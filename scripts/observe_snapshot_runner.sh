@@ -66,7 +66,7 @@ parse_args() {
 
 slugify() {
   local raw="$1"
-  raw="${raw,,}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
   raw="$(echo "$raw" | tr -c 'a-z0-9_-.' '-')"
   raw="$(echo "$raw" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   if [[ -z "$raw" ]]; then
