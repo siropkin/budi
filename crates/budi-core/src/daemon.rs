@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
 use crate::git;
@@ -19,6 +19,8 @@ use crate::rpc::{
 pub struct DaemonState {
     repos: Arc<RwLock<HashMap<String, Arc<Mutex<RuntimeIndex>>>>>,
     load_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    update_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    queued_updates: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
 }
 
@@ -98,18 +100,34 @@ impl DaemonState {
         request: UpdateRequest,
         config: &BudiConfig,
     ) -> Result<IndexResponse> {
-        let repo_root = Path::new(&request.repo_root);
-        let workspace =
-            index::build_or_update(repo_root, config, false, Some(&request.changed_files), None)?;
-        let runtime = RuntimeIndex::from_state(repo_root, workspace.state)?;
-        self.repos
-            .write()
-            .await
-            .insert(request.repo_root.clone(), Arc::new(Mutex::new(runtime)));
+        let repo_key = request.repo_root.clone();
+        self.queue_update_paths(&repo_key, &request.changed_files)
+            .await;
+
+        let update_lock = {
+            let mut locks = self.update_locks.lock().await;
+            locks
+                .entry(repo_key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+
+        if let Ok(update_guard) = update_lock.clone().try_lock_owned() {
+            let state = self.clone();
+            let repo_key_for_task = repo_key.clone();
+            let config_for_task = config.clone();
+            tokio::spawn(async move {
+                state
+                    .process_queued_updates(repo_key_for_task, config_for_task, update_guard)
+                    .await;
+            });
+        }
+
+        let (indexed_files, indexed_chunks) = self.runtime_counts(&repo_key).await;
         Ok(IndexResponse {
-            indexed_files: workspace.report.indexed_files,
-            indexed_chunks: workspace.report.indexed_chunks,
-            changed_files: workspace.report.changed_files,
+            indexed_files,
+            indexed_chunks,
+            changed_files: request.changed_files.len(),
         })
     }
 
@@ -266,6 +284,82 @@ impl DaemonState {
         match self.progress.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    async fn queue_update_paths(&self, repo_key: &str, changed_files: &[String]) {
+        let mut queue = self.queued_updates.lock().await;
+        let entry = queue.entry(repo_key.to_string()).or_default();
+        for path in changed_files {
+            if !path.trim().is_empty() {
+                entry.insert(path.clone());
+            }
+        }
+    }
+
+    async fn take_queued_update_paths(&self, repo_key: &str) -> Vec<String> {
+        let mut queue = self.queued_updates.lock().await;
+        let mut out = queue
+            .remove(repo_key)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
+        out.sort();
+        out
+    }
+
+    async fn runtime_counts(&self, repo_key: &str) -> (usize, usize) {
+        let runtime = { self.repos.read().await.get(repo_key).cloned() };
+        if let Some(runtime) = runtime {
+            let guard = runtime.lock().await;
+            (guard.state.files.len(), guard.state.chunks.len())
+        } else {
+            (0, 0)
+        }
+    }
+
+    async fn process_queued_updates(
+        &self,
+        repo_key: String,
+        config: BudiConfig,
+        _update_guard: OwnedMutexGuard<()>,
+    ) {
+        let repo_root = Path::new(&repo_key);
+        loop {
+            let changed_files = self.take_queued_update_paths(&repo_key).await;
+            if changed_files.is_empty() {
+                break;
+            }
+
+            let workspace =
+                match index::build_or_update(repo_root, &config, false, Some(&changed_files), None)
+                {
+                    Ok(workspace) => workspace,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Background update failed for {} ({} files): {:#}",
+                            repo_key,
+                            changed_files.len(),
+                            err
+                        );
+                        continue;
+                    }
+                };
+            let runtime = match RuntimeIndex::from_state(repo_root, workspace.state) {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to rebuild runtime index after update for {}: {:#}",
+                        repo_key,
+                        err
+                    );
+                    continue;
+                }
+            };
+            self.repos
+                .write()
+                .await
+                .insert(repo_key.clone(), Arc::new(Mutex::new(runtime)));
         }
     }
 }

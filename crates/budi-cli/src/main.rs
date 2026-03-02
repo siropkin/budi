@@ -424,18 +424,18 @@ impl ObserveSummary {
         if let Some(reason) = obj.get("reason").and_then(Value::as_str) {
             increment_counter(&mut self.reason_counts, &normalize_reason(reason));
         }
-        if let Some(intent) = obj.get("retrieval_intent").and_then(Value::as_str) {
-            if !intent.is_empty() {
-                increment_counter(&mut self.intent_counts, intent);
-            }
+        if let Some(intent) = obj.get("retrieval_intent").and_then(Value::as_str)
+            && !intent.is_empty()
+        {
+            increment_counter(&mut self.intent_counts, intent);
         }
-        if let Some(skip_reason) = obj.get("skip_reason").and_then(Value::as_str) {
-            if !skip_reason.is_empty() {
-                increment_counter(
-                    &mut self.skip_reason_counts,
-                    &normalize_skip_reason(skip_reason),
-                );
-            }
+        if let Some(skip_reason) = obj.get("skip_reason").and_then(Value::as_str)
+            && !skip_reason.is_empty()
+        {
+            increment_counter(
+                &mut self.skip_reason_counts,
+                &normalize_skip_reason(skip_reason),
+            );
         }
     }
 
@@ -638,10 +638,10 @@ fn cmd_observe_report(
             .and_then(Value::as_u64)
             .map(u128::from);
         if let Some(ts) = ts_unix_ms {
-            if let Some(since) = since_ms {
-                if ts < since {
-                    continue;
-                }
+            if let Some(since) = since_ms
+                && ts < since
+            {
+                continue;
             }
             summary.update_time_bounds(ts);
         }
@@ -1051,28 +1051,33 @@ fn cmd_hook_post_tool_use() -> Result<()> {
         })
         .send();
     let mut update_success = false;
-    let mut update_reason = "request_failed".to_string();
     let mut indexed_chunks = 0usize;
     let mut changed_files = 0usize;
-    if let Ok(response) = update_result
-        && let Ok(ok_resp) = response.error_for_status()
-        && let Ok(parsed_resp) = ok_resp.json::<IndexResponse>()
-    {
-        update_success = true;
-        update_reason = "ok".to_string();
-        indexed_chunks = parsed_resp.indexed_chunks;
-        changed_files = parsed_resp.changed_files;
-        let msg = format!(
-            "budi indexed {} changed file(s), total chunks={}",
-            parsed_resp.changed_files, parsed_resp.indexed_chunks
-        );
-        println!(
-            "{}",
-            serde_json::to_string(&AsyncSystemMessageOutput {
-                system_message: msg
-            })?
-        );
-    }
+    let (update_reason, update_error_detail) = match update_result {
+        Ok(response) => match response.error_for_status() {
+            Ok(ok_resp) => match ok_resp.json::<IndexResponse>() {
+                Ok(parsed_resp) => {
+                    update_success = true;
+                    indexed_chunks = parsed_resp.indexed_chunks;
+                    changed_files = parsed_resp.changed_files;
+                    let msg = format!(
+                        "budi indexed {} changed file(s), total chunks={}",
+                        parsed_resp.changed_files, parsed_resp.indexed_chunks
+                    );
+                    println!(
+                        "{}",
+                        serde_json::to_string(&AsyncSystemMessageOutput {
+                            system_message: msg
+                        })?
+                    );
+                    ("ok".to_string(), String::new())
+                }
+                Err(err) => ("response_parse_error".to_string(), err.to_string()),
+            },
+            Err(err) => (classify_update_error(&err), err.to_string()),
+        },
+        Err(err) => (classify_update_error(&err), err.to_string()),
+    };
     log_hook_event(&repo_root, &config, || {
         json!({
             "event":"PostToolUse",
@@ -1081,11 +1086,25 @@ fn cmd_hook_post_tool_use() -> Result<()> {
             "latency_ms": hook_started.elapsed().as_millis(),
             "success": update_success,
             "reason": update_reason,
+            "error_detail": excerpt(&update_error_detail, &config),
             "indexed_chunks": indexed_chunks,
             "changed_files": changed_files,
         })
     });
     Ok(())
+}
+
+fn classify_update_error(err: &reqwest::Error) -> String {
+    if err.is_timeout() {
+        return "request_timeout".to_string();
+    }
+    if err.is_connect() {
+        return "request_connect_error".to_string();
+    }
+    if let Some(status) = err.status() {
+        return format!("http_{}", status.as_u16());
+    }
+    "request_failed".to_string()
 }
 
 fn emit_hook_response(output: UserPromptSubmitOutput) -> Result<()> {
