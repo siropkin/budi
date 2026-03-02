@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -73,6 +74,10 @@ enum Commands {
         #[arg(long)]
         repo_root: Option<PathBuf>,
     },
+    Observe {
+        #[command(subcommand)]
+        command: ObserveCommands,
+    },
     Hook {
         #[command(subcommand)]
         command: HookCommands,
@@ -83,6 +88,34 @@ enum Commands {
 enum HookCommands {
     UserPromptSubmit,
     PostToolUse,
+}
+
+#[derive(Debug, Subcommand)]
+enum ObserveCommands {
+    Enable {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+    },
+    Disable {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+    },
+    Report {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u32).range(1..=3650),
+            conflicts_with = "all"
+        )]
+        days: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -114,6 +147,17 @@ fn main() -> Result<()> {
         Commands::Ignore { pattern, repo_root } => cmd_ignore(repo_root, &pattern),
         Commands::Doctor { repo_root } => cmd_doctor(repo_root),
         Commands::Preview { prompt, repo_root } => cmd_preview(repo_root, &prompt),
+        Commands::Observe { command } => match command {
+            ObserveCommands::Enable { repo_root } => cmd_observe_enable(repo_root),
+            ObserveCommands::Disable { repo_root } => cmd_observe_disable(repo_root),
+            ObserveCommands::Report {
+                repo_root,
+                days,
+                all,
+                json,
+                out,
+            } => cmd_observe_report(repo_root, days, all, json, out),
+        },
         Commands::Hook { command } => match command {
             HookCommands::UserPromptSubmit => cmd_hook_user_prompt_submit(),
             HookCommands::PostToolUse => cmd_hook_post_tool_use(),
@@ -290,6 +334,532 @@ fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str) -> Result<()> {
         );
     }
     println!("\n--- injected context preview ---\n{}", context_preview);
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ObserveSummary {
+    lines_total: usize,
+    lines_parsed: usize,
+    lines_in_window: usize,
+    first_ts_unix_ms: Option<u128>,
+    last_ts_unix_ms: Option<u128>,
+    prompt_outputs_total: usize,
+    prompt_outputs_success: usize,
+    prompt_outputs_failed: usize,
+    prompt_injected: usize,
+    prompt_skipped: usize,
+    prompt_recommended_injection: usize,
+    context_chars_total: usize,
+    context_chars_injected_total: usize,
+    prompt_latency_ms: Vec<f64>,
+    retrieval_confidence_total: f64,
+    retrieval_confidence_count: usize,
+    reason_counts: HashMap<String, usize>,
+    intent_counts: HashMap<String, usize>,
+    skip_reason_counts: HashMap<String, usize>,
+    post_tool_outputs_total: usize,
+    post_tool_outputs_success: usize,
+    post_tool_outputs_failed: usize,
+    post_tool_latency_ms: Vec<f64>,
+    post_tool_changed_files_total: usize,
+}
+
+impl ObserveSummary {
+    fn update_time_bounds(&mut self, ts_unix_ms: u128) {
+        if ts_unix_ms == 0 {
+            return;
+        }
+        self.first_ts_unix_ms = Some(
+            self.first_ts_unix_ms
+                .map_or(ts_unix_ms, |current| current.min(ts_unix_ms)),
+        );
+        self.last_ts_unix_ms = Some(
+            self.last_ts_unix_ms
+                .map_or(ts_unix_ms, |current| current.max(ts_unix_ms)),
+        );
+    }
+
+    fn record_user_prompt_output(&mut self, obj: &serde_json::Map<String, Value>) {
+        self.prompt_outputs_total = self.prompt_outputs_total.saturating_add(1);
+
+        let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
+        if success {
+            self.prompt_outputs_success = self.prompt_outputs_success.saturating_add(1);
+        } else {
+            self.prompt_outputs_failed = self.prompt_outputs_failed.saturating_add(1);
+        }
+
+        let context_chars = obj
+            .get("context_chars")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        self.context_chars_total = self.context_chars_total.saturating_add(context_chars);
+        if success && context_chars > 0 {
+            self.prompt_injected = self.prompt_injected.saturating_add(1);
+            self.context_chars_injected_total = self
+                .context_chars_injected_total
+                .saturating_add(context_chars);
+        } else if success {
+            self.prompt_skipped = self.prompt_skipped.saturating_add(1);
+        }
+
+        if obj
+            .get("recommended_injection")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            self.prompt_recommended_injection = self.prompt_recommended_injection.saturating_add(1);
+        }
+
+        if let Some(latency_ms) = obj.get("latency_ms").and_then(Value::as_f64) {
+            self.prompt_latency_ms.push(latency_ms);
+        }
+
+        if let Some(confidence) = obj.get("retrieval_confidence").and_then(Value::as_f64) {
+            self.retrieval_confidence_total += confidence;
+            self.retrieval_confidence_count = self.retrieval_confidence_count.saturating_add(1);
+        }
+
+        if let Some(reason) = obj.get("reason").and_then(Value::as_str) {
+            increment_counter(&mut self.reason_counts, &normalize_reason(reason));
+        }
+        if let Some(intent) = obj.get("retrieval_intent").and_then(Value::as_str) {
+            if !intent.is_empty() {
+                increment_counter(&mut self.intent_counts, intent);
+            }
+        }
+        if let Some(skip_reason) = obj.get("skip_reason").and_then(Value::as_str) {
+            if !skip_reason.is_empty() {
+                increment_counter(
+                    &mut self.skip_reason_counts,
+                    &normalize_skip_reason(skip_reason),
+                );
+            }
+        }
+    }
+
+    fn record_post_tool_output(&mut self, obj: &serde_json::Map<String, Value>) {
+        self.post_tool_outputs_total = self.post_tool_outputs_total.saturating_add(1);
+        let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
+        if success {
+            self.post_tool_outputs_success = self.post_tool_outputs_success.saturating_add(1);
+        } else {
+            self.post_tool_outputs_failed = self.post_tool_outputs_failed.saturating_add(1);
+        }
+        if let Some(latency_ms) = obj.get("latency_ms").and_then(Value::as_f64) {
+            self.post_tool_latency_ms.push(latency_ms);
+        }
+        let changed_files = obj
+            .get("changed_files")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        self.post_tool_changed_files_total = self
+            .post_tool_changed_files_total
+            .saturating_add(changed_files);
+    }
+}
+
+fn normalize_reason(reason: &str) -> String {
+    if reason.starts_with("query_error:") {
+        return "query_error".to_string();
+    }
+    if let Some(rest) = reason.strip_prefix("skip:") {
+        if rest.starts_with("low-confidence") {
+            return "skip:low-confidence".to_string();
+        }
+        return format!("skip:{rest}");
+    }
+    reason.to_string()
+}
+
+fn normalize_skip_reason(skip_reason: &str) -> String {
+    if skip_reason.starts_with("low-confidence") {
+        "low-confidence".to_string()
+    } else {
+        skip_reason.to_string()
+    }
+}
+
+fn increment_counter(counter: &mut HashMap<String, usize>, key: &str) {
+    let entry = counter.entry(key.to_string()).or_default();
+    *entry = entry.saturating_add(1);
+}
+
+fn top_counts(counter: &HashMap<String, usize>, limit: usize) -> Vec<(String, usize)> {
+    let mut rows: Vec<(String, usize)> = counter.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows.truncate(limit);
+    rows
+}
+
+fn percentile(values: &[f64], fraction: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let last_idx = sorted.len().saturating_sub(1);
+    let idx = ((last_idx as f64) * fraction.clamp(0.0, 1.0)).round() as usize;
+    sorted[idx.min(last_idx)]
+}
+
+fn percentage(part: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (part as f64) * 100.0 / (total as f64)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ObserveWindow {
+    All,
+    RollingDays(u32),
+}
+
+impl ObserveWindow {
+    fn description(self) -> String {
+        match self {
+            ObserveWindow::All => "all available history".to_string(),
+            ObserveWindow::RollingDays(days) => {
+                format!(
+                    "last {} day{} (rolling window from now)",
+                    days,
+                    if days == 1 { "" } else { "s" }
+                )
+            }
+        }
+    }
+
+    fn mode(self) -> &'static str {
+        match self {
+            ObserveWindow::All => "all",
+            ObserveWindow::RollingDays(_) => "rolling_days",
+        }
+    }
+
+    fn days(self) -> Option<u32> {
+        match self {
+            ObserveWindow::All => None,
+            ObserveWindow::RollingDays(days) => Some(days),
+        }
+    }
+
+    fn since_unix_ms(self, now_unix_ms: u128) -> Option<u128> {
+        match self {
+            ObserveWindow::All => None,
+            ObserveWindow::RollingDays(days) => {
+                let window_ms = u128::from(days)
+                    .saturating_mul(24)
+                    .saturating_mul(60)
+                    .saturating_mul(60)
+                    .saturating_mul(1000);
+                Some(now_unix_ms.saturating_sub(window_ms))
+            }
+        }
+    }
+}
+
+fn resolve_observe_window(days: Option<u32>, all: bool) -> ObserveWindow {
+    if all {
+        return ObserveWindow::All;
+    }
+    if let Some(days) = days {
+        ObserveWindow::RollingDays(days)
+    } else {
+        ObserveWindow::All
+    }
+}
+
+fn cmd_observe_enable(repo_root: Option<PathBuf>) -> Result<()> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    config::ensure_repo_layout(&repo_root)?;
+    let mut cfg = config::load_or_default(&repo_root)?;
+    cfg.debug_io = true;
+    cfg.debug_io_full_text = false;
+    cfg.debug_io_max_chars = 0;
+    config::save(&repo_root, &cfg)?;
+    println!("Observe logging enabled for {}", repo_root.display());
+    println!("Log file: {}", config::hook_log_path(&repo_root)?.display());
+    println!("Mode: metadata-only (prompt/context text omitted). Use `budi observe report` later.");
+    Ok(())
+}
+
+fn cmd_observe_disable(repo_root: Option<PathBuf>) -> Result<()> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    config::ensure_repo_layout(&repo_root)?;
+    let mut cfg = config::load_or_default(&repo_root)?;
+    cfg.debug_io = false;
+    config::save(&repo_root, &cfg)?;
+    println!("Observe logging disabled for {}", repo_root.display());
+    Ok(())
+}
+
+fn cmd_observe_report(
+    repo_root: Option<PathBuf>,
+    days: Option<u32>,
+    all: bool,
+    as_json: bool,
+    out_path: Option<PathBuf>,
+) -> Result<()> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    let log_path = config::hook_log_path(&repo_root)?;
+    if !log_path.exists() {
+        println!("No observe log found at {}", log_path.display());
+        println!(
+            "Enable it with: budi observe enable --repo-root {}",
+            repo_root.display()
+        );
+        return Ok(());
+    }
+
+    let window = resolve_observe_window(days, all);
+    let since_ms = window.since_unix_ms(now_unix_ms());
+    let file = fs::File::open(&log_path)
+        .with_context(|| format!("Failed reading observe log at {}", log_path.display()))?;
+    let reader = BufReader::new(file);
+    let mut summary = ObserveSummary::default();
+
+    for maybe_line in reader.lines() {
+        summary.lines_total = summary.lines_total.saturating_add(1);
+        let Ok(line) = maybe_line else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        summary.lines_parsed = summary.lines_parsed.saturating_add(1);
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let ts_unix_ms = obj
+            .get("ts_unix_ms")
+            .and_then(Value::as_u64)
+            .map(u128::from);
+        if let Some(ts) = ts_unix_ms {
+            if let Some(since) = since_ms {
+                if ts < since {
+                    continue;
+                }
+            }
+            summary.update_time_bounds(ts);
+        }
+        summary.lines_in_window = summary.lines_in_window.saturating_add(1);
+
+        let event = obj.get("event").and_then(Value::as_str).unwrap_or_default();
+        let phase = obj.get("phase").and_then(Value::as_str).unwrap_or_default();
+        match (event, phase) {
+            ("UserPromptSubmit", "output") => summary.record_user_prompt_output(obj),
+            ("PostToolUse", "output") => summary.record_post_tool_output(obj),
+            _ => {}
+        }
+    }
+
+    let prompt_avg_latency = if summary.prompt_latency_ms.is_empty() {
+        0.0
+    } else {
+        summary.prompt_latency_ms.iter().sum::<f64>() / (summary.prompt_latency_ms.len() as f64)
+    };
+    let post_tool_avg_latency = if summary.post_tool_latency_ms.is_empty() {
+        0.0
+    } else {
+        summary.post_tool_latency_ms.iter().sum::<f64>()
+            / (summary.post_tool_latency_ms.len() as f64)
+    };
+    let avg_confidence = if summary.retrieval_confidence_count == 0 {
+        0.0
+    } else {
+        summary.retrieval_confidence_total / (summary.retrieval_confidence_count as f64)
+    };
+    let avg_injected_context_chars = if summary.prompt_injected == 0 {
+        0.0
+    } else {
+        (summary.context_chars_injected_total as f64) / (summary.prompt_injected as f64)
+    };
+
+    let top_reasons = top_counts(&summary.reason_counts, 8);
+    let top_intents = top_counts(&summary.intent_counts, 8);
+    let top_skip_reasons = top_counts(&summary.skip_reason_counts, 8);
+
+    let json_payload = json!({
+        "repo_root": repo_root.display().to_string(),
+        "log_path": log_path.display().to_string(),
+        "window": {
+            "mode": window.mode(),
+            "days": window.days(),
+            "description": window.description(),
+        },
+        "first_ts_unix_ms": summary.first_ts_unix_ms,
+        "last_ts_unix_ms": summary.last_ts_unix_ms,
+        "lines_total": summary.lines_total,
+        "lines_parsed": summary.lines_parsed,
+        "lines_in_window": summary.lines_in_window,
+        "prompt_outputs_total": summary.prompt_outputs_total,
+        "prompt_outputs_success": summary.prompt_outputs_success,
+        "prompt_outputs_failed": summary.prompt_outputs_failed,
+        "prompt_injected": summary.prompt_injected,
+        "prompt_skipped": summary.prompt_skipped,
+        "prompt_recommended_injection": summary.prompt_recommended_injection,
+        "prompt_injection_rate_success_pct": percentage(summary.prompt_injected, summary.prompt_outputs_success),
+        "prompt_avg_latency_ms": prompt_avg_latency,
+        "prompt_p50_latency_ms": percentile(&summary.prompt_latency_ms, 0.50),
+        "prompt_p95_latency_ms": percentile(&summary.prompt_latency_ms, 0.95),
+        "avg_retrieval_confidence": avg_confidence,
+        "avg_injected_context_chars": avg_injected_context_chars,
+        "post_tool_outputs_total": summary.post_tool_outputs_total,
+        "post_tool_outputs_success": summary.post_tool_outputs_success,
+        "post_tool_outputs_failed": summary.post_tool_outputs_failed,
+        "post_tool_success_rate_pct": percentage(summary.post_tool_outputs_success, summary.post_tool_outputs_total),
+        "post_tool_avg_latency_ms": post_tool_avg_latency,
+        "post_tool_p50_latency_ms": percentile(&summary.post_tool_latency_ms, 0.50),
+        "post_tool_p95_latency_ms": percentile(&summary.post_tool_latency_ms, 0.95),
+        "post_tool_changed_files_total": summary.post_tool_changed_files_total,
+        "top_reasons": top_reasons.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
+        "top_intents": top_intents.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
+        "top_skip_reasons": top_skip_reasons.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
+    });
+
+    let rendered = if as_json {
+        serde_json::to_string_pretty(&json_payload)?
+    } else {
+        let mut output = String::new();
+        output.push_str(&format!("budi observe report ({})\n", window.description()));
+        output.push_str(&format!("repo: {}\n", repo_root.display()));
+        output.push_str(&format!("log: {}\n", log_path.display()));
+        output.push_str(&format!(
+            "log lines: total={} parsed={} in_window={}\n",
+            summary.lines_total, summary.lines_parsed, summary.lines_in_window
+        ));
+        if let (Some(first), Some(last)) = (summary.first_ts_unix_ms, summary.last_ts_unix_ms) {
+            output.push_str(&format!("window data ts_unix_ms: {} .. {}\n", first, last));
+        }
+        output.push('\n');
+        output.push_str("Prompt hook outcomes:\n");
+        output.push_str(&format!(
+            "- total outputs: {}\n",
+            summary.prompt_outputs_total
+        ));
+        output.push_str(&format!(
+            "- success/fail: {} / {}\n",
+            summary.prompt_outputs_success, summary.prompt_outputs_failed
+        ));
+        output.push_str(&format!(
+            "- injected contexts: {} ({:.1}% of successful prompts)\n",
+            summary.prompt_injected,
+            percentage(summary.prompt_injected, summary.prompt_outputs_success)
+        ));
+        output.push_str(&format!(
+            "- skipped (no context): {} ({:.1}% of successful prompts)\n",
+            summary.prompt_skipped,
+            percentage(summary.prompt_skipped, summary.prompt_outputs_success)
+        ));
+        output.push_str(&format!(
+            "- recommended injection: {} ({:.1}% of prompt outputs)\n",
+            summary.prompt_recommended_injection,
+            percentage(
+                summary.prompt_recommended_injection,
+                summary.prompt_outputs_total
+            )
+        ));
+        output.push_str(&format!(
+            "- latency ms (avg/p50/p95): {:.1} / {:.1} / {:.1}\n",
+            prompt_avg_latency,
+            percentile(&summary.prompt_latency_ms, 0.50),
+            percentile(&summary.prompt_latency_ms, 0.95)
+        ));
+        if summary.retrieval_confidence_count > 0 {
+            output.push_str(&format!(
+                "- avg retrieval confidence: {:.3}\n",
+                avg_confidence
+            ));
+        }
+        if summary.prompt_injected > 0 {
+            output.push_str(&format!(
+                "- avg injected context size (chars): {:.0}\n",
+                avg_injected_context_chars
+            ));
+        }
+
+        if !top_intents.is_empty() {
+            output.push('\n');
+            output.push_str("Top retrieval intents:\n");
+            for (intent, count) in top_intents {
+                output.push_str(&format!("- {}: {}\n", intent, count));
+            }
+        }
+        if !top_skip_reasons.is_empty() {
+            output.push('\n');
+            output.push_str("Top skip reasons:\n");
+            for (reason, count) in top_skip_reasons {
+                output.push_str(&format!("- {}: {}\n", reason, count));
+            }
+        }
+        if !top_reasons.is_empty() {
+            output.push('\n');
+            output.push_str("Top output reasons:\n");
+            for (reason, count) in top_reasons {
+                output.push_str(&format!("- {}: {}\n", reason, count));
+            }
+        }
+
+        if summary.post_tool_outputs_total > 0 {
+            output.push('\n');
+            output.push_str("PostToolUse (index refresh after edits):\n");
+            output.push_str(&format!(
+                "- success/fail: {} / {} ({:.1}% success)\n",
+                summary.post_tool_outputs_success,
+                summary.post_tool_outputs_failed,
+                percentage(
+                    summary.post_tool_outputs_success,
+                    summary.post_tool_outputs_total
+                )
+            ));
+            output.push_str(&format!(
+                "- latency ms (avg/p50/p95): {:.1} / {:.1} / {:.1}\n",
+                post_tool_avg_latency,
+                percentile(&summary.post_tool_latency_ms, 0.50),
+                percentile(&summary.post_tool_latency_ms, 0.95)
+            ));
+            output.push_str(&format!(
+                "- changed files sent to daemon: {}\n",
+                summary.post_tool_changed_files_total
+            ));
+        }
+
+        output.push('\n');
+        output.push_str(&format!(
+            "Tips:\n- All history: budi observe report --repo-root {}\n- Rolling 7 days from now: budi observe report --days 7 --repo-root {}\n- JSON export: budi observe report --all --json --out budi-observe.json --repo-root {}\n",
+            repo_root.display(),
+            repo_root.display(),
+            repo_root.display()
+        ));
+        output
+    };
+
+    let mut saved_to: Option<PathBuf> = None;
+    if let Some(raw_out) = out_path {
+        let target = if raw_out.is_absolute() {
+            raw_out
+        } else {
+            std::env::current_dir()?.join(raw_out)
+        };
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed creating report directory {}", parent.display())
+            })?;
+        }
+        fs::write(&target, rendered.as_bytes())
+            .with_context(|| format!("Failed writing observe report to {}", target.display()))?;
+        saved_to = Some(target);
+    }
+
+    if !(as_json && saved_to.is_some()) {
+        println!("{rendered}");
+    }
+    if let Some(saved) = saved_to {
+        println!("Saved observe report: {}", saved.display());
+    }
     Ok(())
 }
 
@@ -600,6 +1170,9 @@ fn now_unix_ms() -> u128 {
 fn excerpt(text: &str, config: &BudiConfig) -> String {
     if config.debug_io_full_text {
         return text.to_string();
+    }
+    if config.debug_io_max_chars == 0 {
+        return String::new();
     }
     let max = config.debug_io_max_chars.max(64);
     if text.chars().count() <= max {
@@ -1084,5 +1657,28 @@ mod tests {
         assert!(!sanitized.contains("@forcebudi"));
         assert!(!sanitized.contains("@nobudi"));
         assert!(sanitized.contains("map auth flow"));
+    }
+
+    #[test]
+    fn excerpt_omits_text_when_max_chars_is_zero() {
+        let config = BudiConfig {
+            debug_io: true,
+            debug_io_full_text: false,
+            debug_io_max_chars: 0,
+            ..BudiConfig::default()
+        };
+        assert_eq!(excerpt("sensitive prompt text", &config), "");
+    }
+
+    #[test]
+    fn observe_window_defaults_to_all_history() {
+        let window = resolve_observe_window(None, false);
+        assert!(matches!(window, ObserveWindow::All));
+    }
+
+    #[test]
+    fn observe_window_uses_days_when_provided() {
+        let window = resolve_observe_window(Some(7), false);
+        assert!(matches!(window, ObserveWindow::RollingDays(7)));
     }
 }

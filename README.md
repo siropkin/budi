@@ -136,6 +136,10 @@ budi index --hard --progress # full rebuild + live per-file progress + phase
 budi status            # daemon/index/hooks health
 budi preview "<prompt>"# see context that would be injected
 budi ignore <path>     # add file to local budi ignore list
+budi observe enable    # start metadata-only local usage logging
+budi observe report    # summarize all logged usage (default: all history)
+budi observe report --days 7  # summarize rolling last 7 days from now
+budi observe disable   # stop usage logging
 ```
 
 ## What happens under the hood (simple)
@@ -190,9 +194,36 @@ debug_io_max_chars = 1200
 - `debug_io = false` (default): no hook JSONL logging
 - `debug_io = true`: writes hook events to `~/.local/share/budi/repos/<repo-id>/logs/hook-io.jsonl`
 - `debug_io_full_text = true`: logs full prompt/context text (use carefully)
-- `debug_io_max_chars`: max chars in excerpt mode
+- `debug_io_max_chars`: max chars in excerpt mode (`0` = metadata-only, no text excerpts)
 
 `budi preview` now prints retrieval diagnostics (intent, confidence, recommended injection).
+
+## Observe real usage (day/week)
+
+If you want to validate real daily impact (not synthetic benchmarks), use observe mode:
+
+```bash
+# 1) Enable metadata-only local logging (no prompt/context text)
+budi observe enable --repo-root "/path/to/repo"
+
+# 2) Use Claude Code normally for a day or week
+
+# 3) Generate summary reports
+budi observe report --repo-root "/path/to/repo"          # all available history
+budi observe report --days 7 --repo-root "/path/to/repo"
+
+# Optional: export machine-readable report to file
+budi observe report --all --json --out "./budi-observe.json" --repo-root "/path/to/repo"
+
+# 4) Disable when done
+budi observe disable --repo-root "/path/to/repo"
+```
+
+Notes:
+- `--days N` means a rolling lookback window from "now" (for example, `--days 7` = last 7 days).
+- If you omit both `--days` and `--all`, `budi` reports all available history.
+
+The report shows injection rate, skip reasons, retrieval confidence, hook latency, and post-edit index update health.
 
 ## Benchmark your own repo (A/B)
 
@@ -250,14 +281,14 @@ To publish a new prebuilt release:
 
 ```bash
 # 1) Keep plugin + marketplace versions in sync
-./scripts/bump-plugin-version.sh 1.0.7
+./scripts/bump-plugin-version.sh 1.0.8
 
-# 2) Ensure Cargo workspace version is also 1.0.7
+# 2) Ensure Cargo workspace version is also 1.0.8
 #    (release workflow enforces tag == Cargo version)
 
 # 3) Tag and publish
-git tag v1.0.7
-git push origin v1.0.7
+git tag v1.0.8
+git push origin v1.0.8
 ```
 
 To publish only the Claude plugin marketplace entry through CI:

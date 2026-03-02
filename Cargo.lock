@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "budi-bench"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "budi-core",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "budi-cli"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "budi-core",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "budi-core"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "blake3",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "budi-daemon"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "axum",
