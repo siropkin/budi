@@ -13,7 +13,7 @@
       "name": "budi-hooks",
       "source": "./plugins/budi-hooks",
       "description": "Claude Code hooks that run budi prompt/context and post-edit indexing automation.",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "author": {
         "name": "Ivan Seredkin",
         "url": "https://github.com/siropkin/budi"

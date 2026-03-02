@@ -18,6 +18,12 @@ Think of it as: "better context, less back-and-forth."
 Built in Rust, so the hook path stays fast and lightweight.
 Because every AI assistant deserves a buddy too.
 
+## Product idea: hybrid local + cloud AI
+
+- Local buddy: `budi` does private indexing/retrieval on your machine
+- Cloud big brother: Claude does deeper reasoning and generation
+- Together: local speed + privacy, cloud intelligence + broad reasoning
+
 ## Why use budi
 
 - Faster responses in big codebases
@@ -223,7 +229,20 @@ Notes:
 - `--days N` means a rolling lookback window from "now" (for example, `--days 7` = last 7 days).
 - If you omit both `--days` and `--all`, `budi` reports all available history.
 
-The report shows injection rate, skip reasons, retrieval confidence, hook latency, and post-edit index update health.
+The report shows injection rate, skip reasons, retrieval confidence, hook latency, post-edit index update health, and a simple health verdict with tuning hypotheses.
+
+Auto snapshots on macOS (launchd):
+
+```bash
+# Generate observe snapshots every 6 hours (and run one immediately)
+./scripts/setup-observe-launchd.sh \
+  --repo-root "/path/to/repo" \
+  --interval-secs 21600 \
+  --window-days 1
+
+# Remove the scheduled job later (use the label printed by setup)
+./scripts/remove-observe-launchd.sh --label "com.siropkin.budi.observe.<repo>.<id>"
+```
 
 ## Benchmark your own repo (A/B)
 
@@ -281,14 +300,14 @@ To publish a new prebuilt release:
 
 ```bash
 # 1) Keep plugin + marketplace versions in sync
-./scripts/bump-plugin-version.sh 1.0.9
+./scripts/bump-plugin-version.sh 1.0.10
 
-# 2) Ensure Cargo workspace version is also 1.0.9
+# 2) Ensure Cargo workspace version is also 1.0.10
 #    (release workflow enforces tag == Cargo version)
 
 # 3) Tag and publish
-git tag v1.0.9
-git push origin v1.0.9
+git tag v1.0.10
+git push origin v1.0.10
 ```
 
 To publish only the Claude plugin marketplace entry through CI:
@@ -308,6 +327,9 @@ Optional secret for custom push credentials:
 - `crates/budi-bench`: benchmark harness
 - `scripts/install.sh`: installer
 - `scripts/uninstall.sh`: uninstaller
+- `scripts/setup-observe-launchd.sh`: schedule periodic observe snapshots
+- `scripts/remove-observe-launchd.sh`: remove scheduled observe snapshots
+- `scripts/observe_snapshot_runner.sh`: snapshot generation worker used by launchd
 - `scripts/ab_benchmark_runner.py`: A/B benchmark runner
 - `scripts/bump-plugin-version.sh`: sync `budi-hooks` plugin + marketplace versions
 

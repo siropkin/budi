@@ -1,6 +1,6 @@
 {
   "name": "budi-hooks",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Claude Code hooks for automatic budi context injection and index upkeep.",
   "author": {
     "name": "Ivan Seredkin",

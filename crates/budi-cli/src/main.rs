@@ -355,6 +355,14 @@ struct ObserveSummary {
     prompt_latency_ms: Vec<f64>,
     retrieval_confidence_total: f64,
     retrieval_confidence_count: usize,
+    retrieval_top_score_total: f64,
+    retrieval_top_score_count: usize,
+    retrieval_margin_total: f64,
+    retrieval_margin_count: usize,
+    snippets_count_total: usize,
+    snippets_count_count: usize,
+    total_candidates_total: usize,
+    total_candidates_count: usize,
     reason_counts: HashMap<String, usize>,
     intent_counts: HashMap<String, usize>,
     skip_reason_counts: HashMap<String, usize>,
@@ -420,6 +428,26 @@ impl ObserveSummary {
             self.retrieval_confidence_total += confidence;
             self.retrieval_confidence_count = self.retrieval_confidence_count.saturating_add(1);
         }
+        if let Some(top_score) = obj.get("retrieval_top_score").and_then(Value::as_f64) {
+            self.retrieval_top_score_total += top_score;
+            self.retrieval_top_score_count = self.retrieval_top_score_count.saturating_add(1);
+        }
+        if let Some(margin) = obj.get("retrieval_margin").and_then(Value::as_f64) {
+            self.retrieval_margin_total += margin;
+            self.retrieval_margin_count = self.retrieval_margin_count.saturating_add(1);
+        }
+        if let Some(snippets_count) = obj.get("snippets_count").and_then(Value::as_u64) {
+            self.snippets_count_total = self
+                .snippets_count_total
+                .saturating_add(snippets_count as usize);
+            self.snippets_count_count = self.snippets_count_count.saturating_add(1);
+        }
+        if let Some(total_candidates) = obj.get("total_candidates").and_then(Value::as_u64) {
+            self.total_candidates_total = self
+                .total_candidates_total
+                .saturating_add(total_candidates as usize);
+            self.total_candidates_count = self.total_candidates_count.saturating_add(1);
+        }
 
         if let Some(reason) = obj.get("reason").and_then(Value::as_str) {
             increment_counter(&mut self.reason_counts, &normalize_reason(reason));
@@ -461,9 +489,6 @@ impl ObserveSummary {
 }
 
 fn normalize_reason(reason: &str) -> String {
-    if reason.starts_with("query_error:") {
-        return "query_error".to_string();
-    }
     if let Some(rest) = reason.strip_prefix("skip:") {
         if rest.starts_with("low-confidence") {
             return "skip:low-confidence".to_string();
@@ -509,6 +534,173 @@ fn percentage(part: usize, total: usize) -> f64 {
         0.0
     } else {
         (part as f64) * 100.0 / (total as f64)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ObserveAssessment {
+    score: i32,
+    grade: &'static str,
+    likely_helping: bool,
+    findings: Vec<String>,
+    hypotheses: Vec<String>,
+}
+
+fn reason_count(summary: &ObserveSummary, key: &str) -> usize {
+    summary.reason_counts.get(key).copied().unwrap_or(0)
+}
+
+fn reason_prefix_count(summary: &ObserveSummary, prefix: &str) -> usize {
+    summary
+        .reason_counts
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .map(|(_, count)| *count)
+        .sum()
+}
+
+fn build_observe_assessment(
+    summary: &ObserveSummary,
+    prompt_p95_latency_ms: f64,
+    avg_confidence: f64,
+    prompt_injection_rate_success_pct: f64,
+    post_tool_success_rate_pct: f64,
+) -> ObserveAssessment {
+    let prompt_success_rate_pct =
+        percentage(summary.prompt_outputs_success, summary.prompt_outputs_total);
+    let query_like_failures =
+        reason_prefix_count(summary, "query_") + reason_count(summary, "daemon_unavailable");
+    let query_failure_rate_pct = percentage(query_like_failures, summary.prompt_outputs_total);
+
+    let mut score = 100i32;
+    let mut findings = Vec::new();
+    let mut hypotheses = Vec::new();
+
+    if prompt_success_rate_pct < 95.0 {
+        score -= 30;
+    } else if prompt_success_rate_pct < 97.0 {
+        score -= 15;
+    } else if prompt_success_rate_pct < 99.0 {
+        score -= 8;
+    }
+
+    if query_failure_rate_pct > 2.0 {
+        score -= 20;
+    } else if query_failure_rate_pct > 1.0 {
+        score -= 10;
+    } else if query_failure_rate_pct > 0.2 {
+        score -= 5;
+    }
+
+    if prompt_p95_latency_ms > 15_000.0 {
+        score -= 15;
+    } else if prompt_p95_latency_ms > 10_000.0 {
+        score -= 8;
+    } else if prompt_p95_latency_ms > 5_000.0 {
+        score -= 3;
+    }
+
+    if avg_confidence < 0.55 {
+        score -= 10;
+    } else if avg_confidence < 0.70 {
+        score -= 4;
+    } else {
+        score += 3;
+    }
+
+    if summary.post_tool_outputs_total > 0 {
+        if post_tool_success_rate_pct < 70.0 {
+            score -= 20;
+        } else if post_tool_success_rate_pct < 85.0 {
+            score -= 8;
+        } else if post_tool_success_rate_pct >= 95.0 {
+            score += 4;
+        }
+    }
+
+    if !(20.0..=98.0).contains(&prompt_injection_rate_success_pct) {
+        score -= 5;
+    } else if (40.0..=95.0).contains(&prompt_injection_rate_success_pct) {
+        score += 3;
+    }
+
+    score = score.clamp(0, 100);
+    let grade = if score >= 85 {
+        "A"
+    } else if score >= 70 {
+        "B"
+    } else if score >= 55 {
+        "C"
+    } else {
+        "D"
+    };
+    let likely_helping = score >= 70 && prompt_success_rate_pct >= 95.0 && avg_confidence >= 0.60;
+
+    findings.push(format!(
+        "Prompt success rate: {:.1}% ({} / {})",
+        prompt_success_rate_pct, summary.prompt_outputs_success, summary.prompt_outputs_total
+    ));
+    if summary.post_tool_outputs_total > 0 {
+        findings.push(format!(
+            "PostToolUse success rate: {:.1}% ({} / {})",
+            post_tool_success_rate_pct,
+            summary.post_tool_outputs_success,
+            summary.post_tool_outputs_total
+        ));
+    }
+    findings.push(format!(
+        "Prompt p95 latency: {:.0} ms, avg confidence: {:.3}",
+        prompt_p95_latency_ms, avg_confidence
+    ));
+
+    if post_tool_success_rate_pct < 85.0 && summary.post_tool_outputs_total > 0 {
+        hypotheses.push(
+            "Incremental update path is unstable under edit bursts; prioritize queueing/coalescing and daemon backpressure handling.".to_string(),
+        );
+    }
+    if query_failure_rate_pct > 1.0 {
+        hypotheses.push(
+            "Prompt-time query path has transient transport or daemon errors; investigate daemon lifecycle and /query timeout behavior."
+                .to_string(),
+        );
+    }
+    if prompt_p95_latency_ms > 10_000.0 {
+        hypotheses.push(
+            "Long-tail prompt latency suggests cold-load/index churn or heavy retrieval/ranking work; consider warmup and lighter tail-path logic."
+                .to_string(),
+        );
+    }
+    if avg_confidence < 0.60 {
+        hypotheses.push(
+            "Retrieval confidence is low for many prompts; adjust ranking/intent signals or prompt skip threshold."
+                .to_string(),
+        );
+    }
+    if prompt_injection_rate_success_pct > 98.0 {
+        hypotheses.push(
+            "Context is injected almost always; possible over-injection. Consider raising confidence threshold for smarter skip."
+                .to_string(),
+        );
+    }
+    if prompt_injection_rate_success_pct < 20.0 {
+        hypotheses.push(
+            "Context is rarely injected; skip thresholds may be too strict for this repo's prompt patterns."
+                .to_string(),
+        );
+    }
+    if hypotheses.is_empty() {
+        hypotheses.push(
+            "Current telemetry looks healthy; keep observing trend deltas weekly and run periodic judged A/B checks for quality confirmation."
+                .to_string(),
+        );
+    }
+
+    ObserveAssessment {
+        score,
+        grade,
+        likely_helping,
+        findings,
+        hypotheses,
     }
 }
 
@@ -677,6 +869,47 @@ fn cmd_observe_report(
     } else {
         (summary.context_chars_injected_total as f64) / (summary.prompt_injected as f64)
     };
+    let avg_top_score = if summary.retrieval_top_score_count == 0 {
+        None
+    } else {
+        Some(summary.retrieval_top_score_total / (summary.retrieval_top_score_count as f64))
+    };
+    let avg_margin = if summary.retrieval_margin_count == 0 {
+        None
+    } else {
+        Some(summary.retrieval_margin_total / (summary.retrieval_margin_count as f64))
+    };
+    let avg_snippets = if summary.snippets_count_count == 0 {
+        None
+    } else {
+        Some((summary.snippets_count_total as f64) / (summary.snippets_count_count as f64))
+    };
+    let avg_total_candidates = if summary.total_candidates_count == 0 {
+        None
+    } else {
+        Some((summary.total_candidates_total as f64) / (summary.total_candidates_count as f64))
+    };
+    let prompt_p50_latency = percentile(&summary.prompt_latency_ms, 0.50);
+    let prompt_p95_latency = percentile(&summary.prompt_latency_ms, 0.95);
+    let post_tool_p50_latency = percentile(&summary.post_tool_latency_ms, 0.50);
+    let post_tool_p95_latency = percentile(&summary.post_tool_latency_ms, 0.95);
+    let prompt_injection_rate_success_pct =
+        percentage(summary.prompt_injected, summary.prompt_outputs_success);
+    let prompt_query_error_count =
+        reason_prefix_count(&summary, "query_") + reason_count(&summary, "daemon_unavailable");
+    let prompt_query_error_rate_pct =
+        percentage(prompt_query_error_count, summary.prompt_outputs_total);
+    let post_tool_success_rate_pct = percentage(
+        summary.post_tool_outputs_success,
+        summary.post_tool_outputs_total,
+    );
+    let assessment = build_observe_assessment(
+        &summary,
+        prompt_p95_latency,
+        avg_confidence,
+        prompt_injection_rate_success_pct,
+        post_tool_success_rate_pct,
+    );
 
     let top_reasons = top_counts(&summary.reason_counts, 8);
     let top_intents = top_counts(&summary.intent_counts, 8);
@@ -701,20 +934,33 @@ fn cmd_observe_report(
         "prompt_injected": summary.prompt_injected,
         "prompt_skipped": summary.prompt_skipped,
         "prompt_recommended_injection": summary.prompt_recommended_injection,
-        "prompt_injection_rate_success_pct": percentage(summary.prompt_injected, summary.prompt_outputs_success),
+        "prompt_injection_rate_success_pct": prompt_injection_rate_success_pct,
+        "prompt_query_error_count": prompt_query_error_count,
+        "prompt_query_error_rate_pct": prompt_query_error_rate_pct,
         "prompt_avg_latency_ms": prompt_avg_latency,
-        "prompt_p50_latency_ms": percentile(&summary.prompt_latency_ms, 0.50),
-        "prompt_p95_latency_ms": percentile(&summary.prompt_latency_ms, 0.95),
+        "prompt_p50_latency_ms": prompt_p50_latency,
+        "prompt_p95_latency_ms": prompt_p95_latency,
         "avg_retrieval_confidence": avg_confidence,
+        "avg_retrieval_top_score": avg_top_score,
+        "avg_retrieval_margin": avg_margin,
+        "avg_snippets_per_prompt": avg_snippets,
+        "avg_total_candidates_per_prompt": avg_total_candidates,
         "avg_injected_context_chars": avg_injected_context_chars,
         "post_tool_outputs_total": summary.post_tool_outputs_total,
         "post_tool_outputs_success": summary.post_tool_outputs_success,
         "post_tool_outputs_failed": summary.post_tool_outputs_failed,
-        "post_tool_success_rate_pct": percentage(summary.post_tool_outputs_success, summary.post_tool_outputs_total),
+        "post_tool_success_rate_pct": post_tool_success_rate_pct,
         "post_tool_avg_latency_ms": post_tool_avg_latency,
-        "post_tool_p50_latency_ms": percentile(&summary.post_tool_latency_ms, 0.50),
-        "post_tool_p95_latency_ms": percentile(&summary.post_tool_latency_ms, 0.95),
+        "post_tool_p50_latency_ms": post_tool_p50_latency,
+        "post_tool_p95_latency_ms": post_tool_p95_latency,
         "post_tool_changed_files_total": summary.post_tool_changed_files_total,
+        "assessment": {
+            "score": assessment.score,
+            "grade": assessment.grade,
+            "likely_helping": assessment.likely_helping,
+            "findings": assessment.findings.clone(),
+            "hypotheses": assessment.hypotheses.clone(),
+        },
         "top_reasons": top_reasons.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
         "top_intents": top_intents.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
         "top_skip_reasons": top_skip_reasons.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
@@ -735,6 +981,23 @@ fn cmd_observe_report(
             output.push_str(&format!("window data ts_unix_ms: {} .. {}\n", first, last));
         }
         output.push('\n');
+        output.push_str("Health verdict:\n");
+        output.push_str(&format!(
+            "- score: {}/100 (grade {})\n",
+            assessment.score, assessment.grade
+        ));
+        output.push_str(&format!(
+            "- likely helping right now: {}\n",
+            if assessment.likely_helping {
+                "yes"
+            } else {
+                "unclear / needs tuning"
+            }
+        ));
+        for finding in &assessment.findings {
+            output.push_str(&format!("- {}\n", finding));
+        }
+        output.push('\n');
         output.push_str("Prompt hook outcomes:\n");
         output.push_str(&format!(
             "- total outputs: {}\n",
@@ -746,8 +1009,7 @@ fn cmd_observe_report(
         ));
         output.push_str(&format!(
             "- injected contexts: {} ({:.1}% of successful prompts)\n",
-            summary.prompt_injected,
-            percentage(summary.prompt_injected, summary.prompt_outputs_success)
+            summary.prompt_injected, prompt_injection_rate_success_pct
         ));
         output.push_str(&format!(
             "- skipped (no context): {} ({:.1}% of successful prompts)\n",
@@ -763,16 +1025,30 @@ fn cmd_observe_report(
             )
         ));
         output.push_str(&format!(
+            "- query-like failures: {} ({:.1}% of prompt outputs)\n",
+            prompt_query_error_count, prompt_query_error_rate_pct
+        ));
+        output.push_str(&format!(
             "- latency ms (avg/p50/p95): {:.1} / {:.1} / {:.1}\n",
-            prompt_avg_latency,
-            percentile(&summary.prompt_latency_ms, 0.50),
-            percentile(&summary.prompt_latency_ms, 0.95)
+            prompt_avg_latency, prompt_p50_latency, prompt_p95_latency
         ));
         if summary.retrieval_confidence_count > 0 {
             output.push_str(&format!(
                 "- avg retrieval confidence: {:.3}\n",
                 avg_confidence
             ));
+            if let (Some(top_score), Some(margin)) = (avg_top_score, avg_margin) {
+                output.push_str(&format!(
+                    "- avg retrieval top_score/margin: {:.3} / {:.3}\n",
+                    top_score, margin
+                ));
+            }
+            if let (Some(snippets), Some(candidates)) = (avg_snippets, avg_total_candidates) {
+                output.push_str(&format!(
+                    "- avg snippets / candidates: {:.1} / {:.1}\n",
+                    snippets, candidates
+                ));
+            }
         }
         if summary.prompt_injected > 0 {
             output.push_str(&format!(
@@ -810,16 +1086,11 @@ fn cmd_observe_report(
                 "- success/fail: {} / {} ({:.1}% success)\n",
                 summary.post_tool_outputs_success,
                 summary.post_tool_outputs_failed,
-                percentage(
-                    summary.post_tool_outputs_success,
-                    summary.post_tool_outputs_total
-                )
+                post_tool_success_rate_pct
             ));
             output.push_str(&format!(
                 "- latency ms (avg/p50/p95): {:.1} / {:.1} / {:.1}\n",
-                post_tool_avg_latency,
-                percentile(&summary.post_tool_latency_ms, 0.50),
-                percentile(&summary.post_tool_latency_ms, 0.95)
+                post_tool_avg_latency, post_tool_p50_latency, post_tool_p95_latency
             ));
             output.push_str(&format!(
                 "- changed files sent to daemon: {}\n",
@@ -827,6 +1098,11 @@ fn cmd_observe_report(
             ));
         }
 
+        output.push('\n');
+        output.push_str("Hypotheses / next checks:\n");
+        for item in &assessment.hypotheses {
+            output.push_str(&format!("- {}\n", item));
+        }
         output.push('\n');
         output.push_str(&format!(
             "Tips:\n- All history: budi observe report --repo-root {}\n- Rolling 7 days from now: budi observe report --days 7 --repo-root {}\n- JSON export: budi observe report --all --json --out budi-observe.json --repo-root {}\n",
@@ -876,6 +1152,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
     };
 
     let cwd = PathBuf::from(&parsed.common.cwd);
+    let session_id = parsed.common.session_id.clone();
     let repo_root = match config::find_repo_root(&cwd) {
         Ok(path) => path,
         Err(_) => {
@@ -891,7 +1168,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             "event":"UserPromptSubmit",
             "phase":"input",
             "ts_unix_ms": now_unix_ms(),
-            "session_id": parsed.common.session_id,
+            "session_id": session_id.clone(),
             "cwd": parsed.common.cwd,
             "permission_mode": parsed.common.permission_mode,
             "prompt_chars": parsed.prompt.len(),
@@ -917,6 +1194,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 "event":"UserPromptSubmit",
                 "phase":"output",
                 "ts_unix_ms": now_unix_ms(),
+                "session_id": session_id.clone(),
                 "latency_ms": hook_started.elapsed().as_millis(),
                 "success": true,
                 "reason": "forced_skip",
@@ -938,6 +1216,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 "event":"UserPromptSubmit",
                 "phase":"output",
                 "ts_unix_ms": now_unix_ms(),
+                "session_id": session_id.clone(),
                 "latency_ms": hook_started.elapsed().as_millis(),
                 "success": false,
                 "reason": "daemon_unavailable",
@@ -950,7 +1229,9 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
     }
 
     let mut diagnostics = QueryDiagnostics::default();
-    let (context, success, reason) = match query_daemon_with_timeout(
+    let mut total_candidates = 0usize;
+    let mut snippets_count = 0usize;
+    let (context, success, reason, error_detail) = match query_daemon_with_timeout(
         &repo_root,
         &config,
         &sanitized_prompt,
@@ -958,28 +1239,45 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
         HOOK_QUERY_TIMEOUT_SECS,
     ) {
         Ok(response) => {
+            total_candidates = response.total_candidates;
+            snippets_count = response.snippets.len();
             diagnostics = response.diagnostics;
             let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
             if let Some(skip_reason) = skip_reason {
-                (String::new(), true, format!("skip:{skip_reason}"))
+                (
+                    String::new(),
+                    true,
+                    format!("skip:{skip_reason}"),
+                    String::new(),
+                )
             } else {
-                (response.context, true, "ok".to_string())
+                (response.context, true, "ok".to_string(), String::new())
             }
         }
-        Err(err) => (String::new(), false, format!("query_error:{err}")),
+        Err(err) => {
+            let reason = classify_query_error(&err);
+            (String::new(), false, reason, err.to_string())
+        }
     };
     log_hook_event(&repo_root, &config, || {
         json!({
             "event":"UserPromptSubmit",
             "phase":"output",
             "ts_unix_ms": now_unix_ms(),
+            "session_id": session_id.clone(),
             "latency_ms": hook_started.elapsed().as_millis(),
             "success": success,
             "reason": reason,
             "context_chars": context.len(),
             "context_excerpt": excerpt(&context, &config),
+            "error_detail": excerpt(&error_detail, &config),
+            "total_candidates": total_candidates,
+            "snippets_count": snippets_count,
             "retrieval_intent": diagnostics.intent,
             "retrieval_confidence": diagnostics.confidence,
+            "retrieval_top_score": diagnostics.top_score,
+            "retrieval_margin": diagnostics.margin,
+            "retrieval_signals_count": diagnostics.signals.len(),
             "recommended_injection": diagnostics.recommended_injection,
             "skip_reason": diagnostics.skip_reason,
         })
@@ -997,6 +1295,7 @@ fn cmd_hook_post_tool_use() -> Result<()> {
     };
     let tool_name = parsed.tool_name.clone();
     let cwd_str = parsed.common.cwd.clone();
+    let session_id = parsed.common.session_id.clone();
     if parsed.tool_name != "Write" && parsed.tool_name != "Edit" {
         return Ok(());
     }
@@ -1022,6 +1321,7 @@ fn cmd_hook_post_tool_use() -> Result<()> {
             "event":"PostToolUse",
             "phase":"input",
             "ts_unix_ms": now_unix_ms(),
+            "session_id": session_id.clone(),
             "tool_name": tool_name,
             "file_path": file_path.clone(),
             "cwd": cwd_str,
@@ -1033,6 +1333,7 @@ fn cmd_hook_post_tool_use() -> Result<()> {
                 "event":"PostToolUse",
                 "phase":"output",
                 "ts_unix_ms": now_unix_ms(),
+                "session_id": session_id.clone(),
                 "latency_ms": hook_started.elapsed().as_millis(),
                 "success": false,
                 "reason": "daemon_unavailable",
@@ -1083,6 +1384,7 @@ fn cmd_hook_post_tool_use() -> Result<()> {
             "event":"PostToolUse",
             "phase":"output",
             "ts_unix_ms": now_unix_ms(),
+            "session_id": session_id.clone(),
             "latency_ms": hook_started.elapsed().as_millis(),
             "success": update_success,
             "reason": update_reason,
@@ -1092,6 +1394,28 @@ fn cmd_hook_post_tool_use() -> Result<()> {
         })
     });
     Ok(())
+}
+
+fn classify_query_error(err: &anyhow::Error) -> String {
+    for cause in err.chain() {
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            return format!("query_{}", classify_update_error(reqwest_err));
+        }
+    }
+    let message = err.to_string().to_ascii_lowercase();
+    if message.contains("timed out") || message.contains("timeout") {
+        return "query_timeout".to_string();
+    }
+    if message.contains("failed to send query request")
+        || message.contains("connection")
+        || message.contains("connect")
+    {
+        return "query_transport_error".to_string();
+    }
+    if message.contains("query endpoint returned error") {
+        return "query_http_error".to_string();
+    }
+    "query_error".to_string()
 }
 
 fn classify_update_error(err: &reqwest::Error) -> String {
