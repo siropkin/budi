@@ -17,7 +17,7 @@ Bumps Claude plugin version in:
   - .claude-plugin/marketplace.json (budi-hooks entry)
 
 Example:
-  ./scripts/bump-plugin-version.sh 1.0.6
+  ./scripts/bump-plugin-version.sh 1.0.7
 EOF
 }
 

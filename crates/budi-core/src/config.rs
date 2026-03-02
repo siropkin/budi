@@ -16,6 +16,7 @@ pub const BUDI_STATE_FILE_NAME: &str = "state.json";
 pub const BUDI_TANTIVY_DIR_NAME: &str = "tantivy";
 pub const BUDI_LOG_DIR_NAME: &str = "logs";
 pub const BUDI_BENCH_DIR_NAME: &str = "benchmarks";
+pub const BUDI_FASTEMBED_CACHE_DIR_NAME: &str = "fastembed-cache";
 
 pub const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 
@@ -151,6 +152,10 @@ pub fn daemon_log_path(repo_root: &Path) -> Result<PathBuf> {
 
 pub fn benchmark_root(repo_root: &Path) -> Result<PathBuf> {
     Ok(repo_paths(repo_root)?.bench_dir)
+}
+
+pub fn fastembed_cache_dir() -> Result<PathBuf> {
+    Ok(budi_home_dir()?.join(BUDI_FASTEMBED_CACHE_DIR_NAME))
 }
 
 pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {

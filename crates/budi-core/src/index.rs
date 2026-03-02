@@ -825,8 +825,10 @@ pub struct EmbeddingEngine {
 
 impl EmbeddingEngine {
     fn new() -> Self {
-        let options =
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false);
+        let cache_dir = resolve_fastembed_cache_dir();
+        let options = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(false);
         match TextEmbedding::try_new(options) {
             Ok(embedder) => {
                 info!("Using fastembed backend (AllMiniLML6V2)");
@@ -865,6 +867,25 @@ impl EmbeddingEngine {
             EmbeddingBackend::Fallback => Ok(hash_embedding(query)),
         }
     }
+}
+
+fn resolve_fastembed_cache_dir() -> PathBuf {
+    let fallback = std::env::temp_dir().join("budi-fastembed-cache");
+    let Ok(path) = config::fastembed_cache_dir() else {
+        warn!(
+            "Failed resolving budi fastembed cache directory, using fallback {}",
+            fallback.display()
+        );
+        return fallback;
+    };
+    if let Err(err) = fs::create_dir_all(&path) {
+        warn!(
+            "Failed creating fastembed cache dir {}: {}",
+            path.display(),
+            err
+        );
+    }
+    path
 }
 
 fn hash_embedding(text: &str) -> Vec<f32> {

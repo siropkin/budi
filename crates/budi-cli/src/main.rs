@@ -698,9 +698,11 @@ fn daemon_port_is_listening(config: &BudiConfig) -> bool {
 fn spawn_daemon_process(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     let daemon_bin = resolve_daemon_binary()?;
     let log_path = config::daemon_log_path(repo_root)?;
+    let fastembed_cache_dir = config::fastembed_cache_dir()?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    fs::create_dir_all(&fastembed_cache_dir)?;
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -714,6 +716,7 @@ fn spawn_daemon_process(repo_root: &Path, config: &BudiConfig) -> Result<()> {
         .arg(&config.daemon_host)
         .arg("--port")
         .arg(config.daemon_port.to_string())
+        .env("FASTEMBED_CACHE_DIR", &fastembed_cache_dir)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .stdin(Stdio::null())

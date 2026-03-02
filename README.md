@@ -83,6 +83,7 @@ If you want to install the hook automation as a plugin instead of running
 By default, `budi` keeps index/config/log data outside your repo at:
 
 - `~/.local/share/budi/repos/<repo-id>/...`
+- embedding model cache: `~/.local/share/budi/fastembed-cache`
 
 `budi init` prints the exact local data path for each repo.
 
@@ -249,14 +250,14 @@ To publish a new prebuilt release:
 
 ```bash
 # 1) Keep plugin + marketplace versions in sync
-./scripts/bump-plugin-version.sh 1.0.6
+./scripts/bump-plugin-version.sh 1.0.7
 
-# 2) Ensure Cargo workspace version is also 1.0.6
+# 2) Ensure Cargo workspace version is also 1.0.7
 #    (release workflow enforces tag == Cargo version)
 
 # 3) Tag and publish
-git tag v1.0.6
-git push origin v1.0.6
+git tag v1.0.7
+git push origin v1.0.7
 ```
 
 To publish only the Claude plugin marketplace entry through CI:

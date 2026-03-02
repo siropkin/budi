@@ -31,6 +31,7 @@
 
 - `~/.local/share/budi/repos/<repo-id>/index/state.json`: files, chunk metadata, embeddings, branch/head snapshot
 - `~/.local/share/budi/repos/<repo-id>/index/tantivy/`: lexical index files
+- `~/.local/share/budi/fastembed-cache/`: embedding model cache (kept outside repos)
 - in-memory daemon cache:
   - HNSW vector graph
   - chunk id map
