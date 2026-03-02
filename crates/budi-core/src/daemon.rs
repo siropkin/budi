@@ -1,0 +1,293 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Result;
+use tokio::sync::{Mutex, RwLock};
+
+use crate::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
+use crate::git;
+use crate::index::{self, RuntimeIndex};
+use crate::retrieval;
+use crate::rpc::{
+    IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryRequest,
+    QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
+};
+
+#[derive(Clone, Default)]
+pub struct DaemonState {
+    repos: Arc<RwLock<HashMap<String, Arc<Mutex<RuntimeIndex>>>>>,
+    load_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct IndexProgressSnapshot {
+    active: bool,
+    hard: bool,
+    phase: String,
+    total_files: usize,
+    processed_files: usize,
+    changed_files: usize,
+    current_file: Option<String>,
+    started_at_unix_ms: u128,
+    last_update_unix_ms: u128,
+    last_error: Option<String>,
+}
+
+impl DaemonState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn query(&self, request: QueryRequest, config: &BudiConfig) -> Result<QueryResponse> {
+        let repo_root = Path::new(&request.repo_root);
+        let runtime = self.ensure_loaded(repo_root, config).await?;
+        let git_snapshot = git::snapshot(repo_root)?;
+        let query_embedding = index::embed_query(repo_root, &request.prompt)?;
+        let runtime_guard = runtime.lock().await;
+        let cwd = request.cwd.as_deref().map(Path::new);
+        retrieval::build_query_response(
+            &runtime_guard,
+            &request.prompt,
+            &query_embedding,
+            &git_snapshot,
+            cwd,
+            config,
+        )
+    }
+
+    pub async fn index(&self, request: IndexRequest, config: &BudiConfig) -> Result<IndexResponse> {
+        let repo_root = Path::new(&request.repo_root);
+        self.start_progress(&request.repo_root, request.hard);
+        let state_for_progress = self.clone();
+        let repo_for_progress = request.repo_root.clone();
+        let hard = request.hard;
+        let mut progress_cb = move |progress: index::IndexBuildProgress| {
+            state_for_progress.update_progress(&repo_for_progress, hard, progress);
+        };
+        let workspace = match index::build_or_update(
+            repo_root,
+            config,
+            request.hard,
+            None,
+            Some(&mut progress_cb),
+        ) {
+            Ok(workspace) => workspace,
+            Err(err) => {
+                self.fail_progress(&request.repo_root, request.hard, &format!("{err:#}"));
+                return Err(err);
+            }
+        };
+        self.finish_progress(&request.repo_root, request.hard);
+        let runtime = RuntimeIndex::from_state(repo_root, workspace.state)?;
+        self.repos
+            .write()
+            .await
+            .insert(request.repo_root.clone(), Arc::new(Mutex::new(runtime)));
+        Ok(IndexResponse {
+            indexed_files: workspace.report.indexed_files,
+            indexed_chunks: workspace.report.indexed_chunks,
+            changed_files: workspace.report.changed_files,
+        })
+    }
+
+    pub async fn update(
+        &self,
+        request: UpdateRequest,
+        config: &BudiConfig,
+    ) -> Result<IndexResponse> {
+        let repo_root = Path::new(&request.repo_root);
+        let workspace =
+            index::build_or_update(repo_root, config, false, Some(&request.changed_files), None)?;
+        let runtime = RuntimeIndex::from_state(repo_root, workspace.state)?;
+        self.repos
+            .write()
+            .await
+            .insert(request.repo_root.clone(), Arc::new(Mutex::new(runtime)));
+        Ok(IndexResponse {
+            indexed_files: workspace.report.indexed_files,
+            indexed_chunks: workspace.report.indexed_chunks,
+            changed_files: workspace.report.changed_files,
+        })
+    }
+
+    pub async fn index_progress(
+        &self,
+        request: IndexProgressRequest,
+    ) -> Result<IndexProgressResponse> {
+        let snapshot = {
+            let guard = self.progress_guard();
+            guard.get(&request.repo_root).cloned().unwrap_or_default()
+        };
+        Ok(IndexProgressResponse {
+            repo_root: request.repo_root,
+            active: snapshot.active,
+            hard: snapshot.hard,
+            phase: snapshot.phase,
+            total_files: snapshot.total_files,
+            processed_files: snapshot.processed_files,
+            changed_files: snapshot.changed_files,
+            current_file: snapshot.current_file,
+            started_at_unix_ms: snapshot.started_at_unix_ms,
+            last_update_unix_ms: snapshot.last_update_unix_ms,
+            last_error: snapshot.last_error,
+        })
+    }
+
+    pub async fn status(
+        &self,
+        request: StatusRequest,
+        config: &BudiConfig,
+    ) -> Result<StatusResponse> {
+        let repo_root = Path::new(&request.repo_root);
+        let runtime = self.ensure_loaded(repo_root, config).await?;
+        let runtime_guard = runtime.lock().await;
+        let git_snapshot = git::snapshot(repo_root)?;
+        let hooks_detected = detect_hooks(repo_root);
+        Ok(StatusResponse {
+            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+            repo_root: request.repo_root,
+            branch: git_snapshot.branch,
+            head: git_snapshot.head,
+            tracked_files: runtime_guard.state.files.len(),
+            embedded_chunks: runtime_guard.state.chunks.len(),
+            dirty_files: git_snapshot.dirty_files.len(),
+            hooks_detected,
+        })
+    }
+
+    async fn ensure_loaded(
+        &self,
+        repo_root: &Path,
+        config: &BudiConfig,
+    ) -> Result<Arc<Mutex<RuntimeIndex>>> {
+        let key = repo_root.display().to_string();
+        if let Some(runtime) = self.repos.read().await.get(&key) {
+            return Ok(runtime.clone());
+        }
+
+        let load_lock = {
+            let mut locks = self.load_locks.lock().await;
+            locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _load_guard = load_lock.lock().await;
+        if let Some(runtime) = self.repos.read().await.get(&key) {
+            return Ok(runtime.clone());
+        }
+
+        let state = if let Some(state) = index::load_state(repo_root)? {
+            state
+        } else {
+            let workspace = index::build_or_update(repo_root, config, false, None, None)?;
+            workspace.state
+        };
+        let runtime = Arc::new(Mutex::new(RuntimeIndex::from_state(repo_root, state)?));
+        self.repos.write().await.insert(key, runtime.clone());
+        Ok(runtime)
+    }
+
+    fn start_progress(&self, repo_root: &str, hard: bool) {
+        let now = now_unix_ms();
+        let mut guard = self.progress_guard();
+        guard.insert(
+            repo_root.to_string(),
+            IndexProgressSnapshot {
+                active: true,
+                hard,
+                phase: "starting".to_string(),
+                total_files: 0,
+                processed_files: 0,
+                changed_files: 0,
+                current_file: None,
+                started_at_unix_ms: now,
+                last_update_unix_ms: now,
+                last_error: None,
+            },
+        );
+    }
+
+    fn update_progress(&self, repo_root: &str, hard: bool, progress: index::IndexBuildProgress) {
+        let now = now_unix_ms();
+        let mut guard = self.progress_guard();
+        let entry = guard.entry(repo_root.to_string()).or_default();
+        if entry.started_at_unix_ms == 0 {
+            entry.started_at_unix_ms = now;
+        }
+        entry.active = !progress.done;
+        entry.hard = hard;
+        entry.phase = progress.phase;
+        entry.total_files = progress.total_files;
+        entry.processed_files = progress.processed_files;
+        entry.changed_files = progress.changed_files;
+        entry.current_file = progress.current_file;
+        entry.last_update_unix_ms = now;
+        entry.last_error = None;
+        if progress.done {
+            entry.current_file = None;
+        }
+    }
+
+    fn finish_progress(&self, repo_root: &str, hard: bool) {
+        let now = now_unix_ms();
+        let mut guard = self.progress_guard();
+        let entry = guard.entry(repo_root.to_string()).or_default();
+        if entry.started_at_unix_ms == 0 {
+            entry.started_at_unix_ms = now;
+        }
+        entry.active = false;
+        entry.hard = hard;
+        entry.phase = "complete".to_string();
+        entry.current_file = None;
+        entry.last_update_unix_ms = now;
+        entry.last_error = None;
+    }
+
+    fn fail_progress(&self, repo_root: &str, hard: bool, error: &str) {
+        let now = now_unix_ms();
+        let mut guard = self.progress_guard();
+        let entry = guard.entry(repo_root.to_string()).or_default();
+        if entry.started_at_unix_ms == 0 {
+            entry.started_at_unix_ms = now;
+        }
+        entry.active = false;
+        entry.hard = hard;
+        entry.phase = "failed".to_string();
+        entry.current_file = None;
+        entry.last_update_unix_ms = now;
+        entry.last_error = Some(error.to_string());
+    }
+
+    fn progress_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, IndexProgressSnapshot>> {
+        match self.progress.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+fn detect_hooks(repo_root: &Path) -> bool {
+    let settings_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
+    let Ok(raw) = std::fs::read_to_string(settings_path) else {
+        return false;
+    };
+    raw.contains("UserPromptSubmit") && raw.contains("budi hook user-prompt-submit")
+}
+
+pub fn resolve_repo_root(input_repo_root: Option<String>, cwd: &Path) -> Result<String> {
+    if let Some(root) = input_repo_root {
+        return Ok(root);
+    }
+    Ok(config::find_repo_root(cwd)?.display().to_string())
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}

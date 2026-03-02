@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+
+# Runtime artifacts
+.budi/
+.claude/settings.local.json
+.fastembed_cache/
+.install-test/
+
+# Bench artifacts
+bench-output/
+tmp/

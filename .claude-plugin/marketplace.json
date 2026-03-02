@@ -1,0 +1,39 @@
+{
+  "name": "budi-plugins",
+  "owner": {
+    "name": "Ivan Seredkin"
+  },
+  "metadata": {
+    "description": "Official budi plugin marketplace for Claude Code hook automation.",
+    "version": "1.0.0",
+    "homepage": "https://github.com/siropkin/budi"
+  },
+  "plugins": [
+    {
+      "name": "budi-hooks",
+      "source": "./plugins/budi-hooks",
+      "description": "Claude Code hooks that run budi prompt/context and post-edit indexing automation.",
+      "version": "1.0.6",
+      "author": {
+        "name": "Ivan Seredkin",
+        "url": "https://github.com/siropkin/budi"
+      },
+      "repository": "https://github.com/siropkin/budi",
+      "homepage": "https://github.com/siropkin/budi",
+      "license": "MIT",
+      "keywords": [
+        "claude-code",
+        "hooks",
+        "context",
+        "retrieval",
+        "budi"
+      ],
+      "category": "development",
+      "tags": [
+        "hooks",
+        "context",
+        "productivity"
+      ]
+    }
+  ]
+}
