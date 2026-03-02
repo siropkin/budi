@@ -34,7 +34,7 @@ If you want the fastest setup (no local Rust build), install from release assets
 Install a specific release tag:
 
 ```bash
-./scripts/install.sh --from-release --version v1.0.10
+./scripts/install.sh --from-release --version v1.0.11
 ```
 
 Custom repository (fork):
@@ -53,7 +53,7 @@ If the repository is private, authenticate first with `gh auth login`.
 ./scripts/install.sh --bin-dir "$HOME/.local/bin" --force
 ./scripts/install.sh --cargo-install
 ./scripts/install.sh --skip-build --bin-dir "$HOME/.local/bin"
-./scripts/install.sh --from-release --version v1.0.10
+./scripts/install.sh --from-release --version v1.0.11
 ```
 
 ## PATH troubleshooting
