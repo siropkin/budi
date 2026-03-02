@@ -139,11 +139,28 @@ budi ignore <path>     # add file to local budi ignore list
 
 ## What happens under the hood (simple)
 
+`budi` uses local RAG (Retrieval-Augmented Generation):
+"retrieve useful repo context first, then let Claude generate the answer."
+
+How indexing works:
+1. `budi index --hard` scans your repo (respecting git ignore rules and budi ignore rules).
+2. It splits code/docs into small chunks (so it can retrieve precise snippets, not whole files).
+3. It builds a local search index for those chunks:
+   - keyword/symbol/path search (fast exact matching)
+   - semantic search vectors (meaning-based matching)
+4. It stores everything locally on your machine (`~/.local/share/budi/...`).
+
+How prompt-time retrieval works:
 1. You send a prompt in Claude Code.
-2. `budi` retrieves relevant local snippets.
-3. `budi` adds that context to the request.
-4. Claude answers with better repo context.
-5. After file edits, `budi` updates index in the background.
+2. `budi` searches the local index (keyword + semantic + symbol/path signals).
+3. It ranks the best snippets and injects a small deterministic context block.
+4. Claude answers with better repo grounding and fewer "where is this defined?" steps.
+5. After file edits, `budi` updates the index in the background so results stay fresh.
+
+Why this works:
+- Search is fast because the heavy work (indexing) is precomputed.
+- Answers are better grounded because Claude gets real file snippets up front.
+- Privacy is preserved because indexing and retrieval stay local.
 
 Prompt controls:
 - `@nobudi`: skip context injection for this prompt
@@ -196,16 +213,28 @@ Every benchmark output includes a prompt-set fingerprint (SHA256), so different 
 
 ## Real run snapshot
 
-Latest judged A/B runs (`scripts/ab_benchmark_runner.py`, measured on 2026-03-02):
-- Big frontend repo: ~24% faster average API time, ~22% faster average wall time, ~51% lower total cost.
-- Big backend repo: ~71% slower average API time, ~62% slower average wall time, ~46% higher total cost.
-- Combined across both runs: ~24% slower average API time, ~20% slower average wall time, ~9% higher total cost.
+Latest judged cross-repo A/B sweep (`scripts/ab_benchmark_runner.py`, measured on 2026-03-02):
+- 16 repos, 32 prompts total (32 judged).
+- Overall result: faster and cheaper with `budi`, while quality was mixed in this run.
 
-| Repo profile | Prompts | Avg API time delta (with vs no) | Avg wall time delta (with vs no) | Total cost delta (with vs no) | Judge winners (with/no/tie) | Quality delta (with-no) | Grounding delta (with-no) |
-| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
-| Big frontend repo | 2 | -24.08% | -21.89% | -51.20% | 0 / 2 / 0 | -1.00 | -1.00 |
-| Big backend repo | 2 | +71.07% | +62.29% | +45.74% | 2 / 0 / 0 | +1.25 | +1.50 |
-| Combined | 4 | +24.02% | +19.79% | +9.01% | 2 / 2 / 0 | +0.12 | +0.25 |
+| What changed with `budi` | Result |
+| --- | --- |
+| API speed | 8.84% faster |
+| End-to-end speed (wall time) | 9.25% faster |
+| Total cost | 32.01% lower |
+| Quality winner count | 13 (`with_budi`) / 17 (`no_budi`) / 2 tie |
+| Repos improved | 10/16 faster API, 11/16 faster wall time, 14/16 cheaper |
+
+Technical note (for deeper comparison): aggregate quality delta `-0.27`, grounding delta `-0.21`; median per-repo deltas were API `-2.89%`, wall `-2.80%`, and cost `-25.39%`.
+
+How this snapshot was produced (simple):
+- We ran the same small prompt set across a mix of local repos (frontend-style, backend-style, infra, and tools).
+- For each prompt, we executed two runs:
+  - `no_budi`: Claude with hooks disabled
+  - `with_budi`: Claude with hooks enabled (`budi` injection path on)
+- Speed/cost numbers come from Claude CLI JSON output (`duration_ms`, wall time, tokens, USD cost).
+- Quality/grounding winners were judged by a separate Claude pass that compares both answers side-by-side using a fixed JSON schema (`winner`, quality, grounding, actionability).
+- Repo names and internal paths are intentionally not shown in this public summary.
 
 ## GitHub Actions goodies
 
