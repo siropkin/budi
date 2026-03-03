@@ -267,8 +267,11 @@ fn cmd_index(repo_root: Option<PathBuf>, hard: bool, progress: bool) -> Result<(
         )?
     };
     println!(
-        "Index complete: files={}, chunks={}, changed_files={}",
-        response.indexed_files, response.indexed_chunks, response.changed_files
+        "Index {}: files={}, chunks={}, changed_files={}",
+        response.index_status,
+        response.indexed_files,
+        response.indexed_chunks,
+        response.changed_files
     );
     Ok(())
 }

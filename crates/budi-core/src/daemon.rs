@@ -96,6 +96,11 @@ impl DaemonState {
             indexed_files: workspace.report.indexed_files,
             indexed_chunks: workspace.report.indexed_chunks,
             changed_files: workspace.report.changed_files,
+            index_status: if workspace.report.limit_reached {
+                "limit_reached".to_string()
+            } else {
+                "completed".to_string()
+            },
         })
     }
 
@@ -115,6 +120,7 @@ impl DaemonState {
             indexed_files,
             indexed_chunks,
             changed_files: changed_count,
+            index_status: "scheduled".to_string(),
         })
     }
 
@@ -454,6 +460,18 @@ impl DaemonState {
                     continue;
                 }
             };
+            if workspace.report.limit_reached {
+                tracing::warn!(
+                    "Background update hit index budget limits for {} (trigger={} files={})",
+                    repo_key,
+                    if reconcile_requested {
+                        "reconcile"
+                    } else {
+                        "watch/hook"
+                    },
+                    changed_files.len()
+                );
+            }
             let runtime = match RuntimeIndex::from_state(repo_root, workspace.state) {
                 Ok(runtime) => runtime,
                 Err(err) => {

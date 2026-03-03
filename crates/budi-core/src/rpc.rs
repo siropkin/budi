@@ -52,6 +52,12 @@ pub struct IndexResponse {
     pub indexed_files: usize,
     pub indexed_chunks: usize,
     pub changed_files: usize,
+    #[serde(default = "default_index_status")]
+    pub index_status: String,
+}
+
+fn default_index_status() -> String {
+    "completed".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

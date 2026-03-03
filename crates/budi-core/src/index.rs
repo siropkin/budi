@@ -60,6 +60,7 @@ pub struct IndexBuildReport {
     pub indexed_files: usize,
     pub indexed_chunks: usize,
     pub changed_files: usize,
+    pub limit_reached: bool,
 }
 
 pub struct RuntimeIndex {
@@ -275,6 +276,22 @@ pub fn build_or_update(
             &hinted_paths,
         )?
     };
+    let mut current_files = current_files;
+    let mut current_hashes = current_hashes;
+    let mut limit_reached = false;
+    if current_files.len() > config.max_index_files {
+        current_files.truncate(config.max_index_files);
+        let retained_paths = current_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<HashSet<_>>();
+        current_hashes.retain(|path, _| retained_paths.contains(path));
+        limit_reached = true;
+        info!(
+            "Index file budget reached (max_index_files={}): truncating scan set.",
+            config.max_index_files
+        );
+    }
 
     let changed_set = calculate_changed_set(hard, &hinted_paths, &previous_hashes, &current_hashes);
 
@@ -319,15 +336,35 @@ pub fn build_or_update(
     );
 
     for file in &current_files {
+        if chunks.len() >= config.max_index_chunks {
+            limit_reached = true;
+            info!(
+                "Index chunk budget reached (max_index_chunks={}): stopping chunk ingestion.",
+                config.max_index_chunks
+            );
+            break;
+        }
         let should_process = hard
             || changed_set.contains(&file.path)
             || !previous_chunks_by_path.contains_key(&file.path);
         if !should_process {
             if let Some(existing) = previous_chunks_by_path.get(&file.path) {
-                for chunk in existing {
-                    used_chunk_ids.insert(chunk.id);
+                let remaining = config.max_index_chunks.saturating_sub(chunks.len());
+                if remaining == 0 {
+                    limit_reached = true;
+                    break;
                 }
-                chunks.extend(existing.clone());
+                for chunk in existing {
+                    if chunks.len() >= config.max_index_chunks {
+                        limit_reached = true;
+                        break;
+                    }
+                    used_chunk_ids.insert(chunk.id);
+                    chunks.push(chunk.clone());
+                }
+                if limit_reached {
+                    break;
+                }
             }
             continue;
         }
@@ -391,6 +428,10 @@ pub fn build_or_update(
         let mut missing_passages = Vec::new();
         let mut missing_positions = Vec::new();
         for chunk in chunked {
+            if chunks.len() + pending.len() >= config.max_index_chunks {
+                limit_reached = true;
+                break;
+            }
             let fingerprint =
                 chunk_fingerprint(&file.path, chunk.start_line, chunk.end_line, &chunk.text);
             let id = allocate_chunk_id(&fingerprint, &mut used_chunk_ids);
@@ -412,6 +453,9 @@ pub fn build_or_update(
                 embedding_cache_key,
                 embedding,
             });
+        }
+        if pending.is_empty() && limit_reached {
+            break;
         }
         if !missing_passages.is_empty() {
             let new_embeddings = embedder.embed_passages(&missing_passages)?;
@@ -463,6 +507,9 @@ pub fn build_or_update(
                 done: false,
             },
         );
+        if limit_reached {
+            break;
+        }
     }
     if embedding_cache_dirty {
         emit_progress(
@@ -533,6 +580,7 @@ pub fn build_or_update(
         indexed_files: state.files.len(),
         indexed_chunks: state.chunks.len(),
         changed_files,
+        limit_reached,
     };
     emit_progress(
         &mut progress_cb,
@@ -2320,6 +2368,18 @@ fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<Pa
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true);
+    builder.filter_entry(|entry| {
+        let Some(file_type) = entry.file_type() else {
+            return true;
+        };
+        if !file_type.is_dir() {
+            return true;
+        }
+        let Some(name) = entry.path().file_name().and_then(|value| value.to_str()) else {
+            return true;
+        };
+        !is_always_skipped_dir_name(name)
+    });
     let local_ignore = config::ignore_path(repo_root)?;
     if local_ignore.exists() {
         builder.add_ignore(local_ignore);
@@ -2347,6 +2407,27 @@ fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<Pa
         files.push(path.to_path_buf());
     }
     Ok(files)
+}
+
+fn is_always_skipped_dir_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".nuxt"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".pytest_cache"
+            | "coverage"
+            | ".turbo"
+            | ".cache"
+            | "vendor"
+    )
 }
 
 fn is_supported_code_file(path: &Path) -> bool {
@@ -3054,5 +3135,13 @@ mod tests {
         let resolved = resolve_reference_token("src/controller.py", "process_order", &aliases);
         assert!(resolved.contains("process_order"));
         assert!(resolved.contains("app_services_process_order"));
+    }
+
+    #[test]
+    fn builtin_skip_dirs_cover_common_large_trees() {
+        assert!(is_always_skipped_dir_name("node_modules"));
+        assert!(is_always_skipped_dir_name("target"));
+        assert!(is_always_skipped_dir_name(".venv"));
+        assert!(!is_always_skipped_dir_name("src"));
     }
 }
