@@ -64,6 +64,7 @@ pub struct IndexBuildReport {
     pub embedded_chunks: usize,
     pub missing_embeddings: usize,
     pub repaired_embeddings: usize,
+    pub invalid_embeddings: usize,
     pub changed_files: usize,
     pub limit_reached: bool,
 }
@@ -606,6 +607,32 @@ pub fn build_or_update(
         )?;
     }
 
+    let mut invalid_embeddings = sanitize_chunk_embeddings(&mut chunks);
+    if invalid_embeddings > 0 && embedder.is_available() {
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "repairing-invalid-embeddings".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+        repaired_embeddings =
+            repaired_embeddings.saturating_add(reconcile_missing_chunk_embeddings(
+                &mut chunks,
+                &mut embedder,
+                &mut embedding_cache,
+                &mut embedding_cache_dirty,
+                embedding_batch_size,
+                embedding_retry_attempts,
+                embedding_retry_backoff_ms,
+            )?);
+        invalid_embeddings = sanitize_chunk_embeddings(&mut chunks);
+    }
+
     let missing_embeddings = chunks
         .iter()
         .filter(|chunk| chunk.embedding.is_empty())
@@ -681,6 +708,7 @@ pub fn build_or_update(
         embedded_chunks,
         missing_embeddings,
         repaired_embeddings,
+        invalid_embeddings,
         changed_files,
         limit_reached,
     };
@@ -3182,6 +3210,41 @@ fn reconcile_missing_chunk_embeddings(
     Ok(repaired)
 }
 
+fn infer_expected_embedding_dims(chunks: &[ChunkRecord]) -> Option<usize> {
+    let mut dims_to_counts: HashMap<usize, usize> = HashMap::new();
+    for chunk in chunks {
+        if chunk.embedding.is_empty() || chunk.embedding.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        *dims_to_counts.entry(chunk.embedding.len()).or_insert(0) += 1;
+    }
+    dims_to_counts
+        .into_iter()
+        .max_by(|(left_dims, left_count), (right_dims, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| left_dims.cmp(right_dims))
+        })
+        .map(|(dims, _)| dims)
+}
+
+fn sanitize_chunk_embeddings(chunks: &mut [ChunkRecord]) -> usize {
+    let expected_dims = infer_expected_embedding_dims(chunks);
+    let mut invalid = 0usize;
+    for chunk in chunks {
+        if chunk.embedding.is_empty() {
+            continue;
+        }
+        let has_non_finite = chunk.embedding.iter().any(|value| !value.is_finite());
+        let dims_mismatch = expected_dims.is_some_and(|dims| chunk.embedding.len() != dims);
+        if has_non_finite || dims_mismatch {
+            chunk.embedding.clear();
+            invalid = invalid.saturating_add(1);
+        }
+    }
+    invalid
+}
+
 enum EmbeddingBackend {
     Fast(Box<TextEmbedding>),
     Unavailable,
@@ -4128,5 +4191,77 @@ mod tests {
         assert_eq!(repaired, 0);
         assert!(chunks[0].embedding.is_empty());
         assert!(!cache_dirty);
+    }
+
+    #[test]
+    fn infer_expected_embedding_dims_prefers_majority_dimension() {
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/a.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                symbol_hint: None,
+                text: "fn a() {}".to_string(),
+                embedding: vec![0.1, 0.2, 0.3],
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/b.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                symbol_hint: None,
+                text: "fn b() {}".to_string(),
+                embedding: vec![0.4, 0.5, 0.6],
+            },
+            ChunkRecord {
+                id: 3,
+                path: "src/c.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                symbol_hint: None,
+                text: "fn c() {}".to_string(),
+                embedding: vec![0.9, 1.0],
+            },
+        ];
+        assert_eq!(infer_expected_embedding_dims(&chunks), Some(3));
+    }
+
+    #[test]
+    fn sanitize_chunk_embeddings_clears_invalid_vectors() {
+        let mut chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/a.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                symbol_hint: None,
+                text: "fn a() {}".to_string(),
+                embedding: vec![0.1, 0.2, 0.3],
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/b.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                symbol_hint: None,
+                text: "fn b() {}".to_string(),
+                embedding: vec![0.4, f32::NAN, 0.6],
+            },
+            ChunkRecord {
+                id: 3,
+                path: "src/c.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                symbol_hint: None,
+                text: "fn c() {}".to_string(),
+                embedding: vec![0.9, 1.0],
+            },
+        ];
+        let invalid = sanitize_chunk_embeddings(&mut chunks);
+        assert_eq!(invalid, 2);
+        assert_eq!(chunks[0].embedding.len(), 3);
+        assert!(chunks[1].embedding.is_empty());
+        assert!(chunks[2].embedding.is_empty());
     }
 }

@@ -96,6 +96,7 @@ impl DaemonState {
             embedded_chunks: workspace.report.embedded_chunks,
             missing_embeddings: workspace.report.missing_embeddings,
             repaired_embeddings: workspace.report.repaired_embeddings,
+            invalid_embeddings: workspace.report.invalid_embeddings,
             changed_files: workspace.report.changed_files,
             index_status: if workspace.report.limit_reached {
                 "limit_reached".to_string()
@@ -116,14 +117,20 @@ impl DaemonState {
             .await;
         self.kick_update_processor(&repo_key, config).await;
 
-        let (indexed_files, indexed_chunks, embedded_chunks, missing_embeddings) =
-            self.runtime_counts(&repo_key).await;
+        let (
+            indexed_files,
+            indexed_chunks,
+            embedded_chunks,
+            missing_embeddings,
+            invalid_embeddings,
+        ) = self.runtime_counts(&repo_key).await;
         Ok(IndexResponse {
             indexed_files,
             indexed_chunks,
             embedded_chunks,
             missing_embeddings,
             repaired_embeddings: 0,
+            invalid_embeddings,
             changed_files: changed_count,
             index_status: "scheduled".to_string(),
         })
@@ -182,13 +189,29 @@ impl DaemonState {
         let runtime_guard = runtime.lock().await;
         let git_snapshot = git::snapshot(repo_root)?;
         let hooks_detected = detect_hooks(repo_root);
+        let embedded_chunks = runtime_guard
+            .state
+            .chunks
+            .iter()
+            .filter(|chunk| !chunk.embedding.is_empty())
+            .count();
+        let invalid_embeddings = runtime_guard
+            .state
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                !chunk.embedding.is_empty()
+                    && chunk.embedding.iter().any(|value| !value.is_finite())
+            })
+            .count();
         Ok(StatusResponse {
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             repo_root: request.repo_root,
             branch: git_snapshot.branch,
             head: git_snapshot.head,
             tracked_files: runtime_guard.state.files.len(),
-            embedded_chunks: runtime_guard.state.chunks.len(),
+            embedded_chunks,
+            invalid_embeddings,
             dirty_files: git_snapshot.dirty_files.len(),
             hooks_detected,
         })
@@ -424,7 +447,7 @@ impl DaemonState {
         }
     }
 
-    async fn runtime_counts(&self, repo_key: &str) -> (usize, usize, usize, usize) {
+    async fn runtime_counts(&self, repo_key: &str) -> (usize, usize, usize, usize, usize) {
         let runtime = { self.repos.read().await.get(repo_key).cloned() };
         if let Some(runtime) = runtime {
             let guard = runtime.lock().await;
@@ -435,14 +458,24 @@ impl DaemonState {
                 .filter(|chunk| !chunk.embedding.is_empty())
                 .count();
             let missing_embeddings = guard.state.chunks.len().saturating_sub(embedded_chunks);
+            let invalid_embeddings = guard
+                .state
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    !chunk.embedding.is_empty()
+                        && chunk.embedding.iter().any(|value| !value.is_finite())
+                })
+                .count();
             (
                 guard.state.files.len(),
                 guard.state.chunks.len(),
                 embedded_chunks,
                 missing_embeddings,
+                invalid_embeddings,
             )
         } else {
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0)
         }
     }
 

@@ -55,6 +55,8 @@ pub struct IndexResponse {
     pub missing_embeddings: usize,
     #[serde(default)]
     pub repaired_embeddings: usize,
+    #[serde(default)]
+    pub invalid_embeddings: usize,
     pub changed_files: usize,
     #[serde(default = "default_index_status")]
     pub index_status: String,
@@ -106,6 +108,8 @@ pub struct StatusResponse {
     pub head: String,
     pub tracked_files: usize,
     pub embedded_chunks: usize,
+    #[serde(default)]
+    pub invalid_embeddings: usize,
     pub dirty_files: usize,
     pub hooks_detected: bool,
 }

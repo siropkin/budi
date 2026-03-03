@@ -343,13 +343,14 @@ fn cmd_index(repo_root: Option<PathBuf>, hard: bool, progress: bool) -> Result<(
         )?
     };
     println!(
-        "Index {}: files={}, chunks={}, embedded={}, missing_embeddings={}, repaired_embeddings={}, changed_files={}",
+        "Index {}: files={}, chunks={}, embedded={}, missing_embeddings={}, repaired_embeddings={}, invalid_embeddings={}, changed_files={}",
         response.index_status,
         response.indexed_files,
         response.indexed_chunks,
         response.embedded_chunks,
         response.missing_embeddings,
         response.repaired_embeddings,
+        response.invalid_embeddings,
         response.changed_files
     );
     Ok(())
@@ -368,6 +369,7 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     println!("head: {}", response.head);
     println!("tracked files: {}", response.tracked_files);
     println!("embedded chunks: {}", response.embedded_chunks);
+    println!("invalid embeddings: {}", response.invalid_embeddings);
     println!("dirty files: {}", response.dirty_files);
     println!("hooks detected: {}", response.hooks_detected);
     Ok(())
@@ -746,6 +748,43 @@ fn path_matches_expected(actual: &str, expected: &str) -> bool {
     actual == expected || actual.ends_with(expected)
 }
 
+fn embedding_integrity_counts(chunks: &[index::ChunkRecord]) -> (usize, usize, usize, usize) {
+    let mut dims_to_counts: HashMap<usize, usize> = HashMap::new();
+    for chunk in chunks {
+        if chunk.embedding.is_empty() || chunk.embedding.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        *dims_to_counts.entry(chunk.embedding.len()).or_insert(0) += 1;
+    }
+    let expected_dims = dims_to_counts
+        .into_iter()
+        .max_by(|(left_dims, left_count), (right_dims, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| left_dims.cmp(right_dims))
+        })
+        .map(|(dims, _)| dims)
+        .unwrap_or(0);
+
+    let mut embedded = 0usize;
+    let mut missing = 0usize;
+    let mut invalid = 0usize;
+    for chunk in chunks {
+        if chunk.embedding.is_empty() {
+            missing = missing.saturating_add(1);
+            continue;
+        }
+        let has_non_finite = chunk.embedding.iter().any(|value| !value.is_finite());
+        let dims_mismatch = expected_dims > 0 && chunk.embedding.len() != expected_dims;
+        if has_non_finite || dims_mismatch {
+            invalid = invalid.saturating_add(1);
+        } else {
+            embedded = embedded.saturating_add(1);
+        }
+    }
+    (embedded, missing, invalid, expected_dims)
+}
+
 fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
@@ -758,13 +797,10 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
 
     let indexed_files = state.as_ref().map_or(0usize, |s| s.files.len());
     let indexed_chunks = state.as_ref().map_or(0usize, |s| s.chunks.len());
-    let embedded_chunks = state.as_ref().map_or(0usize, |s| {
-        s.chunks
-            .iter()
-            .filter(|chunk| !chunk.embedding.is_empty())
-            .count()
-    });
-    let missing_embeddings = indexed_chunks.saturating_sub(embedded_chunks);
+    let (embedded_chunks, missing_embeddings, invalid_embeddings, expected_embedding_dims) = state
+        .as_ref()
+        .map(|s| embedding_integrity_counts(&s.chunks))
+        .unwrap_or((0, 0, 0, 0));
     let catalog_updated_at_ts = state.as_ref().map_or(0i64, |s| s.updated_at_ts);
     let chunks_per_file = if indexed_files == 0 {
         0.0
@@ -790,6 +826,8 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
             "indexed_chunks": indexed_chunks,
             "embedded_chunks": embedded_chunks,
             "missing_embeddings": missing_embeddings,
+            "invalid_embeddings": invalid_embeddings,
+            "expected_embedding_dims": expected_embedding_dims,
             "chunks_per_file": chunks_per_file,
             "catalog_updated_at_ts": catalog_updated_at_ts,
             "index_db_file": index_db_path.display().to_string(),
@@ -812,6 +850,8 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     println!("indexed chunks: {}", indexed_chunks);
     println!("embedded chunks: {}", embedded_chunks);
     println!("missing embeddings: {}", missing_embeddings);
+    println!("invalid embeddings: {}", invalid_embeddings);
+    println!("expected embedding dims: {}", expected_embedding_dims);
     println!("chunks/file: {:.2}", chunks_per_file);
     println!("catalog updated_at_ts: {}", catalog_updated_at_ts);
     println!(
@@ -871,6 +911,8 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     let mut orphan_chunks = 0usize;
     let mut state_embedded_chunks = 0usize;
     let mut state_missing_embeddings = 0usize;
+    let mut state_invalid_embeddings = 0usize;
+    let mut state_expected_embedding_dims = 0usize;
     if let Some(index_state) = &state {
         let mut seen_paths: HashSet<&str> = HashSet::new();
         for file in &index_state.files {
@@ -891,20 +933,32 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
             if !file_paths.contains(chunk.path.as_str()) {
                 orphan_chunks = orphan_chunks.saturating_add(1);
             }
-            if chunk.embedding.is_empty() {
-                state_missing_embeddings = state_missing_embeddings.saturating_add(1);
-            } else {
-                state_embedded_chunks = state_embedded_chunks.saturating_add(1);
-            }
         }
+        (
+            state_embedded_chunks,
+            state_missing_embeddings,
+            state_invalid_embeddings,
+            state_expected_embedding_dims,
+        ) = embedding_integrity_counts(&index_state.chunks);
     }
     println!(
         "catalog consistency: duplicate_file_paths={} duplicate_chunk_ids={} orphan_chunks={}",
         duplicate_file_paths, duplicate_chunk_ids, orphan_chunks
     );
     println!(
-        "embedding coverage: embedded_chunks={} missing_embeddings={}",
-        state_embedded_chunks, state_missing_embeddings
+        "embedding coverage: embedded_chunks={} missing_embeddings={} invalid_embeddings={} expected_dims={}",
+        state_embedded_chunks,
+        state_missing_embeddings,
+        state_invalid_embeddings,
+        state_expected_embedding_dims
+    );
+    println!(
+        "embedding integrity: {}",
+        if state_invalid_embeddings == 0 {
+            "ok"
+        } else {
+            "degraded"
+        }
     );
 
     let tantivy_entries = fs::read_dir(&tantivy_path)
@@ -986,8 +1040,11 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
         Ok(status) => {
             println!(
-                "route /status: ok (tracked_files={} embedded_chunks={} dirty_files={})",
-                status.tracked_files, status.embedded_chunks, status.dirty_files
+                "route /status: ok (tracked_files={} embedded_chunks={} invalid_embeddings={} dirty_files={})",
+                status.tracked_files,
+                status.embedded_chunks,
+                status.invalid_embeddings,
+                status.dirty_files
             );
             daemon_status = Some(status);
         }
@@ -1058,10 +1115,16 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
                 status.tracked_files, sqlite_files_count
             ));
         }
-        if status.embedded_chunks != sqlite_chunks_count {
+        if status.embedded_chunks != state_embedded_chunks {
             drift_notes.push(format!(
-                "status_embedded_chunks={} sqlite_chunks={}",
-                status.embedded_chunks, sqlite_chunks_count
+                "status_embedded_chunks={} state_embedded_chunks={}",
+                status.embedded_chunks, state_embedded_chunks
+            ));
+        }
+        if status.invalid_embeddings != state_invalid_embeddings {
+            drift_notes.push(format!(
+                "status_invalid_embeddings={} state_invalid_embeddings={}",
+                status.invalid_embeddings, state_invalid_embeddings
             ));
         }
     }
