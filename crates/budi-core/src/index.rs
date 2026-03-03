@@ -357,7 +357,12 @@ pub fn build_or_update(
                 continue;
             }
         };
-        let chunked = chunk_text(&content, config.chunk_lines, config.chunk_overlap);
+        let chunked = chunk_text(
+            &file.path,
+            &content,
+            config.chunk_lines,
+            config.chunk_overlap,
+        );
         if chunked.is_empty() {
             processed_files += 1;
             emit_progress(
