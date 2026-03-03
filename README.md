@@ -145,10 +145,6 @@ budi repo search "<query>"   # run retrieval and list top matching snippets
 budi bench --prompt "<prompt>" --iterations 30 # retrieval latency/context benchmark
 budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
 budi doctor --deep     # extended consistency/route/retrieval diagnostics
-budi observe enable    # start metadata-only local usage logging
-budi observe report    # summarize all logged usage (default: all history)
-budi observe report --days 7  # summarize rolling last 7 days from now
-budi observe disable   # stop usage logging
 ```
 
 ## What happens under the hood (simple)
@@ -211,46 +207,6 @@ debug_io_max_chars = 1200
 `budi repo preview` now prints retrieval diagnostics (intent, confidence, recommended injection).
 
 `budi eval retrieval` runs an offline retrieval-quality check against JSON fixtures and reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) with per-intent breakdowns. It also writes a timestamped JSON artifact to `./.budi/eval/runs/` (or `--out-dir`) and can compare against a prior artifact (`--baseline` or auto-previous artifact) with optional regression gating via `--fail-on-regression --max-regression <drop>`. If `--fixtures` is omitted, it reads `./.budi/eval/retrieval.json` in the repo root.
-
-## Observe real usage (day/week)
-
-If you want to validate real daily impact (not synthetic benchmarks), use observe mode:
-
-```bash
-# 1) Enable metadata-only local logging (no prompt/context text)
-budi observe enable --repo-root "/path/to/repo"
-
-# 2) Use Claude Code normally for a day or week
-
-# 3) Generate summary reports
-budi observe report --repo-root "/path/to/repo"          # all available history
-budi observe report --days 7 --repo-root "/path/to/repo"
-
-# Optional: export machine-readable report to file
-budi observe report --all --json --out "./budi-observe.json" --repo-root "/path/to/repo"
-
-# 4) Disable when done
-budi observe disable --repo-root "/path/to/repo"
-```
-
-Notes:
-- `--days N` means a rolling lookback window from "now" (for example, `--days 7` = last 7 days).
-- If you omit both `--days` and `--all`, `budi` reports all available history.
-
-The report shows injection rate, skip reasons, retrieval confidence, hook latency, post-edit index update health, and a simple health verdict with tuning hypotheses.
-
-Auto snapshots on macOS (launchd):
-
-```bash
-# Generate observe snapshots every 6 hours (and run one immediately)
-./scripts/setup-observe-launchd.sh \
-  --repo-root "/path/to/repo" \
-  --interval-secs 21600 \
-  --window-days 1
-
-# Remove the scheduled job later (use the label printed by setup)
-./scripts/remove-observe-launchd.sh --label "com.siropkin.budi.observe.<repo>.<id>"
-```
 
 ## Benchmark your own repo (A/B)
 
@@ -334,9 +290,6 @@ Optional secret for custom push credentials:
 - `crates/budi-core`: indexing, retrieval, config, hook schemas
 - `scripts/install.sh`: installer
 - `scripts/uninstall.sh`: uninstaller
-- `scripts/setup-observe-launchd.sh`: schedule periodic observe snapshots
-- `scripts/remove-observe-launchd.sh`: remove scheduled observe snapshots
-- `scripts/observe_snapshot_runner.sh`: snapshot generation worker used by launchd
 - `scripts/ab_benchmark_runner.py`: A/B benchmark runner
 - `scripts/bump-plugin-version.sh`: sync `budi-hooks` plugin + marketplace versions
 
