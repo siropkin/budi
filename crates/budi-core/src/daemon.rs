@@ -7,7 +7,6 @@ use anyhow::Result;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
-use crate::git;
 use crate::index::{self, RuntimeIndex};
 use crate::retrieval;
 use crate::rpc::{
@@ -48,7 +47,6 @@ impl DaemonState {
     pub async fn query(&self, request: QueryRequest, config: &BudiConfig) -> Result<QueryResponse> {
         let repo_root = Path::new(&request.repo_root);
         let runtime = self.ensure_loaded(repo_root, config).await?;
-        let dirty_files = git::dirty_files(repo_root)?;
         let query_embedding = index::embed_query(repo_root, &request.prompt)?;
         let runtime_guard = runtime.lock().await;
         let cwd = request.cwd.as_deref().map(Path::new);
@@ -57,7 +55,6 @@ impl DaemonState {
             &runtime_guard,
             &request.prompt,
             query_embedding.as_deref(),
-            &dirty_files,
             cwd,
             retrieval_mode,
             config,

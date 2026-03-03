@@ -120,7 +120,6 @@ pub fn build_query_response(
     runtime: &RuntimeIndex,
     query: &str,
     query_embedding: Option<&[f32]>,
-    dirty_files: &[String],
     cwd: Option<&Path>,
     retrieval_mode: RetrievalMode,
     config: &BudiConfig,
@@ -189,8 +188,6 @@ pub fn build_query_response(
     };
     let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
 
-    let dirty_set: std::collections::HashSet<&str> =
-        dirty_files.iter().map(String::as_str).collect();
     let cwd_rel = cwd
         .and_then(|path| path.to_str())
         .map(normalize_path)
@@ -393,10 +390,6 @@ pub fn build_query_response(
         if matched_clauses > 0 {
             adjusted += (matched_clauses as f32).min(3.0) * 0.035;
             push_unique_reason(&mut reasons, "clause-match");
-        }
-        if dirty_set.contains(chunk.path.as_str()) {
-            adjusted += 0.12;
-            push_unique_reason(&mut reasons, "dirty-file");
         }
         if !cwd_rel.is_empty() && chunk.path.starts_with(&cwd_rel) {
             adjusted += 0.08;
