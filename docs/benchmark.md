@@ -28,10 +28,10 @@ For end-to-end evaluations against native Claude Code behavior:
 Use fixture-driven retrieval evaluation to track ranking quality over time:
 
 ```bash
-budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8
+budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
 ```
 
-This reports `hit@1`, `hit@3`, `hit@5`, and `MRR` from expected-path fixtures.
+This reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) from expected-path fixtures, plus per-intent rollups and a persisted JSON artifact under `./.budi/eval/runs/` (or `--out-dir`).
 
 ## Debug logging during A/B runs
 

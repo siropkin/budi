@@ -32,7 +32,7 @@ use prompt_controls::PromptDirectives;
 use prompt_controls::{
     evaluate_context_skip, excerpt, parse_prompt_directives, sanitize_prompt_for_query,
 };
-use retrieval_eval::run_retrieval_eval;
+use retrieval_eval::{RetrievalEvalReport, run_retrieval_eval};
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
@@ -161,6 +161,8 @@ enum EvalCommands {
         mode: RetrievalModeArg,
         #[arg(long, default_value_t = false)]
         json: bool,
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
     },
 }
 
@@ -265,7 +267,8 @@ fn main() -> Result<()> {
                 limit,
                 mode,
                 json,
-            } => cmd_eval_retrieval(repo_root, fixtures, limit, mode, json),
+                out_dir,
+            } => cmd_eval_retrieval(repo_root, fixtures, limit, mode, json, out_dir),
         },
         Commands::Repo { command } => match command {
             RepoCommands::Status { repo_root } => cmd_status(repo_root),
@@ -597,6 +600,7 @@ fn cmd_eval_retrieval(
     limit: usize,
     mode: RetrievalModeArg,
     json_output: bool,
+    out_dir: Option<PathBuf>,
 ) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
@@ -619,9 +623,14 @@ fn cmd_eval_retrieval(
             )
         },
     )?;
+    let artifact_path = persist_retrieval_eval_report(&repo_root, out_dir.as_deref(), &report)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let payload = json!({
+            "artifact_path": artifact_path.display().to_string(),
+            "report": report,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
@@ -634,8 +643,44 @@ fn cmd_eval_retrieval(
     );
     println!(
         "metrics: hit@1={:.3} hit@3={:.3} hit@5={:.3} mrr={:.3}",
-        report.hit_at_1, report.hit_at_3, report.hit_at_5, report.mrr
+        report.metrics.hit_at_1,
+        report.metrics.hit_at_3,
+        report.metrics.hit_at_5,
+        report.metrics.mrr
     );
+    println!(
+        "metrics: precision@1={:.3} precision@3={:.3} precision@5={:.3}",
+        report.metrics.precision_at_1, report.metrics.precision_at_3, report.metrics.precision_at_5
+    );
+    println!(
+        "metrics: recall@1={:.3} recall@3={:.3} recall@5={:.3}",
+        report.metrics.recall_at_1, report.metrics.recall_at_3, report.metrics.recall_at_5
+    );
+    println!(
+        "metrics: f1@1={:.3} f1@3={:.3} f1@5={:.3}",
+        report.metrics.f1_at_1, report.metrics.f1_at_3, report.metrics.f1_at_5
+    );
+    if !report.per_intent_metrics.is_empty() {
+        let mut intent_rows = report
+            .per_intent_metrics
+            .iter()
+            .map(|(intent, metrics)| (intent.as_str(), metrics))
+            .collect::<Vec<_>>();
+        intent_rows.sort_by(|left, right| left.0.cmp(right.0));
+        println!("per-intent metrics:");
+        for (intent, metrics) in intent_rows {
+            println!(
+                "- {} cases={} hit@1={:.3} hit@3={:.3} hit@5={:.3} mrr={:.3} f1@3={:.3}",
+                intent,
+                metrics.cases,
+                metrics.hit_at_1,
+                metrics.hit_at_3,
+                metrics.hit_at_5,
+                metrics.mrr,
+                metrics.f1_at_3
+            );
+        }
+    }
     for case in &report.results {
         let rank_display = case.rank.map_or("-".to_string(), |r| r.to_string());
         let expected = if case.expected_paths.is_empty() {
@@ -649,13 +694,22 @@ fn cmd_eval_retrieval(
             case.top_paths.join(",")
         };
         println!(
-            "- rank={} intent={} confidence={:.3} query=\"{}\" expected={} top={}",
-            rank_display, case.intent, case.confidence, case.query, expected, top
+            "- rank={} matched@1/3/5={}/{}/{} intent={} confidence={:.3} query=\"{}\" expected={} top={}",
+            rank_display,
+            case.matched_at_1,
+            case.matched_at_3,
+            case.matched_at_5,
+            case.intent,
+            case.confidence,
+            case.query,
+            expected,
+            top
         );
         if let Some(err) = &case.error {
             println!("  error={err}");
         }
     }
+    println!("artifact: {}", artifact_path.display());
     Ok(())
 }
 
@@ -677,6 +731,24 @@ fn format_snippet_channels(item: &QueryResultItem) -> String {
         item.channel_scores.graph,
         item.channel_scores.rerank
     )
+}
+
+fn persist_retrieval_eval_report(
+    repo_root: &Path,
+    out_dir: Option<&Path>,
+    report: &RetrievalEvalReport,
+) -> Result<PathBuf> {
+    let output_dir = out_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| repo_root.join(".budi").join("eval").join("runs"));
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("Failed creating eval artifact dir {}", output_dir.display()))?;
+    let mode = report.retrieval_mode.replace('-', "_");
+    let path = output_dir.join(format!("retrieval-{mode}-{}.json", now_unix_ms()));
+    let payload = serde_json::to_string_pretty(report)?;
+    fs::write(&path, payload)
+        .with_context(|| format!("Failed writing eval artifact {}", path.display()))?;
+    Ok(path)
 }
 
 fn embedding_integrity_counts(chunks: &[index::ChunkRecord]) -> (usize, usize, usize, usize) {
