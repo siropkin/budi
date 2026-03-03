@@ -14,6 +14,13 @@ use budi_core::hooks::{
     AsyncSystemMessageOutput, PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput,
 };
 use budi_core::index;
+use budi_core::reason_codes::{
+    HOOK_REASON_DAEMON_UNAVAILABLE, HOOK_REASON_OK, HOOK_REASON_QUERY_ERROR,
+    HOOK_REASON_QUERY_HTTP_ERROR, HOOK_REASON_QUERY_TIMEOUT, HOOK_REASON_QUERY_TRANSPORT_ERROR,
+    HOOK_REASON_RESPONSE_PARSE_ERROR, HOOK_REASON_UPDATE_CONNECT_ERROR, HOOK_REASON_UPDATE_FAILED,
+    HOOK_REASON_UPDATE_HTTP_ERROR, HOOK_REASON_UPDATE_TIMEOUT, SKIP_REASON_FORCED_SKIP,
+    format_skip_hook_reason, normalize_hook_reason, normalize_skip_reason,
+};
 use budi_core::rpc::{
     IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryDiagnostics,
     QueryRequest, QueryResponse, QueryResultItem, StatusRequest, StatusResponse, UpdateRequest,
@@ -1490,7 +1497,7 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
                 progress.total_files,
                 progress.processed_files,
                 if progress_issues.is_empty() {
-                    "ok".to_string()
+                    HOOK_REASON_OK.to_string()
                 } else {
                     progress_issues.join(",")
                 }
@@ -1733,21 +1740,7 @@ impl ObserveSummary {
 }
 
 fn normalize_reason(reason: &str) -> String {
-    if let Some(rest) = reason.strip_prefix("skip:") {
-        if rest.starts_with("low-confidence") {
-            return "skip:low-confidence".to_string();
-        }
-        return format!("skip:{rest}");
-    }
-    reason.to_string()
-}
-
-fn normalize_skip_reason(skip_reason: &str) -> String {
-    if skip_reason.starts_with("low-confidence") {
-        "low-confidence".to_string()
-    } else {
-        skip_reason.to_string()
-    }
+    normalize_hook_reason(reason)
 }
 
 fn increment_counter(counter: &mut HashMap<String, usize>, key: &str) {
@@ -1819,8 +1812,8 @@ fn build_observe_assessment(
 ) -> ObserveAssessment {
     let prompt_success_rate_pct =
         percentage(summary.prompt_outputs_success, summary.prompt_outputs_total);
-    let query_like_failures =
-        reason_prefix_count(summary, "query_") + reason_count(summary, "daemon_unavailable");
+    let query_like_failures = reason_prefix_count(summary, "query_")
+        + reason_count(summary, HOOK_REASON_DAEMON_UNAVAILABLE);
     let query_failure_rate_pct = percentage(query_like_failures, summary.prompt_outputs_total);
 
     let mut score = 100i32;
@@ -2156,8 +2149,8 @@ fn cmd_observe_report(
     let post_tool_p95_latency = percentile(&summary.post_tool_latency_ms, 0.95);
     let prompt_injection_rate_success_pct =
         percentage(summary.prompt_injected, summary.prompt_outputs_success);
-    let prompt_query_error_count =
-        reason_prefix_count(&summary, "query_") + reason_count(&summary, "daemon_unavailable");
+    let prompt_query_error_count = reason_prefix_count(&summary, "query_")
+        + reason_count(&summary, HOOK_REASON_DAEMON_UNAVAILABLE);
     let prompt_query_error_rate_pct =
         percentage(prompt_query_error_count, summary.prompt_outputs_total);
     let post_tool_success_rate_pct = percentage(
@@ -2448,7 +2441,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             margin: 0.0,
             signals: vec!["@nobudi".to_string()],
             recommended_injection: false,
-            skip_reason: Some("forced_skip".to_string()),
+            skip_reason: Some(SKIP_REASON_FORCED_SKIP.to_string()),
         };
         log_hook_event(&repo_root, &config, || {
             json!({
@@ -2458,7 +2451,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 "session_id": session_id.clone(),
                 "latency_ms": hook_started.elapsed().as_millis(),
                 "success": true,
-                "reason": "forced_skip",
+                "reason": SKIP_REASON_FORCED_SKIP,
                 "context_chars": 0,
                 "context_excerpt": "",
                 "retrieval_intent": diagnostics.intent,
@@ -2480,7 +2473,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 "session_id": session_id.clone(),
                 "latency_ms": hook_started.elapsed().as_millis(),
                 "success": false,
-                "reason": "daemon_unavailable",
+                "reason": HOOK_REASON_DAEMON_UNAVAILABLE,
                 "context_chars": 0,
                 "context_excerpt": "",
             })
@@ -2508,15 +2501,20 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 (
                     String::new(),
                     true,
-                    format!("skip:{skip_reason}"),
+                    format_skip_hook_reason(&skip_reason),
                     String::new(),
                 )
             } else {
-                (response.context, true, "ok".to_string(), String::new())
+                (
+                    response.context,
+                    true,
+                    HOOK_REASON_OK.to_string(),
+                    String::new(),
+                )
             }
         }
         Err(err) => {
-            let reason = classify_query_error(&err);
+            let reason = classify_query_error(&err).as_str().to_string();
             (String::new(), false, reason, err.to_string())
         }
     };
@@ -2618,7 +2616,7 @@ fn cmd_hook_post_tool_use() -> Result<()> {
                 "session_id": session_id.clone(),
                 "latency_ms": hook_started.elapsed().as_millis(),
                 "success": false,
-                "reason": "daemon_unavailable",
+                "reason": HOOK_REASON_DAEMON_UNAVAILABLE,
             })
         });
         return Ok(());
@@ -2653,13 +2651,22 @@ fn cmd_hook_post_tool_use() -> Result<()> {
                             system_message: msg
                         })?
                     );
-                    ("ok".to_string(), String::new())
+                    (HOOK_REASON_OK.to_string(), String::new())
                 }
-                Err(err) => ("response_parse_error".to_string(), err.to_string()),
+                Err(err) => (
+                    HOOK_REASON_RESPONSE_PARSE_ERROR.to_string(),
+                    err.to_string(),
+                ),
             },
-            Err(err) => (classify_update_error(&err), err.to_string()),
+            Err(err) => (
+                classify_update_error(&err).as_str().to_string(),
+                err.to_string(),
+            ),
         },
-        Err(err) => (classify_update_error(&err), err.to_string()),
+        Err(err) => (
+            classify_update_error(&err).as_str().to_string(),
+            err.to_string(),
+        ),
     };
     log_hook_event(&repo_root, &config, || {
         json!({
@@ -2678,39 +2685,82 @@ fn cmd_hook_post_tool_use() -> Result<()> {
     Ok(())
 }
 
-fn classify_query_error(err: &anyhow::Error) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryErrorReason {
+    Timeout,
+    TransportError,
+    HttpError,
+    Error,
+}
+
+impl QueryErrorReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            QueryErrorReason::Timeout => HOOK_REASON_QUERY_TIMEOUT,
+            QueryErrorReason::TransportError => HOOK_REASON_QUERY_TRANSPORT_ERROR,
+            QueryErrorReason::HttpError => HOOK_REASON_QUERY_HTTP_ERROR,
+            QueryErrorReason::Error => HOOK_REASON_QUERY_ERROR,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateErrorReason {
+    Timeout,
+    ConnectError,
+    HttpError,
+    Failed,
+}
+
+impl UpdateErrorReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            UpdateErrorReason::Timeout => HOOK_REASON_UPDATE_TIMEOUT,
+            UpdateErrorReason::ConnectError => HOOK_REASON_UPDATE_CONNECT_ERROR,
+            UpdateErrorReason::HttpError => HOOK_REASON_UPDATE_HTTP_ERROR,
+            UpdateErrorReason::Failed => HOOK_REASON_UPDATE_FAILED,
+        }
+    }
+}
+
+fn classify_query_error(err: &anyhow::Error) -> QueryErrorReason {
     for cause in err.chain() {
         if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
-            return format!("query_{}", classify_update_error(reqwest_err));
+            return match classify_update_error(reqwest_err) {
+                UpdateErrorReason::Timeout => QueryErrorReason::Timeout,
+                UpdateErrorReason::ConnectError => QueryErrorReason::TransportError,
+                UpdateErrorReason::HttpError => QueryErrorReason::HttpError,
+                UpdateErrorReason::Failed => QueryErrorReason::Error,
+            };
         }
     }
     let message = err.to_string().to_ascii_lowercase();
     if message.contains("timed out") || message.contains("timeout") {
-        return "query_timeout".to_string();
+        return QueryErrorReason::Timeout;
     }
     if message.contains("failed to send query request")
         || message.contains("connection")
         || message.contains("connect")
     {
-        return "query_transport_error".to_string();
+        return QueryErrorReason::TransportError;
     }
     if message.contains("query endpoint returned error") {
-        return "query_http_error".to_string();
+        return QueryErrorReason::HttpError;
     }
-    "query_error".to_string()
+    QueryErrorReason::Error
 }
 
-fn classify_update_error(err: &reqwest::Error) -> String {
+fn classify_update_error(err: &reqwest::Error) -> UpdateErrorReason {
     if err.is_timeout() {
-        return "request_timeout".to_string();
+        return UpdateErrorReason::Timeout;
     }
     if err.is_connect() {
-        return "request_connect_error".to_string();
+        return UpdateErrorReason::ConnectError;
     }
-    if let Some(status) = err.status() {
-        return format!("http_{}", status.as_u16());
+    if err.status().is_some() {
+        return UpdateErrorReason::HttpError;
     }
-    "request_failed".to_string()
+    UpdateErrorReason::Failed
 }
 
 fn emit_hook_response(output: UserPromptSubmitOutput) -> Result<()> {
@@ -3256,7 +3306,10 @@ mod tests {
         };
         let directives = PromptDirectives::default();
         let skip = evaluate_context_skip(&config, &directives, &diagnostics);
-        assert_eq!(skip.as_deref(), Some("non-code-intent"));
+        assert_eq!(
+            skip.as_deref(),
+            Some(budi_core::reason_codes::SKIP_REASON_NON_CODE_INTENT)
+        );
     }
 
     #[test]
@@ -3273,7 +3326,7 @@ mod tests {
             margin: 0.0,
             signals: vec![],
             recommended_injection: false,
-            skip_reason: Some("low-confidence".to_string()),
+            skip_reason: Some(budi_core::reason_codes::SKIP_REASON_LOW_CONFIDENCE.to_string()),
         };
         let directives = PromptDirectives {
             force_skip: false,
@@ -3304,7 +3357,10 @@ mod tests {
             force_inject: false,
         };
         let skip = evaluate_context_skip(&config, &directives, &diagnostics);
-        assert_eq!(skip.as_deref(), Some("forced_skip"));
+        assert_eq!(
+            skip.as_deref(),
+            Some(budi_core::reason_codes::SKIP_REASON_FORCED_SKIP)
+        );
     }
 
     #[test]
@@ -3359,7 +3415,7 @@ mod tests {
             "retrieval_margin": 0.0,
             "snippets_count": 0,
             "total_candidates": 0,
-            "reason": "query_request_timeout"
+            "reason": HOOK_REASON_QUERY_TIMEOUT
         });
         summary.record_user_prompt_output(failed.as_object().expect("object"));
         assert_eq!(summary.retrieval_confidence_count, 0);
@@ -3376,7 +3432,7 @@ mod tests {
             "retrieval_margin": 0.2,
             "snippets_count": 5,
             "total_candidates": 17,
-            "reason": "ok"
+            "reason": HOOK_REASON_OK
         });
         summary.record_user_prompt_output(ok.as_object().expect("object"));
         assert_eq!(summary.retrieval_confidence_count, 1);

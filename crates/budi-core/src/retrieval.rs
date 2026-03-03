@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use crate::config::BudiConfig;
 use crate::index::RuntimeIndex;
+use crate::reason_codes::{SKIP_REASON_NON_CODE_INTENT, format_low_confidence_skip_reason};
 use crate::rpc::{QueryChannelScores, QueryDiagnostics, QueryResponse, QueryResultItem};
 use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
 
@@ -803,10 +804,10 @@ fn build_diagnostics(
     if smart_skip_enabled {
         if skip_non_code_prompts && !intent.code_related {
             recommended_injection = false;
-            skip_reason = Some("non-code-intent".to_string());
+            skip_reason = Some(SKIP_REASON_NON_CODE_INTENT.to_string());
         } else if confidence < min_confidence_to_inject {
             recommended_injection = false;
-            skip_reason = Some(format!("low-confidence:{confidence:.3}"));
+            skip_reason = Some(format_low_confidence_skip_reason(confidence));
         }
     }
 

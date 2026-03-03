@@ -5,5 +5,6 @@ pub mod git;
 pub mod hooks;
 pub mod index;
 mod index_scope;
+pub mod reason_codes;
 pub mod retrieval;
 pub mod rpc;

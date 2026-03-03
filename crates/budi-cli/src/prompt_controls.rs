@@ -1,4 +1,8 @@
 use budi_core::config::BudiConfig;
+use budi_core::reason_codes::{
+    SKIP_REASON_FORCED_SKIP, SKIP_REASON_LOW_CONFIDENCE, SKIP_REASON_NON_CODE_INTENT,
+    normalize_skip_reason,
+};
 use budi_core::rpc::QueryDiagnostics;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -58,7 +62,7 @@ pub fn evaluate_context_skip(
     diagnostics: &QueryDiagnostics,
 ) -> Option<String> {
     if directives.force_skip {
-        return Some("forced_skip".to_string());
+        return Some(SKIP_REASON_FORCED_SKIP.to_string());
     }
     if directives.force_inject {
         return None;
@@ -70,13 +74,13 @@ pub fn evaluate_context_skip(
         return None;
     }
     if config.skip_non_code_prompts && diagnostics.intent == "non-code" {
-        return Some("non-code-intent".to_string());
+        return Some(SKIP_REASON_NON_CODE_INTENT.to_string());
     }
     if !diagnostics.recommended_injection {
         if let Some(reason) = &diagnostics.skip_reason {
-            return Some(reason.clone());
+            return Some(normalize_skip_reason(reason));
         }
-        return Some("low-confidence".to_string());
+        return Some(SKIP_REASON_LOW_CONFIDENCE.to_string());
     }
     None
 }
