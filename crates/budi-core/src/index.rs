@@ -100,7 +100,7 @@ impl RuntimeIndex {
             graph_family_to_tokens,
             graph_family_prefix_to_families,
             doc_like_chunk_ids,
-        ) = build_retrieval_signal_indexes(&state.chunks);
+        ) = build_retrieval_signal_indexes(repo_root, &state.chunks);
         Ok(Self {
             state,
             id_to_chunk,
@@ -1509,13 +1509,16 @@ fn emit_progress(
     }
 }
 
-fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalIndexes {
+fn build_retrieval_signal_indexes(
+    repo_root: &Path,
+    chunks: &[ChunkRecord],
+) -> RetrievalSignalIndexes {
     let mut symbol_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut path_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut graph_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut doc_like_chunk_ids: HashSet<u64> = HashSet::new();
     let mut defined_tokens: HashSet<String> = HashSet::new();
-    let mut file_import_aliases: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let file_import_aliases = build_file_import_aliases(repo_root, chunks);
     let mut chunk_path_by_id: HashMap<u64, String> = HashMap::new();
     let mut chunk_reference_tokens: HashMap<u64, HashSet<String>> = HashMap::new();
     let mut chunk_call_sites: HashMap<u64, Vec<CallSite>> = HashMap::new();
@@ -1531,12 +1534,6 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         }
         for token in extract_definition_tokens(&chunk.text, chunk.symbol_hint.as_deref()) {
             defined_tokens.insert(token);
-        }
-        for (alias, target) in extract_import_aliases(&chunk.text) {
-            file_import_aliases
-                .entry(chunk.path.clone())
-                .or_default()
-                .insert(alias, target);
         }
         let mut references = extract_reference_tokens(&chunk.text);
         references.extend(extract_call_tokens(&chunk.text));
@@ -1608,6 +1605,40 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         graph_family_prefix_to_families,
         doc_like_chunk_ids,
     )
+}
+
+fn build_file_import_aliases(
+    repo_root: &Path,
+    chunks: &[ChunkRecord],
+) -> HashMap<String, HashMap<String, String>> {
+    let mut aliases_by_path: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let grouped_chunks = group_chunks_by_path(chunks);
+    let mut paths = grouped_chunks.keys().cloned().collect::<Vec<_>>();
+    paths.sort();
+
+    for path in paths {
+        let absolute = repo_root.join(&path);
+        if let Ok(content) = fs::read_to_string(&absolute) {
+            for (alias, target) in extract_import_aliases(&content) {
+                aliases_by_path
+                    .entry(path.clone())
+                    .or_default()
+                    .insert(alias, target);
+            }
+            continue;
+        }
+        if let Some(file_chunks) = grouped_chunks.get(&path) {
+            for chunk in file_chunks {
+                for (alias, target) in extract_import_aliases(&chunk.text) {
+                    aliases_by_path
+                        .entry(path.clone())
+                        .or_default()
+                        .insert(alias, target);
+                }
+            }
+        }
+    }
+    aliases_by_path
 }
 
 fn dedup_index_values(map: &mut HashMap<String, Vec<u64>>) {
@@ -3585,7 +3616,7 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
-        ) = build_retrieval_signal_indexes(&chunks);
+        ) = build_retrieval_signal_indexes(Path::new("."), &chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
         assert!(!refs.contains(&1));
@@ -3622,7 +3653,57 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
-        ) = build_retrieval_signal_indexes(&chunks);
+        ) = build_retrieval_signal_indexes(Path::new("."), &chunks);
+        let refs = graph.get("process_order").cloned().unwrap_or_default();
+        assert!(refs.contains(&2));
+    }
+
+    #[test]
+    fn graph_signal_resolves_file_level_imports_when_chunk_omits_import_line() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-file-imports-{stamp}"));
+        let src_dir = repo_root.join("src");
+        fs::create_dir_all(&src_dir).expect("create temp src dir");
+        fs::write(
+            src_dir.join("controller.ts"),
+            "import { process_order as processOrderAlias } from './service';\nfunction handle_request() { processOrderAlias(); }\n",
+        )
+        .expect("write temp controller file");
+
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/service.ts".to_string(),
+                start_line: 1,
+                end_line: 3,
+                symbol_hint: Some("process_order".to_string()),
+                text: "export function process_order() { return true; }".to_string(),
+                embedding: vec![0.0; 4],
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/controller.ts".to_string(),
+                start_line: 2,
+                end_line: 2,
+                symbol_hint: Some("handle_request".to_string()),
+                text: "processOrderAlias();".to_string(),
+                embedding: vec![0.0; 4],
+            },
+        ];
+        let (
+            _symbol,
+            _symbol_family,
+            _symbol_family_prefix,
+            _path,
+            graph,
+            _graph_family,
+            _graph_family_prefix,
+            _doc,
+        ) = build_retrieval_signal_indexes(&repo_root, &chunks);
+        let _ = fs::remove_dir_all(&repo_root);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
     }
@@ -3669,7 +3750,7 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
-        ) = build_retrieval_signal_indexes(&chunks);
+        ) = build_retrieval_signal_indexes(Path::new("."), &chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
         assert!(!refs.contains(&3));
@@ -3873,6 +3954,28 @@ mod tests {
             candidates.first().map(String::as_str),
             Some("internal_service_client")
         );
+    }
+
+    #[test]
+    fn first_defined_candidate_prefers_nearest_wildcard_target() {
+        let aliases = HashMap::from([(
+            "app/services/controller.py".to_string(),
+            HashMap::from([
+                ("*app_services".to_string(), "app_services".to_string()),
+                (
+                    "*legacy_services".to_string(),
+                    "legacy_services".to_string(),
+                ),
+            ]),
+        )]);
+        let candidates =
+            resolve_reference_candidates("app/services/controller.py", "process_order", &aliases);
+        let defined = HashSet::from([
+            "legacy_services_process_order".to_string(),
+            "app_services_process_order".to_string(),
+        ]);
+        let selected = first_defined_candidate(&candidates, &defined);
+        assert_eq!(selected.as_deref(), Some("app_services_process_order"));
     }
 
     #[test]
