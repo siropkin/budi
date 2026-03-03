@@ -26,6 +26,7 @@ use tracing_subscriber::EnvFilter;
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
 const SEARCH_QUERY_TIMEOUT_SECS: u64 = 30;
+const DOCTOR_QUERY_TIMEOUT_SECS: u64 = 8;
 const HOOK_QUERY_TIMEOUT_SECS: u64 = 12;
 const STATUS_TIMEOUT_SECS: u64 = 120;
 const UPDATE_TIMEOUT_SECS: u64 = 180;
@@ -72,6 +73,8 @@ enum Commands {
     Doctor {
         #[arg(long)]
         repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        deep: bool,
     },
     Preview {
         prompt: String,
@@ -92,6 +95,10 @@ enum Commands {
         repo_root: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommands,
     },
     Observe {
         #[command(subcommand)]
@@ -137,6 +144,34 @@ enum ObserveCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum RepoCommands {
+    Status {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+    },
+    Stats {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Search {
+        query: String,
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Preview {
+        prompt: String,
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let default_level = match cli.verbose {
@@ -164,7 +199,7 @@ fn main() -> Result<()> {
         } => cmd_index(repo_root, hard, progress),
         Commands::Status { repo_root } => cmd_status(repo_root),
         Commands::Ignore { pattern, repo_root } => cmd_ignore(repo_root, &pattern),
-        Commands::Doctor { repo_root } => cmd_doctor(repo_root),
+        Commands::Doctor { repo_root, deep } => cmd_doctor(repo_root, deep),
         Commands::Preview { prompt, repo_root } => cmd_preview(repo_root, &prompt),
         Commands::Search {
             query,
@@ -173,6 +208,17 @@ fn main() -> Result<()> {
             json,
         } => cmd_search(repo_root, &query, limit, json),
         Commands::Stats { repo_root, json } => cmd_stats(repo_root, json),
+        Commands::Repo { command } => match command {
+            RepoCommands::Status { repo_root } => cmd_status(repo_root),
+            RepoCommands::Stats { repo_root, json } => cmd_stats(repo_root, json),
+            RepoCommands::Search {
+                query,
+                repo_root,
+                limit,
+                json,
+            } => cmd_search(repo_root, &query, limit, json),
+            RepoCommands::Preview { prompt, repo_root } => cmd_preview(repo_root, &prompt),
+        },
         Commands::Observe { command } => match command {
             ObserveCommands::Enable { repo_root } => cmd_observe_enable(repo_root),
             ObserveCommands::Disable { repo_root } => cmd_observe_disable(repo_root),
@@ -284,7 +330,7 @@ fn cmd_ignore(repo_root: Option<PathBuf>, pattern: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
+fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     let paths = config::repo_paths(&repo_root)?;
@@ -304,6 +350,9 @@ fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         println!("Attempting daemon start...");
         ensure_daemon_running(&repo_root, &config)?;
         println!("daemon health after start: {}", daemon_health(&config));
+    }
+    if deep {
+        run_deep_doctor_checks(&repo_root, &config)?;
     }
     Ok(())
 }
@@ -513,6 +562,148 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
         tantivy_path.display(),
         tantivy_path.exists()
     );
+    Ok(())
+}
+
+fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
+    println!("\n-- deep checks --");
+    let repo_root_str = repo_root.display().to_string();
+    let state_path = config::state_path(repo_root)?;
+    let manifest_path = config::manifest_path(repo_root)?;
+    let tantivy_path = config::tantivy_path(repo_root)?;
+    let embedding_cache_path = config::embedding_cache_path()?;
+    let state = index::load_state(repo_root)?;
+    let manifest = index::load_manifest(repo_root)?;
+
+    let state_file_bytes = fs::metadata(&state_path).map(|m| m.len()).unwrap_or(0);
+    let manifest_file_bytes = fs::metadata(&manifest_path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "state file: exists={} bytes={}",
+        state_path.exists(),
+        state_file_bytes
+    );
+    println!(
+        "manifest file: exists={} bytes={}",
+        manifest_path.exists(),
+        manifest_file_bytes
+    );
+
+    let mut missing_in_manifest = 0usize;
+    let mut missing_in_state = 0usize;
+    let mut hash_mismatches = 0usize;
+    if let (Some(state), Some(manifest)) = (&state, &manifest) {
+        let state_map: HashMap<&str, &str> = state
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.hash.as_str()))
+            .collect();
+        let manifest_map: HashMap<&str, &str> = manifest
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.hash.as_str()))
+            .collect();
+        for (path, state_hash) in &state_map {
+            match manifest_map.get(path) {
+                Some(manifest_hash) if *manifest_hash == *state_hash => {}
+                Some(_) => hash_mismatches = hash_mismatches.saturating_add(1),
+                None => missing_in_manifest = missing_in_manifest.saturating_add(1),
+            }
+        }
+        for path in manifest_map.keys() {
+            if !state_map.contains_key(path) {
+                missing_in_state = missing_in_state.saturating_add(1);
+            }
+        }
+    }
+    println!(
+        "manifest consistency: missing_in_manifest={} missing_in_state={} hash_mismatches={}",
+        missing_in_manifest, missing_in_state, hash_mismatches
+    );
+
+    let tantivy_entries = fs::read_dir(&tantivy_path)
+        .map(|entries| entries.filter_map(std::result::Result::ok).count())
+        .unwrap_or(0);
+    println!(
+        "tantivy dir: exists={} entries={}",
+        tantivy_path.exists(),
+        tantivy_entries
+    );
+
+    let mut embedding_cache_valid = false;
+    let mut embedding_cache_entries = 0usize;
+    if embedding_cache_path.exists()
+        && let Ok(raw) = fs::read_to_string(&embedding_cache_path)
+        && let Ok(parsed) = serde_json::from_str::<Value>(&raw)
+    {
+        embedding_cache_valid = true;
+        embedding_cache_entries = parsed
+            .get("entries")
+            .and_then(Value::as_object)
+            .map(|entries| entries.len())
+            .unwrap_or(0);
+    }
+    println!(
+        "embedding cache: exists={} valid_json={} entries={}",
+        embedding_cache_path.exists(),
+        embedding_cache_valid,
+        embedding_cache_entries
+    );
+
+    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
+    let health_url = format!("{}/health", config.daemon_base_url());
+    let health_route = client.get(health_url).send();
+    match health_route {
+        Ok(resp) => println!("route /health: {}", resp.status()),
+        Err(err) => println!("route /health: error ({err})"),
+    }
+
+    let status_url = format!("{}/status", config.daemon_base_url());
+    let status_route = client
+        .post(status_url)
+        .json(&StatusRequest {
+            repo_root: repo_root_str.clone(),
+        })
+        .send();
+    match status_route {
+        Ok(resp) => println!("route /status: {}", resp.status()),
+        Err(err) => println!("route /status: error ({err})"),
+    }
+
+    let progress_url = format!("{}/progress", config.daemon_base_url());
+    let progress_route = client
+        .post(progress_url)
+        .json(&IndexProgressRequest {
+            repo_root: repo_root_str.clone(),
+        })
+        .send();
+    match progress_route {
+        Ok(resp) => println!("route /progress: {}", resp.status()),
+        Err(err) => println!("route /progress: error ({err})"),
+    }
+
+    if state
+        .as_ref()
+        .map_or(0usize, |index_state| index_state.chunks.len())
+        > 0
+    {
+        match query_daemon_with_timeout(
+            repo_root,
+            config,
+            "doctor deep health check retrieval",
+            Some(repo_root),
+            DOCTOR_QUERY_TIMEOUT_SECS,
+        ) {
+            Ok(response) => println!(
+                "query smoke: snippets={} confidence={:.3} intent={}",
+                response.snippets.len(),
+                response.diagnostics.confidence,
+                response.diagnostics.intent
+            ),
+            Err(err) => println!("query smoke: error ({err:#})"),
+        }
+    } else {
+        println!("query smoke: skipped (index has zero chunks)");
+    }
     Ok(())
 }
 

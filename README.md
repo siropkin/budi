@@ -143,7 +143,10 @@ budi status            # daemon/index/hooks health
 budi stats             # local index + manifest stats
 budi preview "<prompt>"# see context that would be injected
 budi search "<query>"  # run retrieval and list top matching snippets
+budi repo status       # same as status, under organized repo namespace
+budi repo search "<query>"  # same as search under repo namespace
 budi ignore <path>     # add file to local budi ignore list
+budi doctor --deep     # extended consistency/route/retrieval diagnostics
 budi observe enable    # start metadata-only local usage logging
 budi observe report    # summarize all logged usage (default: all history)
 budi observe report --days 7  # summarize rolling last 7 days from now
