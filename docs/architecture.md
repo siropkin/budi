@@ -24,13 +24,14 @@
 - `budi-core`: shared logic:
   - file discovery with `.gitignore` + local budi ignore file (repo-scoped in user home)
   - chunking
-  - embedding engine (fastembed with deterministic fallback)
+  - embedding engine (fastembed with lexical-only fallback when unavailable)
   - persistent state
   - hybrid retrieval and context packing
 
 ## Index state
 
 - `~/.local/share/budi/repos/<repo-id>/index/index.sqlite`: transactional catalog for files + chunks + embeddings
+  - also stores persisted index progress snapshot (`indexing`/`ready`/`failed`) for daemon restarts
 - `~/.local/share/budi/repos/<repo-id>/index/tantivy/`: lexical index files
 - `~/.local/share/budi/fastembed-cache/`: embedding model cache (kept outside repos)
 - `~/.local/share/budi/embedding-cache.sqlite`: global content-hash embedding reuse cache

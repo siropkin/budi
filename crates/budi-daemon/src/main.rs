@@ -25,6 +25,8 @@ use tracing_subscriber::EnvFilter;
 const WATCH_DEBOUNCE_MS: u64 = 650;
 const WATCH_FLUSH_TICK_MS: u64 = 200;
 const RECONCILE_INTERVAL_SECS: u64 = 90;
+const WATCH_RESTART_BASE_MS: u64 = 1_000;
+const WATCH_RESTART_MAX_MS: u64 = 30_000;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi-daemon")]
@@ -222,73 +224,138 @@ fn request_config(repo_root: &str) -> Result<BudiConfig> {
 }
 
 async fn run_repo_autosync(repo_root: String, daemon_state: DaemonState, config: BudiConfig) {
-    tracing::info!("auto-sync started for {}", repo_root);
-    let (path_tx, mut path_rx) = mpsc::unbounded_channel::<String>();
-    let watch_root = repo_root.clone();
-    let watcher_name = format!("budi-watch-{}", short_repo_tag(&watch_root));
-    match std::thread::Builder::new()
-        .name(watcher_name)
-        .spawn(move || watch_repo_events(&watch_root, path_tx))
-    {
-        Ok(_join_handle) => {}
-        Err(err) => {
-            tracing::warn!("failed starting file watcher for {}: {}", repo_root, err);
-            return;
-        }
-    }
-
-    let mut pending_paths: HashSet<String> = HashSet::new();
-    let mut last_event_at: Option<Instant> = None;
-    let mut flush_tick = tokio::time::interval(Duration::from_millis(WATCH_FLUSH_TICK_MS));
-    flush_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut reconcile_tick = tokio::time::interval(Duration::from_secs(RECONCILE_INTERVAL_SECS));
-    reconcile_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Consume the immediate first tick so we reconcile on cadence, not instantly again.
-    reconcile_tick.tick().await;
+    tracing::info!("auto-sync supervisor started for {}", repo_root);
+    let mut consecutive_failures = 0u32;
+    let mut restart_count = 0u64;
 
     loop {
-        tokio::select! {
-            maybe_path = path_rx.recv() => {
-                match maybe_path {
-                    Some(path) => {
-                        pending_paths.insert(path);
-                        last_event_at = Some(Instant::now());
-                    }
-                    None => {
-                        tracing::warn!("watch channel closed for {}", repo_root);
-                        break;
+        let (path_tx, mut path_rx) = mpsc::unbounded_channel::<String>();
+        let watch_root = repo_root.clone();
+        let watcher_name = format!("budi-watch-{}", short_repo_tag(&watch_root));
+        let watcher_started = std::thread::Builder::new()
+            .name(watcher_name)
+            .spawn(move || watch_repo_events(&watch_root, path_tx));
+        if let Err(err) = watcher_started {
+            consecutive_failures = consecutive_failures.saturating_add(1);
+            restart_count = restart_count.saturating_add(1);
+            let delay = watcher_restart_backoff(consecutive_failures);
+            tracing::warn!(
+                "failed starting file watcher for {} (restart #{}, consecutive failures {}): {}. retrying in {}ms",
+                repo_root,
+                restart_count,
+                consecutive_failures,
+                err,
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+
+        if consecutive_failures > 0 {
+            tracing::info!(
+                "auto-sync watcher recovered for {} after {} consecutive failures",
+                repo_root,
+                consecutive_failures
+            );
+            consecutive_failures = 0;
+        }
+
+        let mut pending_paths: HashSet<String> = HashSet::new();
+        let mut last_event_at: Option<Instant> = None;
+        let mut flush_tick = tokio::time::interval(Duration::from_millis(WATCH_FLUSH_TICK_MS));
+        flush_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut reconcile_tick =
+            tokio::time::interval(Duration::from_secs(RECONCILE_INTERVAL_SECS));
+        reconcile_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // Consume the immediate first tick so we reconcile on cadence, not instantly again.
+        reconcile_tick.tick().await;
+
+        loop {
+            tokio::select! {
+                maybe_path = path_rx.recv() => {
+                    match maybe_path {
+                        Some(path) => {
+                            pending_paths.insert(path);
+                            last_event_at = Some(Instant::now());
+                        }
+                        None => {
+                            tracing::warn!("watch channel closed for {}", repo_root);
+                            break;
+                        }
                     }
                 }
-            }
-            _ = flush_tick.tick() => {
-                if let Some(last_change) = last_event_at
-                    && last_change.elapsed() >= Duration::from_millis(WATCH_DEBOUNCE_MS)
-                    && !pending_paths.is_empty()
-                {
-                    let mut changed_files = pending_paths.drain().collect::<Vec<_>>();
-                    changed_files.sort();
-                    last_event_at = None;
-                    if let Err(err) = daemon_state
-                        .update(
-                            UpdateRequest {
-                                repo_root: repo_root.clone(),
-                                changed_files,
-                            },
-                            &config,
-                        )
-                        .await
+                _ = flush_tick.tick() => {
+                    if let Some(last_change) = last_event_at
+                        && last_change.elapsed() >= Duration::from_millis(WATCH_DEBOUNCE_MS)
+                        && !pending_paths.is_empty()
                     {
-                        tracing::warn!("auto-sync update failed for {}: {:#}", repo_root, err);
+                        let mut changed_files = pending_paths.drain().collect::<Vec<_>>();
+                        changed_files.sort();
+                        last_event_at = None;
+                        if let Err(err) = daemon_state
+                            .update(
+                                UpdateRequest {
+                                    repo_root: repo_root.clone(),
+                                    changed_files,
+                                },
+                                &config,
+                            )
+                            .await
+                        {
+                            tracing::warn!("auto-sync update failed for {}: {:#}", repo_root, err);
+                        }
                     }
                 }
-            }
-            _ = reconcile_tick.tick() => {
-                daemon_state
-                    .request_reconcile(repo_root.clone(), &config)
-                    .await;
+                _ = reconcile_tick.tick() => {
+                    daemon_state
+                        .request_reconcile(repo_root.clone(), &config)
+                        .await;
+                }
             }
         }
+
+        if !pending_paths.is_empty() {
+            let mut changed_files = pending_paths.drain().collect::<Vec<_>>();
+            changed_files.sort();
+            if let Err(err) = daemon_state
+                .update(
+                    UpdateRequest {
+                        repo_root: repo_root.clone(),
+                        changed_files,
+                    },
+                    &config,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "auto-sync update failed while draining pending paths for {}: {:#}",
+                    repo_root,
+                    err
+                );
+            }
+        }
+
+        consecutive_failures = consecutive_failures.saturating_add(1);
+        restart_count = restart_count.saturating_add(1);
+        let delay = watcher_restart_backoff(consecutive_failures);
+        tracing::warn!(
+            "restarting auto-sync watcher for {} (restart #{}, consecutive failures {}, backoff {}ms)",
+            repo_root,
+            restart_count,
+            consecutive_failures,
+            delay.as_millis()
+        );
+        tokio::time::sleep(delay).await;
     }
+}
+
+fn watcher_restart_backoff(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(6);
+    let multiplier = 1u64 << exponent;
+    let millis = WATCH_RESTART_BASE_MS
+        .saturating_mul(multiplier)
+        .min(WATCH_RESTART_MAX_MS);
+    Duration::from_millis(millis)
 }
 
 fn watch_repo_events(repo_root: &str, path_tx: mpsc::UnboundedSender<String>) {
@@ -424,5 +491,13 @@ mod tests {
         let access_kind = EventKind::Access(AccessKind::Close(AccessMode::Read));
         assert!(is_relevant_event_kind(&create_kind));
         assert!(!is_relevant_event_kind(&access_kind));
+    }
+
+    #[test]
+    fn watcher_backoff_caps_at_maximum_delay() {
+        assert_eq!(watcher_restart_backoff(1), Duration::from_millis(1_000));
+        assert_eq!(watcher_restart_backoff(2), Duration::from_millis(2_000));
+        assert_eq!(watcher_restart_backoff(7), Duration::from_millis(30_000));
+        assert_eq!(watcher_restart_backoff(20), Duration::from_millis(30_000));
     }
 }

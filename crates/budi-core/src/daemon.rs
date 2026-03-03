@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
@@ -25,10 +26,12 @@ pub struct DaemonState {
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct IndexProgressSnapshot {
     active: bool,
     hard: bool,
+    #[serde(default)]
+    state: String,
     phase: String,
     total_files: usize,
     processed_files: usize,
@@ -124,14 +127,29 @@ impl DaemonState {
         &self,
         request: IndexProgressRequest,
     ) -> Result<IndexProgressResponse> {
-        let snapshot = {
+        let mut snapshot = {
             let guard = self.progress_guard();
             guard.get(&request.repo_root).cloned().unwrap_or_default()
         };
+        if snapshot.started_at_unix_ms == 0
+            && let Some(persisted) = self.load_persisted_progress(&request.repo_root)
+        {
+            snapshot = persisted;
+        }
+        if snapshot.state.is_empty() {
+            snapshot.state = if snapshot.active {
+                "indexing".to_string()
+            } else if snapshot.last_error.is_some() {
+                "failed".to_string()
+            } else {
+                "ready".to_string()
+            };
+        }
         Ok(IndexProgressResponse {
             repo_root: request.repo_root,
             active: snapshot.active,
             hard: snapshot.hard,
+            state: snapshot.state,
             phase: snapshot.phase,
             total_files: snapshot.total_files,
             processed_files: snapshot.processed_files,
@@ -200,22 +218,23 @@ impl DaemonState {
 
     fn start_progress(&self, repo_root: &str, hard: bool) {
         let now = now_unix_ms();
+        let snapshot = IndexProgressSnapshot {
+            active: true,
+            hard,
+            state: "indexing".to_string(),
+            phase: "starting".to_string(),
+            total_files: 0,
+            processed_files: 0,
+            changed_files: 0,
+            current_file: None,
+            started_at_unix_ms: now,
+            last_update_unix_ms: now,
+            last_error: None,
+        };
         let mut guard = self.progress_guard();
-        guard.insert(
-            repo_root.to_string(),
-            IndexProgressSnapshot {
-                active: true,
-                hard,
-                phase: "starting".to_string(),
-                total_files: 0,
-                processed_files: 0,
-                changed_files: 0,
-                current_file: None,
-                started_at_unix_ms: now,
-                last_update_unix_ms: now,
-                last_error: None,
-            },
-        );
+        guard.insert(repo_root.to_string(), snapshot.clone());
+        drop(guard);
+        self.persist_progress(repo_root, &snapshot);
     }
 
     fn update_progress(&self, repo_root: &str, hard: bool, progress: index::IndexBuildProgress) {
@@ -227,6 +246,11 @@ impl DaemonState {
         }
         entry.active = !progress.done;
         entry.hard = hard;
+        entry.state = if progress.done {
+            "ready".to_string()
+        } else {
+            "indexing".to_string()
+        };
         entry.phase = progress.phase;
         entry.total_files = progress.total_files;
         entry.processed_files = progress.processed_files;
@@ -237,6 +261,9 @@ impl DaemonState {
         if progress.done {
             entry.current_file = None;
         }
+        let snapshot = entry.clone();
+        drop(guard);
+        self.persist_progress(repo_root, &snapshot);
     }
 
     fn finish_progress(&self, repo_root: &str, hard: bool) {
@@ -248,10 +275,14 @@ impl DaemonState {
         }
         entry.active = false;
         entry.hard = hard;
-        entry.phase = "complete".to_string();
+        entry.state = "ready".to_string();
+        entry.phase = "ready".to_string();
         entry.current_file = None;
         entry.last_update_unix_ms = now;
         entry.last_error = None;
+        let snapshot = entry.clone();
+        drop(guard);
+        self.persist_progress(repo_root, &snapshot);
     }
 
     fn fail_progress(&self, repo_root: &str, hard: bool, error: &str) {
@@ -263,10 +294,60 @@ impl DaemonState {
         }
         entry.active = false;
         entry.hard = hard;
+        entry.state = "failed".to_string();
         entry.phase = "failed".to_string();
         entry.current_file = None;
         entry.last_update_unix_ms = now;
         entry.last_error = Some(error.to_string());
+        let snapshot = entry.clone();
+        drop(guard);
+        self.persist_progress(repo_root, &snapshot);
+    }
+
+    fn persist_progress(&self, repo_root: &str, snapshot: &IndexProgressSnapshot) {
+        let raw = match serde_json::to_string(snapshot) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::warn!(
+                    "failed serializing progress snapshot for {}: {}",
+                    repo_root,
+                    err
+                );
+                return;
+            }
+        };
+        if let Err(err) = index::save_index_progress_snapshot(Path::new(repo_root), &raw) {
+            tracing::warn!(
+                "failed persisting progress snapshot for {}: {:#}",
+                repo_root,
+                err
+            );
+        }
+    }
+
+    fn load_persisted_progress(&self, repo_root: &str) -> Option<IndexProgressSnapshot> {
+        let raw = match index::load_index_progress_snapshot(Path::new(repo_root)) {
+            Ok(raw) => raw?,
+            Err(err) => {
+                tracing::warn!(
+                    "failed loading persisted progress snapshot for {}: {:#}",
+                    repo_root,
+                    err
+                );
+                return None;
+            }
+        };
+        match serde_json::from_str::<IndexProgressSnapshot>(&raw) {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                tracing::warn!(
+                    "failed parsing persisted progress snapshot for {}: {}",
+                    repo_root,
+                    err
+                );
+                None
+            }
+        }
     }
 
     fn progress_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, IndexProgressSnapshot>> {

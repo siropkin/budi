@@ -65,6 +65,8 @@ pub struct IndexProgressResponse {
     pub active: bool,
     pub hard: bool,
     #[serde(default)]
+    pub state: String,
+    #[serde(default)]
     pub phase: String,
     pub total_files: usize,
     pub processed_files: usize,

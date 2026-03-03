@@ -2273,13 +2273,20 @@ fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> 
         return format!("Indexing failed ({elapsed_secs:.1}s): {error}");
     }
     let phase = if progress.phase.is_empty() {
-        "working"
+        if progress.state.is_empty() {
+            "working"
+        } else {
+            progress.state.as_str()
+        }
     } else {
         progress.phase.as_str()
     };
     if progress.total_files == 0 {
-        if progress.active {
+        if progress.active || progress.state == "indexing" {
             return format!("Indexing... {phase} ({elapsed_secs:.1}s elapsed)");
+        }
+        if progress.state == "ready" {
+            return format!("Index ready ({elapsed_secs:.1}s elapsed)");
         }
         return format!("Indexing... waiting to start ({elapsed_secs:.1}s elapsed)");
     }

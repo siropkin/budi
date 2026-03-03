@@ -159,6 +159,7 @@ type RetrievalSignalIndexes = (
     HashMap<String, Vec<u64>>,
     HashSet<u64>,
 );
+const INDEX_PROGRESS_META_KEY: &str = "index_progress_snapshot";
 
 #[derive(Debug)]
 struct PendingChunk {
@@ -783,6 +784,32 @@ fn load_meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
         )
         .optional()?;
     Ok(value)
+}
+
+pub fn load_index_progress_snapshot(repo_root: &Path) -> Result<Option<String>> {
+    let path = config::index_db_path(repo_root)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let conn = open_index_db(repo_root)?;
+    ensure_index_db_schema(&conn)?;
+    load_meta_value(&conn, INDEX_PROGRESS_META_KEY)
+}
+
+pub fn save_index_progress_snapshot(repo_root: &Path, snapshot_json: &str) -> Result<()> {
+    let path = config::index_db_path(repo_root)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating {}", parent.display()))?;
+    }
+    let conn = open_index_db(repo_root)?;
+    ensure_index_db_schema(&conn)?;
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![INDEX_PROGRESS_META_KEY, snapshot_json],
+    )?;
+    Ok(())
 }
 
 fn encode_embedding(embedding: &[f32]) -> Vec<u8> {
