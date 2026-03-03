@@ -9,6 +9,7 @@ use chrono::Utc;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use hnsw_rs::prelude::*;
 use ignore::WalkBuilder;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -36,8 +37,6 @@ pub struct FileRecord {
 pub struct ChunkRecord {
     pub id: u64,
     pub path: String,
-    pub branch: String,
-    pub head: String,
     pub start_line: usize,
     pub end_line: usize,
     pub symbol_hint: Option<String>,
@@ -53,14 +52,6 @@ pub struct RepoIndexState {
     pub head: String,
     pub files: Vec<FileRecord>,
     pub chunks: Vec<ChunkRecord>,
-    pub next_id: u64,
-    pub updated_at_ts: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RepoFileManifest {
-    pub repo_root: String,
-    pub files: Vec<FileRecord>,
     pub updated_at_ts: i64,
 }
 
@@ -112,13 +103,8 @@ impl RuntimeIndex {
         self.id_to_chunk.get(&id)
     }
 
-    pub fn search_lexical(
-        &self,
-        query: &str,
-        branch: &str,
-        limit: usize,
-    ) -> Result<Vec<(u64, f32)>> {
-        self.tantivy.search(query, branch, limit)
+    pub fn search_lexical(&self, query: &str, limit: usize) -> Result<Vec<(u64, f32)>> {
+        self.tantivy.search(query, limit)
     }
 
     pub fn search_vector(&self, query_embedding: &[f32], limit: usize) -> Vec<(u64, f32)> {
@@ -209,17 +195,13 @@ pub fn build_or_update(
 ) -> Result<IndexWorkspace> {
     let git_snapshot = git::snapshot(repo_root)?;
     let previous = load_state(repo_root)?.unwrap_or_default();
-    let previous_manifest = load_manifest(repo_root)?.unwrap_or_default();
-    let previous_file_records = if previous_manifest.files.is_empty() {
-        previous.files.clone()
-    } else {
-        previous_manifest.files
-    };
-    let previous_files_by_path: HashMap<String, FileRecord> = previous_file_records
+    let previous_files_by_path: HashMap<String, FileRecord> = previous
+        .files
         .iter()
         .map(|file| (file.path.clone(), file.clone()))
         .collect();
-    let previous_hashes: HashMap<String, String> = previous_file_records
+    let previous_hashes: HashMap<String, String> = previous
+        .files
         .iter()
         .map(|f| (f.path.clone(), f.hash.clone()))
         .collect();
@@ -227,15 +209,15 @@ pub fn build_or_update(
         group_chunks_by_path(&previous.chunks);
 
     let hinted_paths = collect_hint_paths(repo_root, changed_hint);
-    let use_manifest_delta = should_use_manifest_delta(
+    let use_metadata_delta = should_use_metadata_delta(
         repo_root,
         hard,
         &hinted_paths,
         &previous_files_by_path,
         &previous_chunks_by_path,
     );
-    let (current_files, current_hashes) = if use_manifest_delta {
-        build_current_files_from_manifest_delta(
+    let (current_files, current_hashes) = if use_metadata_delta {
+        build_current_files_from_metadata_delta(
             repo_root,
             config,
             &previous_files_by_path,
@@ -416,8 +398,6 @@ pub fn build_or_update(
             chunks.push(ChunkRecord {
                 id: chunk.id,
                 path: file.path.clone(),
-                branch: git_snapshot.branch.clone(),
-                head: git_snapshot.head.clone(),
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,
                 symbol_hint: chunk.symbol_hint,
@@ -459,12 +439,6 @@ pub fn build_or_update(
     }
 
     chunks.sort_by(|a, b| (&a.path, a.start_line).cmp(&(&b.path, b.start_line)));
-    let next_id = chunks
-        .iter()
-        .map(|chunk| chunk.id)
-        .max()
-        .unwrap_or_default()
-        .saturating_add(1);
 
     let state = RepoIndexState {
         repo_root: repo_root.display().to_string(),
@@ -472,7 +446,6 @@ pub fn build_or_update(
         head: git_snapshot.head,
         files: current_files,
         chunks,
-        next_id,
         updated_at_ts: Utc::now().timestamp(),
     };
     emit_progress(
@@ -487,25 +460,6 @@ pub fn build_or_update(
         },
     );
     save_state(repo_root, &state)?;
-    emit_progress(
-        &mut progress_cb,
-        IndexBuildProgress {
-            phase: "saving-manifest".to_string(),
-            total_files: total_files_to_process,
-            processed_files,
-            changed_files,
-            current_file: None,
-            done: false,
-        },
-    );
-    save_manifest(
-        repo_root,
-        &RepoFileManifest {
-            repo_root: state.repo_root.clone(),
-            files: state.files.clone(),
-            updated_at_ts: state.updated_at_ts,
-        },
-    )?;
     emit_progress(
         &mut progress_cb,
         IndexBuildProgress {
@@ -539,48 +493,245 @@ pub fn build_or_update(
 }
 
 pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
-    let path = config::state_path(repo_root)?;
+    let path = config::index_db_path(repo_root)?;
     if !path.exists() {
         return Ok(None);
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("Failed reading {}", path.display()))?;
-    let state: RepoIndexState =
-        serde_json::from_str(&raw).with_context(|| "Invalid budi index state".to_string())?;
-    Ok(Some(state))
+    let conn = open_index_db(repo_root)?;
+    ensure_index_db_schema(&conn)?;
+
+    let file_count: i64 = conn.query_row("SELECT COUNT(1) FROM files", [], |row| row.get(0))?;
+    let chunk_count: i64 = conn.query_row("SELECT COUNT(1) FROM chunks", [], |row| row.get(0))?;
+    if file_count == 0 && chunk_count == 0 {
+        return Ok(None);
+    }
+
+    let mut files = Vec::new();
+    let mut file_stmt =
+        conn.prepare("SELECT path, hash, size_bytes, modified_unix_ms FROM files ORDER BY path")?;
+    let file_rows = file_stmt.query_map([], |row| {
+        let size_bytes_i64: i64 = row.get(2)?;
+        let modified_unix_ms_i64: i64 = row.get(3)?;
+        Ok(FileRecord {
+            path: row.get(0)?,
+            hash: row.get(1)?,
+            size_bytes: u64::try_from(size_bytes_i64).unwrap_or_default(),
+            modified_unix_ms: u64::try_from(modified_unix_ms_i64).unwrap_or_default(),
+        })
+    })?;
+    for row in file_rows {
+        files.push(row?);
+    }
+
+    let mut chunks = Vec::new();
+    let mut chunk_stmt = conn.prepare(
+        "SELECT id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts
+         FROM chunks
+         ORDER BY path, start_line, id",
+    )?;
+    let chunk_rows = chunk_stmt.query_map([], |row| {
+        let id_i64: i64 = row.get(0)?;
+        let start_line_i64: i64 = row.get(2)?;
+        let end_line_i64: i64 = row.get(3)?;
+        let path: String = row.get(1)?;
+        let text: String = row.get(5)?;
+        let embedding_blob: Vec<u8> = row.get(6)?;
+        let embedding = decode_embedding(&embedding_blob).unwrap_or_else(|| {
+            warn!(
+                "Invalid embedding payload for chunk id={} path={}, recomputing fallback embedding",
+                id_i64, path
+            );
+            hash_embedding(text.as_str())
+        });
+        Ok(ChunkRecord {
+            id: u64::try_from(id_i64).unwrap_or_default(),
+            path,
+            start_line: usize::try_from(start_line_i64).unwrap_or_default(),
+            end_line: usize::try_from(end_line_i64).unwrap_or_default(),
+            symbol_hint: row.get(4)?,
+            text,
+            embedding,
+            updated_at_ts: row.get(7)?,
+        })
+    })?;
+    for row in chunk_rows {
+        chunks.push(row?);
+    }
+
+    let repo_root_value =
+        load_meta_value(&conn, "repo_root")?.unwrap_or_else(|| repo_root.display().to_string());
+    let branch = load_meta_value(&conn, "branch")?.unwrap_or_else(|| "unknown".to_string());
+    let head = load_meta_value(&conn, "head")?.unwrap_or_else(|| "unknown".to_string());
+    let updated_at_ts = load_meta_value(&conn, "updated_at_ts")?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or_default();
+
+    Ok(Some(RepoIndexState {
+        repo_root: repo_root_value,
+        branch,
+        head,
+        files,
+        chunks,
+        updated_at_ts,
+    }))
 }
 
 pub fn save_state(repo_root: &Path, state: &RepoIndexState) -> Result<()> {
-    let path = config::state_path(repo_root)?;
+    let path = config::index_db_path(repo_root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed creating {}", parent.display()))?;
     }
-    let raw = serde_json::to_string_pretty(state)?;
-    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
+
+    let mut conn = open_index_db(repo_root)?;
+    ensure_index_db_schema(&conn)?;
+    let tx = conn.transaction()?;
+
+    tx.execute("DELETE FROM meta", [])?;
+    tx.execute("DELETE FROM files", [])?;
+    tx.execute("DELETE FROM chunks", [])?;
+
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+        params!["repo_root", &state.repo_root],
+    )?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+        params!["branch", &state.branch],
+    )?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+        params!["head", &state.head],
+    )?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+        params!["updated_at_ts", state.updated_at_ts.to_string()],
+    )?;
+
+    {
+        let mut file_stmt = tx.prepare(
+            "INSERT INTO files(path, hash, size_bytes, modified_unix_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for file in &state.files {
+            file_stmt.execute(params![
+                &file.path,
+                &file.hash,
+                i64::try_from(file.size_bytes).unwrap_or(i64::MAX),
+                i64::try_from(file.modified_unix_ms).unwrap_or(i64::MAX),
+            ])?;
+        }
+    }
+
+    {
+        let mut chunk_stmt = tx.prepare(
+            "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for chunk in &state.chunks {
+            chunk_stmt.execute(params![
+                i64::try_from(chunk.id).unwrap_or(i64::MAX),
+                &chunk.path,
+                i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
+                i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
+                chunk.symbol_hint.as_deref(),
+                &chunk.text,
+                encode_embedding(&chunk.embedding),
+                chunk.updated_at_ts,
+            ])?;
+        }
+    }
+
+    tx.commit()?;
+
+    cleanup_legacy_index_files(repo_root)?;
     Ok(())
 }
 
-pub fn load_manifest(repo_root: &Path) -> Result<Option<RepoFileManifest>> {
-    let path = config::manifest_path(repo_root)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("Failed reading {}", path.display()))?;
-    let manifest: RepoFileManifest =
-        serde_json::from_str(&raw).with_context(|| "Invalid budi file manifest".to_string())?;
-    Ok(Some(manifest))
+fn open_index_db(repo_root: &Path) -> Result<Connection> {
+    let path = config::index_db_path(repo_root)?;
+    let conn = Connection::open(&path)
+        .with_context(|| format!("Failed opening index database {}", path.display()))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;",
+    )?;
+    Ok(conn)
 }
 
-pub fn save_manifest(repo_root: &Path, manifest: &RepoFileManifest) -> Result<()> {
-    let path = config::manifest_path(repo_root)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed creating {}", parent.display()))?;
+fn ensure_index_db_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS files (
+            path TEXT PRIMARY KEY,
+            hash TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            modified_unix_ms INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            symbol_hint TEXT,
+            text TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            updated_at_ts INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
+        ",
+    )?;
+    Ok(())
+}
+
+fn load_meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(value)
+}
+
+fn encode_embedding(embedding: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(embedding.len() * 4);
+    for value in embedding {
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
-    let raw = serde_json::to_string_pretty(manifest)?;
-    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
+    bytes
+}
+
+fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+    )
+}
+
+fn cleanup_legacy_index_files(repo_root: &Path) -> Result<()> {
+    let paths = config::repo_paths(repo_root)?;
+    let legacy_state = paths.index_dir.join("state.json");
+    let legacy_manifest = paths.index_dir.join("manifest.json");
+    for file in [legacy_state, legacy_manifest] {
+        if file.exists() {
+            fs::remove_file(&file)
+                .with_context(|| format!("Failed removing legacy file {}", file.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -714,7 +865,7 @@ fn normalize_hint_path(repo_root: &Path, raw: &str) -> Option<String> {
     Some(cleaned.to_string_lossy().replace('\\', "/"))
 }
 
-fn should_use_manifest_delta(
+fn should_use_metadata_delta(
     repo_root: &Path,
     hard: bool,
     hinted_paths: &HashSet<String>,
@@ -728,7 +879,7 @@ fn should_use_manifest_delta(
     {
         return false;
     }
-    // Use the manifest fast-path only when all hinted existing files are already tracked.
+    // Use metadata delta fast-path only when all hinted existing files are already tracked.
     // This keeps ignore semantics correct for brand new files by falling back to full discovery.
     hinted_paths
         .iter()
@@ -803,7 +954,7 @@ fn build_current_files_from_discovery(
     Ok((current_files, current_hashes))
 }
 
-fn build_current_files_from_manifest_delta(
+fn build_current_files_from_metadata_delta(
     repo_root: &Path,
     config: &BudiConfig,
     previous_files_by_path: &HashMap<String, FileRecord>,
@@ -1773,7 +1924,6 @@ struct TantivyBundle {
     reader: IndexReader,
     id_field: tantivy::schema::Field,
     path_field: tantivy::schema::Field,
-    branch_field: tantivy::schema::Field,
     text_field: tantivy::schema::Field,
 }
 
@@ -1783,18 +1933,16 @@ impl TantivyBundle {
         tantivy::schema::Field,
         tantivy::schema::Field,
         tantivy::schema::Field,
-        tantivy::schema::Field,
     ) {
         let mut builder = SchemaBuilder::default();
         let id_field = builder.add_u64_field("id", STORED | FAST | INDEXED);
         let path_field = builder.add_text_field("path", STRING | STORED);
-        let branch_field = builder.add_text_field("branch", STRING | STORED);
         let text_options = TextOptions::default()
             .set_stored()
             .set_indexing_options(TextFieldIndexing::default().set_tokenizer("default"));
         let text_field = builder.add_text_field("text", text_options);
         let schema = builder.build();
-        (schema, id_field, path_field, branch_field, text_field)
+        (schema, id_field, path_field, text_field)
     }
 
     fn open_or_rebuild(repo_root: &Path, chunks: &[ChunkRecord]) -> Result<Self> {
@@ -1802,7 +1950,7 @@ impl TantivyBundle {
         if !tantivy_dir.exists() {
             Self::rebuild(repo_root, chunks)?;
         }
-        let (schema, id_field, path_field, branch_field, text_field) = Self::schema();
+        let (schema, id_field, path_field, text_field) = Self::schema();
         let index = Index::open_in_dir(&tantivy_dir)
             .or_else(|_| Index::create_in_dir(&tantivy_dir, schema))
             .with_context(|| {
@@ -1817,7 +1965,6 @@ impl TantivyBundle {
             reader,
             id_field,
             path_field,
-            branch_field,
             text_field,
         })
     }
@@ -1831,14 +1978,13 @@ impl TantivyBundle {
         fs::create_dir_all(&tantivy_dir)
             .with_context(|| format!("Failed creating {}", tantivy_dir.display()))?;
 
-        let (schema, id_field, path_field, branch_field, text_field) = Self::schema();
+        let (schema, id_field, path_field, text_field) = Self::schema();
         let index = Index::create_in_dir(&tantivy_dir, schema)?;
         let mut writer = index.writer(50_000_000)?;
         for chunk in chunks {
             writer.add_document(doc!(
                 id_field => chunk.id,
                 path_field => chunk.path.clone(),
-                branch_field => chunk.branch.clone(),
                 text_field => chunk.text.clone(),
             ))?;
         }
@@ -1846,7 +1992,7 @@ impl TantivyBundle {
         Ok(())
     }
 
-    fn search(&self, query: &str, branch: &str, limit: usize) -> Result<Vec<(u64, f32)>> {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<(u64, f32)>> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
         let query_parser =
@@ -1878,13 +2024,6 @@ impl TantivyBundle {
         let mut out = Vec::new();
         for (score, addr) in top_docs {
             let retrieved: TantivyDocument = searcher.doc(addr)?;
-            let doc_branch = retrieved
-                .get_first(self.branch_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if doc_branch != branch {
-                continue;
-            }
             if let Some(id) = retrieved.get_first(self.id_field).and_then(|v| v.as_u64()) {
                 out.push((id, score));
             }
@@ -2042,8 +2181,6 @@ mod tests {
             ChunkRecord {
                 id: 1,
                 path: "src/service.rs".to_string(),
-                branch: "main".to_string(),
-                head: "abc".to_string(),
                 start_line: 1,
                 end_line: 3,
                 symbol_hint: Some("process_order".to_string()),
@@ -2054,8 +2191,6 @@ mod tests {
             ChunkRecord {
                 id: 2,
                 path: "src/controller.rs".to_string(),
-                branch: "main".to_string(),
-                head: "abc".to_string(),
                 start_line: 1,
                 end_line: 5,
                 symbol_hint: Some("handle_request".to_string()),
@@ -2078,8 +2213,6 @@ mod tests {
             ChunkRecord {
                 id: 1,
                 path: "src/service.ts".to_string(),
-                branch: "main".to_string(),
-                head: "abc".to_string(),
                 start_line: 1,
                 end_line: 3,
                 symbol_hint: Some("process_order".to_string()),
@@ -2090,8 +2223,6 @@ mod tests {
             ChunkRecord {
                 id: 2,
                 path: "src/controller.ts".to_string(),
-                branch: "main".to_string(),
-                head: "abc".to_string(),
                 start_line: 1,
                 end_line: 5,
                 symbol_hint: Some("handle_request".to_string()),

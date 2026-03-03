@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -480,28 +480,22 @@ fn cmd_search(
 fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
-    let state_path = config::state_path(&repo_root)?;
-    let manifest_path = config::manifest_path(&repo_root)?;
+    let index_db_path = config::index_db_path(&repo_root)?;
     let tantivy_path = config::tantivy_path(&repo_root)?;
     let state = index::load_state(&repo_root)?;
-    let manifest = index::load_manifest(&repo_root)?;
     let daemon_healthy = daemon_health(&config);
     let hooks_detected = repo_root.join(CLAUDE_LOCAL_SETTINGS).exists();
     let git_snapshot = git::snapshot(&repo_root).ok();
 
     let indexed_files = state.as_ref().map_or(0usize, |s| s.files.len());
     let indexed_chunks = state.as_ref().map_or(0usize, |s| s.chunks.len());
-    let state_updated_at_ts = state.as_ref().map_or(0i64, |s| s.updated_at_ts);
-    let manifest_files = manifest.as_ref().map_or(0usize, |m| m.files.len());
-    let manifest_updated_at_ts = manifest.as_ref().map_or(0i64, |m| m.updated_at_ts);
+    let catalog_updated_at_ts = state.as_ref().map_or(0i64, |s| s.updated_at_ts);
     let chunks_per_file = if indexed_files == 0 {
         0.0
     } else {
         indexed_chunks as f64 / indexed_files as f64
     };
-    let manifest_drift = indexed_files.abs_diff(manifest_files);
-    let state_file_bytes = fs::metadata(&state_path).map(|m| m.len()).unwrap_or(0);
-    let manifest_file_bytes = fs::metadata(&manifest_path).map(|m| m.len()).unwrap_or(0);
+    let index_db_bytes = fs::metadata(&index_db_path).map(|m| m.len()).unwrap_or(0);
     let (branch, head, dirty_files) = if let Some(snapshot) = git_snapshot {
         (snapshot.branch, snapshot.head, snapshot.dirty_files.len())
     } else {
@@ -519,14 +513,10 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
             "indexed_files": indexed_files,
             "indexed_chunks": indexed_chunks,
             "chunks_per_file": chunks_per_file,
-            "state_updated_at_ts": state_updated_at_ts,
-            "manifest_files": manifest_files,
-            "manifest_updated_at_ts": manifest_updated_at_ts,
-            "manifest_drift": manifest_drift,
-            "state_file": state_path.display().to_string(),
-            "state_file_bytes": state_file_bytes,
-            "manifest_file": manifest_path.display().to_string(),
-            "manifest_file_bytes": manifest_file_bytes,
+            "catalog_updated_at_ts": catalog_updated_at_ts,
+            "index_db_file": index_db_path.display().to_string(),
+            "index_db_file_bytes": index_db_bytes,
+            "index_db_exists": index_db_path.exists(),
             "tantivy_dir": tantivy_path.display().to_string(),
             "tantivy_exists": tantivy_path.exists(),
         });
@@ -543,19 +533,12 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     println!("indexed files: {}", indexed_files);
     println!("indexed chunks: {}", indexed_chunks);
     println!("chunks/file: {:.2}", chunks_per_file);
-    println!("state updated_at_ts: {}", state_updated_at_ts);
-    println!("manifest files: {}", manifest_files);
-    println!("manifest updated_at_ts: {}", manifest_updated_at_ts);
-    println!("manifest drift (file count delta): {}", manifest_drift);
+    println!("catalog updated_at_ts: {}", catalog_updated_at_ts);
     println!(
-        "state file: {} ({} bytes)",
-        state_path.display(),
-        state_file_bytes
-    );
-    println!(
-        "manifest file: {} ({} bytes)",
-        manifest_path.display(),
-        manifest_file_bytes
+        "index db: {} ({} bytes, exists: {})",
+        index_db_path.display(),
+        index_db_bytes,
+        index_db_path.exists()
     );
     println!(
         "tantivy dir: {} (exists: {})",
@@ -568,56 +551,46 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
 fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     println!("\n-- deep checks --");
     let repo_root_str = repo_root.display().to_string();
-    let state_path = config::state_path(repo_root)?;
-    let manifest_path = config::manifest_path(repo_root)?;
+    let index_db_path = config::index_db_path(repo_root)?;
     let tantivy_path = config::tantivy_path(repo_root)?;
     let embedding_cache_path = config::embedding_cache_path()?;
     let state = index::load_state(repo_root)?;
-    let manifest = index::load_manifest(repo_root)?;
 
-    let state_file_bytes = fs::metadata(&state_path).map(|m| m.len()).unwrap_or(0);
-    let manifest_file_bytes = fs::metadata(&manifest_path).map(|m| m.len()).unwrap_or(0);
+    let index_db_bytes = fs::metadata(&index_db_path).map(|m| m.len()).unwrap_or(0);
     println!(
-        "state file: exists={} bytes={}",
-        state_path.exists(),
-        state_file_bytes
-    );
-    println!(
-        "manifest file: exists={} bytes={}",
-        manifest_path.exists(),
-        manifest_file_bytes
+        "index db: exists={} bytes={}",
+        index_db_path.exists(),
+        index_db_bytes
     );
 
-    let mut missing_in_manifest = 0usize;
-    let mut missing_in_state = 0usize;
-    let mut hash_mismatches = 0usize;
-    if let (Some(state), Some(manifest)) = (&state, &manifest) {
-        let state_map: HashMap<&str, &str> = state
-            .files
-            .iter()
-            .map(|file| (file.path.as_str(), file.hash.as_str()))
-            .collect();
-        let manifest_map: HashMap<&str, &str> = manifest
-            .files
-            .iter()
-            .map(|file| (file.path.as_str(), file.hash.as_str()))
-            .collect();
-        for (path, state_hash) in &state_map {
-            match manifest_map.get(path) {
-                Some(manifest_hash) if *manifest_hash == *state_hash => {}
-                Some(_) => hash_mismatches = hash_mismatches.saturating_add(1),
-                None => missing_in_manifest = missing_in_manifest.saturating_add(1),
+    let mut duplicate_file_paths = 0usize;
+    let mut duplicate_chunk_ids = 0usize;
+    let mut orphan_chunks = 0usize;
+    if let Some(index_state) = &state {
+        let mut seen_paths: HashSet<&str> = HashSet::new();
+        for file in &index_state.files {
+            if !seen_paths.insert(file.path.as_str()) {
+                duplicate_file_paths = duplicate_file_paths.saturating_add(1);
             }
         }
-        for path in manifest_map.keys() {
-            if !state_map.contains_key(path) {
-                missing_in_state = missing_in_state.saturating_add(1);
+        let file_paths: HashSet<&str> = index_state
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        let mut seen_chunk_ids: HashSet<u64> = HashSet::new();
+        for chunk in &index_state.chunks {
+            if !seen_chunk_ids.insert(chunk.id) {
+                duplicate_chunk_ids = duplicate_chunk_ids.saturating_add(1);
+            }
+            if !file_paths.contains(chunk.path.as_str()) {
+                orphan_chunks = orphan_chunks.saturating_add(1);
             }
         }
     }
     println!(
-        "manifest consistency: missing_in_manifest={} missing_in_state={} hash_mismatches={}",
-        missing_in_manifest, missing_in_state, hash_mismatches
+        "catalog consistency: duplicate_file_paths={} duplicate_chunk_ids={} orphan_chunks={}",
+        duplicate_file_paths, duplicate_chunk_ids, orphan_chunks
     );
 
     let tantivy_entries = fs::read_dir(&tantivy_path)

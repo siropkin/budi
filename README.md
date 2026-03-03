@@ -140,7 +140,7 @@ budi index             # incremental re-index
 budi index --hard      # full rebuild
 budi index --hard --progress # full rebuild + live per-file progress + phase
 budi status            # daemon/index/hooks health
-budi stats             # local index + manifest stats
+budi stats             # local index stats (SQLite catalog + Tantivy)
 budi preview "<prompt>"# see context that would be injected
 budi search "<query>"  # run retrieval and list top matching snippets
 budi repo status       # same as status, under organized repo namespace
@@ -165,7 +165,7 @@ How indexing works:
    - keyword/symbol/path search (fast exact matching)
    - semantic search vectors (meaning-based matching)
 4. It stores everything locally on your machine (`~/.local/share/budi/...`).
-5. It keeps a local file manifest (`manifest.json`) so hook-driven updates can re-index only hinted files instead of rescanning the full tree each time.
+5. It keeps a local SQLite catalog (`index.sqlite`) with file hashes + chunks so hook-driven updates can re-index only changed or hinted files instead of rescanning the full tree each time.
 6. It keeps a global embedding cache (`~/.local/share/budi/embedding-cache.json`) keyed by chunk content hash, so repeated code text is not re-embedded on every run.
 
 How prompt-time retrieval works:

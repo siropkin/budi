@@ -12,8 +12,7 @@ pub const BUDI_REPOS_DIR: &str = "repos";
 pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub const BUDI_IGNORE_FILE_NAME: &str = "ignore";
 pub const BUDI_INDEX_DIR_NAME: &str = "index";
-pub const BUDI_STATE_FILE_NAME: &str = "state.json";
-pub const BUDI_MANIFEST_FILE_NAME: &str = "manifest.json";
+pub const BUDI_INDEX_DB_FILE_NAME: &str = "index.sqlite";
 pub const BUDI_TANTIVY_DIR_NAME: &str = "tantivy";
 pub const BUDI_LOG_DIR_NAME: &str = "logs";
 pub const BUDI_BENCH_DIR_NAME: &str = "benchmarks";
@@ -81,8 +80,7 @@ pub struct RepoPaths {
     pub config_file: PathBuf,
     pub ignore_file: PathBuf,
     pub index_dir: PathBuf,
-    pub state_file: PathBuf,
-    pub manifest_file: PathBuf,
+    pub index_db_file: PathBuf,
     pub tantivy_dir: PathBuf,
     pub log_dir: PathBuf,
     pub bench_dir: PathBuf,
@@ -120,8 +118,7 @@ pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
     Ok(RepoPaths {
         config_file: data_dir.join(BUDI_CONFIG_FILE_NAME),
         ignore_file: data_dir.join(BUDI_IGNORE_FILE_NAME),
-        state_file: index_dir.join(BUDI_STATE_FILE_NAME),
-        manifest_file: index_dir.join(BUDI_MANIFEST_FILE_NAME),
+        index_db_file: index_dir.join(BUDI_INDEX_DB_FILE_NAME),
         data_dir,
         index_dir,
         tantivy_dir,
@@ -138,12 +135,8 @@ pub fn ignore_path(repo_root: &Path) -> Result<PathBuf> {
     Ok(repo_paths(repo_root)?.ignore_file)
 }
 
-pub fn state_path(repo_root: &Path) -> Result<PathBuf> {
-    Ok(repo_paths(repo_root)?.state_file)
-}
-
-pub fn manifest_path(repo_root: &Path) -> Result<PathBuf> {
-    Ok(repo_paths(repo_root)?.manifest_file)
+pub fn index_db_path(repo_root: &Path) -> Result<PathBuf> {
+    Ok(repo_paths(repo_root)?.index_db_file)
 }
 
 pub fn tantivy_path(repo_root: &Path) -> Result<PathBuf> {

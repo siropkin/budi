@@ -168,7 +168,7 @@ pub fn build_query_response(
         .collect::<Vec<_>>();
     let has_specific_path_tokens = !specific_path_tokens.is_empty();
     let doc_path_hints = extract_explicit_doc_path_hints(query);
-    let lexical = runtime.search_lexical(query, &git_snapshot.branch, config.topk_lexical)?;
+    let lexical = runtime.search_lexical(query, config.topk_lexical)?;
     let vector = runtime.search_vector(query_embedding, config.topk_vector);
     let symbol_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let path_limit = config.topk_lexical.max(config.retrieval_limit * 2);
@@ -700,10 +700,6 @@ pub fn build_query_response(
         if !cwd_rel.is_empty() && chunk.path.starts_with(&cwd_rel) {
             adjusted += 0.08;
             push_unique_reason(&mut reasons, "cwd-proximity");
-        }
-        if chunk.head == git_snapshot.head {
-            adjusted += 0.02;
-            push_unique_reason(&mut reasons, "head-match");
         }
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
