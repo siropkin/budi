@@ -894,6 +894,7 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
     let mut doc_like_chunk_ids: HashSet<u64> = HashSet::new();
     let mut defined_tokens: HashSet<String> = HashSet::new();
     let mut file_reference_tokens: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut file_import_aliases: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut file_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
 
     for chunk in chunks {
@@ -908,7 +909,14 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         for token in extract_definition_tokens(&chunk.text, chunk.symbol_hint.as_deref()) {
             defined_tokens.insert(token);
         }
-        let references = extract_reference_tokens(&chunk.text);
+        for (alias, target) in extract_import_aliases(&chunk.text) {
+            file_import_aliases
+                .entry(chunk.path.clone())
+                .or_default()
+                .insert(alias, target);
+        }
+        let mut references = extract_reference_tokens(&chunk.text);
+        references.extend(extract_call_tokens(&chunk.text));
         if !references.is_empty() {
             let entry = file_reference_tokens.entry(chunk.path.clone()).or_default();
             for token in references {
@@ -934,13 +942,22 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
             continue;
         };
         for token in references {
-            if !defined_tokens.contains(token) {
-                continue;
+            let mut resolved_candidates = HashSet::from([token.clone()]);
+            if let Some(target) = file_import_aliases
+                .get(path)
+                .and_then(|aliases| aliases.get(token))
+            {
+                resolved_candidates.insert(target.clone());
             }
-            graph_token_to_chunk_ids
-                .entry(token.clone())
-                .or_default()
-                .extend(chunk_ids.iter().copied());
+            for resolved in resolved_candidates {
+                if !defined_tokens.contains(&resolved) {
+                    continue;
+                }
+                graph_token_to_chunk_ids
+                    .entry(resolved)
+                    .or_default()
+                    .extend(chunk_ids.iter().copied());
+            }
         }
     }
 
@@ -1166,6 +1183,191 @@ fn extract_reference_tokens(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn extract_call_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if looks_like_definition_line(trimmed) {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        for idx in 0..bytes.len() {
+            if bytes[idx] != b'(' {
+                continue;
+            }
+            let mut end = idx;
+            while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+                end -= 1;
+            }
+            if end == 0 {
+                continue;
+            }
+            let mut start = end;
+            while start > 0 {
+                let ch = bytes[start - 1] as char;
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            if start == end {
+                continue;
+            }
+            let raw = &line[start..end];
+            if let Some(method) = raw.rsplit('.').next().and_then(first_signal_token)
+                && seen.insert(method.clone())
+            {
+                out.push(method);
+            }
+            if let Some((owner, method_raw)) = raw.rsplit_once('.')
+                && let (Some(owner_token), Some(method_token)) =
+                    (last_signal_token(owner), first_signal_token(method_raw))
+            {
+                let combined = format!("{}_{}", owner_token, method_token);
+                if is_signal_token(&combined) && seen.insert(combined.clone()) {
+                    out.push(combined);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("import ") && trimmed.contains(" from ") {
+            let after_import = trimmed.trim_start_matches("import ").trim();
+            if let Some((lhs, _)) = after_import.split_once(" from ") {
+                let lhs = lhs.trim();
+                if let Some((default_part, brace_part)) = lhs.split_once('{') {
+                    if let Some(alias) =
+                        first_signal_token(default_part.trim().trim_end_matches(','))
+                    {
+                        push_alias_pair(&mut out, &mut seen, (alias.clone(), alias));
+                    }
+                    if let Some((inside, _)) = brace_part.split_once('}') {
+                        for clause in inside.split(',') {
+                            if let Some((alias, target)) = parse_import_alias_clause(clause) {
+                                push_alias_pair(&mut out, &mut seen, (alias, target));
+                            }
+                        }
+                    }
+                } else if let Some(alias) = first_signal_token(lhs) {
+                    push_alias_pair(&mut out, &mut seen, (alias.clone(), alias));
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with("from ") && trimmed.contains(" import ") {
+            if let Some((_, imported)) = trimmed.split_once(" import ") {
+                for clause in imported.split(',') {
+                    if let Some((alias, target)) = parse_import_alias_clause(clause) {
+                        push_alias_pair(&mut out, &mut seen, (alias, target));
+                    }
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with("import ") {
+            let imported = trimmed.trim_start_matches("import ").trim();
+            for clause in imported.split(',') {
+                if let Some((alias, target)) = parse_import_alias_clause(clause) {
+                    push_alias_pair(&mut out, &mut seen, (alias, target));
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with("use ") {
+            let body = trimmed
+                .trim_start_matches("use ")
+                .trim()
+                .trim_end_matches(';');
+            if body.contains('{') && body.contains('}') {
+                if let Some((prefix, rest)) = body.split_once('{')
+                    && let Some((inside, _)) = rest.split_once('}')
+                {
+                    for clause in inside.split(',') {
+                        let piece = clause.trim();
+                        if piece.is_empty() {
+                            continue;
+                        }
+                        let combined = format!("{}::{}", prefix.trim(), piece);
+                        if let Some((alias, target)) = parse_import_alias_clause(&combined) {
+                            push_alias_pair(&mut out, &mut seen, (alias, target));
+                        }
+                    }
+                }
+            } else if let Some((alias, target)) = parse_import_alias_clause(body) {
+                push_alias_pair(&mut out, &mut seen, (alias, target));
+            }
+            continue;
+        }
+        if let Some(alias) = parse_require_alias(trimmed) {
+            push_alias_pair(&mut out, &mut seen, (alias.clone(), alias));
+        }
+    }
+    out
+}
+
+fn parse_import_alias_clause(clause: &str) -> Option<(String, String)> {
+    let normalized = clause.trim().trim_matches(|c: char| {
+        c.is_ascii_whitespace() || matches!(c, '{' | '}' | '(' | ')' | ';')
+    });
+    if normalized.is_empty() {
+        return None;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if let Some(position) = lower.find(" as ") {
+        let target = last_signal_token(normalized[..position].trim())?;
+        let alias = first_signal_token(normalized[position + 4..].trim())?;
+        return Some((alias, target));
+    }
+    let token = last_signal_token(normalized)?;
+    Some((token.clone(), token))
+}
+
+fn parse_require_alias(line: &str) -> Option<String> {
+    for prefix in ["const ", "let ", "var "] {
+        let Some(rest) = line.strip_prefix(prefix) else {
+            continue;
+        };
+        if !rest.contains("require(") {
+            continue;
+        }
+        let alias_raw = rest.split('=').next().unwrap_or_default().trim();
+        if let Some(alias) = first_signal_token(alias_raw) {
+            return Some(alias);
+        }
+    }
+    None
+}
+
+fn first_signal_token(raw: &str) -> Option<String> {
+    extract_signal_tokens(raw).into_iter().next()
+}
+
+fn last_signal_token(raw: &str) -> Option<String> {
+    extract_signal_tokens(raw).into_iter().last()
+}
+
+fn push_alias_pair(
+    out: &mut Vec<(String, String)>,
+    seen: &mut HashSet<(String, String)>,
+    pair: (String, String),
+) {
+    if seen.insert(pair.clone()) {
+        out.push(pair);
+    }
 }
 
 fn looks_like_reference_line(line: &str) -> bool {
@@ -1868,5 +2070,51 @@ mod tests {
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
         assert!(!refs.contains(&1));
+    }
+
+    #[test]
+    fn graph_signal_resolves_import_alias_calls() {
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/service.ts".to_string(),
+                branch: "main".to_string(),
+                head: "abc".to_string(),
+                start_line: 1,
+                end_line: 3,
+                symbol_hint: Some("process_order".to_string()),
+                text: "export function process_order() { return true; }".to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/controller.ts".to_string(),
+                branch: "main".to_string(),
+                head: "abc".to_string(),
+                start_line: 1,
+                end_line: 5,
+                symbol_hint: Some("handle_request".to_string()),
+                text: "import { process_order as processOrderAlias } from './service';\nfunction handle_request() { processOrderAlias(); }".to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+        ];
+        let (_symbol, _path, graph, _doc) = build_retrieval_signal_indexes(&chunks);
+        let refs = graph.get("process_order").cloned().unwrap_or_default();
+        assert!(refs.contains(&2));
+    }
+
+    #[test]
+    fn call_token_extraction_picks_member_invocations() {
+        let tokens =
+            extract_call_tokens("await featureClient.fetchFlags(userId);\nrouter.post('/x')");
+        assert!(tokens.iter().any(|token| token == "fetchflags"));
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token == "featureclient_fetchflags")
+        );
+        assert!(tokens.iter().any(|token| token == "post"));
     }
 }
