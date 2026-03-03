@@ -1463,11 +1463,8 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         };
         for call_site in call_sites {
             let resolved_candidates =
-                resolve_call_site_tokens(path, call_site, &file_import_aliases);
-            for resolved in resolved_candidates {
-                if !defined_tokens.contains(&resolved) {
-                    continue;
-                }
+                resolve_call_site_candidates(path, call_site, &file_import_aliases);
+            if let Some(resolved) = first_defined_candidate(&resolved_candidates, &defined_tokens) {
                 graph_token_to_chunk_ids
                     .entry(resolved)
                     .or_default()
@@ -1481,11 +1478,9 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
             continue;
         };
         for token in references {
-            let resolved_candidates = resolve_reference_token(path, token, &file_import_aliases);
-            for resolved in resolved_candidates {
-                if !defined_tokens.contains(&resolved) {
-                    continue;
-                }
+            let resolved_candidates =
+                resolve_reference_candidates(path, token, &file_import_aliases);
+            if let Some(resolved) = first_defined_candidate(&resolved_candidates, &defined_tokens) {
                 graph_token_to_chunk_ids
                     .entry(resolved)
                     .or_default()
@@ -1956,82 +1951,106 @@ fn receiver_chain_tokens(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_reference_token(
+fn first_defined_candidate(
+    candidates: &[String],
+    defined_tokens: &HashSet<String>,
+) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| defined_tokens.contains(*candidate))
+        .cloned()
+}
+
+fn push_unique_candidate(out: &mut Vec<String>, seen: &mut HashSet<String>, token: String) {
+    if !token.is_empty() && seen.insert(token.clone()) {
+        out.push(token);
+    }
+}
+
+fn resolve_reference_candidates(
     path: &str,
     token: &str,
     file_import_aliases: &HashMap<String, HashMap<String, String>>,
-) -> HashSet<String> {
-    let mut resolved = HashSet::new();
-    if !token.is_empty() {
-        resolved.insert(token.to_string());
+) -> Vec<String> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    let token = token.trim();
+    if token.is_empty() {
+        return resolved;
     }
     if let Some(aliases) = file_import_aliases.get(path) {
+        // 1) Exact import aliases are highest confidence.
         if let Some(target) = aliases.get(token) {
-            resolved.insert(target.clone());
+            push_unique_candidate(&mut resolved, &mut seen, target.clone());
         }
-        let wildcard_targets = wildcard_import_targets(path, aliases);
-        for target in wildcard_targets {
-            resolved.insert(target.clone());
+        // 2) Wildcard imports are next, sorted by import distance.
+        for target in wildcard_import_targets(path, aliases) {
             if let Some(expanded) = combine_receiver_method_token(&target, token) {
-                resolved.insert(expanded);
+                push_unique_candidate(&mut resolved, &mut seen, expanded);
             }
         }
     }
+    // 3) Plain token fallback last.
+    push_unique_candidate(&mut resolved, &mut seen, token.to_string());
     resolved
 }
 
-fn resolve_call_site_tokens(
+fn resolve_call_site_candidates(
     path: &str,
     call_site: &CallSite,
     file_import_aliases: &HashMap<String, HashMap<String, String>>,
-) -> HashSet<String> {
-    let mut resolved = resolve_reference_token(path, &call_site.callee, file_import_aliases);
+) -> Vec<String> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
     if let Some(receiver) = call_site.receiver.as_deref() {
-        let receiver_candidates = expand_receiver_candidates(path, receiver, file_import_aliases);
-        for receiver_candidate in receiver_candidates {
-            if !receiver_candidate.is_empty() {
-                resolved.insert(receiver_candidate.clone());
-            }
+        // Namespace receiver chains should be resolved before broad fallback tokens.
+        for receiver_candidate in
+            expand_receiver_candidates_ordered(path, receiver, file_import_aliases)
+        {
             if let Some(combined) =
                 combine_receiver_method_token(&receiver_candidate, &call_site.callee)
             {
-                resolved.insert(combined);
+                push_unique_candidate(&mut resolved, &mut seen, combined);
             }
         }
+    }
+    for candidate in resolve_reference_candidates(path, &call_site.callee, file_import_aliases) {
+        push_unique_candidate(&mut resolved, &mut seen, candidate);
     }
     resolved
 }
 
-fn expand_receiver_candidates(
+fn expand_receiver_candidates_ordered(
     path: &str,
     receiver: &str,
     file_import_aliases: &HashMap<String, HashMap<String, String>>,
-) -> HashSet<String> {
-    let mut candidates = HashSet::new();
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
     let chain = receiver_chain_tokens(receiver);
     if chain.is_empty() {
         return candidates;
     }
     let tail = chain.last().cloned().unwrap_or_default();
     if !tail.is_empty() {
-        candidates.insert(tail);
+        push_unique_candidate(&mut candidates, &mut seen, tail);
     }
     if chain.len() > 1 {
-        candidates.insert(chain.join("_"));
+        push_unique_candidate(&mut candidates, &mut seen, chain.join("_"));
     }
 
     let head = chain.first().cloned().unwrap_or_default();
     if !head.is_empty() {
-        let head_targets = resolve_reference_token(path, &head, file_import_aliases);
+        let head_targets = resolve_reference_candidates(path, &head, file_import_aliases);
         for target in head_targets {
             if target.is_empty() {
                 continue;
             }
-            candidates.insert(target.clone());
+            push_unique_candidate(&mut candidates, &mut seen, target.clone());
             if chain.len() > 1 {
                 let mut expanded = vec![target];
                 expanded.extend(chain.iter().skip(1).cloned());
-                candidates.insert(expanded.join("_"));
+                push_unique_candidate(&mut candidates, &mut seen, expanded.join("_"));
             }
         }
     }
@@ -2222,15 +2241,19 @@ fn wildcard_import_targets(path: &str, aliases: &HashMap<String, String>) -> Vec
             }
         })
         .collect::<Vec<_>>();
-    targets.sort_by_key(|target| import_distance_from_path(path, target));
+    targets.sort_by(|left, right| {
+        import_distance_from_path(path, left)
+            .cmp(&import_distance_from_path(path, right))
+            .then_with(|| left.cmp(right))
+    });
     targets.dedup();
     targets.truncate(6);
     targets
 }
 
 fn import_distance_from_path(path: &str, target: &str) -> usize {
-    let path_tokens = extract_signal_tokens(path);
-    let target_tokens = extract_signal_tokens(target);
+    let path_tokens = expand_distance_tokens(path);
+    let target_tokens = expand_distance_tokens(target);
     if path_tokens.is_empty() || target_tokens.is_empty() {
         return usize::MAX / 4;
     }
@@ -2240,6 +2263,21 @@ fn import_distance_from_path(path: &str, target: &str) -> usize {
         .take_while(|(left, right)| left == right)
         .count();
     path_tokens.len() + target_tokens.len() - (shared_prefix * 2)
+}
+
+fn expand_distance_tokens(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in extract_signal_tokens(raw) {
+        let mut emitted_subparts = false;
+        for subpart in token.split('_').filter(|part| part.len() >= 2) {
+            emitted_subparts = true;
+            out.push(subpart.to_string());
+        }
+        if !emitted_subparts {
+            out.push(token);
+        }
+    }
+    out
 }
 
 fn parse_import_alias_clause(clause: &str) -> Option<(String, String)> {
@@ -3166,7 +3204,9 @@ mod tests {
             callee: "processorderalias".to_string(),
             receiver: Some("svc".to_string()),
         };
-        let resolved = resolve_call_site_tokens("src/controller.ts", &site, &aliases);
+        let resolved = resolve_call_site_candidates("src/controller.ts", &site, &aliases)
+            .into_iter()
+            .collect::<HashSet<_>>();
         assert!(resolved.contains("process_order"));
         assert!(resolved.contains("service_processorderalias"));
     }
@@ -3196,7 +3236,9 @@ mod tests {
             callee: "fetchflags".to_string(),
             receiver: Some("api.client".to_string()),
         };
-        let resolved = resolve_call_site_tokens("src/controller.ts", &site, &aliases);
+        let resolved = resolve_call_site_candidates("src/controller.ts", &site, &aliases)
+            .into_iter()
+            .collect::<HashSet<_>>();
         assert!(resolved.contains("client_fetchflags"));
         assert!(resolved.contains("service_fetchflags"));
         assert!(resolved.contains("service_client_fetchflags"));
@@ -3228,9 +3270,57 @@ mod tests {
             "src/controller.py".to_string(),
             HashMap::from([("*app_services".to_string(), "app_services".to_string())]),
         )]);
-        let resolved = resolve_reference_token("src/controller.py", "process_order", &aliases);
+        let resolved = resolve_reference_candidates("src/controller.py", "process_order", &aliases)
+            .into_iter()
+            .collect::<HashSet<_>>();
         assert!(resolved.contains("process_order"));
         assert!(resolved.contains("app_services_process_order"));
+    }
+
+    #[test]
+    fn reference_candidates_prioritize_exact_alias_over_wildcard() {
+        let aliases = HashMap::from([(
+            "src/controller.py".to_string(),
+            HashMap::from([
+                (
+                    "process_order".to_string(),
+                    "orders_process_order".to_string(),
+                ),
+                ("*legacy_orders".to_string(), "legacy_orders".to_string()),
+            ]),
+        )]);
+        let candidates =
+            resolve_reference_candidates("src/controller.py", "process_order", &aliases);
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some("orders_process_order")
+        );
+
+        let defined = HashSet::from([
+            "orders_process_order".to_string(),
+            "legacy_orders_process_order".to_string(),
+            "process_order".to_string(),
+        ]);
+        let selected = first_defined_candidate(&candidates, &defined);
+        assert_eq!(selected.as_deref(), Some("orders_process_order"));
+    }
+
+    #[test]
+    fn wildcard_targets_sort_by_import_distance_then_name() {
+        let aliases = HashMap::from([
+            ("*app_utils".to_string(), "app_utils".to_string()),
+            ("*app_services".to_string(), "app_services".to_string()),
+            ("*app_core".to_string(), "app_core".to_string()),
+        ]);
+        let targets = wildcard_import_targets("app/services/controller.py", &aliases);
+        assert_eq!(
+            targets,
+            vec![
+                "app_services".to_string(),
+                "app_core".to_string(),
+                "app_utils".to_string()
+            ]
+        );
     }
 
     #[test]
