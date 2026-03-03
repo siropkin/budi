@@ -183,6 +183,22 @@ impl RetrievalModeArg {
 
 #[derive(Debug, Subcommand)]
 enum RepoCommands {
+    List {
+        #[arg(long, default_value_t = false)]
+        stale_only: bool,
+    },
+    Remove {
+        #[arg(long)]
+        repo_root: PathBuf,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    Wipe {
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
     Status {
         #[arg(long)]
         repo_root: Option<PathBuf>,
@@ -210,10 +226,6 @@ enum RepoCommands {
         repo_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
         mode: RetrievalModeArg,
-    },
-    Cleanup {
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
     },
 }
 
@@ -269,6 +281,9 @@ fn main() -> Result<()> {
             } => cmd_eval_retrieval(repo_root, fixtures, limit, mode, json, out_dir),
         },
         Commands::Repo { command } => match command {
+            RepoCommands::List { stale_only } => cmd_repo_list(stale_only),
+            RepoCommands::Remove { repo_root, dry_run } => cmd_repo_remove(repo_root, dry_run),
+            RepoCommands::Wipe { confirm, dry_run } => cmd_repo_wipe(confirm, dry_run),
             RepoCommands::Status { repo_root } => cmd_status(repo_root),
             RepoCommands::Stats { repo_root, json } => cmd_stats(repo_root, json),
             RepoCommands::Search {
@@ -283,7 +298,6 @@ fn main() -> Result<()> {
                 repo_root,
                 mode,
             } => cmd_preview(repo_root, &prompt, mode),
-            RepoCommands::Cleanup { dry_run } => cmd_repo_cleanup(dry_run),
         },
         Commands::Observe { command } => match command {
             ObserveCommands::Enable { repo_root } => cmd_observe_enable(repo_root),
@@ -369,17 +383,28 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_repo_cleanup(dry_run: bool) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoStorageEntryKind {
+    Active,
+    Stale,
+    MarkerMissing,
+}
+
+#[derive(Debug, Clone)]
+struct RepoStorageEntry {
+    repo_id: String,
+    data_dir: PathBuf,
+    marker_repo_root: Option<PathBuf>,
+    kind: RepoStorageEntryKind,
+}
+
+fn collect_repo_storage_entries() -> Result<(PathBuf, Vec<RepoStorageEntry>)> {
     let repos_root = config::repos_root_dir()?;
     if !repos_root.exists() {
-        println!("No local repo storage found at {}", repos_root.display());
-        return Ok(());
+        return Ok((repos_root, Vec::new()));
     }
 
-    let mut scanned_dirs = 0usize;
-    let mut active_dirs = 0usize;
-    let mut unknown_dirs = 0usize;
-    let mut stale_dirs = Vec::new();
+    let mut entries = Vec::new();
     for entry in fs::read_dir(&repos_root)
         .with_context(|| format!("Failed reading {}", repos_root.display()))?
     {
@@ -388,61 +413,153 @@ fn cmd_repo_cleanup(dry_run: bool) -> Result<()> {
         if !data_dir.is_dir() {
             continue;
         }
-        scanned_dirs = scanned_dirs.saturating_add(1);
-        let Some(repo_root) = config::read_repo_root_marker(&data_dir) else {
-            unknown_dirs = unknown_dirs.saturating_add(1);
-            continue;
+        let repo_id = entry.file_name().to_string_lossy().to_string();
+        let marker_repo_root = config::read_repo_root_marker(&data_dir);
+        let kind = match marker_repo_root.as_ref() {
+            Some(repo_root) if repo_root.join(".git").exists() => RepoStorageEntryKind::Active,
+            Some(_) => RepoStorageEntryKind::Stale,
+            None => RepoStorageEntryKind::MarkerMissing,
         };
-        if repo_root.join(".git").exists() {
-            active_dirs = active_dirs.saturating_add(1);
-            continue;
-        }
-        stale_dirs.push((data_dir, repo_root));
+        entries.push(RepoStorageEntry {
+            repo_id,
+            data_dir,
+            marker_repo_root,
+            kind,
+        });
     }
+    entries.sort_by(|left, right| left.repo_id.cmp(&right.repo_id));
+    Ok((repos_root, entries))
+}
+
+fn cmd_repo_list(stale_only: bool) -> Result<()> {
+    let (repos_root, entries) = collect_repo_storage_entries()?;
+    if entries.is_empty() {
+        println!("No local repo storage found at {}", repos_root.display());
+        return Ok(());
+    }
+    let scanned = entries.len();
+    let active = entries
+        .iter()
+        .filter(|entry| entry.kind == RepoStorageEntryKind::Active)
+        .count();
+    let stale = entries
+        .iter()
+        .filter(|entry| entry.kind == RepoStorageEntryKind::Stale)
+        .count();
+    let marker_missing = entries
+        .iter()
+        .filter(|entry| entry.kind == RepoStorageEntryKind::MarkerMissing)
+        .count();
 
     println!("repo storage root: {}", repos_root.display());
     println!(
         "scanned={} active={} stale={} unknown_without_marker={}",
-        scanned_dirs,
-        active_dirs,
-        stale_dirs.len(),
-        unknown_dirs
+        scanned, active, stale, marker_missing
     );
-    if stale_dirs.is_empty() {
-        println!("No stale repo state directories found.");
-        if unknown_dirs > 0 {
+    let filtered = entries
+        .iter()
+        .filter(|entry| !stale_only || entry.kind == RepoStorageEntryKind::Stale)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        if stale_only {
+            println!("No stale repo state directories found.");
+        } else {
+            println!("No repo state directories found.");
+        }
+        return Ok(());
+    }
+    for entry in filtered {
+        match entry.kind {
+            RepoStorageEntryKind::Active => {
+                if let Some(root) = &entry.marker_repo_root {
+                    println!(
+                        "- active  {} data_dir={} repo_root={}",
+                        entry.repo_id,
+                        entry.data_dir.display(),
+                        root.display()
+                    );
+                }
+            }
+            RepoStorageEntryKind::Stale => {
+                if let Some(root) = &entry.marker_repo_root {
+                    println!(
+                        "- stale   {} data_dir={} repo_root={}",
+                        entry.repo_id,
+                        entry.data_dir.display(),
+                        root.display()
+                    );
+                }
+            }
+            RepoStorageEntryKind::MarkerMissing => {
+                println!(
+                    "- unknown {} data_dir={} repo_root=missing-marker",
+                    entry.repo_id,
+                    entry.data_dir.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_repo_remove(repo_root: PathBuf, dry_run: bool) -> Result<()> {
+    let locator = if repo_root.is_absolute() {
+        repo_root
+    } else {
+        std::env::current_dir()
+            .context("Failed resolving current directory")?
+            .join(repo_root)
+    };
+    let data_dir = config::repo_paths(&locator)?.data_dir;
+    if !data_dir.exists() {
+        println!("No local repo state found at {}", data_dir.display());
+        return Ok(());
+    }
+    if dry_run {
+        println!("Dry run: would remove {}", data_dir.display());
+        return Ok(());
+    }
+    fs::remove_dir_all(&data_dir)
+        .with_context(|| format!("Failed removing repo state {}", data_dir.display()))?;
+    println!("Removed repo state {}", data_dir.display());
+    Ok(())
+}
+
+fn cmd_repo_wipe(confirm: bool, dry_run: bool) -> Result<()> {
+    let (repos_root, entries) = collect_repo_storage_entries()?;
+    if entries.is_empty() {
+        println!("No local repo storage found at {}", repos_root.display());
+        return Ok(());
+    }
+    if !confirm {
+        anyhow::bail!("Refusing to wipe repo storage without --confirm");
+    }
+    if dry_run {
+        println!(
+            "Dry run: would remove {} repo state directorie(s) from {}",
+            entries.len(),
+            repos_root.display()
+        );
+        for entry in &entries {
             println!(
-                "Kept {} directories because they do not have a repo-root marker (legacy layout).",
-                unknown_dirs
+                "- {} ({})",
+                entry.data_dir.display(),
+                match entry.kind {
+                    RepoStorageEntryKind::Active => "active",
+                    RepoStorageEntryKind::Stale => "stale",
+                    RepoStorageEntryKind::MarkerMissing => "unknown",
+                }
             );
         }
         return Ok(());
     }
-    for (data_dir, repo_root) in &stale_dirs {
-        println!(
-            "- stale: {} (repo_root marker points to missing/non-git path: {})",
-            data_dir.display(),
-            repo_root.display()
-        );
-    }
-    if dry_run {
-        println!("Dry run only: no directories removed.");
-        return Ok(());
-    }
-
     let mut removed = 0usize;
-    for (data_dir, _) in stale_dirs {
-        fs::remove_dir_all(&data_dir)
-            .with_context(|| format!("Failed removing stale dir {}", data_dir.display()))?;
+    for entry in entries {
+        fs::remove_dir_all(&entry.data_dir)
+            .with_context(|| format!("Failed removing repo state {}", entry.data_dir.display()))?;
         removed = removed.saturating_add(1);
     }
-    println!("Removed {} stale repo state directorie(s).", removed);
-    if unknown_dirs > 0 {
-        println!(
-            "Kept {} markerless directories; migrate or prune them manually if needed.",
-            unknown_dirs
-        );
-    }
+    println!("Removed {} repo state directorie(s).", removed);
     Ok(())
 }
 

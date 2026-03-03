@@ -136,7 +136,9 @@ budi index --hard      # full rebuild
 budi index --hard --progress # full rebuild + live per-file progress + phase
 budi repo status       # daemon/index/hooks health
 budi repo stats        # local index stats (SQLite catalog + Tantivy)
-budi repo cleanup --dry-run # scan local repo-state storage and preview stale dirs
+budi repo list         # list local repo-state storage entries
+budi repo remove --repo-root "/path/to/repo" --dry-run # preview removing one repo state
+budi repo wipe --confirm --dry-run # preview wiping all local repo-state dirs
 budi repo preview "<prompt>" # see context that would be injected
 budi repo search "<query>"   # run retrieval and list top matching snippets
 budi bench --prompt "<prompt>" --iterations 30 # retrieval latency/context benchmark
