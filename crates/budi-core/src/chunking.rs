@@ -46,6 +46,9 @@ enum AstLanguageKind {
     Python,
     Rust,
     Go,
+    Java,
+    Cpp,
+    CSharp,
 }
 
 fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)> {
@@ -80,6 +83,26 @@ fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)>
     }
     if lower.ends_with(".go") {
         return Some((AstLanguageKind::Go, tree_sitter_go::LANGUAGE.into()));
+    }
+    if lower.ends_with(".java") {
+        return Some((AstLanguageKind::Java, tree_sitter_java::LANGUAGE.into()));
+    }
+    if lower.ends_with(".cs") {
+        return Some((
+            AstLanguageKind::CSharp,
+            tree_sitter_c_sharp::LANGUAGE.into(),
+        ));
+    }
+    if lower.ends_with(".c")
+        || lower.ends_with(".cc")
+        || lower.ends_with(".cpp")
+        || lower.ends_with(".cxx")
+        || lower.ends_with(".h")
+        || lower.ends_with(".hh")
+        || lower.ends_with(".hpp")
+        || lower.ends_with(".hxx")
+    {
+        return Some((AstLanguageKind::Cpp, tree_sitter_cpp::LANGUAGE.into()));
     }
     None
 }
@@ -120,6 +143,37 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
                 | "type_declaration"
                 | "var_declaration"
                 | "const_declaration"
+        ),
+        AstLanguageKind::Java => matches!(
+            kind,
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "method_declaration"
+                | "constructor_declaration"
+                | "field_declaration"
+        ),
+        AstLanguageKind::Cpp => matches!(
+            kind,
+            "function_definition"
+                | "class_specifier"
+                | "struct_specifier"
+                | "namespace_definition"
+                | "enum_specifier"
+                | "template_declaration"
+                | "declaration"
+        ),
+        AstLanguageKind::CSharp => matches!(
+            kind,
+            "class_declaration"
+                | "interface_declaration"
+                | "struct_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "method_declaration"
+                | "constructor_declaration"
+                | "field_declaration"
         ),
     }
 }
@@ -296,5 +350,33 @@ def beta():
         assert!(chunks.len() >= 2);
         assert!(chunks.iter().any(|chunk| chunk.text.contains("def alpha")));
         assert!(chunks.iter().any(|chunk| chunk.text.contains("def beta")));
+    }
+
+    #[test]
+    fn ast_chunking_splits_java_methods() {
+        let content = r#"
+class Demo {
+    int alpha() { return 1; }
+    int beta() { return 2; }
+}
+"#;
+        let chunks = chunk_text("Demo.java", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("alpha")));
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("beta")));
+    }
+
+    #[test]
+    fn ast_chunking_splits_csharp_methods() {
+        let content = r#"
+public class Demo {
+    public int Alpha() { return 1; }
+    public int Beta() { return 2; }
+}
+"#;
+        let chunks = chunk_text("Demo.cs", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("Alpha")));
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("Beta")));
     }
 }

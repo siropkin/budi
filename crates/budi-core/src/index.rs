@@ -1607,7 +1607,7 @@ fn parse_call_site(raw: &str) -> Option<CallSite> {
     }
     let (receiver_raw, callee_raw) = split_call_receiver(raw);
     let callee = first_signal_token(callee_raw)?;
-    let receiver = receiver_raw.and_then(last_signal_token);
+    let receiver = receiver_raw.and_then(normalize_receiver_chain);
     Some(CallSite { callee, receiver })
 }
 
@@ -1637,6 +1637,23 @@ fn split_call_receiver(raw: &str) -> (Option<&str>, &str) {
     (None, raw)
 }
 
+fn normalize_receiver_chain(raw: &str) -> Option<String> {
+    let tokens = receiver_chain_tokens(raw);
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join("."))
+    }
+}
+
+fn receiver_chain_tokens(raw: &str) -> Vec<String> {
+    raw.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+        .filter(|token| is_signal_token(token))
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
 fn resolve_reference_token(
     path: &str,
     token: &str,
@@ -1662,19 +1679,55 @@ fn resolve_call_site_tokens(
 ) -> HashSet<String> {
     let mut resolved = resolve_reference_token(path, &call_site.callee, file_import_aliases);
     if let Some(receiver) = call_site.receiver.as_deref() {
-        let receiver_candidates = resolve_reference_token(path, receiver, file_import_aliases);
+        let receiver_candidates = expand_receiver_candidates(path, receiver, file_import_aliases);
         for receiver_candidate in receiver_candidates {
+            if !receiver_candidate.is_empty() {
+                resolved.insert(receiver_candidate.clone());
+            }
             if let Some(combined) =
                 combine_receiver_method_token(&receiver_candidate, &call_site.callee)
             {
                 resolved.insert(combined);
             }
         }
-        if let Some(combined) = combine_receiver_method_token(receiver, &call_site.callee) {
-            resolved.insert(combined);
-        }
     }
     resolved
+}
+
+fn expand_receiver_candidates(
+    path: &str,
+    receiver: &str,
+    file_import_aliases: &HashMap<String, HashMap<String, String>>,
+) -> HashSet<String> {
+    let mut candidates = HashSet::new();
+    let chain = receiver_chain_tokens(receiver);
+    if chain.is_empty() {
+        return candidates;
+    }
+    let tail = chain.last().cloned().unwrap_or_default();
+    if !tail.is_empty() {
+        candidates.insert(tail);
+    }
+    if chain.len() > 1 {
+        candidates.insert(chain.join("_"));
+    }
+
+    let head = chain.first().cloned().unwrap_or_default();
+    if !head.is_empty() {
+        let head_targets = resolve_reference_token(path, &head, file_import_aliases);
+        for target in head_targets {
+            if target.is_empty() {
+                continue;
+            }
+            candidates.insert(target.clone());
+            if chain.len() > 1 {
+                let mut expanded = vec![target];
+                expanded.extend(chain.iter().skip(1).cloned());
+                candidates.insert(expanded.join("_"));
+            }
+        }
+    }
+    candidates
 }
 
 fn combine_receiver_method_token(receiver: &str, callee: &str) -> Option<String> {
@@ -1698,8 +1751,13 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
         }
         if trimmed.starts_with("import ") && trimmed.contains(" from ") {
             let after_import = trimmed.trim_start_matches("import ").trim();
-            if let Some((lhs, _)) = after_import.split_once(" from ") {
+            if let Some((lhs, import_source)) = after_import.split_once(" from ") {
                 let lhs = lhs.trim();
+                let namespace_aliases = lhs
+                    .split(',')
+                    .filter_map(parse_namespace_import_alias)
+                    .collect::<Vec<_>>();
+                let source_token = import_source_token(import_source);
                 if let Some((default_part, brace_part)) = lhs.split_once('{') {
                     if let Some(alias) =
                         first_signal_token(default_part.trim().trim_end_matches(','))
@@ -1715,6 +1773,10 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
                     }
                 } else if let Some(alias) = first_signal_token(lhs) {
                     push_alias_pair(&mut out, &mut seen, (alias.clone(), alias));
+                }
+                for alias in namespace_aliases {
+                    let target = source_token.clone().unwrap_or_else(|| alias.clone());
+                    push_alias_pair(&mut out, &mut seen, (alias, target));
                 }
             }
             continue;
@@ -1770,6 +1832,34 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
     out
 }
 
+fn parse_namespace_import_alias(clause: &str) -> Option<String> {
+    let normalized = clause.trim();
+    let lower = normalized.to_ascii_lowercase();
+    let position = lower.find("* as ")?;
+    first_signal_token(normalized[position + 5..].trim())
+}
+
+fn import_source_token(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .trim_end_matches(';')
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    if cleaned.is_empty() {
+        return None;
+    }
+    let file_like = cleaned.rsplit('/').next().unwrap_or(cleaned);
+    let stem = file_like
+        .split_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_like);
+    let tokens = extract_signal_tokens(stem);
+    if tokens.is_empty() {
+        last_signal_token(cleaned)
+    } else {
+        Some(tokens.join("_"))
+    }
+}
+
 fn parse_import_alias_clause(clause: &str) -> Option<(String, String)> {
     let normalized = clause.trim().trim_matches(|c: char| {
         c.is_ascii_whitespace() || matches!(c, '{' | '}' | '(' | ')' | ';')
@@ -1778,6 +1868,10 @@ fn parse_import_alias_clause(clause: &str) -> Option<(String, String)> {
         return None;
     }
     let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with("* as ") {
+        let alias = first_signal_token(normalized[5..].trim())?;
+        return Some((alias.clone(), alias));
+    }
     if let Some(position) = lower.find(" as ") {
         let target = last_signal_token(normalized[..position].trim())?;
         let alias = first_signal_token(normalized[position + 4..].trim())?;
@@ -2615,5 +2709,36 @@ mod tests {
         let resolved = resolve_call_site_tokens("src/controller.ts", &site, &aliases);
         assert!(resolved.contains("process_order"));
         assert!(resolved.contains("service_processorderalias"));
+    }
+
+    #[test]
+    fn extract_import_aliases_tracks_namespace_import_sources() {
+        let aliases = extract_import_aliases("import * as api from \"./service-client\";");
+        assert!(aliases.iter().any(|(alias, target)| {
+            alias == "api" && (target == "service_client" || target == "api")
+        }));
+    }
+
+    #[test]
+    fn parse_call_site_preserves_receiver_chain() {
+        let site = parse_call_site("api.client.fetchFlags").expect("expected call site");
+        assert_eq!(site.callee, "fetchflags");
+        assert_eq!(site.receiver.as_deref(), Some("api.client"));
+    }
+
+    #[test]
+    fn call_site_resolution_expands_namespace_alias_receiver_chain() {
+        let aliases = HashMap::from([(
+            "src/controller.ts".to_string(),
+            HashMap::from([("api".to_string(), "service".to_string())]),
+        )]);
+        let site = CallSite {
+            callee: "fetchflags".to_string(),
+            receiver: Some("api.client".to_string()),
+        };
+        let resolved = resolve_call_site_tokens("src/controller.ts", &site, &aliases);
+        assert!(resolved.contains("client_fetchflags"));
+        assert!(resolved.contains("service_fetchflags"));
+        assert!(resolved.contains("service_client_fetchflags"));
     }
 }
