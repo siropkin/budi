@@ -9,7 +9,6 @@ pub struct GitSnapshot {
     pub branch: String,
     pub head: String,
     pub dirty_files: Vec<String>,
-    pub recent_commits: Vec<String>,
 }
 
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<String> {
@@ -69,20 +68,11 @@ pub fn dirty_files(repo_root: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
-pub fn recent_commits(repo_root: &Path, n: usize) -> Result<Vec<String>> {
-    let n = n.max(1).to_string();
-    if let Some(raw) = run_git_lossy(repo_root, &["log", "--oneline", &format!("-{}", n)]) {
-        return Ok(raw.lines().map(|x| x.to_string()).collect());
-    }
-    Ok(Vec::new())
-}
-
 pub fn snapshot(repo_root: &Path) -> Result<GitSnapshot> {
     Ok(GitSnapshot {
         branch: branch(repo_root)?,
         head: head_sha(repo_root)?,
         dirty_files: dirty_files(repo_root)?,
-        recent_commits: recent_commits(repo_root, 5)?,
     })
 }
 

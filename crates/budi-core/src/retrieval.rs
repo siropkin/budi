@@ -4,7 +4,6 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::config::BudiConfig;
-use crate::git::GitSnapshot;
 use crate::index::RuntimeIndex;
 use crate::rpc::{QueryDiagnostics, QueryResponse, QueryResultItem};
 use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
@@ -107,7 +106,7 @@ pub fn build_query_response(
     runtime: &RuntimeIndex,
     query: &str,
     query_embedding: Option<&[f32]>,
-    git_snapshot: &GitSnapshot,
+    dirty_files: &[String],
     cwd: Option<&Path>,
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
@@ -160,11 +159,8 @@ pub fn build_query_response(
     );
     let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
 
-    let dirty_set: std::collections::HashSet<&str> = git_snapshot
-        .dirty_files
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let dirty_set: std::collections::HashSet<&str> =
+        dirty_files.iter().map(String::as_str).collect();
     let cwd_rel = cwd
         .and_then(|path| path.to_str())
         .map(normalize_path)
@@ -506,8 +502,6 @@ pub fn build_query_response(
     );
     let context = build_context(&selection.snippets, config.context_char_budget);
     Ok(QueryResponse {
-        branch: git_snapshot.branch.clone(),
-        head: git_snapshot.head.clone(),
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
         snippets: selection.snippets,

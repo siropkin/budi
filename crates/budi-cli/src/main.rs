@@ -387,7 +387,6 @@ fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str) -> Result<()> {
         ""
     };
 
-    println!("branch={} head={}", response.branch, response.head);
     println!("total candidates={}", response.total_candidates);
     if !response.diagnostics.intent.is_empty() {
         println!(
@@ -437,8 +436,6 @@ fn cmd_search(
     if json_output {
         let payload = json!({
             "query": query,
-            "branch": response.branch,
-            "head": response.head,
             "total_candidates": response.total_candidates,
             "returned": limited_snippets.len(),
             "diagnostics": response.diagnostics,
@@ -449,7 +446,6 @@ fn cmd_search(
     }
 
     println!("query: {}", query);
-    println!("branch={} head={}", response.branch, response.head);
     println!(
         "total candidates={} returned={}",
         response.total_candidates,

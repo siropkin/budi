@@ -20,8 +20,6 @@ pub struct QueryResultItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
-    pub branch: String,
-    pub head: String,
     pub total_candidates: usize,
     pub context: String,
     pub snippets: Vec<QueryResultItem>,
