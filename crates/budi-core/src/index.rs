@@ -1044,9 +1044,10 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
     let mut graph_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut doc_like_chunk_ids: HashSet<u64> = HashSet::new();
     let mut defined_tokens: HashSet<String> = HashSet::new();
-    let mut file_reference_tokens: HashMap<String, HashSet<String>> = HashMap::new();
     let mut file_import_aliases: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let mut file_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut chunk_path_by_id: HashMap<u64, String> = HashMap::new();
+    let mut chunk_reference_tokens: HashMap<u64, HashSet<String>> = HashMap::new();
+    let mut chunk_call_sites: HashMap<u64, Vec<CallSite>> = HashMap::new();
 
     for chunk in chunks {
         if is_doc_like_path(&chunk.path) {
@@ -1069,15 +1070,13 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         let mut references = extract_reference_tokens(&chunk.text);
         references.extend(extract_call_tokens(&chunk.text));
         if !references.is_empty() {
-            let entry = file_reference_tokens.entry(chunk.path.clone()).or_default();
-            for token in references {
-                entry.insert(token);
-            }
+            chunk_reference_tokens.insert(chunk.id, references.into_iter().collect());
         }
-        file_chunk_ids
-            .entry(chunk.path.clone())
-            .or_default()
-            .push(chunk.id);
+        let call_sites = extract_call_sites(&chunk.text);
+        if !call_sites.is_empty() {
+            chunk_call_sites.insert(chunk.id, call_sites);
+        }
+        chunk_path_by_id.insert(chunk.id, chunk.path.clone());
 
         let path_tokens = extract_path_tokens(&chunk.path);
         for token in path_tokens {
@@ -1088,18 +1087,13 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         }
     }
 
-    for (path, references) in &file_reference_tokens {
-        let Some(chunk_ids) = file_chunk_ids.get(path) else {
+    for (chunk_id, call_sites) in &chunk_call_sites {
+        let Some(path) = chunk_path_by_id.get(chunk_id) else {
             continue;
         };
-        for token in references {
-            let mut resolved_candidates = HashSet::from([token.clone()]);
-            if let Some(target) = file_import_aliases
-                .get(path)
-                .and_then(|aliases| aliases.get(token))
-            {
-                resolved_candidates.insert(target.clone());
-            }
+        for call_site in call_sites {
+            let resolved_candidates =
+                resolve_call_site_tokens(path, call_site, &file_import_aliases);
             for resolved in resolved_candidates {
                 if !defined_tokens.contains(&resolved) {
                     continue;
@@ -1107,7 +1101,25 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
                 graph_token_to_chunk_ids
                     .entry(resolved)
                     .or_default()
-                    .extend(chunk_ids.iter().copied());
+                    .push(*chunk_id);
+            }
+        }
+    }
+
+    for (chunk_id, references) in &chunk_reference_tokens {
+        let Some(path) = chunk_path_by_id.get(chunk_id) else {
+            continue;
+        };
+        for token in references {
+            let resolved_candidates = resolve_reference_token(path, token, &file_import_aliases);
+            for resolved in resolved_candidates {
+                if !defined_tokens.contains(&resolved) {
+                    continue;
+                }
+                graph_token_to_chunk_ids
+                    .entry(resolved)
+                    .or_default()
+                    .push(*chunk_id);
             }
         }
     }
@@ -1336,7 +1348,30 @@ fn extract_reference_tokens(text: &str) -> Vec<String> {
     out
 }
 
+#[derive(Debug, Clone)]
+struct CallSite {
+    callee: String,
+    receiver: Option<String>,
+}
+
 fn extract_call_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for site in extract_call_sites(text) {
+        if seen.insert(site.callee.clone()) {
+            out.push(site.callee.clone());
+        }
+        if let Some(receiver) = site.receiver.as_deref()
+            && let Some(combined) = combine_receiver_method_token(receiver, &site.callee)
+            && seen.insert(combined.clone())
+        {
+            out.push(combined);
+        }
+    }
+    out
+}
+
+fn extract_call_sites(text: &str) -> Vec<CallSite> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for line in text.lines() {
@@ -1359,7 +1394,7 @@ fn extract_call_tokens(text: &str) -> Vec<String> {
             let mut start = end;
             while start > 0 {
                 let ch = bytes[start - 1] as char;
-                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':') {
                     start -= 1;
                 } else {
                     break;
@@ -1369,23 +1404,108 @@ fn extract_call_tokens(text: &str) -> Vec<String> {
                 continue;
             }
             let raw = &line[start..end];
-            if let Some(method) = raw.rsplit('.').next().and_then(first_signal_token)
-                && seen.insert(method.clone())
-            {
-                out.push(method);
-            }
-            if let Some((owner, method_raw)) = raw.rsplit_once('.')
-                && let (Some(owner_token), Some(method_token)) =
-                    (last_signal_token(owner), first_signal_token(method_raw))
-            {
-                let combined = format!("{}_{}", owner_token, method_token);
-                if is_signal_token(&combined) && seen.insert(combined.clone()) {
-                    out.push(combined);
-                }
+            let Some(site) = parse_call_site(raw) else {
+                continue;
+            };
+            let key = format!(
+                "{}::{}",
+                site.receiver.as_deref().unwrap_or_default(),
+                site.callee
+            );
+            if seen.insert(key) {
+                out.push(site);
             }
         }
     }
     out
+}
+
+fn parse_call_site(raw: &str) -> Option<CallSite> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (receiver_raw, callee_raw) = split_call_receiver(raw);
+    let callee = first_signal_token(callee_raw)?;
+    let receiver = receiver_raw.and_then(last_signal_token);
+    Some(CallSite { callee, receiver })
+}
+
+fn split_call_receiver(raw: &str) -> (Option<&str>, &str) {
+    let dot_pos = raw.rfind('.');
+    let namespace_pos = raw.rfind("::");
+    let split = match (dot_pos, namespace_pos) {
+        (Some(dot), Some(namespace)) => {
+            if namespace > dot {
+                Some((namespace, 2usize))
+            } else {
+                Some((dot, 1usize))
+            }
+        }
+        (Some(dot), None) => Some((dot, 1usize)),
+        (None, Some(namespace)) => Some((namespace, 2usize)),
+        (None, None) => None,
+    };
+    if let Some((position, width)) = split {
+        let receiver = raw[..position].trim();
+        let callee = raw[position + width..].trim();
+        if receiver.is_empty() || callee.is_empty() {
+            return (None, raw);
+        }
+        return (Some(receiver), callee);
+    }
+    (None, raw)
+}
+
+fn resolve_reference_token(
+    path: &str,
+    token: &str,
+    file_import_aliases: &HashMap<String, HashMap<String, String>>,
+) -> HashSet<String> {
+    let mut resolved = HashSet::new();
+    if !token.is_empty() {
+        resolved.insert(token.to_string());
+    }
+    if let Some(target) = file_import_aliases
+        .get(path)
+        .and_then(|aliases| aliases.get(token))
+    {
+        resolved.insert(target.clone());
+    }
+    resolved
+}
+
+fn resolve_call_site_tokens(
+    path: &str,
+    call_site: &CallSite,
+    file_import_aliases: &HashMap<String, HashMap<String, String>>,
+) -> HashSet<String> {
+    let mut resolved = resolve_reference_token(path, &call_site.callee, file_import_aliases);
+    if let Some(receiver) = call_site.receiver.as_deref() {
+        let receiver_candidates = resolve_reference_token(path, receiver, file_import_aliases);
+        for receiver_candidate in receiver_candidates {
+            if let Some(combined) =
+                combine_receiver_method_token(&receiver_candidate, &call_site.callee)
+            {
+                resolved.insert(combined);
+            }
+        }
+        if let Some(combined) = combine_receiver_method_token(receiver, &call_site.callee) {
+            resolved.insert(combined);
+        }
+    }
+    resolved
+}
+
+fn combine_receiver_method_token(receiver: &str, callee: &str) -> Option<String> {
+    let receiver_token = last_signal_token(receiver)?;
+    let callee_token = first_signal_token(callee)?;
+    let combined = format!("{}_{}", receiver_token, callee_token);
+    if is_signal_token(&combined) {
+        Some(combined)
+    } else {
+        None
+    }
 }
 
 fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
@@ -2237,6 +2357,48 @@ mod tests {
     }
 
     #[test]
+    fn graph_signal_tracks_callers_per_chunk_not_whole_file() {
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/service.rs".to_string(),
+                start_line: 1,
+                end_line: 3,
+                symbol_hint: Some("process_order".to_string()),
+                text: "pub fn process_order() {}".to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/controller.rs".to_string(),
+                start_line: 1,
+                end_line: 5,
+                symbol_hint: Some("handle_request".to_string()),
+                text:
+                    "use crate::service::process_order;\nfn handle_request() { process_order(); }"
+                        .to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+            ChunkRecord {
+                id: 3,
+                path: "src/controller.rs".to_string(),
+                start_line: 6,
+                end_line: 10,
+                symbol_hint: Some("unrelated_helper".to_string()),
+                text: "fn unrelated_helper() { let local_flag = true; }".to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+        ];
+        let (_symbol, _path, graph, _doc) = build_retrieval_signal_indexes(&chunks);
+        let refs = graph.get("process_order").cloned().unwrap_or_default();
+        assert!(refs.contains(&2));
+        assert!(!refs.contains(&3));
+    }
+
+    #[test]
     fn call_token_extraction_picks_member_invocations() {
         let tokens =
             extract_call_tokens("await featureClient.fetchFlags(userId);\nrouter.post('/x')");
@@ -2247,5 +2409,23 @@ mod tests {
                 .any(|token| token == "featureclient_fetchflags")
         );
         assert!(tokens.iter().any(|token| token == "post"));
+    }
+
+    #[test]
+    fn call_site_resolution_uses_alias_and_receiver_signals() {
+        let aliases = HashMap::from([(
+            "src/controller.ts".to_string(),
+            HashMap::from([
+                ("svc".to_string(), "service".to_string()),
+                ("processorderalias".to_string(), "process_order".to_string()),
+            ]),
+        )]);
+        let site = CallSite {
+            callee: "processorderalias".to_string(),
+            receiver: Some("svc".to_string()),
+        };
+        let resolved = resolve_call_site_tokens("src/controller.ts", &site, &aliases);
+        assert!(resolved.contains("process_order"));
+        assert!(resolved.contains("service_processorderalias"));
     }
 }
