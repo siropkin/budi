@@ -643,8 +643,6 @@ pub fn save_state(repo_root: &Path, state: &RepoIndexState) -> Result<()> {
     }
 
     tx.commit()?;
-
-    cleanup_legacy_index_files(repo_root)?;
     Ok(())
 }
 
@@ -720,19 +718,6 @@ fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect(),
     )
-}
-
-fn cleanup_legacy_index_files(repo_root: &Path) -> Result<()> {
-    let paths = config::repo_paths(repo_root)?;
-    let legacy_state = paths.index_dir.join("state.json");
-    let legacy_manifest = paths.index_dir.join("manifest.json");
-    for file in [legacy_state, legacy_manifest] {
-        if file.exists() {
-            fs::remove_file(&file)
-                .with_context(|| format!("Failed removing legacy file {}", file.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn load_embedding_cache_or_default() -> EmbeddingCacheState {

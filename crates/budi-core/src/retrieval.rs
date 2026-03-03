@@ -76,28 +76,9 @@ struct QueryClause {
     tokens: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct QueryFocus {
-    service: bool,
-    state: bool,
-    routing: bool,
-    auth: bool,
-    localization: bool,
-    mutation: bool,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct RetrievalPolicy {
-    apply_config_rules: bool,
-    apply_focus_rules: bool,
-    apply_route_binding_rules: bool,
     apply_route_ownership_rules: bool,
-}
-
-impl RetrievalPolicy {
-    fn needs_focus_analysis(self) -> bool {
-        self.apply_focus_rules || self.apply_route_binding_rules
-    }
 }
 
 fn retrieval_policy(intent_kind: QueryIntentKind) -> RetrievalPolicy {
@@ -105,9 +86,6 @@ fn retrieval_policy(intent_kind: QueryIntentKind) -> RetrievalPolicy {
         // Keep route ownership rules for explicit "where is this symbol rendered/owned" prompts,
         // but prune broad focus/config/routing rule packs that were too ad-hoc.
         QueryIntentKind::SymbolDefinition => RetrievalPolicy {
-            apply_config_rules: false,
-            apply_focus_rules: false,
-            apply_route_binding_rules: false,
             apply_route_ownership_rules: true,
         },
         QueryIntentKind::SymbolUsage
@@ -117,9 +95,6 @@ fn retrieval_policy(intent_kind: QueryIntentKind) -> RetrievalPolicy {
         | QueryIntentKind::CodeNavigation
         | QueryIntentKind::TestLookup
         | QueryIntentKind::NonCode => RetrievalPolicy {
-            apply_config_rules: false,
-            apply_focus_rules: false,
-            apply_route_binding_rules: false,
             apply_route_ownership_rules: false,
         },
     }
@@ -135,65 +110,7 @@ pub fn build_query_response(
 ) -> Result<QueryResponse> {
     let intent = analyze_query_intent(query);
     let policy = retrieval_policy(intent.kind);
-    let focus = if policy.needs_focus_analysis() {
-        analyze_query_focus(query)
-    } else {
-        QueryFocus::default()
-    };
     let query_lower = query.to_ascii_lowercase();
-    let implementation_focus = policy.apply_config_rules
-        && contains_any(
-            &query_lower,
-            &[
-                "handler",
-                "handlers",
-                "bind",
-                "bound",
-                "register",
-                "registered",
-                "wired",
-                "wiring",
-            ],
-        );
-    let config_focus = (policy.apply_config_rules || policy.apply_route_binding_rules)
-        && contains_any(
-            &query_lower,
-            &[
-                "config",
-                "configs",
-                "configmap",
-                "configmaps",
-                "yaml",
-                "yml",
-                "manifest",
-                "manifests",
-                "k8s",
-                "helm",
-                "generated",
-            ],
-        );
-    let route_binding_focus = policy.apply_route_binding_rules
-        && focus.routing
-        && contains_any(
-            &query_lower,
-            &[
-                "bound",
-                "bind",
-                "binding",
-                "register",
-                "registered",
-                "wired",
-                "wiring",
-                "expose",
-                "exposes",
-                "handler",
-                "handlers",
-                "map",
-                "mapped",
-                "serve",
-                "serves",
-            ],
-        );
     let i18n_keys = extract_query_i18n_keys(query);
     let scope_hints = extract_scope_path_hints(query);
     let clauses = extract_query_clauses(query);
@@ -293,31 +210,6 @@ pub fn build_query_response(
         if intent.code_related && is_low_signal_code_path(&lower_path) {
             adjusted -= 0.28;
             push_unique_reason(&mut reasons, "analysis-config-penalty");
-        }
-        if policy.apply_config_rules && implementation_focus && !config_focus {
-            if is_config_like_path(&lower_path) {
-                adjusted -= 0.16;
-                push_unique_reason(&mut reasons, "impl-config-penalty");
-            } else if is_runtime_code_path(&lower_path) && !is_data_layer_path(&lower_path) {
-                adjusted += 0.07;
-                push_unique_reason(&mut reasons, "impl-code-hit");
-            }
-        }
-        if policy.apply_config_rules && config_focus {
-            if is_config_like_path(&lower_path) {
-                adjusted += 0.20;
-                push_unique_reason(&mut reasons, "config-focus-hit");
-            } else if lower_path.contains("generate") || lower_path.contains("generator") {
-                adjusted += 0.06;
-                push_unique_reason(&mut reasons, "config-generator-hit");
-            } else {
-                adjusted -= 0.08;
-                push_unique_reason(&mut reasons, "config-focus-miss");
-            }
-            if is_data_layer_path(&lower_path) {
-                adjusted -= 0.18;
-                push_unique_reason(&mut reasons, "config-data-layer-penalty");
-            }
         }
         if matches!(
             intent.kind,
@@ -419,225 +311,6 @@ pub fn build_query_response(
                 }
             }
         }
-        if policy.apply_focus_rules && focus.service {
-            if contains_path_fragment(
-                &lower_path,
-                &["service", "services", "client", "clients", "fetcher", "api"],
-            ) {
-                adjusted += 0.12;
-                push_unique_reason(&mut reasons, "service-focus-hit");
-            } else {
-                adjusted -= 0.05;
-                push_unique_reason(&mut reasons, "service-focus-miss");
-            }
-            if lower_path.contains("schema") {
-                adjusted -= 0.06;
-                push_unique_reason(&mut reasons, "schema-penalty");
-            }
-        }
-        if policy.apply_focus_rules && focus.state {
-            if contains_path_fragment(
-                &lower_path,
-                &[
-                    "store",
-                    "stores",
-                    "slice",
-                    "slices",
-                    "redux",
-                    "zustand",
-                    "selector",
-                    "selectors",
-                    "reducer",
-                    "reducers",
-                    "state",
-                ],
-            ) {
-                adjusted += 0.12;
-                push_unique_reason(&mut reasons, "state-focus-hit");
-            } else {
-                adjusted -= 0.04;
-                push_unique_reason(&mut reasons, "state-focus-miss");
-            }
-        }
-        if policy.apply_focus_rules && focus.routing {
-            if contains_path_fragment(
-                &lower_path,
-                &[
-                    "route",
-                    "routes",
-                    "routing",
-                    "router",
-                    "endpoint",
-                    "endpoints",
-                    "blueprint",
-                    "bp.py",
-                    "api/routes",
-                    "api/route",
-                ],
-            ) {
-                adjusted += 0.12;
-                push_unique_reason(&mut reasons, "routing-focus-hit");
-            } else {
-                adjusted -= 0.04;
-                push_unique_reason(&mut reasons, "routing-focus-miss");
-            }
-            if contains_any(&query_lower, &["render", "renders", "rendered", "element"]) {
-                let has_route_render_signal = (lower_text.contains("element:")
-                    || lower_text.contains("element=")
-                    || lower_text.contains("component:")
-                    || lower_text.contains("path:"))
-                    && symbol_tokens.iter().any(|symbol| {
-                        contains_identifier_with_boundaries(&lower_text, symbol.as_str())
-                    });
-                if has_route_render_signal {
-                    adjusted += 0.18;
-                    push_unique_reason(&mut reasons, "route-render-hit");
-                }
-            }
-            if is_data_layer_path(&lower_path) {
-                adjusted -= 0.14;
-                push_unique_reason(&mut reasons, "routing-data-layer-penalty");
-            }
-            if is_test_like_path(&lower_path) && !wants_test_artifacts {
-                adjusted -= 0.14;
-                push_unique_reason(&mut reasons, "routing-test-fixture-penalty");
-            }
-        }
-        if policy.apply_route_binding_rules && route_binding_focus {
-            let path_binding_hint = contains_path_fragment(
-                &lower_path,
-                &[
-                    "route",
-                    "routes",
-                    "routing",
-                    "router",
-                    "blueprint",
-                    "bp.py",
-                    "api/routes",
-                    "api/route",
-                    "endpoint",
-                    "endpoints",
-                ],
-            );
-            let text_binding_hint = contains_any(
-                &lower_text,
-                &[
-                    "add_url_rule",
-                    "add_api_route",
-                    "register_blueprint",
-                    "include_router",
-                    "@app.route",
-                    "@blueprint.route",
-                    "blueprint.route(",
-                    "route(",
-                    "router.",
-                    "router.get(",
-                    "router.post(",
-                    "router.put(",
-                    "router.delete(",
-                    "routesmanager",
-                ],
-            );
-            let text_specific_binding_signal =
-                has_specific_text_token_match(&lower_text, &specific_path_tokens, 8);
-            let has_specific_binding_match =
-                specific_path_matches > 0 || text_specific_binding_signal;
-            let has_specific_binding_signal = specific_path_matches > 0
-                || text_specific_binding_signal
-                || reasons.iter().any(|r| r == "symbol-hit");
-            if (path_binding_hint || text_binding_hint) && has_specific_binding_signal {
-                adjusted += 0.16;
-                push_unique_reason(&mut reasons, "route-binding-hit");
-            } else if path_binding_hint || text_binding_hint {
-                if has_specific_path_tokens {
-                    adjusted -= 0.04;
-                    push_unique_reason(&mut reasons, "route-binding-generic-hint");
-                } else {
-                    adjusted += 0.06;
-                    push_unique_reason(&mut reasons, "route-binding-hint");
-                }
-            } else {
-                adjusted -= 0.08;
-                push_unique_reason(&mut reasons, "route-binding-miss");
-            }
-            if has_specific_path_tokens && !has_specific_binding_match {
-                adjusted -= 0.10;
-                push_unique_reason(&mut reasons, "route-binding-specific-miss");
-            }
-            if is_data_layer_path(&lower_path) {
-                adjusted -= 0.24;
-                push_unique_reason(&mut reasons, "route-binding-data-layer-penalty");
-            }
-            if is_test_like_path(&lower_path) && !wants_test_artifacts {
-                adjusted -= 0.12;
-                push_unique_reason(&mut reasons, "route-binding-test-fixture-penalty");
-            }
-            if !config_focus && is_config_like_path(&lower_path) {
-                adjusted -= 0.10;
-                push_unique_reason(&mut reasons, "route-binding-config-penalty");
-            }
-        }
-        if policy.apply_focus_rules && focus.auth {
-            if contains_path_fragment(
-                &lower_path,
-                &["/auth/", "session", "sessions", "login", "token", "oidc"],
-            ) {
-                adjusted += 0.12;
-                push_unique_reason(&mut reasons, "auth-focus-hit");
-            } else {
-                adjusted -= 0.04;
-                push_unique_reason(&mut reasons, "auth-focus-miss");
-            }
-        }
-        if policy.apply_focus_rules && focus.mutation {
-            let mutation_signal_path = contains_path_fragment(
-                &lower_path,
-                &[
-                    "mutation",
-                    "mutations",
-                    "mutate",
-                    "/graphql/",
-                    "/hooks/",
-                    "releaseplan",
-                    "release-plan",
-                    "release_plan",
-                ],
-            );
-            let mutation_signal_text = contains_any(
-                &lower_text,
-                &["usemutation", " mutation", "mutate(", "graphql mutation"],
-            );
-            if mutation_signal_path || mutation_signal_text {
-                adjusted += 0.18;
-                push_unique_reason(&mut reasons, "mutation-focus-hit");
-            } else {
-                adjusted -= 0.05;
-                push_unique_reason(&mut reasons, "mutation-focus-miss");
-            }
-            if is_types_file_path(&lower_path) && !mutation_signal_text {
-                adjusted -= 0.22;
-                push_unique_reason(&mut reasons, "mutation-types-penalty");
-            }
-        }
-        if policy.apply_focus_rules && focus.localization {
-            if contains_path_fragment(
-                &lower_path,
-                &[
-                    "/locale/",
-                    "/i18n/",
-                    "messages.ts",
-                    "/messages/",
-                    "intl",
-                    "translation",
-                ],
-            ) {
-                adjusted += 0.28;
-                push_unique_reason(&mut reasons, "i18n-focus-hit");
-            } else {
-                adjusted -= 0.10;
-                push_unique_reason(&mut reasons, "i18n-focus-miss");
-            }
-        }
         if !i18n_keys.is_empty() {
             let i18n_key_hits = i18n_keys
                 .iter()
@@ -646,9 +319,6 @@ pub fn build_query_response(
             if i18n_key_hits > 0 {
                 adjusted += 0.30 + (i18n_key_hits as f32).min(2.0) * 0.06;
                 push_unique_reason(&mut reasons, "i18n-key-hit");
-            } else if policy.apply_focus_rules && focus.localization {
-                adjusted -= 0.08;
-                push_unique_reason(&mut reasons, "i18n-key-miss");
             }
         }
         if is_test_like_path(&lower_path) {
@@ -994,26 +664,6 @@ fn count_path_token_matches(path: &str, path_tokens: &[String]) -> usize {
     seen.len()
 }
 
-fn has_specific_text_token_match(text_lower: &str, tokens: &[String], token_limit: usize) -> bool {
-    if tokens.is_empty() || token_limit == 0 {
-        return false;
-    }
-    let mut checked = 0usize;
-    for token in tokens {
-        if token.len() < 3 || is_generic_path_token(token.as_str()) {
-            continue;
-        }
-        checked += 1;
-        if checked > token_limit {
-            break;
-        }
-        if text_lower.contains(token.as_str()) {
-            return true;
-        }
-    }
-    false
-}
-
 fn build_diagnostics(
     intent: &QueryIntent,
     snippets: &[QueryResultItem],
@@ -1107,16 +757,6 @@ fn estimate_confidence(
     }
     if top_signals.iter().any(|s| s == "i18n-key-hit") {
         confidence += 0.18;
-    }
-    if matches!(intent.kind, QueryIntentKind::PathLookup)
-        && top_signals.iter().any(|s| s == "routing-focus-hit")
-    {
-        confidence += 0.12;
-    }
-    if top_signals.iter().any(|s| s == "route-binding-hit") {
-        confidence += 0.10;
-    } else if top_signals.iter().any(|s| s == "route-binding-hint") {
-        confidence += 0.06;
     }
     if top_signals.iter().any(|s| s == "weak-path-signal") {
         confidence -= 0.10;
@@ -1955,77 +1595,6 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
     out
 }
 
-fn analyze_query_focus(query: &str) -> QueryFocus {
-    let lower = query.to_ascii_lowercase();
-    QueryFocus {
-        service: contains_any(
-            &lower,
-            &[
-                "service",
-                "client",
-                "api",
-                "request",
-                "helper",
-                "websocket",
-                "socket",
-                "middleware",
-                "handler",
-            ],
-        ),
-        state: contains_any(
-            &lower,
-            &[
-                "state",
-                "store",
-                "slice",
-                "redux",
-                "zustand",
-                "bootstrap",
-                "reducer",
-                "selector",
-            ],
-        ),
-        routing: contains_any(
-            &lower,
-            &[
-                "route",
-                "routes",
-                "routing",
-                "router",
-                "endpoint",
-                "endpoints",
-                "blueprint",
-            ],
-        ),
-        auth: contains_any(&lower, &["auth", "session", "login", "token", "oidc"]),
-        localization: contains_any(
-            &lower,
-            &[
-                "translation",
-                "translations",
-                "locale",
-                "locales",
-                "i18n",
-                "intl",
-                "message key",
-                "message keys",
-                "localization",
-            ],
-        ),
-        mutation: contains_any(
-            &lower,
-            &[
-                "mutation",
-                "mutations",
-                "mutate",
-                "graphql",
-                "release plan",
-                "release plans",
-            ],
-        ),
-    }
-}
-
 fn has_symbol_case_pattern(raw: &str) -> bool {
     let chars: Vec<char> = raw.chars().collect();
     let has_lower = chars.iter().any(|c| c.is_ascii_lowercase());
@@ -2339,40 +1908,6 @@ fn is_low_signal_code_path(lower_path: &str) -> bool {
         || lower_path.contains("/.semgrep/")
         || lower_path.ends_with(".semgrep.yaml")
         || lower_path.ends_with(".semgrep.yml")
-}
-
-fn is_config_like_path(lower_path: &str) -> bool {
-    lower_path.ends_with(".yaml")
-        || lower_path.ends_with(".yml")
-        || lower_path.ends_with(".toml")
-        || lower_path.ends_with(".ini")
-        || lower_path.contains("/k8s/")
-        || lower_path.contains("/generated/")
-}
-
-fn is_runtime_code_path(lower_path: &str) -> bool {
-    lower_path.ends_with(".py")
-        || lower_path.ends_with(".go")
-        || lower_path.ends_with(".ts")
-        || lower_path.ends_with(".tsx")
-        || lower_path.ends_with(".rs")
-        || lower_path.ends_with(".java")
-}
-
-fn is_data_layer_path(lower_path: &str) -> bool {
-    lower_path.ends_with(".sql")
-        || lower_path.contains("/db/")
-        || lower_path.contains("/migrations/")
-        || lower_path.contains("/versions/")
-        || lower_path.contains("migration")
-}
-
-fn is_types_file_path(lower_path: &str) -> bool {
-    lower_path.ends_with("/types.ts")
-        || lower_path.ends_with("/types.tsx")
-        || lower_path.ends_with(".types.ts")
-        || lower_path.ends_with(".types.tsx")
-        || lower_path.ends_with("types.d.ts")
 }
 
 fn is_workflow_docs_query(query_lower: &str) -> bool {
@@ -3183,26 +2718,6 @@ export default function devicerowcell() {
     }
 
     #[test]
-    fn specific_text_token_match_ignores_generic_tokens() {
-        let tokens = vec![
-            "api".to_string(),
-            "routes".to_string(),
-            "moq".to_string(),
-            "unit".to_string(),
-        ];
-        assert!(has_specific_text_token_match(
-            "router handler for moq auth flow",
-            &tokens,
-            8,
-        ));
-        assert!(!has_specific_text_token_match(
-            "router handler for auth flow",
-            &tokens,
-            8,
-        ));
-    }
-
-    #[test]
     fn path_tokens_generate_compound_tokens_for_hyphenated_query() {
         let tokens = extract_query_path_tokens("Where are logged-out routes defined?");
         assert!(tokens.iter().any(|t| t == "loggedout"));
@@ -3244,7 +2759,7 @@ export default function devicerowcell() {
     }
 
     #[test]
-    fn route_signals_raise_path_lookup_confidence() {
+    fn path_signals_raise_path_lookup_confidence() {
         let intent = QueryIntent {
             kind: QueryIntentKind::PathLookup,
             code_related: true,
@@ -3261,11 +2776,7 @@ export default function devicerowcell() {
             0.18,
             0.03,
             3,
-            &[
-                "path-hit".to_string(),
-                "routing-focus-hit".to_string(),
-                "route-binding-hint".to_string(),
-            ],
+            &["path-hit".to_string(), "symbol-hit".to_string()],
             &intent,
         );
         assert!(confidence >= 0.45);
@@ -3291,29 +2802,6 @@ export default function devicerowcell() {
     }
 
     #[test]
-    fn detects_query_focus_flags() {
-        let focus =
-            analyze_query_focus("Where are reusable API clients or service-layer request helpers?");
-        assert!(focus.service);
-        assert!(!focus.state);
-        assert!(!focus.routing);
-        assert!(!focus.auth);
-        assert!(!focus.localization);
-    }
-
-    #[test]
-    fn detects_localization_focus_flag() {
-        let focus = analyze_query_focus("Where are locale translation keys for this page?");
-        assert!(focus.localization);
-    }
-
-    #[test]
-    fn detects_routing_focus_from_endpoint_wording() {
-        let focus = analyze_query_focus("Where are API endpoints registered?");
-        assert!(focus.routing);
-    }
-
-    #[test]
     fn recognizes_experimental_paths() {
         assert!(is_experimental_path("experimental/notes/readme.md"));
         assert!(is_experimental_path("foo/experimental/bar/readme.md"));
@@ -3328,26 +2816,6 @@ export default function devicerowcell() {
     }
 
     #[test]
-    fn recognizes_config_like_paths() {
-        assert!(is_config_like_path(
-            "routing/k8s/generated/prod/service.yaml"
-        ));
-        assert!(is_config_like_path("config/app.toml"));
-        assert!(!is_config_like_path("vdoorman/api/routes.py"));
-    }
-
-    #[test]
-    fn recognizes_data_layer_paths() {
-        assert!(is_data_layer_path(
-            "vdoorman/db/versions/abc123_add_field.py"
-        ));
-        assert!(is_data_layer_path("service/migrations/001_init.sql"));
-        assert!(!is_data_layer_path(
-            "vdoorman/api/blueprints/visitor_type_api.py"
-        ));
-    }
-
-    #[test]
     fn localization_asset_generation_prompt_is_code_related() {
         let intent = analyze_query_intent("How is localization asset generation wired?");
         assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
@@ -3355,26 +2823,15 @@ export default function devicerowcell() {
     }
 
     #[test]
-    fn detects_mutation_focus_flag() {
-        let focus = analyze_query_focus("Where are release plan mutations implemented?");
-        assert!(focus.mutation);
-    }
-
-    #[test]
     fn retrieval_policy_prunes_advanced_focus_and_config_rules() {
         let policy = retrieval_policy(QueryIntentKind::PathLookup);
-        assert!(!policy.apply_config_rules);
-        assert!(!policy.apply_focus_rules);
-        assert!(!policy.apply_route_binding_rules);
-        assert!(!policy.needs_focus_analysis());
+        assert!(!policy.apply_route_ownership_rules);
     }
 
     #[test]
     fn retrieval_policy_keeps_symbol_definition_route_ownership() {
         let policy = retrieval_policy(QueryIntentKind::SymbolDefinition);
         assert!(policy.apply_route_ownership_rules);
-        assert!(!policy.apply_config_rules);
-        assert!(!policy.apply_focus_rules);
     }
 
     #[test]
@@ -3400,12 +2857,5 @@ export default function devicerowcell() {
             &[],
             QueryIntentKind::PathLookup
         ));
-    }
-
-    #[test]
-    fn recognizes_types_file_paths() {
-        assert!(is_types_file_path("foo/bar/types.ts"));
-        assert!(is_types_file_path("foo/bar/baz.types.tsx"));
-        assert!(!is_types_file_path("foo/bar/mutations.ts"));
     }
 }
