@@ -2870,11 +2870,34 @@ struct RepoIgnoreRules {
     unignores: Gitignore,
 }
 
-fn discover_source_files(
+#[derive(Clone)]
+pub struct CompiledIndexScope {
+    extension_allowlist: HashSet<String>,
+    basename_allowlist: HashSet<String>,
+    ignore_rules: RepoIgnoreRules,
+}
+
+impl CompiledIndexScope {
+    pub fn allows_relative_file_path(&self, relative_path: &str) -> bool {
+        if relative_path.trim().is_empty() {
+            return false;
+        }
+        if should_skip_index_path(relative_path, false, &self.ignore_rules) {
+            return false;
+        }
+        is_supported_code_file(
+            Path::new(relative_path),
+            &self.extension_allowlist,
+            &self.basename_allowlist,
+        )
+    }
+}
+
+pub fn compile_index_scope(
     repo_root: &Path,
     config: &BudiConfig,
     options: Option<&IndexBuildOptions>,
-) -> Result<Vec<PathBuf>> {
+) -> Result<CompiledIndexScope> {
     let extension_allowlist = build_effective_extension_allowlist(config, options);
     let basename_allowlist = build_basename_allowlist(config);
     let ignore_rules = load_repo_ignore_rules(
@@ -2883,13 +2906,26 @@ fn discover_source_files(
             .map(|value| value.ignore_patterns.as_slice())
             .unwrap_or(&[]),
     )?;
+    Ok(CompiledIndexScope {
+        extension_allowlist,
+        basename_allowlist,
+        ignore_rules,
+    })
+}
+
+fn discover_source_files(
+    repo_root: &Path,
+    config: &BudiConfig,
+    options: Option<&IndexBuildOptions>,
+) -> Result<Vec<PathBuf>> {
+    let scope = compile_index_scope(repo_root, config, options)?;
 
     discover_source_files_from_git(
         repo_root,
         config,
-        &extension_allowlist,
-        &basename_allowlist,
-        &ignore_rules,
+        &scope.extension_allowlist,
+        &scope.basename_allowlist,
+        &scope.ignore_rules,
     )
 }
 
@@ -4187,6 +4223,28 @@ mod tests {
             false,
             &rules
         ));
+    }
+
+    #[test]
+    fn compiled_index_scope_applies_ignore_and_extension_policy() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "budi-index-scope-test-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        fs::write(temp_root.join(".cursorignore"), "ignored/**\n").expect("write cursorignore");
+        let config = BudiConfig {
+            index_extensions: vec!["rs".to_string()],
+            ..BudiConfig::default()
+        };
+        let scope = compile_index_scope(&temp_root, &config, None).expect("compile scope");
+
+        assert!(scope.allows_relative_file_path("src/lib.rs"));
+        assert!(!scope.allows_relative_file_path("src/readme.md"));
+        assert!(!scope.allows_relative_file_path("ignored/file.rs"));
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]

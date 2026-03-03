@@ -11,12 +11,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use budi_core::config::{self, BudiConfig, DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
 use budi_core::daemon::DaemonState;
+use budi_core::index;
 use budi_core::rpc::{
     IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryRequest,
     QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
 };
 use clap::{Parser, Subcommand};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::MissedTickBehavior;
@@ -57,6 +59,14 @@ struct AppState {
 struct AutoSyncRegistry {
     started_repos: Arc<Mutex<HashSet<String>>>,
     watcher_restarts: Arc<Mutex<HashMap<String, u64>>>,
+    watcher_events: Arc<Mutex<HashMap<String, WatchEventMetrics>>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct WatchEventMetrics {
+    seen: u64,
+    accepted: u64,
+    dropped: u64,
 }
 
 impl AutoSyncRegistry {
@@ -72,6 +82,7 @@ impl AutoSyncRegistry {
         }
         drop(started);
         self.record_watcher_restart(repo_root, 0).await;
+        self.watch_event_metrics_for_repo(repo_root).await;
 
         let repo_key = repo_root.to_string();
         let autosync = self.clone();
@@ -87,6 +98,27 @@ impl AutoSyncRegistry {
 
     async fn watcher_restart_snapshot(&self) -> HashMap<String, u64> {
         self.watcher_restarts.lock().await.clone()
+    }
+
+    async fn record_watch_event(&self, repo_root: &str, accepted: bool) {
+        let mut metrics = self.watcher_events.lock().await;
+        let entry = metrics.entry(repo_root.to_string()).or_default();
+        entry.seen = entry.seen.saturating_add(1);
+        if accepted {
+            entry.accepted = entry.accepted.saturating_add(1);
+        } else {
+            entry.dropped = entry.dropped.saturating_add(1);
+        }
+    }
+
+    async fn watch_event_metrics_for_repo(&self, repo_root: &str) -> WatchEventMetrics {
+        let mut metrics = self.watcher_events.lock().await;
+        let entry = metrics.entry(repo_root.to_string()).or_default();
+        *entry
+    }
+
+    async fn watch_event_metrics_snapshot(&self) -> HashMap<String, WatchEventMetrics> {
+        self.watcher_events.lock().await.clone()
     }
 }
 
@@ -130,11 +162,25 @@ async fn main() -> Result<()> {
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let watcher_restarts = state.autosync.watcher_restart_snapshot().await;
     let watcher_restarts_total = watcher_restarts.values().copied().sum::<u64>();
+    let watcher_events = state.autosync.watch_event_metrics_snapshot().await;
+    let watch_events_seen = watcher_events.values().map(|item| item.seen).sum::<u64>();
+    let watch_events_accepted = watcher_events
+        .values()
+        .map(|item| item.accepted)
+        .sum::<u64>();
+    let watch_events_dropped = watcher_events
+        .values()
+        .map(|item| item.dropped)
+        .sum::<u64>();
     Json(json!({
         "ok": true,
         "autosync_repos": watcher_restarts.len(),
         "watcher_restarts_total": watcher_restarts_total,
         "watcher_restarts_by_repo": watcher_restarts,
+        "watch_events_seen": watch_events_seen,
+        "watch_events_accepted": watch_events_accepted,
+        "watch_events_dropped": watch_events_dropped,
+        "watch_events_by_repo": watcher_events,
     }))
 }
 
@@ -220,6 +266,7 @@ async fn status_repo(
     State(state): State<AppState>,
     Json(request): Json<StatusRequest>,
 ) -> Result<Json<StatusResponse>, (StatusCode, String)> {
+    let repo_root = request.repo_root.clone();
     let config = request_config(&request.repo_root).map_err(internal_error)?;
     state
         .autosync
@@ -229,11 +276,18 @@ async fn status_repo(
             config.clone(),
         )
         .await;
-    let response = state
+    let mut response = state
         .daemon_state
         .status(request, &config)
         .await
         .map_err(internal_error)?;
+    let watch_metrics = state
+        .autosync
+        .watch_event_metrics_for_repo(&repo_root)
+        .await;
+    response.watch_events_seen = watch_metrics.seen;
+    response.watch_events_accepted = watch_metrics.accepted;
+    response.watch_events_dropped = watch_metrics.dropped;
     Ok(Json(response))
 }
 
@@ -253,6 +307,17 @@ async fn run_repo_autosync(
     let mut restart_count = 0u64;
 
     loop {
+        let watch_scope = match index::compile_index_scope(Path::new(&repo_root), &config, None) {
+            Ok(scope) => Some(scope),
+            Err(err) => {
+                tracing::warn!(
+                    "failed compiling watcher index scope for {}: {:#}; falling back to permissive filtering",
+                    repo_root,
+                    err
+                );
+                None
+            }
+        };
         let (path_tx, mut path_rx) = mpsc::unbounded_channel::<String>();
         let watch_root = repo_root.clone();
         let watcher_name = format!("budi-watch-{}", short_repo_tag(&watch_root));
@@ -302,8 +367,16 @@ async fn run_repo_autosync(
                 maybe_path = path_rx.recv() => {
                     match maybe_path {
                         Some(path) => {
-                            pending_paths.insert(path);
-                            last_event_at = Some(Instant::now());
+                            let accepted = if let Some(scope) = &watch_scope {
+                                scope.allows_relative_file_path(&path)
+                            } else {
+                                true
+                            };
+                            autosync.record_watch_event(&repo_root, accepted).await;
+                            if accepted {
+                                pending_paths.insert(path);
+                                last_event_at = Some(Instant::now());
+                            }
                         }
                         None => {
                             tracing::warn!("watch channel closed for {}", repo_root);

@@ -453,6 +453,9 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     println!("invalid embeddings: {}", response.invalid_embeddings);
     println!("update retries: {}", response.update_retries);
     println!("update failures: {}", response.update_failures);
+    println!("watch events seen: {}", response.watch_events_seen);
+    println!("watch events accepted: {}", response.watch_events_accepted);
+    println!("watch events dropped: {}", response.watch_events_dropped);
     println!("index state: {}", response.index_state);
     println!("index job state: {}", response.index_job_state);
     if let Some(job_id) = &response.index_job_id {
@@ -1506,7 +1509,7 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
         Ok(status) => {
             println!(
-                "route /status: ok (tracked_files={} indexed_chunks={} embedded_chunks={} missing_embeddings={} invalid_embeddings={} update_retries={} update_failures={} index_state={} index_job_state={} index_terminal_outcome={})",
+                "route /status: ok (tracked_files={} indexed_chunks={} embedded_chunks={} missing_embeddings={} invalid_embeddings={} update_retries={} update_failures={} watch_events_seen={} watch_events_accepted={} watch_events_dropped={} index_state={} index_job_state={} index_terminal_outcome={})",
                 status.tracked_files,
                 status.indexed_chunks,
                 status.embedded_chunks,
@@ -1514,6 +1517,9 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
                 status.invalid_embeddings,
                 status.update_retries,
                 status.update_failures,
+                status.watch_events_seen,
+                status.watch_events_accepted,
+                status.watch_events_dropped,
                 if status.index_state.is_empty() {
                     "-"
                 } else {
@@ -1627,6 +1633,22 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
         }
         if status.update_failures > 0 {
             drift_notes.push(format!("status_update_failures={}", status.update_failures));
+        }
+        if status
+            .watch_events_accepted
+            .saturating_add(status.watch_events_dropped)
+            > status.watch_events_seen
+        {
+            drift_notes.push(format!(
+                "status_watch_events_conflict=seen:{} accepted:{} dropped:{}",
+                status.watch_events_seen, status.watch_events_accepted, status.watch_events_dropped
+            ));
+        }
+        if status.watch_events_dropped > 0 {
+            drift_notes.push(format!(
+                "status_watch_events_dropped={}",
+                status.watch_events_dropped
+            ));
         }
         if matches!(status.index_job_state.as_str(), "failed" | "interrupted") {
             drift_notes.push(format!(

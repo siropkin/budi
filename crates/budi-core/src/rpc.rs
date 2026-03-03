@@ -175,4 +175,10 @@ pub struct StatusResponse {
     pub index_job_state: String,
     #[serde(default)]
     pub index_terminal_outcome: Option<String>,
+    #[serde(default)]
+    pub watch_events_seen: u64,
+    #[serde(default)]
+    pub watch_events_accepted: u64,
+    #[serde(default)]
+    pub watch_events_dropped: u64,
 }

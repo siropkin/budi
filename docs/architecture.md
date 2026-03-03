@@ -44,7 +44,8 @@
 ## Incremental updates
 
 - Async `PostToolUse` hook sends changed file path hints to daemon `/update`.
-- Daemon also starts a repo file watcher after first repo request and batches FS change events with debounce.
+- Daemon also starts a repo file watcher after first repo request, pre-filters events with compiled index scope policy (extensions + layered ignore rules), and batches accepted paths with debounce.
 - A periodic reconcile signal triggers metadata-based re-scan to recover from missed watcher/hook events.
 - Re-index computes changed hashes and re-embeds only changed files unless a reconcile pass is requested.
 - HNSW graph is rebuilt in-memory from current chunk set.
+- `/status` and `budi doctor --deep` expose watcher health counters (`watch_events_seen`, `watch_events_accepted`, `watch_events_dropped`).

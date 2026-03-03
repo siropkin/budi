@@ -360,6 +360,9 @@ impl DaemonState {
             index_job_id: progress_snapshot.job_id,
             index_job_state: progress_snapshot.job_state.as_str().to_string(),
             index_terminal_outcome: progress_snapshot.terminal_outcome,
+            watch_events_seen: 0,
+            watch_events_accepted: 0,
+            watch_events_dropped: 0,
         })
     }
 
