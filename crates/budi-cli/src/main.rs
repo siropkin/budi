@@ -18,7 +18,7 @@ use budi_core::rpc::{
     QueryRequest, QueryResponse, QueryResultItem, StatusRequest, StatusResponse, UpdateRequest,
 };
 use budi_core::{git, index};
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -157,9 +157,31 @@ enum EvalCommands {
         fixtures: Option<PathBuf>,
         #[arg(long, default_value_t = 8)]
         limit: usize,
+        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
+        mode: RetrievalModeArg,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RetrievalModeArg {
+    Hybrid,
+    Lexical,
+    Vector,
+    #[value(name = "symbol-graph")]
+    SymbolGraph,
+}
+
+impl RetrievalModeArg {
+    fn as_rpc_mode(self) -> &'static str {
+        match self {
+            RetrievalModeArg::Hybrid => "hybrid",
+            RetrievalModeArg::Lexical => "lexical",
+            RetrievalModeArg::Vector => "vector",
+            RetrievalModeArg::SymbolGraph => "symbol-graph",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -180,6 +202,8 @@ enum RepoCommands {
         repo_root: Option<PathBuf>,
         #[arg(long, default_value_t = 8)]
         limit: usize,
+        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
+        mode: RetrievalModeArg,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -187,6 +211,8 @@ enum RepoCommands {
         prompt: String,
         #[arg(long)]
         repo_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
+        mode: RetrievalModeArg,
     },
 }
 
@@ -237,8 +263,9 @@ fn main() -> Result<()> {
                 repo_root,
                 fixtures,
                 limit,
+                mode,
                 json,
-            } => cmd_eval_retrieval(repo_root, fixtures, limit, json),
+            } => cmd_eval_retrieval(repo_root, fixtures, limit, mode, json),
         },
         Commands::Repo { command } => match command {
             RepoCommands::Status { repo_root } => cmd_status(repo_root),
@@ -247,9 +274,14 @@ fn main() -> Result<()> {
                 query,
                 repo_root,
                 limit,
+                mode,
                 json,
-            } => cmd_search(repo_root, &query, limit, json),
-            RepoCommands::Preview { prompt, repo_root } => cmd_preview(repo_root, &prompt),
+            } => cmd_search(repo_root, &query, limit, mode, json),
+            RepoCommands::Preview {
+                prompt,
+                repo_root,
+                mode,
+            } => cmd_preview(repo_root, &prompt, mode),
         },
         Commands::Observe { command } => match command {
             ObserveCommands::Enable { repo_root } => cmd_observe_enable(repo_root),
@@ -387,18 +419,19 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str) -> Result<()> {
+fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str, mode: RetrievalModeArg) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
     let directives = parse_prompt_directives(prompt);
     let sanitized_prompt = sanitize_prompt_for_query(prompt);
-    let response = query_daemon_with_timeout(
+    let response = query_daemon_with_timeout_mode(
         &repo_root,
         &config,
         &sanitized_prompt,
         Some(&repo_root),
         PREVIEW_QUERY_TIMEOUT_SECS,
+        Some(mode.as_rpc_mode()),
     )?;
     let effective_skip_reason = evaluate_context_skip(&config, &directives, &response.diagnostics);
     let forced_inject = directives.force_inject && !directives.force_skip;
@@ -421,6 +454,7 @@ fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str) -> Result<()> {
         ""
     };
 
+    println!("retrieval_mode={}", mode.as_rpc_mode());
     println!("total candidates={}", response.total_candidates);
     if !response.diagnostics.intent.is_empty() {
         println!(
@@ -450,6 +484,7 @@ fn cmd_search(
     repo_root: Option<PathBuf>,
     query: &str,
     limit: usize,
+    mode: RetrievalModeArg,
     json_output: bool,
 ) -> Result<()> {
     if limit == 0 {
@@ -459,12 +494,13 @@ fn cmd_search(
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
     let sanitized_query = sanitize_prompt_for_query(query);
-    let response = query_daemon_with_timeout(
+    let response = query_daemon_with_timeout_mode(
         &repo_root,
         &config,
         &sanitized_query,
         Some(&repo_root),
         SEARCH_QUERY_TIMEOUT_SECS,
+        Some(mode.as_rpc_mode()),
     )?;
     let limited_snippets = response
         .snippets
@@ -475,6 +511,7 @@ fn cmd_search(
     if json_output {
         let payload = json!({
             "query": query,
+            "retrieval_mode": mode.as_rpc_mode(),
             "total_candidates": response.total_candidates,
             "returned": limited_snippets.len(),
             "diagnostics": response.diagnostics,
@@ -485,6 +522,7 @@ fn cmd_search(
     }
 
     println!("query: {}", query);
+    println!("retrieval_mode={}", mode.as_rpc_mode());
     println!(
         "total candidates={} returned={}",
         response.total_candidates,
@@ -527,9 +565,15 @@ fn cmd_bench(repo_root: Option<PathBuf>, prompt: &str, iterations: usize) -> Res
     let mut context_chars = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
-        let response =
-            send_query_request(&client, &query_url, &repo_root, prompt, Some(&repo_root))
-                .context("Failed benchmark query iteration")?;
+        let response = send_query_request(
+            &client,
+            &query_url,
+            &repo_root,
+            prompt,
+            Some(&repo_root),
+            None,
+        )
+        .context("Failed benchmark query iteration")?;
         latencies_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         context_chars.push(response.context.len() as f64);
     }
@@ -551,6 +595,7 @@ fn cmd_eval_retrieval(
     repo_root: Option<PathBuf>,
     fixtures: Option<PathBuf>,
     limit: usize,
+    mode: RetrievalModeArg,
     json_output: bool,
 ) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
@@ -558,15 +603,22 @@ fn cmd_eval_retrieval(
     ensure_daemon_running(&repo_root, &config)?;
     let fixtures_path =
         fixtures.unwrap_or_else(|| repo_root.join(".budi").join("eval").join("retrieval.json"));
-    let report = run_retrieval_eval(&repo_root, &fixtures_path, limit, |sanitized_query| {
-        query_daemon_with_timeout(
-            &repo_root,
-            &config,
-            sanitized_query,
-            Some(&repo_root),
-            EVAL_QUERY_TIMEOUT_SECS,
-        )
-    })?;
+    let report = run_retrieval_eval(
+        &repo_root,
+        &fixtures_path,
+        mode.as_rpc_mode(),
+        limit,
+        |sanitized_query| {
+            query_daemon_with_timeout_mode(
+                &repo_root,
+                &config,
+                sanitized_query,
+                Some(&repo_root),
+                EVAL_QUERY_TIMEOUT_SECS,
+                Some(mode.as_rpc_mode()),
+            )
+        },
+    )?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -575,6 +627,7 @@ fn cmd_eval_retrieval(
 
     println!("repo: {}", report.repo_root);
     println!("fixtures: {}", report.fixtures_path);
+    println!("retrieval_mode: {}", report.retrieval_mode);
     println!(
         "cases: total={} scored={} errors={}",
         report.total_cases, report.scored_cases, report.cases_with_errors
@@ -2467,9 +2520,20 @@ fn query_daemon_with_timeout(
     cwd: Option<&Path>,
     timeout_secs: u64,
 ) -> Result<QueryResponse> {
+    query_daemon_with_timeout_mode(repo_root, config, prompt, cwd, timeout_secs, None)
+}
+
+fn query_daemon_with_timeout_mode(
+    repo_root: &Path,
+    config: &BudiConfig,
+    prompt: &str,
+    cwd: Option<&Path>,
+    timeout_secs: u64,
+    retrieval_mode: Option<&str>,
+) -> Result<QueryResponse> {
     let url = format!("{}/query", config.daemon_base_url());
     let client = daemon_client_with_timeout(Duration::from_secs(timeout_secs));
-    send_query_request(&client, &url, repo_root, prompt, cwd)
+    send_query_request(&client, &url, repo_root, prompt, cwd, retrieval_mode)
 }
 
 fn send_query_request(
@@ -2478,6 +2542,7 @@ fn send_query_request(
     repo_root: &Path,
     prompt: &str,
     cwd: Option<&Path>,
+    retrieval_mode: Option<&str>,
 ) -> Result<QueryResponse> {
     let response: QueryResponse = client
         .post(url)
@@ -2485,6 +2550,7 @@ fn send_query_request(
             repo_root: repo_root.display().to_string(),
             prompt: prompt.to_string(),
             cwd: cwd.map(|p| p.display().to_string()),
+            retrieval_mode: retrieval_mode.map(str::to_string),
         })
         .send()
         .context("Failed to send query request")?

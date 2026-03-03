@@ -35,6 +35,7 @@ pub(crate) struct RetrievalEvalCaseResult {
 pub(crate) struct RetrievalEvalReport {
     pub(crate) repo_root: String,
     pub(crate) fixtures_path: String,
+    pub(crate) retrieval_mode: String,
     pub(crate) limit: usize,
     pub(crate) total_cases: usize,
     pub(crate) scored_cases: usize,
@@ -49,6 +50,7 @@ pub(crate) struct RetrievalEvalReport {
 pub(crate) fn run_retrieval_eval<F>(
     repo_root: &Path,
     fixtures_path: &Path,
+    retrieval_mode: &str,
     limit: usize,
     mut query_runner: F,
 ) -> Result<RetrievalEvalReport>
@@ -76,6 +78,7 @@ where
     let mut report = RetrievalEvalReport {
         repo_root: repo_root.display().to_string(),
         fixtures_path: fixtures_path.display().to_string(),
+        retrieval_mode: retrieval_mode.to_string(),
         limit,
         total_cases: cases.len(),
         scored_cases: 0,

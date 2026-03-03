@@ -13,6 +13,41 @@ mod context;
 const RRF_K: f32 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalMode {
+    Hybrid,
+    Lexical,
+    Vector,
+    SymbolGraph,
+}
+
+impl RetrievalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetrievalMode::Hybrid => "hybrid",
+            RetrievalMode::Lexical => "lexical",
+            RetrievalMode::Vector => "vector",
+            RetrievalMode::SymbolGraph => "symbol-graph",
+        }
+    }
+}
+
+pub fn parse_retrieval_mode(raw: Option<&str>) -> RetrievalMode {
+    match raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("lexical") => RetrievalMode::Lexical,
+        Some("vector") => RetrievalMode::Vector,
+        Some("symbol-graph") | Some("symbol_graph") | Some("symbolgraph") => {
+            RetrievalMode::SymbolGraph
+        }
+        _ => RetrievalMode::Hybrid,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueryIntentKind {
     SymbolUsage,
     SymbolDefinition,
@@ -86,6 +121,7 @@ pub fn build_query_response(
     query_embedding: Option<&[f32]>,
     dirty_files: &[String],
     cwd: Option<&Path>,
+    retrieval_mode: RetrievalMode,
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
     let intent = analyze_query_intent(query);
@@ -108,28 +144,48 @@ pub fn build_query_response(
         .collect::<Vec<_>>();
     let has_specific_path_tokens = !specific_path_tokens.is_empty();
     let doc_path_hints = extract_explicit_doc_path_hints(query);
-    let lexical = runtime.search_lexical(query, config.topk_lexical)?;
-    let vector = query_embedding
-        .map(|embedding| runtime.search_vector(embedding, config.topk_vector))
-        .unwrap_or_default();
+    let lexical = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Lexical) {
+        runtime.search_lexical(query, config.topk_lexical)?
+    } else {
+        Vec::new()
+    };
+    let vector = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Vector) {
+        query_embedding
+            .map(|embedding| runtime.search_vector(embedding, config.topk_vector))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let symbol_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let path_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let graph_limit = config.topk_lexical.max(config.retrieval_limit * 2);
-    let symbol = diversify_channel_by_path(
-        runtime,
-        &runtime.search_symbol_tokens(&symbol_tokens, symbol_limit),
-        symbol_limit,
-    );
-    let path = diversify_channel_by_path(
-        runtime,
-        &runtime.search_path_tokens(&path_tokens, path_limit),
-        path_limit,
-    );
-    let graph = diversify_channel_by_path(
-        runtime,
-        &runtime.search_graph_tokens(&symbol_tokens, graph_limit),
-        graph_limit,
-    );
+    let symbol = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Symbol) {
+        diversify_channel_by_path(
+            runtime,
+            &runtime.search_symbol_tokens(&symbol_tokens, symbol_limit),
+            symbol_limit,
+        )
+    } else {
+        Vec::new()
+    };
+    let path = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Path) {
+        diversify_channel_by_path(
+            runtime,
+            &runtime.search_path_tokens(&path_tokens, path_limit),
+            path_limit,
+        )
+    } else {
+        Vec::new()
+    };
+    let graph = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Graph) {
+        diversify_channel_by_path(
+            runtime,
+            &runtime.search_graph_tokens(&symbol_tokens, graph_limit),
+            graph_limit,
+        )
+    } else {
+        Vec::new()
+    };
     let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
 
     let dirty_set: std::collections::HashSet<&str> =
@@ -579,6 +635,20 @@ fn channel_signal_name(kind: ChannelKind) -> &'static str {
         ChannelKind::Symbol => "symbol-hit",
         ChannelKind::Path => "path-hit",
         ChannelKind::Graph => "graph-hit",
+    }
+}
+
+fn retrieval_mode_allows_channel(mode: RetrievalMode, kind: ChannelKind) -> bool {
+    match mode {
+        RetrievalMode::Hybrid => true,
+        RetrievalMode::Lexical => matches!(kind, ChannelKind::Lexical),
+        RetrievalMode::Vector => matches!(kind, ChannelKind::Vector),
+        RetrievalMode::SymbolGraph => {
+            matches!(
+                kind,
+                ChannelKind::Symbol | ChannelKind::Path | ChannelKind::Graph
+            )
+        }
     }
 }
 
@@ -2775,5 +2845,57 @@ export default function devicerowcell() {
     fn path_diversity_bucket_uses_first_two_segments() {
         assert_eq!(path_diversity_bucket("src/routes/home.tsx"), "src/routes");
         assert_eq!(path_diversity_bucket("README.md"), "readme.md");
+    }
+
+    #[test]
+    fn parse_retrieval_mode_handles_aliases_and_defaults() {
+        assert_eq!(parse_retrieval_mode(Some("hybrid")), RetrievalMode::Hybrid);
+        assert_eq!(
+            parse_retrieval_mode(Some("lexical")),
+            RetrievalMode::Lexical
+        );
+        assert_eq!(parse_retrieval_mode(Some("vector")), RetrievalMode::Vector);
+        assert_eq!(
+            parse_retrieval_mode(Some("symbol_graph")),
+            RetrievalMode::SymbolGraph
+        );
+        assert_eq!(
+            parse_retrieval_mode(Some("symbol-graph")),
+            RetrievalMode::SymbolGraph
+        );
+        assert_eq!(parse_retrieval_mode(Some("unknown")), RetrievalMode::Hybrid);
+        assert_eq!(parse_retrieval_mode(None), RetrievalMode::Hybrid);
+    }
+
+    #[test]
+    fn retrieval_mode_channel_filtering_is_deterministic() {
+        assert!(retrieval_mode_allows_channel(
+            RetrievalMode::Hybrid,
+            ChannelKind::Lexical
+        ));
+        assert!(retrieval_mode_allows_channel(
+            RetrievalMode::Lexical,
+            ChannelKind::Lexical
+        ));
+        assert!(!retrieval_mode_allows_channel(
+            RetrievalMode::Lexical,
+            ChannelKind::Vector
+        ));
+        assert!(retrieval_mode_allows_channel(
+            RetrievalMode::Vector,
+            ChannelKind::Vector
+        ));
+        assert!(!retrieval_mode_allows_channel(
+            RetrievalMode::Vector,
+            ChannelKind::Symbol
+        ));
+        assert!(retrieval_mode_allows_channel(
+            RetrievalMode::SymbolGraph,
+            ChannelKind::Graph
+        ));
+        assert!(!retrieval_mode_allows_channel(
+            RetrievalMode::SymbolGraph,
+            ChannelKind::Vector
+        ));
     }
 }

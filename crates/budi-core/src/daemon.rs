@@ -52,12 +52,14 @@ impl DaemonState {
         let query_embedding = index::embed_query(repo_root, &request.prompt)?;
         let runtime_guard = runtime.lock().await;
         let cwd = request.cwd.as_deref().map(Path::new);
+        let retrieval_mode = retrieval::parse_retrieval_mode(request.retrieval_mode.as_deref());
         retrieval::build_query_response(
             &runtime_guard,
             &request.prompt,
             query_embedding.as_deref(),
             &dirty_files,
             cwd,
+            retrieval_mode,
             config,
         )
     }

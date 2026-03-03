@@ -6,6 +6,8 @@ pub struct QueryRequest {
     pub prompt: String,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub retrieval_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
