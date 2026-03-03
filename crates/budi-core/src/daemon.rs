@@ -14,6 +14,8 @@ use crate::rpc::{
     QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
 };
 
+const PROGRESS_PERSIST_INTERVAL_MS: u128 = 2_000;
+
 #[derive(Clone, Default)]
 pub struct DaemonState {
     repos: Arc<RwLock<HashMap<String, Arc<Mutex<RuntimeIndex>>>>>,
@@ -66,6 +68,8 @@ struct IndexProgressSnapshot {
     started_at_unix_ms: u128,
     last_update_unix_ms: u128,
     last_error: Option<String>,
+    last_persist_unix_ms: u128,
+    last_persist_phase: String,
 }
 
 impl DaemonState {
@@ -279,6 +283,8 @@ impl DaemonState {
             started_at_unix_ms: now,
             last_update_unix_ms: now,
             last_error: None,
+            last_persist_unix_ms: now,
+            last_persist_phase: "starting".to_string(),
         };
         let mut guard = self.progress_guard();
         guard.insert(repo_root.to_string(), snapshot.clone());
@@ -310,9 +316,20 @@ impl DaemonState {
         if progress.done {
             entry.current_file = None;
         }
-        let snapshot = entry.clone();
+        let should_persist = progress.done
+            || entry.phase != entry.last_persist_phase
+            || now.saturating_sub(entry.last_persist_unix_ms) >= PROGRESS_PERSIST_INTERVAL_MS;
+        let snapshot = if should_persist {
+            entry.last_persist_unix_ms = now;
+            entry.last_persist_phase = entry.phase.clone();
+            Some(entry.clone())
+        } else {
+            None
+        };
         drop(guard);
-        self.persist_progress(repo_root, &snapshot);
+        if let Some(snapshot) = snapshot {
+            self.persist_progress(repo_root, &snapshot);
+        }
     }
 
     fn finish_progress(&self, repo_root: &str, hard: bool) {
@@ -329,6 +346,8 @@ impl DaemonState {
         entry.current_file = None;
         entry.last_update_unix_ms = now;
         entry.last_error = None;
+        entry.last_persist_unix_ms = now;
+        entry.last_persist_phase = entry.phase.clone();
         let snapshot = entry.clone();
         drop(guard);
         self.persist_progress(repo_root, &snapshot);
@@ -348,6 +367,8 @@ impl DaemonState {
         entry.current_file = None;
         entry.last_update_unix_ms = now;
         entry.last_error = Some(error.to_string());
+        entry.last_persist_unix_ms = now;
+        entry.last_persist_phase = entry.phase.clone();
         let snapshot = entry.clone();
         drop(guard);
         self.persist_progress(repo_root, &snapshot);
@@ -388,11 +409,12 @@ impl DaemonState {
                 return None;
             }
         };
+        let phase = persisted.phase;
         Some(IndexProgressSnapshot {
             active: persisted.active,
             hard: persisted.hard,
             state: IndexState::parse(&persisted.state),
-            phase: persisted.phase,
+            phase: phase.clone(),
             total_files: persisted.total_files,
             processed_files: persisted.processed_files,
             changed_files: persisted.changed_files,
@@ -400,6 +422,8 @@ impl DaemonState {
             started_at_unix_ms: persisted.started_at_unix_ms,
             last_update_unix_ms: persisted.last_update_unix_ms,
             last_error: persisted.last_error,
+            last_persist_unix_ms: persisted.last_update_unix_ms,
+            last_persist_phase: phase,
         })
     }
 
@@ -416,6 +440,8 @@ impl DaemonState {
                 snapshot.last_error = Some("indexing interrupted by daemon restart".to_string());
             }
             snapshot.last_update_unix_ms = now_unix_ms();
+            snapshot.last_persist_unix_ms = snapshot.last_update_unix_ms;
+            snapshot.last_persist_phase = snapshot.phase.clone();
             self.persist_progress(repo_root, &snapshot);
         }
         snapshot
