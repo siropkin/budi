@@ -21,7 +21,6 @@ use tracing::{info, warn};
 
 use crate::chunking::chunk_text;
 use crate::config::{self, BudiConfig};
-use crate::git;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
@@ -42,14 +41,11 @@ pub struct ChunkRecord {
     pub symbol_hint: Option<String>,
     pub text: String,
     pub embedding: Vec<f32>,
-    pub updated_at_ts: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RepoIndexState {
     pub repo_root: String,
-    pub branch: String,
-    pub head: String,
     pub files: Vec<FileRecord>,
     pub chunks: Vec<ChunkRecord>,
     pub updated_at_ts: i64,
@@ -199,7 +195,21 @@ type RetrievalSignalIndexes = (
 );
 type FamilyTokenLookup = HashMap<String, Vec<String>>;
 type FamilyPrefixLookup = HashMap<String, Vec<String>>;
-const INDEX_PROGRESS_META_KEY: &str = "index_progress_snapshot";
+
+#[derive(Debug, Clone, Default)]
+pub struct PersistedIndexProgress {
+    pub active: bool,
+    pub hard: bool,
+    pub state: String,
+    pub phase: String,
+    pub total_files: usize,
+    pub processed_files: usize,
+    pub changed_files: usize,
+    pub current_file: Option<String>,
+    pub started_at_unix_ms: u128,
+    pub last_update_unix_ms: u128,
+    pub last_error: Option<String>,
+}
 
 #[derive(Debug)]
 struct PendingChunk {
@@ -237,7 +247,6 @@ pub fn build_or_update(
     changed_hint: Option<&[String]>,
     mut progress_cb: Option<&mut dyn FnMut(IndexBuildProgress)>,
 ) -> Result<IndexWorkspace> {
-    let git_snapshot = git::snapshot(repo_root)?;
     let previous = load_state(repo_root)?.unwrap_or_default();
     let previous_files_by_path: HashMap<String, FileRecord> = previous
         .files
@@ -491,7 +500,6 @@ pub fn build_or_update(
                 symbol_hint: chunk.symbol_hint,
                 text: chunk.text.clone(),
                 embedding,
-                updated_at_ts: Utc::now().timestamp(),
             });
         }
 
@@ -533,8 +541,6 @@ pub fn build_or_update(
 
     let state = RepoIndexState {
         repo_root: repo_root.display().to_string(),
-        branch: git_snapshot.branch,
-        head: git_snapshot.head,
         files: current_files,
         chunks,
         updated_at_ts: Utc::now().timestamp(),
@@ -629,7 +635,7 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
 
     let mut chunks = Vec::new();
     let mut chunk_stmt = conn.prepare(
-        "SELECT id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts
+        "SELECT id, path, start_line, end_line, symbol_hint, text, embedding
          FROM chunks
          ORDER BY path, start_line, id",
     )?;
@@ -655,7 +661,6 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
             symbol_hint: row.get(4)?,
             text,
             embedding,
-            updated_at_ts: row.get(7)?,
         })
     })?;
     for row in chunk_rows {
@@ -664,16 +669,12 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
 
     let repo_root_value =
         load_meta_value(&conn, "repo_root")?.unwrap_or_else(|| repo_root.display().to_string());
-    let branch = load_meta_value(&conn, "branch")?.unwrap_or_else(|| "unknown".to_string());
-    let head = load_meta_value(&conn, "head")?.unwrap_or_else(|| "unknown".to_string());
     let updated_at_ts = load_meta_value(&conn, "updated_at_ts")?
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or_default();
 
     Ok(Some(RepoIndexState {
         repo_root: repo_root_value,
-        branch,
-        head,
         files,
         chunks,
         updated_at_ts,
@@ -695,8 +696,6 @@ pub fn save_state(
     ensure_index_db_schema(&conn)?;
     let tx = conn.transaction()?;
     upsert_meta_value(&tx, "repo_root", &state.repo_root)?;
-    upsert_meta_value(&tx, "branch", &state.branch)?;
-    upsert_meta_value(&tx, "head", &state.head)?;
     upsert_meta_value(&tx, "updated_at_ts", &state.updated_at_ts.to_string())?;
 
     if let Some(delta_paths) = delta_paths {
@@ -738,16 +737,15 @@ pub fn save_state(
 
             {
                 let mut chunk_stmt = tx.prepare(
-                    "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(id) DO UPDATE SET
                        path = excluded.path,
                        start_line = excluded.start_line,
                        end_line = excluded.end_line,
                        symbol_hint = excluded.symbol_hint,
                        text = excluded.text,
-                       embedding = excluded.embedding,
-                       updated_at_ts = excluded.updated_at_ts",
+                       embedding = excluded.embedding",
                 )?;
                 for chunk in state
                     .chunks
@@ -762,7 +760,6 @@ pub fn save_state(
                         chunk.symbol_hint.as_deref(),
                         &chunk.text,
                         encode_embedding(&chunk.embedding),
-                        chunk.updated_at_ts,
                     ])?;
                 }
             }
@@ -788,8 +785,8 @@ pub fn save_state(
 
         {
             let mut chunk_stmt = tx.prepare(
-                "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for chunk in &state.chunks {
                 chunk_stmt.execute(params![
@@ -800,7 +797,6 @@ pub fn save_state(
                     chunk.symbol_hint.as_deref(),
                     &chunk.text,
                     encode_embedding(&chunk.embedding),
-                    chunk.updated_at_ts,
                 ])?;
             }
         }
@@ -852,14 +848,62 @@ fn ensure_index_db_schema(conn: &Connection) -> Result<()> {
             end_line INTEGER NOT NULL,
             symbol_hint TEXT,
             text TEXT NOT NULL,
-            embedding BLOB NOT NULL,
-            updated_at_ts INTEGER NOT NULL
+            embedding BLOB NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS index_progress (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active INTEGER NOT NULL,
+            hard INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            total_files INTEGER NOT NULL,
+            processed_files INTEGER NOT NULL,
+            changed_files INTEGER NOT NULL,
+            current_file TEXT,
+            started_at_unix_ms TEXT NOT NULL,
+            last_update_unix_ms TEXT NOT NULL,
+            last_error TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
         ",
     )?;
+    if chunks_table_has_legacy_timestamp(conn)? {
+        conn.execute_batch(
+            "
+            DROP TABLE IF EXISTS chunks_legacy;
+            ALTER TABLE chunks RENAME TO chunks_legacy;
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                symbol_hint TEXT,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL
+            );
+            INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding)
+            SELECT id, path, start_line, end_line, symbol_hint, text, embedding
+            FROM chunks_legacy;
+            DROP TABLE chunks_legacy;
+            CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
+            ",
+        )?;
+    }
     Ok(())
+}
+
+fn chunks_table_has_legacy_timestamp(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == "updated_at_ts" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn load_meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -873,17 +917,48 @@ fn load_meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(value)
 }
 
-pub fn load_index_progress_snapshot(repo_root: &Path) -> Result<Option<String>> {
+pub fn load_index_progress_snapshot(repo_root: &Path) -> Result<Option<PersistedIndexProgress>> {
     let path = config::index_db_path(repo_root)?;
     if !path.exists() {
         return Ok(None);
     }
     let conn = open_index_db(repo_root)?;
     ensure_index_db_schema(&conn)?;
-    load_meta_value(&conn, INDEX_PROGRESS_META_KEY)
+    let mut stmt = conn.prepare(
+        "SELECT active, hard, state, phase, total_files, processed_files, changed_files,
+                current_file, started_at_unix_ms, last_update_unix_ms, last_error
+         FROM index_progress
+         WHERE id = 1",
+    )?;
+    let snapshot = stmt
+        .query_row([], |row| {
+            let total_files_i64: i64 = row.get(4)?;
+            let processed_files_i64: i64 = row.get(5)?;
+            let changed_files_i64: i64 = row.get(6)?;
+            let started_raw: String = row.get(8)?;
+            let last_update_raw: String = row.get(9)?;
+            Ok(PersistedIndexProgress {
+                active: row.get::<_, i64>(0)? != 0,
+                hard: row.get::<_, i64>(1)? != 0,
+                state: row.get(2)?,
+                phase: row.get(3)?,
+                total_files: usize::try_from(total_files_i64).unwrap_or_default(),
+                processed_files: usize::try_from(processed_files_i64).unwrap_or_default(),
+                changed_files: usize::try_from(changed_files_i64).unwrap_or_default(),
+                current_file: row.get(7)?,
+                started_at_unix_ms: started_raw.parse::<u128>().unwrap_or_default(),
+                last_update_unix_ms: last_update_raw.parse::<u128>().unwrap_or_default(),
+                last_error: row.get(10)?,
+            })
+        })
+        .optional()?;
+    Ok(snapshot)
 }
 
-pub fn save_index_progress_snapshot(repo_root: &Path, snapshot_json: &str) -> Result<()> {
+pub fn save_index_progress_snapshot(
+    repo_root: &Path,
+    snapshot: &PersistedIndexProgress,
+) -> Result<()> {
     let path = config::index_db_path(repo_root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -892,9 +967,37 @@ pub fn save_index_progress_snapshot(repo_root: &Path, snapshot_json: &str) -> Re
     let conn = open_index_db(repo_root)?;
     ensure_index_db_schema(&conn)?;
     conn.execute(
-        "INSERT INTO meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![INDEX_PROGRESS_META_KEY, snapshot_json],
+        "INSERT INTO index_progress(
+             id, active, hard, state, phase, total_files, processed_files, changed_files,
+             current_file, started_at_unix_ms, last_update_unix_ms, last_error
+         ) VALUES (
+             1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+         )
+         ON CONFLICT(id) DO UPDATE SET
+             active = excluded.active,
+             hard = excluded.hard,
+             state = excluded.state,
+             phase = excluded.phase,
+             total_files = excluded.total_files,
+             processed_files = excluded.processed_files,
+             changed_files = excluded.changed_files,
+             current_file = excluded.current_file,
+             started_at_unix_ms = excluded.started_at_unix_ms,
+             last_update_unix_ms = excluded.last_update_unix_ms,
+             last_error = excluded.last_error",
+        params![
+            if snapshot.active { 1i64 } else { 0i64 },
+            if snapshot.hard { 1i64 } else { 0i64 },
+            &snapshot.state,
+            &snapshot.phase,
+            i64::try_from(snapshot.total_files).unwrap_or(i64::MAX),
+            i64::try_from(snapshot.processed_files).unwrap_or(i64::MAX),
+            i64::try_from(snapshot.changed_files).unwrap_or(i64::MAX),
+            snapshot.current_file.as_deref(),
+            snapshot.started_at_unix_ms.to_string(),
+            snapshot.last_update_unix_ms.to_string(),
+            snapshot.last_error.as_deref(),
+        ],
     )?;
     Ok(())
 }
@@ -2925,7 +3028,6 @@ mod tests {
                 symbol_hint: Some("process_order".to_string()),
                 text: "pub fn process_order() {}".to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
             ChunkRecord {
                 id: 2,
@@ -2937,7 +3039,6 @@ mod tests {
                     "use crate::service::process_order;\nfn handle_request() { process_order(); }"
                         .to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
         ];
         let (
@@ -2966,7 +3067,6 @@ mod tests {
                 symbol_hint: Some("process_order".to_string()),
                 text: "export function process_order() { return true; }".to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
             ChunkRecord {
                 id: 2,
@@ -2976,7 +3076,6 @@ mod tests {
                 symbol_hint: Some("handle_request".to_string()),
                 text: "import { process_order as processOrderAlias } from './service';\nfunction handle_request() { processOrderAlias(); }".to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
         ];
         let (
@@ -3004,7 +3103,6 @@ mod tests {
                 symbol_hint: Some("process_order".to_string()),
                 text: "pub fn process_order() {}".to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
             ChunkRecord {
                 id: 2,
@@ -3016,7 +3114,6 @@ mod tests {
                     "use crate::service::process_order;\nfn handle_request() { process_order(); }"
                         .to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
             ChunkRecord {
                 id: 3,
@@ -3026,7 +3123,6 @@ mod tests {
                 symbol_hint: Some("unrelated_helper".to_string()),
                 text: "fn unrelated_helper() { let local_flag = true; }".to_string(),
                 embedding: vec![0.0; 4],
-                updated_at_ts: 0,
             },
         ];
         let (
