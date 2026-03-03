@@ -13,7 +13,7 @@
    - lexical search via Tantivy (BM25)
    - vector ANN via HNSW (`hnsw_rs`)
    - symbol/path and resolver-backed call-graph channels
-   - Git-aware re-ranking (dirty files, branch, cwd proximity)
+   - intent-policy re-ranking with pruned core rules (dirty files, scope/path, docs/symbol intent)
 5. Daemon returns context pack.
 6. Hook emits JSON with `hookSpecificOutput.additionalContext`.
 

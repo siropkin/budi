@@ -86,6 +86,45 @@ struct QueryFocus {
     mutation: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RetrievalPolicy {
+    apply_config_rules: bool,
+    apply_focus_rules: bool,
+    apply_route_binding_rules: bool,
+    apply_route_ownership_rules: bool,
+}
+
+impl RetrievalPolicy {
+    fn needs_focus_analysis(self) -> bool {
+        self.apply_focus_rules || self.apply_route_binding_rules
+    }
+}
+
+fn retrieval_policy(intent_kind: QueryIntentKind) -> RetrievalPolicy {
+    match intent_kind {
+        // Keep route ownership rules for explicit "where is this symbol rendered/owned" prompts,
+        // but prune broad focus/config/routing rule packs that were too ad-hoc.
+        QueryIntentKind::SymbolDefinition => RetrievalPolicy {
+            apply_config_rules: false,
+            apply_focus_rules: false,
+            apply_route_binding_rules: false,
+            apply_route_ownership_rules: true,
+        },
+        QueryIntentKind::SymbolUsage
+        | QueryIntentKind::PathLookup
+        | QueryIntentKind::Architecture
+        | QueryIntentKind::Docs
+        | QueryIntentKind::CodeNavigation
+        | QueryIntentKind::TestLookup
+        | QueryIntentKind::NonCode => RetrievalPolicy {
+            apply_config_rules: false,
+            apply_focus_rules: false,
+            apply_route_binding_rules: false,
+            apply_route_ownership_rules: false,
+        },
+    }
+}
+
 pub fn build_query_response(
     runtime: &RuntimeIndex,
     query: &str,
@@ -95,38 +134,46 @@ pub fn build_query_response(
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
     let intent = analyze_query_intent(query);
-    let focus = analyze_query_focus(query);
+    let policy = retrieval_policy(intent.kind);
+    let focus = if policy.needs_focus_analysis() {
+        analyze_query_focus(query)
+    } else {
+        QueryFocus::default()
+    };
     let query_lower = query.to_ascii_lowercase();
-    let implementation_focus = contains_any(
-        &query_lower,
-        &[
-            "handler",
-            "handlers",
-            "bind",
-            "bound",
-            "register",
-            "registered",
-            "wired",
-            "wiring",
-        ],
-    );
-    let config_focus = contains_any(
-        &query_lower,
-        &[
-            "config",
-            "configs",
-            "configmap",
-            "configmaps",
-            "yaml",
-            "yml",
-            "manifest",
-            "manifests",
-            "k8s",
-            "helm",
-            "generated",
-        ],
-    );
-    let route_binding_focus = focus.routing
+    let implementation_focus = policy.apply_config_rules
+        && contains_any(
+            &query_lower,
+            &[
+                "handler",
+                "handlers",
+                "bind",
+                "bound",
+                "register",
+                "registered",
+                "wired",
+                "wiring",
+            ],
+        );
+    let config_focus = (policy.apply_config_rules || policy.apply_route_binding_rules)
+        && contains_any(
+            &query_lower,
+            &[
+                "config",
+                "configs",
+                "configmap",
+                "configmaps",
+                "yaml",
+                "yml",
+                "manifest",
+                "manifests",
+                "k8s",
+                "helm",
+                "generated",
+            ],
+        );
+    let route_binding_focus = policy.apply_route_binding_rules
+        && focus.routing
         && contains_any(
             &query_lower,
             &[
@@ -157,7 +204,8 @@ pub fn build_query_response(
         &["test", "tests", "unit", "spec", "mock", "fixture"],
     );
     let symbol_tokens = extract_query_symbol_tokens(query);
-    let route_ownership_focus = is_route_ownership_query(&query_lower, &symbol_tokens, intent.kind);
+    let route_ownership_focus = policy.apply_route_ownership_rules
+        && is_route_ownership_query(&query_lower, &symbol_tokens, intent.kind);
     let mut path_tokens = extract_query_path_tokens(query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(query, &intent, &mut path_tokens);
@@ -246,7 +294,7 @@ pub fn build_query_response(
             adjusted -= 0.28;
             push_unique_reason(&mut reasons, "analysis-config-penalty");
         }
-        if implementation_focus && !config_focus {
+        if policy.apply_config_rules && implementation_focus && !config_focus {
             if is_config_like_path(&lower_path) {
                 adjusted -= 0.16;
                 push_unique_reason(&mut reasons, "impl-config-penalty");
@@ -255,7 +303,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "impl-code-hit");
             }
         }
-        if config_focus {
+        if policy.apply_config_rules && config_focus {
             if is_config_like_path(&lower_path) {
                 adjusted += 0.20;
                 push_unique_reason(&mut reasons, "config-focus-hit");
@@ -371,7 +419,7 @@ pub fn build_query_response(
                 }
             }
         }
-        if focus.service {
+        if policy.apply_focus_rules && focus.service {
             if contains_path_fragment(
                 &lower_path,
                 &["service", "services", "client", "clients", "fetcher", "api"],
@@ -387,7 +435,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "schema-penalty");
             }
         }
-        if focus.state {
+        if policy.apply_focus_rules && focus.state {
             if contains_path_fragment(
                 &lower_path,
                 &[
@@ -411,7 +459,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "state-focus-miss");
             }
         }
-        if focus.routing {
+        if policy.apply_focus_rules && focus.routing {
             if contains_path_fragment(
                 &lower_path,
                 &[
@@ -455,7 +503,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "routing-test-fixture-penalty");
             }
         }
-        if route_binding_focus {
+        if policy.apply_route_binding_rules && route_binding_focus {
             let path_binding_hint = contains_path_fragment(
                 &lower_path,
                 &[
@@ -529,7 +577,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "route-binding-config-penalty");
             }
         }
-        if focus.auth {
+        if policy.apply_focus_rules && focus.auth {
             if contains_path_fragment(
                 &lower_path,
                 &["/auth/", "session", "sessions", "login", "token", "oidc"],
@@ -541,7 +589,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "auth-focus-miss");
             }
         }
-        if focus.mutation {
+        if policy.apply_focus_rules && focus.mutation {
             let mutation_signal_path = contains_path_fragment(
                 &lower_path,
                 &[
@@ -571,7 +619,7 @@ pub fn build_query_response(
                 push_unique_reason(&mut reasons, "mutation-types-penalty");
             }
         }
-        if focus.localization {
+        if policy.apply_focus_rules && focus.localization {
             if contains_path_fragment(
                 &lower_path,
                 &[
@@ -598,7 +646,7 @@ pub fn build_query_response(
             if i18n_key_hits > 0 {
                 adjusted += 0.30 + (i18n_key_hits as f32).min(2.0) * 0.06;
                 push_unique_reason(&mut reasons, "i18n-key-hit");
-            } else if focus.localization {
+            } else if policy.apply_focus_rules && focus.localization {
                 adjusted -= 0.08;
                 push_unique_reason(&mut reasons, "i18n-key-miss");
             }
@@ -632,7 +680,8 @@ pub fn build_query_response(
         let definition_hits = count_symbol_definition_hits(&lower_text, &symbol_tokens);
         let import_hits = count_symbol_import_hits(&lower_text, &symbol_tokens);
         let symbol_reference_hits = count_symbol_reference_hits(&lower_text, &symbol_tokens);
-        if route_ownership_focus
+        if policy.apply_route_ownership_rules
+            && route_ownership_focus
             && contains_path_fragment(&lower_path, &["route", "routes", "routing", "router"])
         {
             if import_hits > 0 {
@@ -3309,6 +3358,23 @@ export default function devicerowcell() {
     fn detects_mutation_focus_flag() {
         let focus = analyze_query_focus("Where are release plan mutations implemented?");
         assert!(focus.mutation);
+    }
+
+    #[test]
+    fn retrieval_policy_prunes_advanced_focus_and_config_rules() {
+        let policy = retrieval_policy(QueryIntentKind::PathLookup);
+        assert!(!policy.apply_config_rules);
+        assert!(!policy.apply_focus_rules);
+        assert!(!policy.apply_route_binding_rules);
+        assert!(!policy.needs_focus_analysis());
+    }
+
+    #[test]
+    fn retrieval_policy_keeps_symbol_definition_route_ownership() {
+        let policy = retrieval_policy(QueryIntentKind::SymbolDefinition);
+        assert!(policy.apply_route_ownership_rules);
+        assert!(!policy.apply_config_rules);
+        assert!(!policy.apply_focus_rules);
     }
 
     #[test]
