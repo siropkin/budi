@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -251,11 +251,18 @@ pub struct IndexBuildProgress {
     pub done: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct IndexBuildOptions {
+    pub include_extensions: Vec<String>,
+    pub ignore_patterns: Vec<String>,
+}
+
 pub fn build_or_update(
     repo_root: &Path,
     config: &BudiConfig,
     hard: bool,
     changed_hint: Option<&[String]>,
+    options: Option<&IndexBuildOptions>,
     mut progress_cb: Option<&mut dyn FnMut(IndexBuildProgress)>,
 ) -> Result<IndexWorkspace> {
     let previous = load_state(repo_root)?.unwrap_or_default();
@@ -286,6 +293,7 @@ pub fn build_or_update(
             config,
             &previous_files_by_path,
             &hinted_paths,
+            options,
         )?
     } else {
         build_current_files_from_discovery(
@@ -294,6 +302,7 @@ pub fn build_or_update(
             &previous_files_by_path,
             hard,
             &hinted_paths,
+            options,
         )?
     };
     let mut current_files = current_files;
@@ -1386,8 +1395,9 @@ fn build_current_files_from_discovery(
     previous_files_by_path: &HashMap<String, FileRecord>,
     hard: bool,
     hinted_paths: &HashSet<String>,
+    options: Option<&IndexBuildOptions>,
 ) -> Result<(Vec<FileRecord>, HashMap<String, String>)> {
-    let files = discover_source_files(repo_root, config)?;
+    let files = discover_source_files(repo_root, config, options)?;
     let mut current_files = Vec::with_capacity(files.len());
     let mut current_hashes = HashMap::with_capacity(files.len());
 
@@ -1453,8 +1463,9 @@ fn build_current_files_from_metadata_delta(
     config: &BudiConfig,
     previous_files_by_path: &HashMap<String, FileRecord>,
     hinted_paths: &HashSet<String>,
+    options: Option<&IndexBuildOptions>,
 ) -> Result<(Vec<FileRecord>, HashMap<String, String>)> {
-    let extension_allowlist = build_extension_allowlist(config);
+    let extension_allowlist = build_effective_extension_allowlist(config, options);
     let basename_allowlist = build_basename_allowlist(config);
     let mut files_by_path = previous_files_by_path.clone();
     for relative in hinted_paths {
@@ -2808,10 +2819,19 @@ struct RepoIgnoreRules {
     unignores: Gitignore,
 }
 
-fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<PathBuf>> {
-    let extension_allowlist = build_extension_allowlist(config);
+fn discover_source_files(
+    repo_root: &Path,
+    config: &BudiConfig,
+    options: Option<&IndexBuildOptions>,
+) -> Result<Vec<PathBuf>> {
+    let extension_allowlist = build_effective_extension_allowlist(config, options);
     let basename_allowlist = build_basename_allowlist(config);
-    let ignore_rules = load_repo_ignore_rules(repo_root)?;
+    let ignore_rules = load_repo_ignore_rules(
+        repo_root,
+        options
+            .map(|value| value.ignore_patterns.as_slice())
+            .unwrap_or(&[]),
+    )?;
 
     if config.use_git_file_discovery
         && let Some(files) = discover_source_files_from_git(
@@ -2933,11 +2953,58 @@ fn discover_source_files_from_git(
     Ok(Some(files))
 }
 
-fn load_repo_ignore_rules(repo_root: &Path) -> Result<RepoIgnoreRules> {
+fn build_effective_extension_allowlist(
+    config: &BudiConfig,
+    options: Option<&IndexBuildOptions>,
+) -> HashSet<String> {
+    let mut allowlist = build_extension_allowlist(config);
+    if let Some(overrides) = options {
+        for extension in &overrides.include_extensions {
+            let normalized = extension
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase();
+            if !normalized.is_empty() {
+                allowlist.insert(normalized);
+            }
+        }
+    }
+    allowlist
+}
+
+fn root_ignore_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let entries = fs::read_dir(repo_root)
+        .with_context(|| format!("Failed reading {}", repo_root.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if file_name.ends_with("ignore") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn load_repo_ignore_rules(repo_root: &Path, extra_patterns: &[String]) -> Result<RepoIgnoreRules> {
     let mut excludes = Vec::new();
     let mut unignores = Vec::new();
 
-    for ignore_path in config::layered_ignore_paths(repo_root)? {
+    let mut ignore_paths = config::layered_ignore_paths(repo_root)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for root_ignore in root_ignore_files(repo_root)? {
+        ignore_paths.insert(root_ignore);
+    }
+
+    for ignore_path in ignore_paths {
         if !ignore_path.exists() {
             continue;
         }
@@ -2958,6 +3025,13 @@ fn load_repo_ignore_rules(repo_root: &Path) -> Result<RepoIgnoreRules> {
             }
         }
     }
+    excludes.extend(
+        extra_patterns
+            .iter()
+            .map(|pattern| pattern.trim())
+            .filter(|pattern| !pattern.is_empty())
+            .map(ToOwned::to_owned),
+    );
 
     Ok(RepoIgnoreRules {
         excludes: build_gitignore_matcher(repo_root, &excludes)?,
@@ -4084,6 +4158,46 @@ mod tests {
                 .expect("unignore matcher"),
         };
         assert!(should_skip_index_path("vendor/lib.rs", false, &rules));
+    }
+
+    #[test]
+    fn root_ignore_files_include_dot_ignore_sources() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "budi-root-ignore-test-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        fs::write(temp_root.join(".cursorignore"), "scratch/**\n").expect("write cursor ignore");
+        fs::write(temp_root.join(".codeiumignore"), "generated/**\n")
+            .expect("write codeium ignore");
+        fs::write(temp_root.join("notes.txt"), "not an ignore file").expect("write notes");
+
+        let discovered = root_ignore_files(&temp_root).expect("discover root ignore files");
+        let discovered_names = discovered
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>();
+        assert!(discovered_names.contains(&".cursorignore"));
+        assert!(discovered_names.contains(&".codeiumignore"));
+        assert!(!discovered_names.contains(&"notes.txt"));
+
+        let rules = load_repo_ignore_rules(&temp_root, &[]).expect("load ignore rules");
+        assert!(should_skip_index_path("scratch/tmp.rs", false, &rules));
+        assert!(should_skip_index_path("generated/out.rs", false, &rules));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn cli_override_ignore_patterns_are_applied() {
+        let rules = load_repo_ignore_rules(Path::new("."), &["tmp_override/**".to_string()])
+            .expect("load rules with overrides");
+        assert!(should_skip_index_path(
+            "tmp_override/file.rs",
+            false,
+            &rules
+        ));
     }
 
     #[test]

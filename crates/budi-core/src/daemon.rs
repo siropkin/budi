@@ -97,6 +97,10 @@ impl DaemonState {
     pub async fn index(&self, request: IndexRequest, config: &BudiConfig) -> Result<IndexResponse> {
         let repo_root = Path::new(&request.repo_root);
         self.start_progress(&request.repo_root, request.hard);
+        let build_options = index::IndexBuildOptions {
+            include_extensions: request.include_extensions.clone(),
+            ignore_patterns: request.ignore_patterns.clone(),
+        };
         let state_for_progress = self.clone();
         let repo_for_progress = request.repo_root.clone();
         let hard = request.hard;
@@ -108,6 +112,7 @@ impl DaemonState {
             config,
             request.hard,
             None,
+            Some(&build_options),
             Some(&mut progress_cb),
         ) {
             Ok(workspace) => workspace,
@@ -261,7 +266,7 @@ impl DaemonState {
         let state = if let Some(state) = index::load_state(repo_root)? {
             state
         } else {
-            let workspace = index::build_or_update(repo_root, config, false, None, None)?;
+            let workspace = index::build_or_update(repo_root, config, false, None, None, None)?;
             workspace.state
         };
         let runtime = Arc::new(Mutex::new(RuntimeIndex::from_state(repo_root, state)?));
@@ -553,9 +558,9 @@ impl DaemonState {
             }
 
             let workspace = match if reconcile_requested {
-                index::build_or_update(repo_root, &config, false, None, None)
+                index::build_or_update(repo_root, &config, false, None, None, None)
             } else {
-                index::build_or_update(repo_root, &config, false, Some(&changed_files), None)
+                index::build_or_update(repo_root, &config, false, Some(&changed_files), None, None)
             } {
                 Ok(workspace) => workspace,
                 Err(err) => {

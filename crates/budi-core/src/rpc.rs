@@ -77,6 +77,10 @@ pub struct IndexRequest {
     pub repo_root: String,
     #[serde(default)]
     pub hard: bool,
+    #[serde(default)]
+    pub include_extensions: Vec<String>,
+    #[serde(default)]
+    pub ignore_patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -133,6 +133,7 @@ Result: Claude starts with relevant files/functions already in context, so it ca
 budi init              # install/update hooks in current repo
 budi index             # incremental re-index
 budi index --hard      # full rebuild
+budi index --ignore-pattern "scratch/**" --include-ext proto # one-shot index-scope overrides
 budi index --hard --progress # full rebuild + live per-file progress + phase
 budi repo status       # daemon/index/hooks health
 budi repo stats        # local index stats (SQLite catalog + Tantivy)
@@ -156,7 +157,7 @@ budi observe disable   # stop usage logging
 "retrieve useful repo context first, then let Claude generate the answer."
 
 How indexing works:
-1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore`, global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`).
+1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore`, root `*.ignore` files (for example `.cursorignore`/`.codeiumignore`/`.contextignore`), global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`) plus optional one-shot CLI overrides (`--ignore-pattern`, `--include-ext`).
 2. It splits indexed files into small chunks (so it can retrieve precise snippets, not whole files).
 3. It builds a local search index for those chunks:
    - keyword/symbol/path search (fast exact matching)

@@ -80,6 +80,10 @@ enum Commands {
         hard: bool,
         #[arg(long, default_value_t = false)]
         progress: bool,
+        #[arg(long = "ignore-pattern", action = ArgAction::Append)]
+        ignore_patterns: Vec<String>,
+        #[arg(long = "include-ext", action = ArgAction::Append)]
+        include_extensions: Vec<String>,
     },
     Doctor {
         #[arg(long)]
@@ -285,7 +289,15 @@ fn main() -> Result<()> {
             repo_root,
             hard,
             progress,
-        } => cmd_index(repo_root, hard, progress),
+            ignore_patterns,
+            include_extensions,
+        } => cmd_index(
+            repo_root,
+            hard,
+            progress,
+            &ignore_patterns,
+            &include_extensions,
+        ),
         Commands::Doctor { repo_root, deep } => cmd_doctor(repo_root, deep),
         Commands::Bench {
             repo_root,
@@ -374,17 +386,31 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_index(repo_root: Option<PathBuf>, hard: bool, progress: bool) -> Result<()> {
+fn cmd_index(
+    repo_root: Option<PathBuf>,
+    hard: bool,
+    progress: bool,
+    ignore_patterns: &[String],
+    include_extensions: &[String],
+) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
     let response = if progress {
-        run_index_with_progress(&repo_root, &config, hard)?
+        run_index_with_progress(
+            &repo_root,
+            &config,
+            hard,
+            ignore_patterns,
+            include_extensions,
+        )?
     } else {
         send_index_request(
             &config.daemon_base_url(),
             &repo_root.display().to_string(),
             hard,
+            ignore_patterns,
+            include_extensions,
         )?
     };
     println!(
@@ -3092,6 +3118,8 @@ fn run_index_with_progress(
     repo_root: &Path,
     config: &BudiConfig,
     hard: bool,
+    ignore_patterns: &[String],
+    include_extensions: &[String],
 ) -> Result<IndexResponse> {
     let base_url = config.daemon_base_url();
     let repo_root_str = repo_root.display().to_string();
@@ -3099,8 +3127,16 @@ fn run_index_with_progress(
     thread::spawn({
         let base_url = base_url.clone();
         let repo_root_str = repo_root_str.clone();
+        let ignore_patterns = ignore_patterns.to_vec();
+        let include_extensions = include_extensions.to_vec();
         move || {
-            let result = send_index_request(&base_url, &repo_root_str, hard);
+            let result = send_index_request(
+                &base_url,
+                &repo_root_str,
+                hard,
+                &ignore_patterns,
+                &include_extensions,
+            );
             let _ = tx.send(result);
         }
     });
@@ -3156,7 +3192,13 @@ fn render_progress_to_stderr(line: &str, previous_line_len: &mut usize) {
     *previous_line_len = line_len;
 }
 
-fn send_index_request(base_url: &str, repo_root: &str, hard: bool) -> Result<IndexResponse> {
+fn send_index_request(
+    base_url: &str,
+    repo_root: &str,
+    hard: bool,
+    ignore_patterns: &[String],
+    include_extensions: &[String],
+) -> Result<IndexResponse> {
     let client = daemon_client_with_timeout(Duration::from_secs(INDEX_TIMEOUT_SECS));
     let url = format!("{base_url}/index");
     let response: IndexResponse = client
@@ -3164,6 +3206,8 @@ fn send_index_request(base_url: &str, repo_root: &str, hard: bool) -> Result<Ind
         .json(&IndexRequest {
             repo_root: repo_root.to_string(),
             hard,
+            include_extensions: include_extensions.to_vec(),
+            ignore_patterns: ignore_patterns.to_vec(),
         })
         .send()
         .context("Failed sending index request")?
