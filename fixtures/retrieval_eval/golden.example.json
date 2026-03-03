@@ -1,0 +1,14 @@
+[
+  {
+    "query": "Where is query intent analysis implemented?",
+    "expected_paths": ["crates/budi-core/src/retrieval.rs"]
+  },
+  {
+    "query": "Where are import alias extraction rules defined?",
+    "expected_paths": ["crates/budi-core/src/index.rs"]
+  },
+  {
+    "query": "Where are prompt directives like @nobudi parsed?",
+    "expected_paths": ["crates/budi-cli/src/prompt_controls.rs"]
+  }
+]

@@ -23,6 +23,16 @@ For end-to-end evaluations against native Claude Code behavior:
 2. Compare token usage via `/cost` before and after.
 3. Measure context hit-rate for files changed within the last 15 minutes.
 
+## Retrieval quality regression checks
+
+Use fixture-driven retrieval evaluation to track ranking quality over time:
+
+```bash
+budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8
+```
+
+This reports `hit@1`, `hit@3`, `hit@5`, and `MRR` from expected-path fixtures.
+
 ## Debug logging during A/B runs
 
 The A/B runner temporarily enables:

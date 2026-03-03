@@ -139,6 +139,7 @@ budi repo stats        # local index stats (SQLite catalog + Tantivy)
 budi repo preview "<prompt>" # see context that would be injected
 budi repo search "<query>"   # run retrieval and list top matching snippets
 budi bench --prompt "<prompt>" --iterations 30 # retrieval latency/context benchmark
+budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8
 budi ignore <pattern>  # append pattern to repo-local .budiignore
 budi doctor --deep     # extended consistency/route/retrieval diagnostics
 budi observe enable    # start metadata-only local usage logging
@@ -204,6 +205,8 @@ debug_io_max_chars = 1200
 - `debug_io_max_chars`: max chars in excerpt mode (`0` = metadata-only, no text excerpts)
 
 `budi repo preview` now prints retrieval diagnostics (intent, confidence, recommended injection).
+
+`budi eval retrieval` runs an offline retrieval-quality check against JSON fixtures and reports `hit@1`, `hit@3`, `hit@5`, and `MRR`. If `--fixtures` is omitted, it reads `./.budi/eval/retrieval.json` in the repo root.
 
 ## Observe real usage (day/week)
 
