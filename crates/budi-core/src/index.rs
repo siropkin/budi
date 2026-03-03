@@ -23,6 +23,10 @@ use tracing::{info, warn};
 
 use crate::chunking::chunk_text;
 use crate::config::{self, BudiConfig};
+use crate::index_scope::{
+    build_basename_allowlist, build_extension_allowlist, is_always_skipped_dir_name,
+    is_supported_code_file,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
@@ -2962,81 +2966,6 @@ fn has_always_skipped_component(relative_path: &str, is_dir: bool) -> bool {
     parts.into_iter().any(is_always_skipped_dir_name)
 }
 
-fn build_extension_allowlist(config: &BudiConfig) -> HashSet<String> {
-    let source = if config.index_extensions.is_empty() {
-        BudiConfig::default().index_extensions
-    } else {
-        config.index_extensions.clone()
-    };
-    source
-        .iter()
-        .filter_map(|ext| {
-            let normalized = ext.trim().trim_start_matches('.').to_ascii_lowercase();
-            if normalized.is_empty() {
-                None
-            } else {
-                Some(normalized)
-            }
-        })
-        .collect()
-}
-
-fn build_basename_allowlist(config: &BudiConfig) -> HashSet<String> {
-    let source = if config.index_basenames.is_empty() {
-        BudiConfig::default().index_basenames
-    } else {
-        config.index_basenames.clone()
-    };
-    source
-        .iter()
-        .filter_map(|name| {
-            let normalized = name.trim().to_ascii_lowercase();
-            if normalized.is_empty() {
-                None
-            } else {
-                Some(normalized)
-            }
-        })
-        .collect()
-}
-
-fn is_always_skipped_dir_name(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | ".next"
-            | ".nuxt"
-            | ".venv"
-            | "venv"
-            | "__pycache__"
-            | ".pytest_cache"
-            | "coverage"
-            | ".turbo"
-            | ".cache"
-            | "vendor"
-    )
-}
-
-fn is_supported_code_file(
-    path: &Path,
-    extension_allowlist: &HashSet<String>,
-    basename_allowlist: &HashSet<String>,
-) -> bool {
-    if let Some(ext) = path.extension().and_then(|value| value.to_str())
-        && extension_allowlist.contains(&ext.to_ascii_lowercase())
-    {
-        return true;
-    }
-    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    basename_allowlist.contains(&file_name.to_ascii_lowercase())
-}
-
 fn hash_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("Failed reading {}", path.display()))?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
@@ -3486,6 +3415,10 @@ pub fn embed_query(repo_root: &Path, query: &str) -> Result<Option<Vec<f32>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index_scope::{
+        build_basename_allowlist, build_extension_allowlist, is_always_skipped_dir_name,
+        is_supported_code_file,
+    };
 
     #[test]
     fn symbol_family_match_supports_pluralized_prefixes() {
