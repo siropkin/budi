@@ -49,3 +49,4 @@
 - Re-index computes changed hashes and re-embeds only changed files unless a reconcile pass is requested.
 - HNSW graph is rebuilt in-memory from current chunk set.
 - `/status` and `budi doctor --deep` expose watcher health counters (`watch_events_seen`, `watch_events_accepted`, `watch_events_dropped`).
+- Incremental updates short-circuit no-op batches (unsupported/ignored/unchanged hints) and surface `updates_noop` / `updates_applied` counters.

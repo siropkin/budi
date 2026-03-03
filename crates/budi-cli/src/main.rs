@@ -453,6 +453,8 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     println!("invalid embeddings: {}", response.invalid_embeddings);
     println!("update retries: {}", response.update_retries);
     println!("update failures: {}", response.update_failures);
+    println!("updates noop: {}", response.updates_noop);
+    println!("updates applied: {}", response.updates_applied);
     println!("watch events seen: {}", response.watch_events_seen);
     println!("watch events accepted: {}", response.watch_events_accepted);
     println!("watch events dropped: {}", response.watch_events_dropped);
@@ -1509,7 +1511,7 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
         Ok(status) => {
             println!(
-                "route /status: ok (tracked_files={} indexed_chunks={} embedded_chunks={} missing_embeddings={} invalid_embeddings={} update_retries={} update_failures={} watch_events_seen={} watch_events_accepted={} watch_events_dropped={} index_state={} index_job_state={} index_terminal_outcome={})",
+                "route /status: ok (tracked_files={} indexed_chunks={} embedded_chunks={} missing_embeddings={} invalid_embeddings={} update_retries={} update_failures={} updates_noop={} updates_applied={} watch_events_seen={} watch_events_accepted={} watch_events_dropped={} index_state={} index_job_state={} index_terminal_outcome={})",
                 status.tracked_files,
                 status.indexed_chunks,
                 status.embedded_chunks,
@@ -1517,6 +1519,8 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
                 status.invalid_embeddings,
                 status.update_retries,
                 status.update_failures,
+                status.updates_noop,
+                status.updates_applied,
                 status.watch_events_seen,
                 status.watch_events_accepted,
                 status.watch_events_dropped,
@@ -1633,6 +1637,12 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
         }
         if status.update_failures > 0 {
             drift_notes.push(format!("status_update_failures={}", status.update_failures));
+        }
+        if status.updates_noop > 0 {
+            drift_notes.push(format!("status_updates_noop={}", status.updates_noop));
+        }
+        if status.updates_applied > 0 {
+            drift_notes.push(format!("status_updates_applied={}", status.updates_applied));
         }
         if status
             .watch_events_accepted

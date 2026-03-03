@@ -120,6 +120,8 @@ struct IndexProgressSnapshot {
 struct UpdateRetryMetrics {
     retries: u64,
     failures: u64,
+    updates_noop: u64,
+    updates_applied: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -356,6 +358,8 @@ impl DaemonState {
             hooks_detected,
             update_retries: update_metrics.retries,
             update_failures: update_metrics.failures,
+            updates_noop: update_metrics.updates_noop,
+            updates_applied: update_metrics.updates_applied,
             index_state: progress_snapshot.state.as_str().to_string(),
             index_job_id: progress_snapshot.job_id,
             index_job_state: progress_snapshot.job_state.as_str().to_string(),
@@ -571,6 +575,24 @@ impl DaemonState {
         let mut guard = self.update_metrics_guard();
         let entry = guard.entry(repo_key.to_string()).or_default();
         entry.failures = entry.failures.saturating_add(count);
+    }
+
+    fn bump_updates_noop(&self, repo_key: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut guard = self.update_metrics_guard();
+        let entry = guard.entry(repo_key.to_string()).or_default();
+        entry.updates_noop = entry.updates_noop.saturating_add(count);
+    }
+
+    fn bump_updates_applied(&self, repo_key: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut guard = self.update_metrics_guard();
+        let entry = guard.entry(repo_key.to_string()).or_default();
+        entry.updates_applied = entry.updates_applied.saturating_add(count);
     }
 
     fn update_retry_metrics(&self, repo_key: &str) -> UpdateRetryMetrics {
@@ -934,6 +956,29 @@ impl DaemonState {
             if changed_files.is_empty() && !reconcile_requested {
                 break;
             }
+            let scoped_changed_files = if reconcile_requested {
+                changed_files.clone()
+            } else {
+                match index::compile_index_scope(repo_root, &config, None) {
+                    Ok(scope) => changed_files
+                        .iter()
+                        .filter(|path| scope.allows_relative_file_path(path))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed compiling update scope for {}: {:#}; applying updates without watcher-side filtering",
+                            repo_key,
+                            err
+                        );
+                        changed_files.clone()
+                    }
+                }
+            };
+            if scoped_changed_files.is_empty() && !reconcile_requested {
+                self.bump_updates_noop(&repo_key, 1);
+                continue;
+            }
 
             let trigger = if reconcile_requested {
                 "reconcile"
@@ -959,7 +1004,7 @@ impl DaemonState {
                         repo_root,
                         repo_key: &repo_key,
                         hard: false,
-                        changed_hint: Some(&changed_files),
+                        changed_hint: Some(&scoped_changed_files),
                         options: None,
                         trigger,
                     },
@@ -973,18 +1018,22 @@ impl DaemonState {
                         "Background update failed for {} (trigger={} files={}): {:#}",
                         repo_key,
                         trigger,
-                        changed_files.len(),
+                        scoped_changed_files.len(),
                         err
                     );
                     continue;
                 }
             };
+            if workspace.report.changed_files == 0 {
+                self.bump_updates_noop(&repo_key, 1);
+                continue;
+            }
             if workspace.report.limit_reached {
                 tracing::warn!(
                     "Background update hit index budget limits for {} (trigger={} files={})",
                     repo_key,
                     trigger,
-                    changed_files.len()
+                    scoped_changed_files.len()
                 );
             }
             let runtime = match RuntimeIndex::from_state(repo_root, workspace.state) {
@@ -1002,6 +1051,7 @@ impl DaemonState {
                 .write()
                 .await
                 .insert(repo_key.clone(), Arc::new(Mutex::new(runtime)));
+            self.bump_updates_applied(&repo_key, 1);
         }
     }
 }

@@ -168,6 +168,10 @@ pub struct StatusResponse {
     #[serde(default)]
     pub update_failures: u64,
     #[serde(default)]
+    pub updates_noop: u64,
+    #[serde(default)]
+    pub updates_applied: u64,
+    #[serde(default)]
     pub index_state: String,
     #[serde(default)]
     pub index_job_id: Option<String>,

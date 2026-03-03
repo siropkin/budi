@@ -676,41 +676,56 @@ pub fn build_or_update(
         chunks,
         updated_at_ts: Utc::now().timestamp(),
     };
-    emit_progress(
-        &mut progress_cb,
-        IndexBuildProgress {
-            phase: "saving-state".to_string(),
-            total_files: total_files_to_process,
-            processed_files,
-            changed_files,
-            current_file: None,
-            done: false,
-        },
-    );
-    if hard {
-        save_state(repo_root, &state, None)?;
-    } else {
-        save_state(repo_root, &state, Some(&changed_set))?;
-    }
-    emit_progress(
-        &mut progress_cb,
-        IndexBuildProgress {
-            phase: if hard {
-                "rebuilding-lexical-index".to_string()
-            } else {
-                "updating-lexical-index".to_string()
+    let incremental_noop = !hard && changed_files == 0;
+    if incremental_noop {
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "noop-skip-write".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
             },
-            total_files: total_files_to_process,
-            processed_files,
-            changed_files,
-            current_file: None,
-            done: false,
-        },
-    );
-    if hard {
-        TantivyBundle::rebuild(repo_root, &state.chunks)?;
+        );
     } else {
-        TantivyBundle::apply_delta(repo_root, &state.chunks, &changed_set)?;
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "saving-state".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+        if hard {
+            save_state(repo_root, &state, None)?;
+        } else {
+            save_state(repo_root, &state, Some(&changed_set))?;
+        }
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: if hard {
+                    "rebuilding-lexical-index".to_string()
+                } else {
+                    "updating-lexical-index".to_string()
+                },
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+        if hard {
+            TantivyBundle::rebuild(repo_root, &state.chunks)?;
+        } else {
+            TantivyBundle::apply_delta(repo_root, &state.chunks, &changed_set)?;
+        }
     }
 
     let report = IndexBuildReport {
