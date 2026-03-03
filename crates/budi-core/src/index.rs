@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -9,6 +10,7 @@ use chrono::Utc;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use hnsw_rs::prelude::*;
 use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
@@ -1330,10 +1332,14 @@ fn build_current_files_from_metadata_delta(
     previous_files_by_path: &HashMap<String, FileRecord>,
     hinted_paths: &HashSet<String>,
 ) -> Result<(Vec<FileRecord>, HashMap<String, String>)> {
+    let extension_allowlist = build_extension_allowlist(config);
     let mut files_by_path = previous_files_by_path.clone();
     for relative in hinted_paths {
         let absolute = repo_root.join(relative);
-        if !absolute.exists() || !absolute.is_file() || !is_supported_code_file(&absolute) {
+        if !absolute.exists()
+            || !absolute.is_file()
+            || !is_supported_code_file(&absolute, &extension_allowlist)
+        {
             files_by_path.remove(relative);
             continue;
         }
@@ -2501,7 +2507,23 @@ fn is_doc_like_path(path: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
+struct RepoIgnoreRules {
+    excludes: Gitignore,
+    unignores: Gitignore,
+}
+
 fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<PathBuf>> {
+    let extension_allowlist = build_extension_allowlist(config);
+    let ignore_rules = load_repo_ignore_rules(repo_root)?;
+
+    if config.use_git_file_discovery
+        && let Some(files) =
+            discover_source_files_from_git(repo_root, config, &extension_allowlist, &ignore_rules)?
+    {
+        return Ok(files);
+    }
+
     let mut files = Vec::new();
     let mut builder = WalkBuilder::new(repo_root);
     builder
@@ -2509,22 +2531,21 @@ fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<Pa
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true);
-    builder.filter_entry(|entry| {
+    let filter_root = repo_root.to_path_buf();
+    let filter_rules = ignore_rules.clone();
+    builder.filter_entry(move |entry| {
         let Some(file_type) = entry.file_type() else {
             return true;
         };
         if !file_type.is_dir() {
             return true;
         }
-        let Some(name) = entry.path().file_name().and_then(|value| value.to_str()) else {
+        let relative = relative_repo_path(entry.path(), &filter_root);
+        if relative.is_empty() {
             return true;
-        };
-        !is_always_skipped_dir_name(name)
+        }
+        !should_skip_index_path(&relative, true, &filter_rules)
     });
-    let local_ignore = config::ignore_path(repo_root)?;
-    if local_ignore.exists() {
-        builder.add_ignore(local_ignore);
-    }
 
     for entry in builder.build() {
         let entry = match entry {
@@ -2535,7 +2556,11 @@ fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<Pa
         if !path.is_file() {
             continue;
         }
-        if !is_supported_code_file(path) {
+        let relative = relative_repo_path(path, repo_root);
+        if relative.is_empty() || should_skip_index_path(&relative, false, &ignore_rules) {
+            continue;
+        }
+        if !is_supported_code_file(path, &extension_allowlist) {
             continue;
         }
         let metadata = match fs::metadata(path) {
@@ -2547,7 +2572,174 @@ fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<Pa
         }
         files.push(path.to_path_buf());
     }
+    files.sort();
+    files.dedup();
     Ok(files)
+}
+
+fn discover_source_files_from_git(
+    repo_root: &Path,
+    config: &BudiConfig,
+    extension_allowlist: &HashSet<String>,
+    ignore_rules: &RepoIgnoreRules,
+) -> Result<Option<Vec<PathBuf>>> {
+    let output = match Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Ok(None),
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let mut files = Vec::new();
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let relative = String::from_utf8_lossy(raw).replace('\\', "/");
+        if relative.is_empty() || should_skip_index_path(&relative, false, ignore_rules) {
+            continue;
+        }
+        let absolute = repo_root.join(&relative);
+        if !absolute.exists() || !absolute.is_file() {
+            continue;
+        }
+        if !is_supported_code_file(&absolute, extension_allowlist) {
+            continue;
+        }
+        let metadata = match fs::metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() as usize > config.max_file_bytes {
+            continue;
+        }
+        files.push(absolute);
+    }
+    files.sort();
+    files.dedup();
+    Ok(Some(files))
+}
+
+fn load_repo_ignore_rules(repo_root: &Path) -> Result<RepoIgnoreRules> {
+    let ignore_path = config::ignore_path(repo_root)?;
+    if !ignore_path.exists() {
+        return Ok(RepoIgnoreRules {
+            excludes: build_gitignore_matcher(repo_root, &[])?,
+            unignores: build_gitignore_matcher(repo_root, &[])?,
+        });
+    }
+
+    let raw = fs::read_to_string(&ignore_path)
+        .with_context(|| format!("Failed reading {}", ignore_path.display()))?;
+    let mut excludes = Vec::new();
+    let mut unignores = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(unignore) = trimmed.strip_prefix('!') {
+            let pattern = unignore.trim();
+            if !pattern.is_empty() {
+                unignores.push(pattern.to_string());
+            }
+        } else {
+            excludes.push(trimmed.to_string());
+        }
+    }
+
+    Ok(RepoIgnoreRules {
+        excludes: build_gitignore_matcher(repo_root, &excludes)?,
+        unignores: build_gitignore_matcher(repo_root, &unignores)?,
+    })
+}
+
+fn build_gitignore_matcher(repo_root: &Path, patterns: &[String]) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new(repo_root);
+    for pattern in patterns {
+        builder
+            .add_line(None, pattern)
+            .with_context(|| format!("Invalid ignore pattern `{pattern}`"))?;
+    }
+    builder
+        .build()
+        .with_context(|| "Failed to build ignore matcher")
+}
+
+fn relative_repo_path(path: &Path, repo_root: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .ok()
+        .and_then(|relative| relative.to_str())
+        .unwrap_or_default()
+        .replace('\\', "/")
+}
+
+fn should_skip_index_path(
+    relative_path: &str,
+    is_dir: bool,
+    ignore_rules: &RepoIgnoreRules,
+) -> bool {
+    let normalized = relative_path.trim_start_matches("./");
+    if normalized.is_empty() {
+        return false;
+    }
+    let path = Path::new(normalized);
+    if ignore_rules
+        .excludes
+        .matched_path_or_any_parents(path, is_dir)
+        .is_ignore()
+    {
+        return true;
+    }
+    if ignore_rules
+        .unignores
+        .matched_path_or_any_parents(path, is_dir)
+        .is_ignore()
+    {
+        return false;
+    }
+    has_always_skipped_component(normalized, is_dir)
+}
+
+fn has_always_skipped_component(relative_path: &str, is_dir: bool) -> bool {
+    let mut parts = relative_path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if !is_dir {
+        parts.pop();
+    }
+    parts.into_iter().any(is_always_skipped_dir_name)
+}
+
+fn build_extension_allowlist(config: &BudiConfig) -> HashSet<String> {
+    let source = if config.index_extensions.is_empty() {
+        BudiConfig::default().index_extensions
+    } else {
+        config.index_extensions.clone()
+    };
+    source
+        .iter()
+        .filter_map(|ext| {
+            let normalized = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect()
 }
 
 fn is_always_skipped_dir_name(name: &str) -> bool {
@@ -2571,41 +2763,11 @@ fn is_always_skipped_dir_name(name: &str) -> bool {
     )
 }
 
-fn is_supported_code_file(path: &Path) -> bool {
+fn is_supported_code_file(path: &Path, extension_allowlist: &HashSet<String>) -> bool {
     let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
         return false;
     };
-    matches!(
-        ext,
-        "rs" | "ts"
-            | "tsx"
-            | "js"
-            | "jsx"
-            | "py"
-            | "go"
-            | "java"
-            | "kt"
-            | "swift"
-            | "cpp"
-            | "cc"
-            | "cxx"
-            | "c"
-            | "h"
-            | "hpp"
-            | "cs"
-            | "rb"
-            | "php"
-            | "scala"
-            | "sql"
-            | "sh"
-            | "yaml"
-            | "yml"
-            | "toml"
-            | "md"
-            | "graphql"
-            | "proto"
-            | "tf"
-    )
+    extension_allowlist.contains(&ext.to_ascii_lowercase())
 }
 
 fn hash_file(path: &Path) -> Result<String> {
@@ -3329,5 +3491,38 @@ mod tests {
         assert!(is_always_skipped_dir_name("target"));
         assert!(is_always_skipped_dir_name(".venv"));
         assert!(!is_always_skipped_dir_name("src"));
+    }
+
+    #[test]
+    fn unignore_rules_can_reinclude_builtin_skipped_dirs() {
+        let rules = RepoIgnoreRules {
+            excludes: build_gitignore_matcher(Path::new("."), &[]).expect("empty excludes"),
+            unignores: build_gitignore_matcher(Path::new("."), &["vendor".to_string()])
+                .expect("unignore matcher"),
+        };
+        assert!(!should_skip_index_path("vendor/lib.rs", false, &rules));
+    }
+
+    #[test]
+    fn exclude_rules_take_precedence_over_unignore_rules() {
+        let rules = RepoIgnoreRules {
+            excludes: build_gitignore_matcher(Path::new("."), &["vendor".to_string()])
+                .expect("exclude matcher"),
+            unignores: build_gitignore_matcher(Path::new("."), &["vendor".to_string()])
+                .expect("unignore matcher"),
+        };
+        assert!(should_skip_index_path("vendor/lib.rs", false, &rules));
+    }
+
+    #[test]
+    fn extension_allowlist_normalizes_configured_values() {
+        let config = BudiConfig {
+            index_extensions: vec![".RS".to_string(), " tsx ".to_string(), "".to_string()],
+            ..BudiConfig::default()
+        };
+        let allowlist = build_extension_allowlist(&config);
+        assert!(allowlist.contains("rs"));
+        assert!(allowlist.contains("tsx"));
+        assert!(!allowlist.contains(".rs"));
     }
 }

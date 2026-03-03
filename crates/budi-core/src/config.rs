@@ -10,7 +10,7 @@ pub const BUDI_HOME_ENV: &str = "BUDI_HOME";
 pub const BUDI_HOME_DEFAULT_REL: &str = ".local/share/budi";
 pub const BUDI_REPOS_DIR: &str = "repos";
 pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
-pub const BUDI_IGNORE_FILE_NAME: &str = "ignore";
+pub const BUDI_IGNORE_FILE_NAME: &str = ".budiignore";
 pub const BUDI_INDEX_DIR_NAME: &str = "index";
 pub const BUDI_INDEX_DB_FILE_NAME: &str = "index.sqlite";
 pub const BUDI_TANTIVY_DIR_NAME: &str = "tantivy";
@@ -34,6 +34,8 @@ pub struct BudiConfig {
     pub retrieval_limit: usize,
     pub context_char_budget: usize,
     pub max_file_bytes: usize,
+    pub use_git_file_discovery: bool,
+    pub index_extensions: Vec<String>,
     pub max_index_files: usize,
     pub max_index_chunks: usize,
     pub chunk_lines: usize,
@@ -56,6 +58,8 @@ impl Default for BudiConfig {
             retrieval_limit: DEFAULT_RETRIEVAL_LIMIT,
             context_char_budget: DEFAULT_CONTEXT_CHAR_BUDGET,
             max_file_bytes: 1_500_000,
+            use_git_file_discovery: true,
+            index_extensions: default_index_extensions(),
             max_index_files: 20_000,
             max_index_chunks: 250_000,
             chunk_lines: 80,
@@ -70,6 +74,40 @@ impl Default for BudiConfig {
             debug_io_max_chars: 1200,
         }
     }
+}
+
+fn default_index_extensions() -> Vec<String> {
+    vec![
+        "rs".to_string(),
+        "ts".to_string(),
+        "tsx".to_string(),
+        "js".to_string(),
+        "jsx".to_string(),
+        "py".to_string(),
+        "go".to_string(),
+        "java".to_string(),
+        "kt".to_string(),
+        "swift".to_string(),
+        "cpp".to_string(),
+        "cc".to_string(),
+        "cxx".to_string(),
+        "c".to_string(),
+        "h".to_string(),
+        "hpp".to_string(),
+        "cs".to_string(),
+        "rb".to_string(),
+        "php".to_string(),
+        "scala".to_string(),
+        "sql".to_string(),
+        "sh".to_string(),
+        "yaml".to_string(),
+        "yml".to_string(),
+        "toml".to_string(),
+        "md".to_string(),
+        "graphql".to_string(),
+        "proto".to_string(),
+        "tf".to_string(),
+    ]
 }
 
 impl BudiConfig {
@@ -121,7 +159,7 @@ pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
     let bench_dir = data_dir.join(BUDI_BENCH_DIR_NAME);
     Ok(RepoPaths {
         config_file: data_dir.join(BUDI_CONFIG_FILE_NAME),
-        ignore_file: data_dir.join(BUDI_IGNORE_FILE_NAME),
+        ignore_file: repo_root.join(BUDI_IGNORE_FILE_NAME),
         index_db_file: index_dir.join(BUDI_INDEX_DB_FILE_NAME),
         data_dir,
         index_dir,
@@ -183,7 +221,7 @@ pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
     if !paths.ignore_file.exists() {
         fs::write(
             &paths.ignore_file,
-            "# Additional ignore patterns for budi (one glob per line)\n",
+            "# budi index exclusions (gitignore-style)\n# Prefix with ! to unignore an included path\n",
         )
         .with_context(|| format!("Failed writing {}", paths.ignore_file.display()))?;
     }
