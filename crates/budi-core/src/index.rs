@@ -16,7 +16,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{
     FAST, INDEXED, STORED, STRING, Schema, SchemaBuilder, TextFieldIndexing, TextOptions, Value,
 };
-use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, doc};
+use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term, doc};
 use tracing::{info, warn};
 
 use crate::chunking::chunk_text;
@@ -463,11 +463,19 @@ pub fn build_or_update(
             done: false,
         },
     );
-    save_state(repo_root, &state)?;
+    if hard {
+        save_state(repo_root, &state, None)?;
+    } else {
+        save_state(repo_root, &state, Some(&changed_set))?;
+    }
     emit_progress(
         &mut progress_cb,
         IndexBuildProgress {
-            phase: "rebuilding-lexical-index".to_string(),
+            phase: if hard {
+                "rebuilding-lexical-index".to_string()
+            } else {
+                "updating-lexical-index".to_string()
+            },
             total_files: total_files_to_process,
             processed_files,
             changed_files,
@@ -475,7 +483,11 @@ pub fn build_or_update(
             done: false,
         },
     );
-    TantivyBundle::rebuild(repo_root, &state.chunks)?;
+    if hard {
+        TantivyBundle::rebuild(repo_root, &state.chunks)?;
+    } else {
+        TantivyBundle::apply_delta(repo_root, &state.chunks, &changed_set)?;
+    }
 
     let report = IndexBuildReport {
         indexed_files: state.files.len(),
@@ -580,7 +592,11 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
     }))
 }
 
-pub fn save_state(repo_root: &Path, state: &RepoIndexState) -> Result<()> {
+pub fn save_state(
+    repo_root: &Path,
+    state: &RepoIndexState,
+    delta_paths: Option<&HashSet<String>>,
+) -> Result<()> {
     let path = config::index_db_path(repo_root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -590,63 +606,128 @@ pub fn save_state(repo_root: &Path, state: &RepoIndexState) -> Result<()> {
     let mut conn = open_index_db(repo_root)?;
     ensure_index_db_schema(&conn)?;
     let tx = conn.transaction()?;
+    upsert_meta_value(&tx, "repo_root", &state.repo_root)?;
+    upsert_meta_value(&tx, "branch", &state.branch)?;
+    upsert_meta_value(&tx, "head", &state.head)?;
+    upsert_meta_value(&tx, "updated_at_ts", &state.updated_at_ts.to_string())?;
 
-    tx.execute("DELETE FROM meta", [])?;
-    tx.execute("DELETE FROM files", [])?;
-    tx.execute("DELETE FROM chunks", [])?;
+    if let Some(delta_paths) = delta_paths {
+        if !delta_paths.is_empty() {
+            let mut sorted_paths = delta_paths.iter().cloned().collect::<Vec<_>>();
+            sorted_paths.sort();
 
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
-        params!["repo_root", &state.repo_root],
-    )?;
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
-        params!["branch", &state.branch],
-    )?;
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
-        params!["head", &state.head],
-    )?;
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES (?1, ?2)",
-        params!["updated_at_ts", state.updated_at_ts.to_string()],
-    )?;
+            {
+                let mut delete_files = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+                let mut delete_chunks = tx.prepare("DELETE FROM chunks WHERE path = ?1")?;
+                for path in &sorted_paths {
+                    delete_files.execute(params![path])?;
+                    delete_chunks.execute(params![path])?;
+                }
+            }
 
-    {
-        let mut file_stmt = tx.prepare(
-            "INSERT INTO files(path, hash, size_bytes, modified_unix_ms)
-             VALUES (?1, ?2, ?3, ?4)",
-        )?;
-        for file in &state.files {
-            file_stmt.execute(params![
-                &file.path,
-                &file.hash,
-                i64::try_from(file.size_bytes).unwrap_or(i64::MAX),
-                i64::try_from(file.modified_unix_ms).unwrap_or(i64::MAX),
-            ])?;
+            {
+                let mut file_stmt = tx.prepare(
+                    "INSERT INTO files(path, hash, size_bytes, modified_unix_ms)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(path) DO UPDATE SET
+                       hash = excluded.hash,
+                       size_bytes = excluded.size_bytes,
+                       modified_unix_ms = excluded.modified_unix_ms",
+                )?;
+                for file in state
+                    .files
+                    .iter()
+                    .filter(|file| delta_paths.contains(&file.path))
+                {
+                    file_stmt.execute(params![
+                        &file.path,
+                        &file.hash,
+                        i64::try_from(file.size_bytes).unwrap_or(i64::MAX),
+                        i64::try_from(file.modified_unix_ms).unwrap_or(i64::MAX),
+                    ])?;
+                }
+            }
+
+            {
+                let mut chunk_stmt = tx.prepare(
+                    "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(id) DO UPDATE SET
+                       path = excluded.path,
+                       start_line = excluded.start_line,
+                       end_line = excluded.end_line,
+                       symbol_hint = excluded.symbol_hint,
+                       text = excluded.text,
+                       embedding = excluded.embedding,
+                       updated_at_ts = excluded.updated_at_ts",
+                )?;
+                for chunk in state
+                    .chunks
+                    .iter()
+                    .filter(|chunk| delta_paths.contains(&chunk.path))
+                {
+                    chunk_stmt.execute(params![
+                        i64::try_from(chunk.id).unwrap_or(i64::MAX),
+                        &chunk.path,
+                        i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
+                        i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
+                        chunk.symbol_hint.as_deref(),
+                        &chunk.text,
+                        encode_embedding(&chunk.embedding),
+                        chunk.updated_at_ts,
+                    ])?;
+                }
+            }
         }
-    }
+    } else {
+        tx.execute("DELETE FROM files", [])?;
+        tx.execute("DELETE FROM chunks", [])?;
 
-    {
-        let mut chunk_stmt = tx.prepare(
-            "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        )?;
-        for chunk in &state.chunks {
-            chunk_stmt.execute(params![
-                i64::try_from(chunk.id).unwrap_or(i64::MAX),
-                &chunk.path,
-                i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
-                i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
-                chunk.symbol_hint.as_deref(),
-                &chunk.text,
-                encode_embedding(&chunk.embedding),
-                chunk.updated_at_ts,
-            ])?;
+        {
+            let mut file_stmt = tx.prepare(
+                "INSERT INTO files(path, hash, size_bytes, modified_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for file in &state.files {
+                file_stmt.execute(params![
+                    &file.path,
+                    &file.hash,
+                    i64::try_from(file.size_bytes).unwrap_or(i64::MAX),
+                    i64::try_from(file.modified_unix_ms).unwrap_or(i64::MAX),
+                ])?;
+            }
+        }
+
+        {
+            let mut chunk_stmt = tx.prepare(
+                "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding, updated_at_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for chunk in &state.chunks {
+                chunk_stmt.execute(params![
+                    i64::try_from(chunk.id).unwrap_or(i64::MAX),
+                    &chunk.path,
+                    i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
+                    i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
+                    chunk.symbol_hint.as_deref(),
+                    &chunk.text,
+                    encode_embedding(&chunk.embedding),
+                    chunk.updated_at_ts,
+                ])?;
+            }
         }
     }
 
     tx.commit()?;
+    Ok(())
+}
+
+fn upsert_meta_value(tx: &rusqlite::Transaction<'_>, key: &str, value: &str) -> Result<()> {
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
     Ok(())
 }
 
@@ -2145,6 +2226,47 @@ impl TantivyBundle {
                 id_field => chunk.id,
                 path_field => chunk.path.clone(),
                 text_field => chunk.text.clone(),
+            ))?;
+        }
+        writer.commit()?;
+        Ok(())
+    }
+
+    fn apply_delta(
+        repo_root: &Path,
+        chunks: &[ChunkRecord],
+        changed_paths: &HashSet<String>,
+    ) -> Result<()> {
+        if changed_paths.is_empty() {
+            return Ok(());
+        }
+        let tantivy_dir = config::tantivy_path(repo_root)?;
+        if !tantivy_dir.exists() {
+            return Self::rebuild(repo_root, chunks);
+        }
+
+        let bundle = match Self::open_or_rebuild(repo_root, chunks) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                warn!(
+                    "Falling back to full tantivy rebuild after open failure: {:#}",
+                    err
+                );
+                return Self::rebuild(repo_root, chunks);
+            }
+        };
+        let mut writer = bundle.index.writer(50_000_000)?;
+        for path in changed_paths {
+            writer.delete_term(Term::from_field_text(bundle.path_field, path));
+        }
+        for chunk in chunks
+            .iter()
+            .filter(|chunk| changed_paths.contains(&chunk.path))
+        {
+            writer.add_document(doc!(
+                bundle.id_field => chunk.id,
+                bundle.path_field => chunk.path.clone(),
+                bundle.text_field => chunk.text.clone(),
             ))?;
         }
         writer.commit()?;
