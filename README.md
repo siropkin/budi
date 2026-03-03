@@ -173,7 +173,7 @@ How prompt-time retrieval works:
 2. `budi` searches the local index (keyword + semantic + symbol/path + import/call graph-lite signals).
 3. It ranks the best snippets and injects a small deterministic context block.
 4. Claude answers with better repo grounding and fewer "where is this defined?" steps.
-5. After file edits, `budi` updates the index in the background so results stay fresh.
+5. After file edits, `budi` updates the index in the background from hook hints and daemon file-watch events, plus a periodic reconcile pass to catch missed events.
 
 Why this works:
 - Search is fast because the heavy work (indexing) is precomputed.

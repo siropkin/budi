@@ -40,6 +40,8 @@
 
 ## Incremental updates
 
-- Async `PostToolUse` hook sends changed file path to daemon `/update`.
-- Re-index computes changed hashes and re-embeds only changed files.
+- Async `PostToolUse` hook sends changed file path hints to daemon `/update`.
+- Daemon also starts a repo file watcher after first repo request and batches FS change events with debounce.
+- A periodic reconcile signal triggers metadata-based re-scan to recover from missed watcher/hook events.
+- Re-index computes changed hashes and re-embeds only changed files unless a reconcile pass is requested.
 - HNSW graph is rebuilt in-memory from current chunk set.

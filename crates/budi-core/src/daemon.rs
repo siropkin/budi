@@ -21,6 +21,7 @@ pub struct DaemonState {
     load_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     update_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     queued_updates: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+    queued_reconciles: Arc<Mutex<HashSet<String>>>,
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
 }
 
@@ -101,34 +102,22 @@ impl DaemonState {
         config: &BudiConfig,
     ) -> Result<IndexResponse> {
         let repo_key = request.repo_root.clone();
+        let changed_count = request.changed_files.len();
         self.queue_update_paths(&repo_key, &request.changed_files)
             .await;
-
-        let update_lock = {
-            let mut locks = self.update_locks.lock().await;
-            locks
-                .entry(repo_key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-
-        if let Ok(update_guard) = update_lock.clone().try_lock_owned() {
-            let state = self.clone();
-            let repo_key_for_task = repo_key.clone();
-            let config_for_task = config.clone();
-            tokio::spawn(async move {
-                state
-                    .process_queued_updates(repo_key_for_task, config_for_task, update_guard)
-                    .await;
-            });
-        }
+        self.kick_update_processor(&repo_key, config).await;
 
         let (indexed_files, indexed_chunks) = self.runtime_counts(&repo_key).await;
         Ok(IndexResponse {
             indexed_files,
             indexed_chunks,
-            changed_files: request.changed_files.len(),
+            changed_files: changed_count,
         })
+    }
+
+    pub async fn request_reconcile(&self, repo_root: String, config: &BudiConfig) {
+        self.queue_reconcile_repo(&repo_root).await;
+        self.kick_update_processor(&repo_root, config).await;
     }
 
     pub async fn index_progress(
@@ -297,6 +286,11 @@ impl DaemonState {
         }
     }
 
+    async fn queue_reconcile_repo(&self, repo_key: &str) {
+        let mut queue = self.queued_reconciles.lock().await;
+        queue.insert(repo_key.to_string());
+    }
+
     async fn take_queued_update_paths(&self, repo_key: &str) -> Vec<String> {
         let mut queue = self.queued_updates.lock().await;
         let mut out = queue
@@ -306,6 +300,32 @@ impl DaemonState {
             .collect::<Vec<_>>();
         out.sort();
         out
+    }
+
+    async fn take_queued_reconcile(&self, repo_key: &str) -> bool {
+        let mut queue = self.queued_reconciles.lock().await;
+        queue.remove(repo_key)
+    }
+
+    async fn kick_update_processor(&self, repo_key: &str, config: &BudiConfig) {
+        let update_lock = {
+            let mut locks = self.update_locks.lock().await;
+            locks
+                .entry(repo_key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+
+        if let Ok(update_guard) = update_lock.clone().try_lock_owned() {
+            let state = self.clone();
+            let repo_key_for_task = repo_key.to_string();
+            let config_for_task = config.clone();
+            tokio::spawn(async move {
+                state
+                    .process_queued_updates(repo_key_for_task, config_for_task, update_guard)
+                    .await;
+            });
+        }
     }
 
     async fn runtime_counts(&self, repo_key: &str) -> (usize, usize) {
@@ -327,24 +347,32 @@ impl DaemonState {
         let repo_root = Path::new(&repo_key);
         loop {
             let changed_files = self.take_queued_update_paths(&repo_key).await;
-            if changed_files.is_empty() {
+            let reconcile_requested = self.take_queued_reconcile(&repo_key).await;
+            if changed_files.is_empty() && !reconcile_requested {
                 break;
             }
 
-            let workspace =
-                match index::build_or_update(repo_root, &config, false, Some(&changed_files), None)
-                {
-                    Ok(workspace) => workspace,
-                    Err(err) => {
-                        tracing::warn!(
-                            "Background update failed for {} ({} files): {:#}",
-                            repo_key,
-                            changed_files.len(),
-                            err
-                        );
-                        continue;
-                    }
-                };
+            let workspace = match if reconcile_requested {
+                index::build_or_update(repo_root, &config, false, None, None)
+            } else {
+                index::build_or_update(repo_root, &config, false, Some(&changed_files), None)
+            } {
+                Ok(workspace) => workspace,
+                Err(err) => {
+                    tracing::warn!(
+                        "Background update failed for {} (trigger={} files={}): {:#}",
+                        repo_key,
+                        if reconcile_requested {
+                            "reconcile"
+                        } else {
+                            "watch/hook"
+                        },
+                        changed_files.len(),
+                        err
+                    );
+                    continue;
+                }
+            };
             let runtime = match RuntimeIndex::from_state(repo_root, workspace.state) {
                 Ok(runtime) => runtime,
                 Err(err) => {
