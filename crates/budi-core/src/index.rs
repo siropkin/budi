@@ -68,8 +68,12 @@ pub struct RuntimeIndex {
     hnsw: Option<Hnsw<'static, f32, DistCosine>>,
     tantivy: TantivyBundle,
     symbol_to_chunk_ids: HashMap<String, Vec<u64>>,
+    symbol_family_to_tokens: FamilyTokenLookup,
+    symbol_family_prefix_to_families: FamilyPrefixLookup,
     path_token_to_chunk_ids: HashMap<String, Vec<u64>>,
     graph_token_to_chunk_ids: HashMap<String, Vec<u64>>,
+    graph_family_to_tokens: FamilyTokenLookup,
+    graph_family_prefix_to_families: FamilyPrefixLookup,
     doc_like_chunk_ids: HashSet<u64>,
 }
 
@@ -83,8 +87,12 @@ impl RuntimeIndex {
         let tantivy = TantivyBundle::open_or_rebuild(repo_root, &state.chunks)?;
         let (
             symbol_to_chunk_ids,
+            symbol_family_to_tokens,
+            symbol_family_prefix_to_families,
             path_token_to_chunk_ids,
             graph_token_to_chunk_ids,
+            graph_family_to_tokens,
+            graph_family_prefix_to_families,
             doc_like_chunk_ids,
         ) = build_retrieval_signal_indexes(&state.chunks);
         Ok(Self {
@@ -93,8 +101,12 @@ impl RuntimeIndex {
             hnsw,
             tantivy,
             symbol_to_chunk_ids,
+            symbol_family_to_tokens,
+            symbol_family_prefix_to_families,
             path_token_to_chunk_ids,
             graph_token_to_chunk_ids,
+            graph_family_to_tokens,
+            graph_family_prefix_to_families,
             doc_like_chunk_ids,
         })
     }
@@ -127,15 +139,36 @@ impl RuntimeIndex {
     }
 
     pub fn search_symbol_tokens(&self, query_tokens: &[String], limit: usize) -> Vec<(u64, f32)> {
-        score_from_token_map(&self.symbol_to_chunk_ids, query_tokens, limit, true)
+        score_from_token_map_with_family_lookup(
+            &self.symbol_to_chunk_ids,
+            Some(&self.symbol_family_to_tokens),
+            Some(&self.symbol_family_prefix_to_families),
+            query_tokens,
+            limit,
+            true,
+        )
     }
 
     pub fn search_path_tokens(&self, query_tokens: &[String], limit: usize) -> Vec<(u64, f32)> {
-        score_from_token_map(&self.path_token_to_chunk_ids, query_tokens, limit, false)
+        score_from_token_map_with_family_lookup(
+            &self.path_token_to_chunk_ids,
+            None,
+            None,
+            query_tokens,
+            limit,
+            false,
+        )
     }
 
     pub fn search_graph_tokens(&self, query_tokens: &[String], limit: usize) -> Vec<(u64, f32)> {
-        score_from_token_map(&self.graph_token_to_chunk_ids, query_tokens, limit, true)
+        score_from_token_map_with_family_lookup(
+            &self.graph_token_to_chunk_ids,
+            Some(&self.graph_family_to_tokens),
+            Some(&self.graph_family_prefix_to_families),
+            query_tokens,
+            limit,
+            true,
+        )
     }
 
     pub fn is_doc_like_chunk(&self, chunk_id: u64) -> bool {
@@ -155,10 +188,16 @@ pub struct IndexWorkspace {
 
 type RetrievalSignalIndexes = (
     HashMap<String, Vec<u64>>,
+    FamilyTokenLookup,
+    FamilyPrefixLookup,
     HashMap<String, Vec<u64>>,
     HashMap<String, Vec<u64>>,
+    FamilyTokenLookup,
+    FamilyPrefixLookup,
     HashSet<u64>,
 );
+type FamilyTokenLookup = HashMap<String, Vec<String>>;
+type FamilyPrefixLookup = HashMap<String, Vec<String>>;
 const INDEX_PROGRESS_META_KEY: &str = "index_progress_snapshot";
 
 #[derive(Debug)]
@@ -1307,11 +1346,19 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
     dedup_index_values(&mut symbol_to_chunk_ids);
     dedup_index_values(&mut path_token_to_chunk_ids);
     dedup_index_values(&mut graph_token_to_chunk_ids);
+    let (symbol_family_to_tokens, symbol_family_prefix_to_families) =
+        build_family_lookup_indexes(&symbol_to_chunk_ids);
+    let (graph_family_to_tokens, graph_family_prefix_to_families) =
+        build_family_lookup_indexes(&graph_token_to_chunk_ids);
 
     (
         symbol_to_chunk_ids,
+        symbol_family_to_tokens,
+        symbol_family_prefix_to_families,
         path_token_to_chunk_ids,
         graph_token_to_chunk_ids,
+        graph_family_to_tokens,
+        graph_family_prefix_to_families,
         doc_like_chunk_ids,
     )
 }
@@ -1323,8 +1370,103 @@ fn dedup_index_values(map: &mut HashMap<String, Vec<u64>>) {
     }
 }
 
-fn score_from_token_map(
+fn build_family_lookup_indexes(
     token_map: &HashMap<String, Vec<u64>>,
+) -> (FamilyTokenLookup, FamilyPrefixLookup) {
+    let mut family_to_tokens: FamilyTokenLookup = HashMap::new();
+    for token in token_map.keys() {
+        let family = normalize_symbol_family(token);
+        if family.len() < 7 {
+            continue;
+        }
+        family_to_tokens
+            .entry(family)
+            .or_default()
+            .push(token.clone());
+    }
+    for tokens in family_to_tokens.values_mut() {
+        tokens.sort();
+        tokens.dedup();
+    }
+
+    let mut family_prefix_to_families: FamilyPrefixLookup = HashMap::new();
+    for family in family_to_tokens.keys() {
+        let prefix = family_prefix_key(family);
+        family_prefix_to_families
+            .entry(prefix)
+            .or_default()
+            .push(family.clone());
+    }
+    for families in family_prefix_to_families.values_mut() {
+        families.sort();
+        families.dedup();
+    }
+    (family_to_tokens, family_prefix_to_families)
+}
+
+fn family_prefix_key(family: &str) -> String {
+    family.chars().take(7).collect()
+}
+
+fn collect_family_candidate_tokens(
+    query_token: &str,
+    token_map: &HashMap<String, Vec<u64>>,
+    family_to_tokens: Option<&FamilyTokenLookup>,
+    family_prefix_to_families: Option<&FamilyPrefixLookup>,
+) -> Vec<String> {
+    let Some(family_to_tokens) = family_to_tokens else {
+        return token_map.keys().cloned().collect();
+    };
+    let Some(family_prefix_to_families) = family_prefix_to_families else {
+        return token_map.keys().cloned().collect();
+    };
+
+    let query_family = normalize_symbol_family(query_token);
+    if query_family.len() < 7 {
+        return Vec::new();
+    }
+    let prefix = family_prefix_key(&query_family);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(families) = family_prefix_to_families.get(prefix.as_str()) {
+        for family in families {
+            if !is_symbol_family_match(family, &query_family) {
+                continue;
+            }
+            if let Some(tokens) = family_to_tokens.get(family) {
+                for token in tokens {
+                    if seen.insert(token.clone()) {
+                        out.push(token.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        for (family, tokens) in family_to_tokens {
+            if !is_symbol_family_match(family, &query_family) {
+                continue;
+            }
+            for token in tokens {
+                if seen.insert(token.clone()) {
+                    out.push(token.clone());
+                }
+            }
+            if out.len() > 160 {
+                break;
+            }
+        }
+    }
+
+    out
+}
+
+fn score_from_token_map_with_family_lookup(
+    token_map: &HashMap<String, Vec<u64>>,
+    family_to_tokens: Option<&FamilyTokenLookup>,
+    family_prefix_to_families: Option<&FamilyPrefixLookup>,
     query_tokens: &[String],
     limit: usize,
     allow_symbol_family_match: bool,
@@ -1352,8 +1494,17 @@ fn score_from_token_map(
             continue;
         }
         let mut family_matches = 0usize;
-        for (indexed_token, ids) in token_map {
-            if indexed_token == token || !is_symbol_family_match(indexed_token, token) {
+        let family_candidates = collect_family_candidate_tokens(
+            token,
+            token_map,
+            family_to_tokens,
+            family_prefix_to_families,
+        );
+        for indexed_token in family_candidates {
+            let Some(ids) = token_map.get(indexed_token.as_str()) else {
+                continue;
+            };
+            if indexed_token == *token || !is_symbol_family_match(indexed_token.as_str(), token) {
                 continue;
             }
             family_matches += 1;
@@ -2572,9 +2723,34 @@ mod tests {
             ),
         ]);
         let query = vec!["usefeaturetoggle".to_string()];
-        let ranked = score_from_token_map(&token_map, &query, 10, true);
+        let ranked =
+            score_from_token_map_with_family_lookup(&token_map, None, None, &query, 10, true);
         assert!(ranked.iter().any(|(id, _)| *id == 1));
         assert!(ranked.iter().any(|(id, _)| *id == 2));
+    }
+
+    #[test]
+    fn family_lookup_indexes_return_related_tokens() {
+        let token_map = HashMap::from([
+            ("usefeaturetoggle".to_string(), vec![1u64]),
+            (
+                "usefeaturetogglessetreleasebatchmutation".to_string(),
+                vec![2u64],
+            ),
+        ]);
+        let (family_to_tokens, family_prefix_to_families) = build_family_lookup_indexes(&token_map);
+        let candidates = collect_family_candidate_tokens(
+            "usefeaturetoggle",
+            &token_map,
+            Some(&family_to_tokens),
+            Some(&family_prefix_to_families),
+        );
+        assert!(candidates.iter().any(|token| token == "usefeaturetoggle"));
+        assert!(
+            candidates
+                .iter()
+                .any(|token| token == "usefeaturetogglessetreleasebatchmutation")
+        );
     }
 
     #[test]
@@ -2683,7 +2859,16 @@ mod tests {
                 updated_at_ts: 0,
             },
         ];
-        let (_symbol, _path, graph, _doc) = build_retrieval_signal_indexes(&chunks);
+        let (
+            _symbol,
+            _symbol_family,
+            _symbol_family_prefix,
+            _path,
+            graph,
+            _graph_family,
+            _graph_family_prefix,
+            _doc,
+        ) = build_retrieval_signal_indexes(&chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
         assert!(!refs.contains(&1));
@@ -2713,7 +2898,16 @@ mod tests {
                 updated_at_ts: 0,
             },
         ];
-        let (_symbol, _path, graph, _doc) = build_retrieval_signal_indexes(&chunks);
+        let (
+            _symbol,
+            _symbol_family,
+            _symbol_family_prefix,
+            _path,
+            graph,
+            _graph_family,
+            _graph_family_prefix,
+            _doc,
+        ) = build_retrieval_signal_indexes(&chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
     }
@@ -2754,7 +2948,16 @@ mod tests {
                 updated_at_ts: 0,
             },
         ];
-        let (_symbol, _path, graph, _doc) = build_retrieval_signal_indexes(&chunks);
+        let (
+            _symbol,
+            _symbol_family,
+            _symbol_family_prefix,
+            _path,
+            graph,
+            _graph_family,
+            _graph_family_prefix,
+            _doc,
+        ) = build_retrieval_signal_indexes(&chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
         assert!(!refs.contains(&3));
