@@ -24,11 +24,40 @@ pub struct DaemonState {
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum IndexState {
+    #[default]
+    Ready,
+    Indexing,
+    Failed,
+    Interrupted,
+}
+
+impl IndexState {
+    fn as_str(self) -> &'static str {
+        match self {
+            IndexState::Ready => "ready",
+            IndexState::Indexing => "indexing",
+            IndexState::Failed => "failed",
+            IndexState::Interrupted => "interrupted",
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "indexing" => IndexState::Indexing,
+            "failed" => IndexState::Failed,
+            "interrupted" => IndexState::Interrupted,
+            _ => IndexState::Ready,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct IndexProgressSnapshot {
     active: bool,
     hard: bool,
-    state: String,
+    state: IndexState,
     phase: String,
     total_files: usize,
     processed_files: usize,
@@ -151,22 +180,13 @@ impl DaemonState {
         if snapshot.started_at_unix_ms == 0
             && let Some(persisted) = self.load_persisted_progress(&request.repo_root)
         {
-            snapshot = persisted;
-        }
-        if snapshot.state.is_empty() {
-            snapshot.state = if snapshot.active {
-                "indexing".to_string()
-            } else if snapshot.last_error.is_some() {
-                "failed".to_string()
-            } else {
-                "ready".to_string()
-            };
+            snapshot = self.interrupt_stale_active_progress(&request.repo_root, persisted);
         }
         Ok(IndexProgressResponse {
             repo_root: request.repo_root,
             active: snapshot.active,
             hard: snapshot.hard,
-            state: snapshot.state,
+            state: snapshot.state.as_str().to_string(),
             phase: snapshot.phase,
             total_files: snapshot.total_files,
             processed_files: snapshot.processed_files,
@@ -250,7 +270,7 @@ impl DaemonState {
         let snapshot = IndexProgressSnapshot {
             active: true,
             hard,
-            state: "indexing".to_string(),
+            state: IndexState::Indexing,
             phase: "starting".to_string(),
             total_files: 0,
             processed_files: 0,
@@ -276,9 +296,9 @@ impl DaemonState {
         entry.active = !progress.done;
         entry.hard = hard;
         entry.state = if progress.done {
-            "ready".to_string()
+            IndexState::Ready
         } else {
-            "indexing".to_string()
+            IndexState::Indexing
         };
         entry.phase = progress.phase;
         entry.total_files = progress.total_files;
@@ -304,7 +324,7 @@ impl DaemonState {
         }
         entry.active = false;
         entry.hard = hard;
-        entry.state = "ready".to_string();
+        entry.state = IndexState::Ready;
         entry.phase = "ready".to_string();
         entry.current_file = None;
         entry.last_update_unix_ms = now;
@@ -323,7 +343,7 @@ impl DaemonState {
         }
         entry.active = false;
         entry.hard = hard;
-        entry.state = "failed".to_string();
+        entry.state = IndexState::Failed;
         entry.phase = "failed".to_string();
         entry.current_file = None;
         entry.last_update_unix_ms = now;
@@ -337,7 +357,7 @@ impl DaemonState {
         let persisted = index::PersistedIndexProgress {
             active: snapshot.active,
             hard: snapshot.hard,
-            state: snapshot.state.clone(),
+            state: snapshot.state.as_str().to_string(),
             phase: snapshot.phase.clone(),
             total_files: snapshot.total_files,
             processed_files: snapshot.processed_files,
@@ -371,7 +391,7 @@ impl DaemonState {
         Some(IndexProgressSnapshot {
             active: persisted.active,
             hard: persisted.hard,
-            state: persisted.state,
+            state: IndexState::parse(&persisted.state),
             phase: persisted.phase,
             total_files: persisted.total_files,
             processed_files: persisted.processed_files,
@@ -381,6 +401,24 @@ impl DaemonState {
             last_update_unix_ms: persisted.last_update_unix_ms,
             last_error: persisted.last_error,
         })
+    }
+
+    fn interrupt_stale_active_progress(
+        &self,
+        repo_root: &str,
+        mut snapshot: IndexProgressSnapshot,
+    ) -> IndexProgressSnapshot {
+        if snapshot.active || snapshot.state == IndexState::Indexing {
+            snapshot.active = false;
+            snapshot.state = IndexState::Interrupted;
+            snapshot.phase = "interrupted".to_string();
+            if snapshot.last_error.is_none() {
+                snapshot.last_error = Some("indexing interrupted by daemon restart".to_string());
+            }
+            snapshot.last_update_unix_ms = now_unix_ms();
+            self.persist_progress(repo_root, &snapshot);
+        }
+        snapshot
     }
 
     fn progress_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, IndexProgressSnapshot>> {
