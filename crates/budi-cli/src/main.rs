@@ -28,6 +28,8 @@ const HOOK_QUERY_TIMEOUT_SECS: u64 = 12;
 const STATUS_TIMEOUT_SECS: u64 = 120;
 const UPDATE_TIMEOUT_SECS: u64 = 180;
 const INDEX_TIMEOUT_SECS: u64 = 21_600;
+const HOOK_LOG_LOCK_TIMEOUT_MS: u64 = 800;
+const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
@@ -424,29 +426,31 @@ impl ObserveSummary {
             self.prompt_latency_ms.push(latency_ms);
         }
 
-        if let Some(confidence) = obj.get("retrieval_confidence").and_then(Value::as_f64) {
-            self.retrieval_confidence_total += confidence;
-            self.retrieval_confidence_count = self.retrieval_confidence_count.saturating_add(1);
-        }
-        if let Some(top_score) = obj.get("retrieval_top_score").and_then(Value::as_f64) {
-            self.retrieval_top_score_total += top_score;
-            self.retrieval_top_score_count = self.retrieval_top_score_count.saturating_add(1);
-        }
-        if let Some(margin) = obj.get("retrieval_margin").and_then(Value::as_f64) {
-            self.retrieval_margin_total += margin;
-            self.retrieval_margin_count = self.retrieval_margin_count.saturating_add(1);
-        }
-        if let Some(snippets_count) = obj.get("snippets_count").and_then(Value::as_u64) {
-            self.snippets_count_total = self
-                .snippets_count_total
-                .saturating_add(snippets_count as usize);
-            self.snippets_count_count = self.snippets_count_count.saturating_add(1);
-        }
-        if let Some(total_candidates) = obj.get("total_candidates").and_then(Value::as_u64) {
-            self.total_candidates_total = self
-                .total_candidates_total
-                .saturating_add(total_candidates as usize);
-            self.total_candidates_count = self.total_candidates_count.saturating_add(1);
+        if success {
+            if let Some(confidence) = obj.get("retrieval_confidence").and_then(Value::as_f64) {
+                self.retrieval_confidence_total += confidence;
+                self.retrieval_confidence_count = self.retrieval_confidence_count.saturating_add(1);
+            }
+            if let Some(top_score) = obj.get("retrieval_top_score").and_then(Value::as_f64) {
+                self.retrieval_top_score_total += top_score;
+                self.retrieval_top_score_count = self.retrieval_top_score_count.saturating_add(1);
+            }
+            if let Some(margin) = obj.get("retrieval_margin").and_then(Value::as_f64) {
+                self.retrieval_margin_total += margin;
+                self.retrieval_margin_count = self.retrieval_margin_count.saturating_add(1);
+            }
+            if let Some(snippets_count) = obj.get("snippets_count").and_then(Value::as_u64) {
+                self.snippets_count_total = self
+                    .snippets_count_total
+                    .saturating_add(snippets_count as usize);
+                self.snippets_count_count = self.snippets_count_count.saturating_add(1);
+            }
+            if let Some(total_candidates) = obj.get("total_candidates").and_then(Value::as_u64) {
+                self.total_candidates_total = self
+                    .total_candidates_total
+                    .saturating_add(total_candidates as usize);
+                self.total_candidates_count = self.total_candidates_count.saturating_add(1);
+            }
         }
 
         if let Some(reason) = obj.get("reason").and_then(Value::as_str) {
@@ -764,6 +768,13 @@ fn resolve_observe_window(days: Option<u32>, all: bool) -> ObserveWindow {
     }
 }
 
+fn parse_json_values_from_line(line: &str) -> Vec<Value> {
+    serde_json::Deserializer::from_str(line)
+        .into_iter::<Value>()
+        .filter_map(std::result::Result::ok)
+        .collect()
+}
+
 fn cmd_observe_enable(repo_root: Option<PathBuf>) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     config::ensure_repo_layout(&repo_root)?;
@@ -818,33 +829,36 @@ fn cmd_observe_report(
         let Ok(line) = maybe_line else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+        let values = parse_json_values_from_line(&line);
+        if values.is_empty() {
             continue;
-        };
-        summary.lines_parsed = summary.lines_parsed.saturating_add(1);
-        let Some(obj) = value.as_object() else {
-            continue;
-        };
-        let ts_unix_ms = obj
-            .get("ts_unix_ms")
-            .and_then(Value::as_u64)
-            .map(u128::from);
-        if let Some(ts) = ts_unix_ms {
-            if let Some(since) = since_ms
-                && ts < since
-            {
-                continue;
-            }
-            summary.update_time_bounds(ts);
         }
-        summary.lines_in_window = summary.lines_in_window.saturating_add(1);
+        summary.lines_parsed = summary.lines_parsed.saturating_add(1);
+        for value in values {
+            let Some(obj) = value.as_object() else {
+                continue;
+            };
+            let ts_unix_ms = obj
+                .get("ts_unix_ms")
+                .and_then(Value::as_u64)
+                .map(u128::from);
+            if let Some(ts) = ts_unix_ms {
+                if let Some(since) = since_ms
+                    && ts < since
+                {
+                    continue;
+                }
+                summary.update_time_bounds(ts);
+            }
+            summary.lines_in_window = summary.lines_in_window.saturating_add(1);
 
-        let event = obj.get("event").and_then(Value::as_str).unwrap_or_default();
-        let phase = obj.get("phase").and_then(Value::as_str).unwrap_or_default();
-        match (event, phase) {
-            ("UserPromptSubmit", "output") => summary.record_user_prompt_output(obj),
-            ("PostToolUse", "output") => summary.record_post_tool_output(obj),
-            _ => {}
+            let event = obj.get("event").and_then(Value::as_str).unwrap_or_default();
+            let phase = obj.get("phase").and_then(Value::as_str).unwrap_or_default();
+            match (event, phase) {
+                ("UserPromptSubmit", "output") => summary.record_user_prompt_output(obj),
+                ("PostToolUse", "output") => summary.record_post_tool_output(obj),
+                _ => {}
+            }
         }
     }
 
@@ -1260,7 +1274,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
         }
     };
     log_hook_event(&repo_root, &config, || {
-        json!({
+        let mut payload = json!({
             "event":"UserPromptSubmit",
             "phase":"output",
             "ts_unix_ms": now_unix_ms(),
@@ -1271,16 +1285,37 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             "context_chars": context.len(),
             "context_excerpt": excerpt(&context, &config),
             "error_detail": excerpt(&error_detail, &config),
-            "total_candidates": total_candidates,
-            "snippets_count": snippets_count,
-            "retrieval_intent": diagnostics.intent,
-            "retrieval_confidence": diagnostics.confidence,
-            "retrieval_top_score": diagnostics.top_score,
-            "retrieval_margin": diagnostics.margin,
-            "retrieval_signals_count": diagnostics.signals.len(),
-            "recommended_injection": diagnostics.recommended_injection,
-            "skip_reason": diagnostics.skip_reason,
-        })
+        });
+        if success && let Some(obj) = payload.as_object_mut() {
+            obj.insert("total_candidates".to_string(), json!(total_candidates));
+            obj.insert("snippets_count".to_string(), json!(snippets_count));
+            obj.insert(
+                "retrieval_intent".to_string(),
+                json!(diagnostics.intent.clone()),
+            );
+            obj.insert(
+                "retrieval_confidence".to_string(),
+                json!(diagnostics.confidence),
+            );
+            obj.insert(
+                "retrieval_top_score".to_string(),
+                json!(diagnostics.top_score),
+            );
+            obj.insert("retrieval_margin".to_string(), json!(diagnostics.margin));
+            obj.insert(
+                "retrieval_signals_count".to_string(),
+                json!(diagnostics.signals.len()),
+            );
+            obj.insert(
+                "recommended_injection".to_string(),
+                json!(diagnostics.recommended_injection),
+            );
+            obj.insert(
+                "skip_reason".to_string(),
+                json!(diagnostics.skip_reason.clone()),
+            );
+        }
+        payload
     });
     emit_hook_response(UserPromptSubmitOutput::allow_with_context(context))
 }
@@ -1524,6 +1559,69 @@ fn excerpt(text: &str, config: &BudiConfig) -> String {
     text.chars().take(max).collect::<String>()
 }
 
+#[derive(Debug)]
+struct HookLogLockGuard {
+    lock_path: PathBuf,
+    _lock_file: fs::File,
+}
+
+impl Drop for HookLogLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
+fn hook_log_lock_path(log_path: &Path) -> PathBuf {
+    let lock_name = log_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}.lock"))
+        .unwrap_or_else(|| "hook-io.jsonl.lock".to_string());
+    log_path.with_file_name(lock_name)
+}
+
+fn clear_stale_hook_log_lock(lock_path: &Path) {
+    let Ok(metadata) = fs::metadata(lock_path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return;
+    };
+    if age > Duration::from_secs(HOOK_LOG_LOCK_STALE_SECS) {
+        let _ = fs::remove_file(lock_path);
+    }
+}
+
+fn acquire_hook_log_lock(log_path: &Path) -> Option<HookLogLockGuard> {
+    let lock_path = hook_log_lock_path(log_path);
+    let started = Instant::now();
+    loop {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(lock_file) => {
+                return Some(HookLogLockGuard {
+                    lock_path,
+                    _lock_file: lock_file,
+                });
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                clear_stale_hook_log_lock(&lock_path);
+                if started.elapsed() >= Duration::from_millis(HOOK_LOG_LOCK_TIMEOUT_MS) {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 fn log_hook_event<F>(repo_root: &Path, config: &BudiConfig, build_value: F)
 where
     F: FnOnce() -> Value,
@@ -1537,6 +1635,9 @@ where
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let Some(_lock_guard) = acquire_hook_log_lock(&log_path) else {
+        return;
+    };
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         let mut line = build_value();
         if let Some(obj) = line.as_object_mut() {
@@ -1545,8 +1646,9 @@ where
                 json!(repo_root.display().to_string()),
             );
         }
-        if let Ok(serialized) = serde_json::to_string(&line) {
-            let _ = writeln!(file, "{serialized}");
+        if let Ok(mut serialized) = serde_json::to_vec(&line) {
+            serialized.push(b'\n');
+            let _ = file.write_all(&serialized);
         }
     }
 }
@@ -2023,5 +2125,52 @@ mod tests {
     fn observe_window_uses_days_when_provided() {
         let window = resolve_observe_window(Some(7), false);
         assert!(matches!(window, ObserveWindow::RollingDays(7)));
+    }
+
+    #[test]
+    fn parse_json_values_supports_concatenated_objects() {
+        let values = parse_json_values_from_line(r#"{"event":"a"}{"event":"b"}"#);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].get("event").and_then(Value::as_str), Some("a"));
+        assert_eq!(values[1].get("event").and_then(Value::as_str), Some("b"));
+    }
+
+    #[test]
+    fn observe_summary_ignores_failed_prompt_diagnostics() {
+        let mut summary = ObserveSummary::default();
+
+        let failed = json!({
+            "success": false,
+            "context_chars": 0,
+            "retrieval_confidence": 0.0,
+            "retrieval_top_score": 0.0,
+            "retrieval_margin": 0.0,
+            "snippets_count": 0,
+            "total_candidates": 0,
+            "reason": "query_request_timeout"
+        });
+        summary.record_user_prompt_output(failed.as_object().expect("object"));
+        assert_eq!(summary.retrieval_confidence_count, 0);
+        assert_eq!(summary.retrieval_top_score_count, 0);
+        assert_eq!(summary.retrieval_margin_count, 0);
+        assert_eq!(summary.snippets_count_count, 0);
+        assert_eq!(summary.total_candidates_count, 0);
+
+        let ok = json!({
+            "success": true,
+            "context_chars": 10,
+            "retrieval_confidence": 0.8,
+            "retrieval_top_score": 0.6,
+            "retrieval_margin": 0.2,
+            "snippets_count": 5,
+            "total_candidates": 17,
+            "reason": "ok"
+        });
+        summary.record_user_prompt_output(ok.as_object().expect("object"));
+        assert_eq!(summary.retrieval_confidence_count, 1);
+        assert_eq!(summary.retrieval_top_score_count, 1);
+        assert_eq!(summary.retrieval_margin_count, 1);
+        assert_eq!(summary.snippets_count_count, 1);
+        assert_eq!(summary.total_candidates_count, 1);
     }
 }

@@ -15,7 +15,7 @@ directory form.
 - Repository: `https://github.com/siropkin/budi`
 - Marketplace manifest: `.claude-plugin/marketplace.json`
 - Plugin manifest: `plugins/budi-hooks/.claude-plugin/plugin.json`
-- Version: `1.0.11`
+- Version: `1.0.12`
 
 ## Short description
 
