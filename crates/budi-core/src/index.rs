@@ -218,6 +218,9 @@ pub struct PersistedIndexProgress {
     pub started_at_unix_ms: u128,
     pub last_update_unix_ms: u128,
     pub last_error: Option<String>,
+    pub job_id: Option<String>,
+    pub job_state: String,
+    pub terminal_outcome: Option<String>,
 }
 
 #[derive(Debug)]
@@ -995,7 +998,10 @@ fn ensure_index_db_schema(conn: &Connection) -> Result<()> {
             current_file TEXT,
             started_at_unix_ms TEXT NOT NULL,
             last_update_unix_ms TEXT NOT NULL,
-            last_error TEXT
+            last_error TEXT,
+            job_id TEXT,
+            job_state TEXT NOT NULL DEFAULT 'idle',
+            terminal_outcome TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
@@ -1023,7 +1029,40 @@ fn ensure_index_db_schema(conn: &Connection) -> Result<()> {
             ",
         )?;
     }
+    ensure_index_progress_columns(conn)?;
     Ok(())
+}
+
+fn ensure_index_progress_columns(conn: &Connection) -> Result<()> {
+    if !table_has_column(conn, "index_progress", "job_id")? {
+        conn.execute("ALTER TABLE index_progress ADD COLUMN job_id TEXT", [])?;
+    }
+    if !table_has_column(conn, "index_progress", "job_state")? {
+        conn.execute(
+            "ALTER TABLE index_progress ADD COLUMN job_state TEXT NOT NULL DEFAULT 'idle'",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "index_progress", "terminal_outcome")? {
+        conn.execute(
+            "ALTER TABLE index_progress ADD COLUMN terminal_outcome TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
+    let pragma = format!("PRAGMA table_info({table_name})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn chunks_table_has_legacy_timestamp(conn: &Connection) -> Result<bool> {
@@ -1058,7 +1097,8 @@ pub fn load_index_progress_snapshot(repo_root: &Path) -> Result<Option<Persisted
     ensure_index_db_schema(&conn)?;
     let mut stmt = conn.prepare(
         "SELECT active, hard, state, phase, total_files, processed_files, changed_files,
-                current_file, started_at_unix_ms, last_update_unix_ms, last_error
+                current_file, started_at_unix_ms, last_update_unix_ms, last_error,
+                job_id, job_state, terminal_outcome
          FROM index_progress
          WHERE id = 1",
     )?;
@@ -1081,6 +1121,11 @@ pub fn load_index_progress_snapshot(repo_root: &Path) -> Result<Option<Persisted
                 started_at_unix_ms: started_raw.parse::<u128>().unwrap_or_default(),
                 last_update_unix_ms: last_update_raw.parse::<u128>().unwrap_or_default(),
                 last_error: row.get(10)?,
+                job_id: row.get(11)?,
+                job_state: row
+                    .get::<_, Option<String>>(12)?
+                    .unwrap_or_else(|| "idle".to_string()),
+                terminal_outcome: row.get(13)?,
             })
         })
         .optional()?;
@@ -1101,9 +1146,10 @@ pub fn save_index_progress_snapshot(
     conn.execute(
         "INSERT INTO index_progress(
              id, active, hard, state, phase, total_files, processed_files, changed_files,
-             current_file, started_at_unix_ms, last_update_unix_ms, last_error
+             current_file, started_at_unix_ms, last_update_unix_ms, last_error,
+             job_id, job_state, terminal_outcome
          ) VALUES (
-             1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+             1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
          )
          ON CONFLICT(id) DO UPDATE SET
              active = excluded.active,
@@ -1116,7 +1162,10 @@ pub fn save_index_progress_snapshot(
              current_file = excluded.current_file,
              started_at_unix_ms = excluded.started_at_unix_ms,
              last_update_unix_ms = excluded.last_update_unix_ms,
-             last_error = excluded.last_error",
+             last_error = excluded.last_error,
+             job_id = excluded.job_id,
+             job_state = excluded.job_state,
+             terminal_outcome = excluded.terminal_outcome",
         params![
             if snapshot.active { 1i64 } else { 0i64 },
             if snapshot.hard { 1i64 } else { 0i64 },
@@ -1129,6 +1178,9 @@ pub fn save_index_progress_snapshot(
             snapshot.started_at_unix_ms.to_string(),
             snapshot.last_update_unix_ms.to_string(),
             snapshot.last_error.as_deref(),
+            snapshot.job_id.as_deref(),
+            &snapshot.job_state,
+            snapshot.terminal_outcome.as_deref(),
         ],
     )?;
     Ok(())

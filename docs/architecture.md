@@ -21,6 +21,7 @@
 
 - `budi-cli`: init, index, status, doctor, preview, and hook entrypoints.
 - `budi-daemon`: local HTTP daemon serving query/index/status/update.
+  - `/index` schedules async full-index jobs; clients poll `/progress` for job state/outcome
 - `budi-core`: shared logic:
   - file discovery from `git ls-files` (tracked + untracked), respecting `.gitignore`, repo-root `*.ignore` files (for example `.cursorignore`/`.codeiumignore`/`.contextignore`), global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` rules (`!unignore` supported), with code-first type filtering via extension and basename allowlists and one-shot CLI overrides (`--ignore-pattern`, `--include-ext`)
   - chunking
@@ -31,7 +32,7 @@
 ## Index state
 
 - `~/.local/share/budi/repos/<repo-id>/index/index.sqlite`: transactional catalog for files + chunks + embeddings
-  - also stores persisted index progress snapshot (`indexing`/`ready`/`failed`) for daemon restarts
+  - also stores persisted index progress + job snapshot (`queued`/`running`/`succeeded`/`failed`/`interrupted`) for daemon restarts
 - `~/.local/share/budi/repos/<repo-id>/index/tantivy/`: lexical index files
 - `~/.local/share/budi/fastembed-cache/`: embedding model cache (kept outside repos)
 - `~/.local/share/budi/embedding-cache.sqlite`: global content-hash embedding reuse cache

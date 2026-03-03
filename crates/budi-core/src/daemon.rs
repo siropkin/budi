@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,11 +23,13 @@ const WRITE_RETRY_MAX_DELAY_MS: u64 = 600;
 pub struct DaemonState {
     repos: Arc<RwLock<HashMap<String, Arc<Mutex<RuntimeIndex>>>>>,
     load_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    index_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     update_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     queued_updates: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     queued_reconciles: Arc<Mutex<HashSet<String>>>,
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
     update_metrics: Arc<StdMutex<HashMap<String, UpdateRetryMetrics>>>,
+    job_counter: Arc<StdMutex<u64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +61,41 @@ impl IndexState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum IndexJobState {
+    #[default]
+    Idle,
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Interrupted,
+}
+
+impl IndexJobState {
+    fn as_str(self) -> &'static str {
+        match self {
+            IndexJobState::Idle => "idle",
+            IndexJobState::Queued => "queued",
+            IndexJobState::Running => "running",
+            IndexJobState::Succeeded => "succeeded",
+            IndexJobState::Failed => "failed",
+            IndexJobState::Interrupted => "interrupted",
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "queued" => IndexJobState::Queued,
+            "running" => IndexJobState::Running,
+            "succeeded" => IndexJobState::Succeeded,
+            "failed" => IndexJobState::Failed,
+            "interrupted" => IndexJobState::Interrupted,
+            _ => IndexJobState::Idle,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct IndexProgressSnapshot {
     active: bool,
@@ -72,6 +109,9 @@ struct IndexProgressSnapshot {
     started_at_unix_ms: u128,
     last_update_unix_ms: u128,
     last_error: Option<String>,
+    job_id: Option<String>,
+    job_state: IndexJobState,
+    terminal_outcome: Option<String>,
     last_persist_unix_ms: u128,
     last_persist_phase: String,
 }
@@ -115,55 +155,73 @@ impl DaemonState {
     }
 
     pub async fn index(&self, request: IndexRequest, config: &BudiConfig) -> Result<IndexResponse> {
-        let repo_root = Path::new(&request.repo_root);
-        self.start_progress(&request.repo_root, request.hard);
-        let build_options = index::IndexBuildOptions {
-            include_extensions: request.include_extensions.clone(),
-            ignore_patterns: request.ignore_patterns.clone(),
+        let repo_key = request.repo_root.clone();
+        let index_lock = {
+            let mut locks = self.index_locks.lock().await;
+            locks
+                .entry(repo_key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
         };
-        let state_for_progress = self.clone();
-        let repo_for_progress = request.repo_root.clone();
-        let hard = request.hard;
-        let mut progress_cb = move |progress: index::IndexBuildProgress| {
-            state_for_progress.update_progress(&repo_for_progress, hard, progress);
-        };
-        let workspace = match self.run_build_or_update_with_retry(
-            BuildRetryRequest {
-                repo_root,
-                repo_key: &request.repo_root,
-                hard: request.hard,
-                changed_hint: None,
-                options: Some(&build_options),
-                trigger: "index",
-            },
-            config,
-            Some(&mut progress_cb),
-        ) {
-            Ok(workspace) => workspace,
-            Err(err) => {
-                self.fail_progress(&request.repo_root, request.hard, &format!("{err:#}"));
-                return Err(err);
-            }
-        };
-        self.finish_progress(&request.repo_root, request.hard);
-        let runtime = RuntimeIndex::from_state(repo_root, workspace.state)?;
-        self.repos
-            .write()
-            .await
-            .insert(request.repo_root.clone(), Arc::new(Mutex::new(runtime)));
+        if let Ok(index_guard) = index_lock.clone().try_lock_owned() {
+            let job_id = self.next_index_job_id();
+            self.start_progress(&repo_key, request.hard, &job_id);
+            let state = self.clone();
+            let request_for_task = request.clone();
+            let config_for_task = config.clone();
+            let job_id_for_task = job_id.clone();
+            tokio::spawn(async move {
+                state
+                    .run_index_job(
+                        request_for_task,
+                        config_for_task,
+                        job_id_for_task,
+                        index_guard,
+                    )
+                    .await;
+            });
+            let (
+                indexed_files,
+                indexed_chunks,
+                embedded_chunks,
+                missing_embeddings,
+                invalid_embeddings,
+            ) = self.runtime_counts(&repo_key).await;
+            return Ok(IndexResponse {
+                indexed_files,
+                indexed_chunks,
+                embedded_chunks,
+                missing_embeddings,
+                repaired_embeddings: 0,
+                invalid_embeddings,
+                changed_files: 0,
+                index_status: "scheduled".to_string(),
+                job_id: Some(job_id),
+                job_state: IndexJobState::Queued.as_str().to_string(),
+                terminal_outcome: None,
+            });
+        }
+
+        let snapshot = self.current_progress_snapshot(&repo_key);
+        let (
+            indexed_files,
+            indexed_chunks,
+            embedded_chunks,
+            missing_embeddings,
+            invalid_embeddings,
+        ) = self.runtime_counts(&repo_key).await;
         Ok(IndexResponse {
-            indexed_files: workspace.report.indexed_files,
-            indexed_chunks: workspace.report.indexed_chunks,
-            embedded_chunks: workspace.report.embedded_chunks,
-            missing_embeddings: workspace.report.missing_embeddings,
-            repaired_embeddings: workspace.report.repaired_embeddings,
-            invalid_embeddings: workspace.report.invalid_embeddings,
-            changed_files: workspace.report.changed_files,
-            index_status: if workspace.report.limit_reached {
-                "limit_reached".to_string()
-            } else {
-                "completed".to_string()
-            },
+            indexed_files,
+            indexed_chunks,
+            embedded_chunks,
+            missing_embeddings,
+            repaired_embeddings: 0,
+            invalid_embeddings,
+            changed_files: 0,
+            index_status: "already_running".to_string(),
+            job_id: snapshot.job_id,
+            job_state: snapshot.job_state.as_str().to_string(),
+            terminal_outcome: snapshot.terminal_outcome,
         })
     }
 
@@ -185,6 +243,7 @@ impl DaemonState {
             missing_embeddings,
             invalid_embeddings,
         ) = self.runtime_counts(&repo_key).await;
+        let progress_snapshot = self.current_progress_snapshot(&repo_key);
         Ok(IndexResponse {
             indexed_files,
             indexed_chunks,
@@ -194,6 +253,9 @@ impl DaemonState {
             invalid_embeddings,
             changed_files: changed_count,
             index_status: "scheduled".to_string(),
+            job_id: progress_snapshot.job_id,
+            job_state: progress_snapshot.job_state.as_str().to_string(),
+            terminal_outcome: progress_snapshot.terminal_outcome,
         })
     }
 
@@ -206,15 +268,7 @@ impl DaemonState {
         &self,
         request: IndexProgressRequest,
     ) -> Result<IndexProgressResponse> {
-        let mut snapshot = {
-            let guard = self.progress_guard();
-            guard.get(&request.repo_root).cloned().unwrap_or_default()
-        };
-        if snapshot.started_at_unix_ms == 0
-            && let Some(persisted) = self.load_persisted_progress(&request.repo_root)
-        {
-            snapshot = self.interrupt_stale_active_progress(&request.repo_root, persisted);
-        }
+        let snapshot = self.current_progress_snapshot(&request.repo_root);
         Ok(IndexProgressResponse {
             repo_root: request.repo_root,
             active: snapshot.active,
@@ -228,43 +282,84 @@ impl DaemonState {
             started_at_unix_ms: snapshot.started_at_unix_ms,
             last_update_unix_ms: snapshot.last_update_unix_ms,
             last_error: snapshot.last_error,
+            job_id: snapshot.job_id,
+            job_state: snapshot.job_state.as_str().to_string(),
+            terminal_outcome: snapshot.terminal_outcome,
         })
     }
 
     pub async fn status(
         &self,
         request: StatusRequest,
-        config: &BudiConfig,
+        _config: &BudiConfig,
     ) -> Result<StatusResponse> {
         let repo_root = Path::new(&request.repo_root);
-        let runtime = self.ensure_loaded(repo_root, config).await?;
-        let runtime_guard = runtime.lock().await;
+        let repo_key = request.repo_root.clone();
+        let runtime = if let Some(runtime) = self.repos.read().await.get(&repo_key).cloned() {
+            Some(runtime)
+        } else if let Some(state) = index::load_state(repo_root)? {
+            let runtime = Arc::new(Mutex::new(RuntimeIndex::from_state(repo_root, state)?));
+            self.repos
+                .write()
+                .await
+                .insert(repo_key.clone(), runtime.clone());
+            Some(runtime)
+        } else {
+            None
+        };
         let hooks_detected = detect_hooks(repo_root);
         let update_metrics = self.update_retry_metrics(&request.repo_root);
-        let embedded_chunks = runtime_guard
-            .state
-            .chunks
-            .iter()
-            .filter(|chunk| !chunk.embedding.is_empty())
-            .count();
-        let invalid_embeddings = runtime_guard
-            .state
-            .chunks
-            .iter()
-            .filter(|chunk| {
-                !chunk.embedding.is_empty()
-                    && chunk.embedding.iter().any(|value| !value.is_finite())
-            })
-            .count();
+        let progress_snapshot = self.current_progress_snapshot(&request.repo_root);
+        let (
+            tracked_files,
+            indexed_chunks,
+            embedded_chunks,
+            missing_embeddings,
+            invalid_embeddings,
+        ) = if let Some(runtime) = runtime {
+            let runtime_guard = runtime.lock().await;
+            let embedded_chunks = runtime_guard
+                .state
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.embedding.is_empty())
+                .count();
+            let indexed_chunks = runtime_guard.state.chunks.len();
+            let missing_embeddings = indexed_chunks.saturating_sub(embedded_chunks);
+            let invalid_embeddings = runtime_guard
+                .state
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    !chunk.embedding.is_empty()
+                        && chunk.embedding.iter().any(|value| !value.is_finite())
+                })
+                .count();
+            (
+                runtime_guard.state.files.len(),
+                indexed_chunks,
+                embedded_chunks,
+                missing_embeddings,
+                invalid_embeddings,
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        };
         Ok(StatusResponse {
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             repo_root: request.repo_root,
-            tracked_files: runtime_guard.state.files.len(),
+            tracked_files,
+            indexed_chunks,
             embedded_chunks,
+            missing_embeddings,
             invalid_embeddings,
             hooks_detected,
             update_retries: update_metrics.retries,
             update_failures: update_metrics.failures,
+            index_state: progress_snapshot.state.as_str().to_string(),
+            index_job_id: progress_snapshot.job_id,
+            index_job_state: progress_snapshot.job_state.as_str().to_string(),
+            index_terminal_outcome: progress_snapshot.terminal_outcome,
         })
     }
 
@@ -310,6 +405,111 @@ impl DaemonState {
         let runtime = Arc::new(Mutex::new(RuntimeIndex::from_state(repo_root, state)?));
         self.repos.write().await.insert(key, runtime.clone());
         Ok(runtime)
+    }
+
+    fn next_index_job_id(&self) -> String {
+        let now = now_unix_ms();
+        let mut counter = self.job_counter_guard();
+        *counter = counter.saturating_add(1);
+        format!("idx-{now}-{}", *counter)
+    }
+
+    fn current_progress_snapshot(&self, repo_root: &str) -> IndexProgressSnapshot {
+        let mut snapshot = {
+            let guard = self.progress_guard();
+            guard.get(repo_root).cloned().unwrap_or_default()
+        };
+        if snapshot.started_at_unix_ms == 0
+            && let Some(persisted) = self.load_persisted_progress(repo_root)
+        {
+            snapshot = self.interrupt_stale_active_progress(repo_root, persisted);
+        }
+        snapshot
+    }
+
+    async fn run_index_job(
+        &self,
+        request: IndexRequest,
+        config: BudiConfig,
+        job_id: String,
+        _index_guard: OwnedMutexGuard<()>,
+    ) {
+        let repo_key = request.repo_root.clone();
+        let hard = request.hard;
+        self.mark_progress_running(&repo_key, hard, &job_id);
+
+        let build_options = index::IndexBuildOptions {
+            include_extensions: request.include_extensions.clone(),
+            ignore_patterns: request.ignore_patterns.clone(),
+        };
+        let repo_root = PathBuf::from(&repo_key);
+        let state_for_build = self.clone();
+        let repo_key_for_build = repo_key.clone();
+        let job_id_for_build = job_id.clone();
+        let config_for_build = config.clone();
+        let build_result = tokio::task::spawn_blocking(move || -> Result<index::IndexWorkspace> {
+            let state_for_progress = state_for_build.clone();
+            let repo_for_progress = repo_key_for_build.clone();
+            let job_for_progress = job_id_for_build.clone();
+            let mut progress_cb = move |progress: index::IndexBuildProgress| {
+                state_for_progress.update_progress(
+                    &repo_for_progress,
+                    hard,
+                    &job_for_progress,
+                    progress,
+                );
+            };
+            state_for_build.run_build_or_update_with_retry(
+                BuildRetryRequest {
+                    repo_root: &repo_root,
+                    repo_key: &repo_key_for_build,
+                    hard,
+                    changed_hint: None,
+                    options: Some(&build_options),
+                    trigger: "index-job",
+                },
+                &config_for_build,
+                Some(&mut progress_cb),
+            )
+        })
+        .await;
+
+        let workspace = match build_result {
+            Ok(Ok(workspace)) => workspace,
+            Ok(Err(err)) => {
+                self.fail_progress(&repo_key, hard, &job_id, &format!("{err:#}"));
+                return;
+            }
+            Err(err) => {
+                self.fail_progress(
+                    &repo_key,
+                    hard,
+                    &job_id,
+                    &format!("index worker join error: {err:#}"),
+                );
+                return;
+            }
+        };
+
+        let repo_root_path = PathBuf::from(&repo_key);
+        let runtime = match RuntimeIndex::from_state(&repo_root_path, workspace.state) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                self.fail_progress(&repo_key, hard, &job_id, &format!("{err:#}"));
+                return;
+            }
+        };
+        self.repos
+            .write()
+            .await
+            .insert(repo_key.clone(), Arc::new(Mutex::new(runtime)));
+
+        let terminal_outcome = if workspace.report.limit_reached {
+            "limit_reached"
+        } else {
+            "completed"
+        };
+        self.finish_progress(&repo_key, hard, &job_id, terminal_outcome);
     }
 
     fn run_build_or_update_with_retry(
@@ -375,13 +575,13 @@ impl DaemonState {
         guard.get(repo_key).copied().unwrap_or_default()
     }
 
-    fn start_progress(&self, repo_root: &str, hard: bool) {
+    fn start_progress(&self, repo_root: &str, hard: bool, job_id: &str) {
         let now = now_unix_ms();
         let snapshot = IndexProgressSnapshot {
             active: true,
             hard,
             state: IndexState::Indexing,
-            phase: "starting".to_string(),
+            phase: "queued".to_string(),
             total_files: 0,
             processed_files: 0,
             changed_files: 0,
@@ -389,8 +589,11 @@ impl DaemonState {
             started_at_unix_ms: now,
             last_update_unix_ms: now,
             last_error: None,
+            job_id: Some(job_id.to_string()),
+            job_state: IndexJobState::Queued,
+            terminal_outcome: None,
             last_persist_unix_ms: now,
-            last_persist_phase: "starting".to_string(),
+            last_persist_phase: "queued".to_string(),
         };
         let mut guard = self.progress_guard();
         guard.insert(repo_root.to_string(), snapshot.clone());
@@ -398,7 +601,39 @@ impl DaemonState {
         self.persist_progress(repo_root, &snapshot);
     }
 
-    fn update_progress(&self, repo_root: &str, hard: bool, progress: index::IndexBuildProgress) {
+    fn mark_progress_running(&self, repo_root: &str, hard: bool, job_id: &str) {
+        let now = now_unix_ms();
+        let mut guard = self.progress_guard();
+        let entry = guard.entry(repo_root.to_string()).or_default();
+        if entry.started_at_unix_ms == 0 {
+            entry.started_at_unix_ms = now;
+        }
+        entry.active = true;
+        entry.hard = hard;
+        entry.state = IndexState::Indexing;
+        if entry.phase.is_empty() || entry.phase == "queued" {
+            entry.phase = "starting".to_string();
+        }
+        entry.current_file = None;
+        entry.last_update_unix_ms = now;
+        entry.last_error = None;
+        entry.job_id = Some(job_id.to_string());
+        entry.job_state = IndexJobState::Running;
+        entry.terminal_outcome = None;
+        entry.last_persist_unix_ms = now;
+        entry.last_persist_phase = entry.phase.clone();
+        let snapshot = entry.clone();
+        drop(guard);
+        self.persist_progress(repo_root, &snapshot);
+    }
+
+    fn update_progress(
+        &self,
+        repo_root: &str,
+        hard: bool,
+        job_id: &str,
+        progress: index::IndexBuildProgress,
+    ) {
         let now = now_unix_ms();
         let mut guard = self.progress_guard();
         let entry = guard.entry(repo_root.to_string()).or_default();
@@ -412,6 +647,9 @@ impl DaemonState {
         } else {
             IndexState::Indexing
         };
+        entry.job_id = Some(job_id.to_string());
+        entry.job_state = IndexJobState::Running;
+        entry.terminal_outcome = None;
         entry.phase = progress.phase;
         entry.total_files = progress.total_files;
         entry.processed_files = progress.processed_files;
@@ -438,7 +676,7 @@ impl DaemonState {
         }
     }
 
-    fn finish_progress(&self, repo_root: &str, hard: bool) {
+    fn finish_progress(&self, repo_root: &str, hard: bool, job_id: &str, terminal_outcome: &str) {
         let now = now_unix_ms();
         let mut guard = self.progress_guard();
         let entry = guard.entry(repo_root.to_string()).or_default();
@@ -452,6 +690,9 @@ impl DaemonState {
         entry.current_file = None;
         entry.last_update_unix_ms = now;
         entry.last_error = None;
+        entry.job_id = Some(job_id.to_string());
+        entry.job_state = IndexJobState::Succeeded;
+        entry.terminal_outcome = Some(terminal_outcome.to_string());
         entry.last_persist_unix_ms = now;
         entry.last_persist_phase = entry.phase.clone();
         let snapshot = entry.clone();
@@ -459,7 +700,7 @@ impl DaemonState {
         self.persist_progress(repo_root, &snapshot);
     }
 
-    fn fail_progress(&self, repo_root: &str, hard: bool, error: &str) {
+    fn fail_progress(&self, repo_root: &str, hard: bool, job_id: &str, error: &str) {
         let now = now_unix_ms();
         let mut guard = self.progress_guard();
         let entry = guard.entry(repo_root.to_string()).or_default();
@@ -473,6 +714,9 @@ impl DaemonState {
         entry.current_file = None;
         entry.last_update_unix_ms = now;
         entry.last_error = Some(error.to_string());
+        entry.job_id = Some(job_id.to_string());
+        entry.job_state = IndexJobState::Failed;
+        entry.terminal_outcome = Some("failed".to_string());
         entry.last_persist_unix_ms = now;
         entry.last_persist_phase = entry.phase.clone();
         let snapshot = entry.clone();
@@ -493,6 +737,9 @@ impl DaemonState {
             started_at_unix_ms: snapshot.started_at_unix_ms,
             last_update_unix_ms: snapshot.last_update_unix_ms,
             last_error: snapshot.last_error.clone(),
+            job_id: snapshot.job_id.clone(),
+            job_state: snapshot.job_state.as_str().to_string(),
+            terminal_outcome: snapshot.terminal_outcome.clone(),
         };
         if let Err(err) = index::save_index_progress_snapshot(Path::new(repo_root), &persisted) {
             tracing::warn!(
@@ -528,6 +775,9 @@ impl DaemonState {
             started_at_unix_ms: persisted.started_at_unix_ms,
             last_update_unix_ms: persisted.last_update_unix_ms,
             last_error: persisted.last_error,
+            job_id: persisted.job_id,
+            job_state: IndexJobState::parse(&persisted.job_state),
+            terminal_outcome: persisted.terminal_outcome,
             last_persist_unix_ms: persisted.last_update_unix_ms,
             last_persist_phase: phase,
         })
@@ -538,13 +788,21 @@ impl DaemonState {
         repo_root: &str,
         mut snapshot: IndexProgressSnapshot,
     ) -> IndexProgressSnapshot {
-        if snapshot.active || snapshot.state == IndexState::Indexing {
+        if snapshot.active
+            || snapshot.state == IndexState::Indexing
+            || matches!(
+                snapshot.job_state,
+                IndexJobState::Queued | IndexJobState::Running
+            )
+        {
             snapshot.active = false;
             snapshot.state = IndexState::Interrupted;
             snapshot.phase = "interrupted".to_string();
             if snapshot.last_error.is_none() {
                 snapshot.last_error = Some("indexing interrupted by daemon restart".to_string());
             }
+            snapshot.job_state = IndexJobState::Interrupted;
+            snapshot.terminal_outcome = Some("interrupted".to_string());
             snapshot.last_update_unix_ms = now_unix_ms();
             snapshot.last_persist_unix_ms = snapshot.last_update_unix_ms;
             snapshot.last_persist_phase = snapshot.phase.clone();
@@ -564,6 +822,13 @@ impl DaemonState {
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, UpdateRetryMetrics>> {
         match self.update_metrics.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn job_counter_guard(&self) -> std::sync::MutexGuard<'_, u64> {
+        match self.job_counter.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }

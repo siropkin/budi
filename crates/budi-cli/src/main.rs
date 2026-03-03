@@ -4,7 +4,6 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -424,6 +423,17 @@ fn cmd_index(
         response.invalid_embeddings,
         response.changed_files
     );
+    if let Some(job_id) = &response.job_id {
+        let job_state = if response.job_state.trim().is_empty() {
+            "unknown"
+        } else {
+            response.job_state.as_str()
+        };
+        println!("index job: {job_id} ({job_state})");
+    }
+    if let Some(outcome) = &response.terminal_outcome {
+        println!("index outcome: {outcome}");
+    }
     Ok(())
 }
 
@@ -437,10 +447,20 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     println!("budi daemon {}", response.daemon_version);
     println!("repo: {}", response.repo_root);
     println!("tracked files: {}", response.tracked_files);
+    println!("indexed chunks: {}", response.indexed_chunks);
     println!("embedded chunks: {}", response.embedded_chunks);
+    println!("missing embeddings: {}", response.missing_embeddings);
     println!("invalid embeddings: {}", response.invalid_embeddings);
     println!("update retries: {}", response.update_retries);
     println!("update failures: {}", response.update_failures);
+    println!("index state: {}", response.index_state);
+    println!("index job state: {}", response.index_job_state);
+    if let Some(job_id) = &response.index_job_id {
+        println!("index job id: {job_id}");
+    }
+    if let Some(outcome) = &response.index_terminal_outcome {
+        println!("index terminal outcome: {outcome}");
+    }
     println!("hooks detected: {}", response.hooks_detected);
     Ok(())
 }
@@ -1486,12 +1506,25 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
         Ok(status) => {
             println!(
-                "route /status: ok (tracked_files={} embedded_chunks={} invalid_embeddings={} update_retries={} update_failures={})",
+                "route /status: ok (tracked_files={} indexed_chunks={} embedded_chunks={} missing_embeddings={} invalid_embeddings={} update_retries={} update_failures={} index_state={} index_job_state={} index_terminal_outcome={})",
                 status.tracked_files,
+                status.indexed_chunks,
                 status.embedded_chunks,
+                status.missing_embeddings,
                 status.invalid_embeddings,
                 status.update_retries,
-                status.update_failures
+                status.update_failures,
+                if status.index_state.is_empty() {
+                    "-"
+                } else {
+                    status.index_state.as_str()
+                },
+                if status.index_job_state.is_empty() {
+                    "-"
+                } else {
+                    status.index_job_state.as_str()
+                },
+                status.index_terminal_outcome.as_deref().unwrap_or("-")
             );
             daemon_status = Some(status);
         }
@@ -1513,8 +1546,17 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
             if progress.state == "failed" && progress.last_error.is_none() {
                 progress_issues.push("failed_without_error");
             }
+            if matches!(progress.job_state.as_str(), "queued" | "running") && !progress.active {
+                progress_issues.push("job_active_conflict");
+            }
+            if progress.terminal_outcome.is_some() && progress.active {
+                progress_issues.push("terminal_while_active");
+            }
+            if progress.job_state == "failed" && progress.last_error.is_none() {
+                progress_issues.push("job_failed_without_error");
+            }
             println!(
-                "route /progress: ok (state={} phase={} active={} total={} processed={} sanity={})",
+                "route /progress: ok (state={} phase={} active={} job_state={} terminal_outcome={} total={} processed={} sanity={})",
                 if progress.state.is_empty() {
                     "-"
                 } else {
@@ -1526,6 +1568,12 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
                     progress.phase.as_str()
                 },
                 progress.active,
+                if progress.job_state.is_empty() {
+                    "-"
+                } else {
+                    progress.job_state.as_str()
+                },
+                progress.terminal_outcome.as_deref().unwrap_or("-"),
                 progress.total_files,
                 progress.processed_files,
                 if progress_issues.is_empty() {
@@ -1579,6 +1627,13 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
         }
         if status.update_failures > 0 {
             drift_notes.push(format!("status_update_failures={}", status.update_failures));
+        }
+        if matches!(status.index_job_state.as_str(), "failed" | "interrupted") {
+            drift_notes.push(format!(
+                "status_index_job_state={} outcome={}",
+                status.index_job_state,
+                status.index_terminal_outcome.as_deref().unwrap_or("-")
+            ));
         }
     }
     println!(
@@ -3135,45 +3190,28 @@ fn run_index_with_progress(
 ) -> Result<IndexResponse> {
     let base_url = config.daemon_base_url();
     let repo_root_str = repo_root.display().to_string();
-    let (tx, rx) = mpsc::channel::<Result<IndexResponse>>();
-    thread::spawn({
-        let base_url = base_url.clone();
-        let repo_root_str = repo_root_str.clone();
-        let ignore_patterns = ignore_patterns.to_vec();
-        let include_extensions = include_extensions.to_vec();
-        move || {
-            let result = send_index_request(
-                &base_url,
-                &repo_root_str,
-                hard,
-                &ignore_patterns,
-                &include_extensions,
-            );
-            let _ = tx.send(result);
-        }
-    });
+    send_index_request(
+        &base_url,
+        &repo_root_str,
+        hard,
+        ignore_patterns,
+        include_extensions,
+    )?;
 
     let started = Instant::now();
     let mut had_progress_line = false;
     let mut warned_missing_progress = false;
     let mut previous_line_len = 0usize;
     loop {
-        match rx.try_recv() {
-            Ok(result) => {
-                if had_progress_line {
-                    eprintln!();
-                }
-                return result;
+        if started.elapsed() > Duration::from_secs(INDEX_TIMEOUT_SECS) {
+            if had_progress_line {
+                eprintln!();
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                anyhow::bail!("Index worker terminated unexpectedly");
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
+            anyhow::bail!("Timed out while waiting for async index job to finish");
         }
-
         let elapsed = started.elapsed().as_secs_f32();
-        let line = match fetch_index_progress(&base_url, &repo_root_str) {
-            Ok(snapshot) => render_progress_line(&snapshot, elapsed),
+        let snapshot = match fetch_index_progress(&base_url, &repo_root_str) {
+            Ok(snapshot) => snapshot,
             Err(err) => {
                 if !warned_missing_progress {
                     eprintln!();
@@ -3183,13 +3221,71 @@ restart daemon (`budi init`) to enable per-file progress."
                     );
                     warned_missing_progress = true;
                 }
-                format!("Indexing... preparing ({elapsed:.1}s elapsed)")
+                let line = format!("Indexing... preparing ({elapsed:.1}s elapsed)");
+                render_progress_to_stderr(&line, &mut previous_line_len);
+                had_progress_line = true;
+                std::thread::sleep(Duration::from_millis(220));
+                continue;
             }
         };
+        let line = render_progress_line(&snapshot, elapsed);
         render_progress_to_stderr(&line, &mut previous_line_len);
         had_progress_line = true;
-        thread::sleep(Duration::from_millis(220));
+        if is_terminal_job_progress(&snapshot) {
+            if had_progress_line {
+                eprintln!();
+            }
+            return build_index_response_from_progress(&base_url, &repo_root_str, snapshot);
+        }
+        std::thread::sleep(Duration::from_millis(220));
     }
+}
+
+fn is_terminal_job_progress(progress: &IndexProgressResponse) -> bool {
+    if progress.terminal_outcome.is_some() {
+        return true;
+    }
+    if matches!(
+        progress.job_state.as_str(),
+        "succeeded" | "failed" | "interrupted"
+    ) {
+        return true;
+    }
+    !progress.active && matches!(progress.state.as_str(), "ready" | "failed" | "interrupted")
+}
+
+fn build_index_response_from_progress(
+    base_url: &str,
+    repo_root: &str,
+    progress: IndexProgressResponse,
+) -> Result<IndexResponse> {
+    if matches!(progress.job_state.as_str(), "failed" | "interrupted")
+        || matches!(progress.state.as_str(), "failed" | "interrupted")
+    {
+        let message = progress
+            .last_error
+            .unwrap_or_else(|| "index job failed".to_string());
+        anyhow::bail!("{message}");
+    }
+    let status = fetch_status_snapshot(base_url, repo_root)
+        .context("Failed to fetch final status after index job completion")?;
+    let index_status = progress
+        .terminal_outcome
+        .clone()
+        .unwrap_or_else(|| "completed".to_string());
+    Ok(IndexResponse {
+        indexed_files: status.tracked_files,
+        indexed_chunks: status.indexed_chunks,
+        embedded_chunks: status.embedded_chunks,
+        missing_embeddings: status.missing_embeddings,
+        repaired_embeddings: 0,
+        invalid_embeddings: status.invalid_embeddings,
+        changed_files: progress.changed_files,
+        index_status,
+        job_id: progress.job_id,
+        job_state: progress.job_state,
+        terminal_outcome: progress.terminal_outcome,
+    })
 }
 
 fn render_progress_to_stderr(line: &str, previous_line_len: &mut usize) {
@@ -3268,6 +3364,9 @@ fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> 
     if let Some(error) = &progress.last_error {
         return format!("Indexing failed ({elapsed_secs:.1}s): {error}");
     }
+    if let Some(outcome) = &progress.terminal_outcome {
+        return format!("Index {outcome} ({elapsed_secs:.1}s elapsed)");
+    }
     let phase = if progress.phase.is_empty() {
         if progress.state.is_empty() {
             "working"
@@ -3277,8 +3376,11 @@ fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> 
     } else {
         progress.phase.as_str()
     };
+    if progress.job_state == "queued" {
+        return format!("Indexing... queued ({elapsed_secs:.1}s elapsed)");
+    }
     if progress.total_files == 0 {
-        if progress.active || progress.state == "indexing" {
+        if progress.active || matches!(progress.job_state.as_str(), "running") {
             return format!("Indexing... {phase} ({elapsed_secs:.1}s elapsed)");
         }
         if progress.state == "ready" {

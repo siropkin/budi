@@ -98,6 +98,12 @@ pub struct IndexResponse {
     pub changed_files: usize,
     #[serde(default = "default_index_status")]
     pub index_status: String,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub job_state: String,
+    #[serde(default)]
+    pub terminal_outcome: Option<String>,
 }
 
 fn default_index_status() -> String {
@@ -125,6 +131,12 @@ pub struct IndexProgressResponse {
     pub started_at_unix_ms: u128,
     pub last_update_unix_ms: u128,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub job_state: String,
+    #[serde(default)]
+    pub terminal_outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +155,11 @@ pub struct StatusResponse {
     pub daemon_version: String,
     pub repo_root: String,
     pub tracked_files: usize,
+    #[serde(default)]
+    pub indexed_chunks: usize,
     pub embedded_chunks: usize,
+    #[serde(default)]
+    pub missing_embeddings: usize,
     #[serde(default)]
     pub invalid_embeddings: usize,
     pub hooks_detected: bool,
@@ -151,4 +167,12 @@ pub struct StatusResponse {
     pub update_retries: u64,
     #[serde(default)]
     pub update_failures: u64,
+    #[serde(default)]
+    pub index_state: String,
+    #[serde(default)]
+    pub index_job_id: Option<String>,
+    #[serde(default)]
+    pub index_job_state: String,
+    #[serde(default)]
+    pub index_terminal_outcome: Option<String>,
 }

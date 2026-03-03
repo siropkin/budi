@@ -134,7 +134,7 @@ budi init              # install/update hooks in current repo
 budi index             # incremental re-index
 budi index --hard      # full rebuild
 budi index --ignore-pattern "scratch/**" --include-ext proto # one-shot index-scope overrides
-budi index --hard --progress # full rebuild + live per-file progress + phase
+budi index --hard --progress # full rebuild job + poll live per-file progress/phase
 budi repo status       # daemon/index/hooks health
 budi repo stats        # local index stats (SQLite catalog + Tantivy)
 budi repo list         # list local repo-state storage entries
@@ -157,14 +157,15 @@ budi observe disable   # stop usage logging
 "retrieve useful repo context first, then let Claude generate the answer."
 
 How indexing works:
-1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore`, root `*.ignore` files (for example `.cursorignore`/`.codeiumignore`/`.contextignore`), global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`) plus optional one-shot CLI overrides (`--ignore-pattern`, `--include-ext`).
-2. It splits indexed files into small chunks (so it can retrieve precise snippets, not whole files).
-3. It builds a local search index for those chunks:
+1. `budi index --hard` schedules a full index job in the daemon, then (with `--progress`) polls `/progress` until a terminal job outcome.
+2. The index job scans git-listed files in your repo (`git ls-files`), respecting `.gitignore`, root `*.ignore` files (for example `.cursorignore`/`.codeiumignore`/`.contextignore`), global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`) plus optional one-shot CLI overrides (`--ignore-pattern`, `--include-ext`).
+3. It splits indexed files into small chunks (so it can retrieve precise snippets, not whole files).
+4. It builds a local search index for those chunks:
    - keyword/symbol/path search (fast exact matching)
    - semantic search vectors (meaning-based matching)
-4. It stores everything locally on your machine (`~/.local/share/budi/...`).
-5. It keeps a local SQLite catalog (`index.sqlite`) with file hashes + chunks so hook-driven updates can re-index only changed or hinted files instead of rescanning the full tree each time.
-6. It keeps a global embedding cache (`~/.local/share/budi/embedding-cache.sqlite`) keyed by chunk content hash, so repeated code text is not re-embedded on every run.
+5. It stores everything locally on your machine (`~/.local/share/budi/...`).
+6. It keeps a local SQLite catalog (`index.sqlite`) with file hashes + chunks so hook-driven updates can re-index only changed or hinted files instead of rescanning the full tree each time.
+7. It keeps a global embedding cache (`~/.local/share/budi/embedding-cache.sqlite`) keyed by chunk content hash, so repeated code text is not re-embedded on every run.
 
 How prompt-time retrieval works:
 1. You send a prompt in Claude Code.
