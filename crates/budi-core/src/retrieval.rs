@@ -7,6 +7,9 @@ use crate::config::BudiConfig;
 use crate::git::GitSnapshot;
 use crate::index::RuntimeIndex;
 use crate::rpc::{QueryDiagnostics, QueryResponse, QueryResultItem};
+use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
+
+mod context;
 
 const RRF_K: f32 = 60.0;
 
@@ -60,16 +63,6 @@ struct ScoredChunk {
     score: f32,
     reasons: Vec<String>,
     clause_hits: Vec<usize>,
-}
-
-#[derive(Debug, Default)]
-struct SnippetSelectionState {
-    snippets: Vec<QueryResultItem>,
-    seen_fingerprints: HashSet<String>,
-    snippets_per_path: HashMap<String, usize>,
-    snippets_per_bucket: HashMap<String, usize>,
-    per_file_limit: usize,
-    per_bucket_limit: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -565,19 +558,6 @@ fn try_push_scored_chunk(
         .or_insert(0) += 1;
     *selection.snippets_per_bucket.entry(bucket).or_insert(0) += 1;
     true
-}
-
-fn path_diversity_bucket(path: &str) -> String {
-    let mut parts = path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_ascii_lowercase());
-    let first = parts.next().unwrap_or_else(|| "root".to_string());
-    if let Some(second) = parts.next() {
-        format!("{first}/{second}")
-    } else {
-        first
-    }
 }
 
 fn fuse_channel_scores(
@@ -2452,48 +2432,11 @@ fn matches_doc_path_hint(path: &str, hints: &[String]) -> bool {
     hints.iter().any(|hint| lower_path.contains(hint))
 }
 
-fn build_context(snippets: &[QueryResultItem], budget: usize) -> String {
-    let mut out = String::new();
-    out.push_str("[budi deterministic context]\n");
-    out.push_str("snippets:\n");
-
-    for snippet in snippets {
-        let header = format!(
-            "### {}:{}-{} score={:.4} reason={}\n",
-            snippet.path, snippet.start_line, snippet.end_line, snippet.score, snippet.reason
-        );
-        if out.len() + header.len() >= budget {
-            break;
-        }
-        out.push_str(&header);
-        let mut body = snippet.text.clone();
-        body.push('\n');
-        if out.len() + body.len() > budget {
-            let remaining = budget.saturating_sub(out.len());
-            let truncated = body.chars().take(remaining).collect::<String>();
-            out.push_str(&truncated);
-            break;
-        }
-        out.push_str(&body);
-    }
-    out
-}
-
 fn normalize_path(input: &str) -> String {
     input
         .replace('\\', "/")
         .trim_start_matches("./")
         .to_string()
-}
-
-fn snippet_fingerprint(text: &str) -> String {
-    let normalized = text
-        .split_whitespace()
-        .take(80)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    blake3::hash(normalized.as_bytes()).to_hex().to_string()
 }
 
 #[cfg(test)]

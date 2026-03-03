@@ -126,7 +126,6 @@ impl BudiConfig {
 pub struct RepoPaths {
     pub data_dir: PathBuf,
     pub config_file: PathBuf,
-    pub ignore_file: PathBuf,
     pub index_dir: PathBuf,
     pub index_db_file: PathBuf,
     pub tantivy_dir: PathBuf,
@@ -165,7 +164,6 @@ pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
     let bench_dir = data_dir.join(BUDI_BENCH_DIR_NAME);
     Ok(RepoPaths {
         config_file: data_dir.join(BUDI_CONFIG_FILE_NAME),
-        ignore_file: repo_root.join(BUDI_IGNORE_FILE_NAME),
         index_db_file: index_dir.join(BUDI_INDEX_DB_FILE_NAME),
         data_dir,
         index_dir,
@@ -180,7 +178,7 @@ pub fn config_path(repo_root: &Path) -> Result<PathBuf> {
 }
 
 pub fn ignore_path(repo_root: &Path) -> Result<PathBuf> {
-    Ok(repo_paths(repo_root)?.ignore_file)
+    Ok(repo_root.join(BUDI_IGNORE_FILE_NAME))
 }
 
 pub fn index_db_path(repo_root: &Path) -> Result<PathBuf> {
@@ -224,12 +222,13 @@ pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
     fs::create_dir_all(repo_root.join(".claude"))
         .with_context(|| "Failed to create .claude".to_string())?;
 
-    if !paths.ignore_file.exists() {
+    let ignore_file = ignore_path(repo_root)?;
+    if !ignore_file.exists() {
         fs::write(
-            &paths.ignore_file,
+            &ignore_file,
             "# budi index exclusions (gitignore-style)\n# Prefix with ! to unignore an included path\n",
         )
-        .with_context(|| format!("Failed writing {}", paths.ignore_file.display()))?;
+        .with_context(|| format!("Failed writing {}", ignore_file.display()))?;
     }
     Ok(())
 }

@@ -25,6 +25,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
+mod prompt_controls;
+#[cfg(test)]
+use prompt_controls::PromptDirectives;
+use prompt_controls::{
+    evaluate_context_skip, excerpt, parse_prompt_directives, sanitize_prompt_for_query,
+};
+
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
 const SEARCH_QUERY_TIMEOUT_SECS: u64 = 30;
@@ -327,7 +334,7 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     println!(".git: {}", repo_root.join(".git").exists());
     println!("local data dir: {}", paths.data_dir.display());
     println!("config: {}", paths.config_file.exists());
-    println!("budi ignore: {}", paths.ignore_file.exists());
+    println!("budi ignore: {}", config::ignore_path(&repo_root)?.exists());
     println!(
         "hook settings: {}",
         repo_root.join(CLAUDE_LOCAL_SETTINGS).exists()
@@ -2053,20 +2060,6 @@ fn now_unix_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn excerpt(text: &str, config: &BudiConfig) -> String {
-    if config.debug_io_full_text {
-        return text.to_string();
-    }
-    if config.debug_io_max_chars == 0 {
-        return String::new();
-    }
-    let max = config.debug_io_max_chars.max(64);
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars().take(max).collect::<String>()
-}
-
 #[derive(Debug)]
 struct HookLogLockGuard {
     lock_path: PathBuf,
@@ -2449,94 +2442,6 @@ fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> 
         total = progress.total_files,
         changed = progress.changed_files
     )
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct PromptDirectives {
-    force_skip: bool,
-    force_inject: bool,
-}
-
-fn parse_prompt_directives(prompt: &str) -> PromptDirectives {
-    let mut directives = PromptDirectives::default();
-    for raw in prompt.split_whitespace() {
-        let normalized = raw.trim_matches(|c: char| {
-            matches!(
-                c,
-                ',' | '.' | ';' | ':' | '!' | '?' | '"' | '\'' | '`' | '(' | ')' | '[' | ']'
-            )
-        });
-        if normalized.eq_ignore_ascii_case("@nobudi") {
-            directives.force_skip = true;
-        } else if normalized.eq_ignore_ascii_case("@forcebudi") {
-            directives.force_inject = true;
-        }
-    }
-    if directives.force_inject {
-        directives.force_skip = false;
-    }
-    directives
-}
-
-fn sanitize_prompt_for_query(prompt: &str) -> String {
-    let mut cleaned = Vec::new();
-    for raw in prompt.split_whitespace() {
-        let normalized = raw.trim_matches(|c: char| {
-            matches!(
-                c,
-                ',' | '.' | ';' | ':' | '!' | '?' | '"' | '\'' | '`' | '(' | ')' | '[' | ']'
-            )
-        });
-        if normalized.eq_ignore_ascii_case("@nobudi")
-            || normalized.eq_ignore_ascii_case("@forcebudi")
-        {
-            continue;
-        }
-        cleaned.push(raw);
-    }
-    let sanitized = cleaned.join(" ").trim().to_string();
-    if sanitized.is_empty() {
-        prompt.to_string()
-    } else {
-        sanitized
-    }
-}
-
-fn evaluate_context_skip(
-    config: &BudiConfig,
-    directives: &PromptDirectives,
-    diagnostics: &QueryDiagnostics,
-) -> Option<String> {
-    if directives.force_skip {
-        return Some("forced_skip".to_string());
-    }
-    if directives.force_inject {
-        return None;
-    }
-    if !config.smart_skip_enabled {
-        return None;
-    }
-    if !diagnostics_available(diagnostics) {
-        return None;
-    }
-    if config.skip_non_code_prompts && diagnostics.intent == "non-code" {
-        return Some("non-code-intent".to_string());
-    }
-    if !diagnostics.recommended_injection {
-        if let Some(reason) = &diagnostics.skip_reason {
-            return Some(reason.clone());
-        }
-        return Some("low-confidence".to_string());
-    }
-    None
-}
-
-fn diagnostics_available(diagnostics: &QueryDiagnostics) -> bool {
-    !diagnostics.intent.is_empty()
-        || diagnostics.top_score > 0.0
-        || diagnostics.margin > 0.0
-        || !diagnostics.signals.is_empty()
-        || diagnostics.skip_reason.is_some()
 }
 
 #[cfg(test)]

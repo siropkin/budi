@@ -117,11 +117,6 @@ What `budi` adds automatically (simplified):
 
 ```text
 [budi deterministic context]
-branch: main
-head: 23e124a...
-dirty_files:
-- src/config/runtime-core.ts
-
 snippets:
 ### src/config/runtime-core.ts:218-260
 function loadTeamsFromJson(...) { ... }
@@ -144,7 +139,7 @@ budi repo stats        # local index stats (SQLite catalog + Tantivy)
 budi repo preview "<prompt>" # see context that would be injected
 budi repo search "<query>"   # run retrieval and list top matching snippets
 budi bench --prompt "<prompt>" --iterations 30 # retrieval latency/context benchmark
-budi ignore <path>     # add file to local budi ignore list
+budi ignore <pattern>  # append pattern to repo-local .budiignore
 budi doctor --deep     # extended consistency/route/retrieval diagnostics
 budi observe enable    # start metadata-only local usage logging
 budi observe report    # summarize all logged usage (default: all history)
@@ -158,7 +153,7 @@ budi observe disable   # stop usage logging
 "retrieve useful repo context first, then let Claude generate the answer."
 
 How indexing works:
-1. `budi index --hard` scans your repo (respecting git ignore rules and budi ignore rules).
+1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore` and `.budiignore` (`!unignore` supported).
 2. It splits code/docs into small chunks (so it can retrieve precise snippets, not whole files).
 3. It builds a local search index for those chunks:
    - keyword/symbol/path search (fast exact matching)
