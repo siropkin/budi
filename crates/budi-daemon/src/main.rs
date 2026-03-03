@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -56,6 +56,7 @@ struct AppState {
 #[derive(Clone, Default)]
 struct AutoSyncRegistry {
     started_repos: Arc<Mutex<HashSet<String>>>,
+    watcher_restarts: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl AutoSyncRegistry {
@@ -70,11 +71,22 @@ impl AutoSyncRegistry {
             return;
         }
         drop(started);
+        self.record_watcher_restart(repo_root, 0).await;
 
         let repo_key = repo_root.to_string();
+        let autosync = self.clone();
         tokio::spawn(async move {
-            run_repo_autosync(repo_key, daemon_state, config).await;
+            run_repo_autosync(repo_key, daemon_state, config, autosync).await;
         });
+    }
+
+    async fn record_watcher_restart(&self, repo_root: &str, restart_count: u64) {
+        let mut counts = self.watcher_restarts.lock().await;
+        counts.insert(repo_root.to_string(), restart_count);
+    }
+
+    async fn watcher_restart_snapshot(&self) -> HashMap<String, u64> {
+        self.watcher_restarts.lock().await.clone()
     }
 }
 
@@ -115,8 +127,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({"ok": true}))
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let watcher_restarts = state.autosync.watcher_restart_snapshot().await;
+    let watcher_restarts_total = watcher_restarts.values().copied().sum::<u64>();
+    Json(json!({
+        "ok": true,
+        "autosync_repos": watcher_restarts.len(),
+        "watcher_restarts_total": watcher_restarts_total,
+        "watcher_restarts_by_repo": watcher_restarts,
+    }))
 }
 
 async fn query(
@@ -223,7 +242,12 @@ fn request_config(repo_root: &str) -> Result<BudiConfig> {
     config::load_or_default(root)
 }
 
-async fn run_repo_autosync(repo_root: String, daemon_state: DaemonState, config: BudiConfig) {
+async fn run_repo_autosync(
+    repo_root: String,
+    daemon_state: DaemonState,
+    config: BudiConfig,
+    autosync: AutoSyncRegistry,
+) {
     tracing::info!("auto-sync supervisor started for {}", repo_root);
     let mut consecutive_failures = 0u32;
     let mut restart_count = 0u64;
@@ -238,6 +262,9 @@ async fn run_repo_autosync(repo_root: String, daemon_state: DaemonState, config:
         if let Err(err) = watcher_started {
             consecutive_failures = consecutive_failures.saturating_add(1);
             restart_count = restart_count.saturating_add(1);
+            autosync
+                .record_watcher_restart(&repo_root, restart_count)
+                .await;
             let delay = watcher_restart_backoff(consecutive_failures);
             tracing::warn!(
                 "failed starting file watcher for {} (restart #{}, consecutive failures {}): {}. retrying in {}ms",
@@ -337,6 +364,9 @@ async fn run_repo_autosync(repo_root: String, daemon_state: DaemonState, config:
 
         consecutive_failures = consecutive_failures.saturating_add(1);
         restart_count = restart_count.saturating_add(1);
+        autosync
+            .record_watcher_restart(&repo_root, restart_count)
+            .await;
         let delay = watcher_restart_backoff(consecutive_failures);
         tracing::warn!(
             "restarting auto-sync watcher for {} (restart #{}, consecutive failures {}, backoff {}ms)",

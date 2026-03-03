@@ -91,6 +91,7 @@ enum Commands {
         #[command(subcommand)]
         command: ObserveCommands,
     },
+    #[command(hide = true)]
     Hook {
         #[command(subcommand)]
         command: HookCommands,
@@ -99,7 +100,9 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum HookCommands {
+    #[command(hide = true)]
     UserPromptSubmit,
+    #[command(hide = true)]
     PostToolUse,
 }
 
@@ -279,19 +282,9 @@ fn cmd_index(repo_root: Option<PathBuf>, hard: bool, progress: bool) -> Result<(
 fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
-    let client = daemon_client_with_timeout(Duration::from_secs(STATUS_TIMEOUT_SECS));
-    let url = format!("{}/status", config.daemon_base_url());
-    let response: StatusResponse = client
-        .post(url)
-        .json(&StatusRequest {
-            repo_root: repo_root.display().to_string(),
-        })
-        .send()
-        .context("Failed to request daemon status")?
-        .error_for_status()
-        .context("Status endpoint returned error")?
-        .json()
-        .context("Invalid status response JSON")?;
+    let response =
+        fetch_status_snapshot(&config.daemon_base_url(), &repo_root.display().to_string())
+            .context("Status endpoint returned error")?;
 
     println!("budi daemon {}", response.daemon_version);
     println!("repo: {}", response.repo_root);
@@ -593,6 +586,29 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
         index_db_bytes
     );
 
+    let mut sqlite_files_count = 0usize;
+    let mut sqlite_chunks_count = 0usize;
+    let mut sqlite_index_progress_rows = 0usize;
+    if index_db_path.exists()
+        && let Ok(conn) = Connection::open(&index_db_path)
+    {
+        if let Ok(count) =
+            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+        {
+            sqlite_files_count = count.max(0) as usize;
+        }
+        if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        }) {
+            sqlite_chunks_count = count.max(0) as usize;
+        }
+        if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM index_progress", [], |row| {
+            row.get::<_, i64>(0)
+        }) {
+            sqlite_index_progress_rows = count.max(0) as usize;
+        }
+    }
+
     let mut duplicate_file_paths = 0usize;
     let mut duplicate_chunk_ids = 0usize;
     let mut orphan_chunks = 0usize;
@@ -650,36 +666,152 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
         embedding_cache_entries
     );
 
+    let mut semantic_backend_ready = false;
+    let mut semantic_embedding_dims = 0usize;
+    let mut semantic_probe_error = String::new();
+    match index::embed_query(repo_root, "doctor semantic backend probe") {
+        Ok(Some(embedding)) if !embedding.is_empty() => {
+            semantic_backend_ready = true;
+            semantic_embedding_dims = embedding.len();
+        }
+        Ok(_) => {}
+        Err(err) => {
+            semantic_probe_error = err.to_string();
+        }
+    }
+    println!(
+        "semantic backend: ready={} dims={} error={}",
+        semantic_backend_ready,
+        semantic_embedding_dims,
+        if semantic_probe_error.is_empty() {
+            "-"
+        } else {
+            semantic_probe_error.as_str()
+        }
+    );
+
     let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
     let health_url = format!("{}/health", config.daemon_base_url());
     let health_route = client.get(health_url).send();
+    let mut watcher_restarts_total = 0u64;
     match health_route {
-        Ok(resp) => println!("route /health: {}", resp.status()),
+        Ok(resp) => {
+            let status = resp.status();
+            match resp.json::<Value>() {
+                Ok(body) => {
+                    watcher_restarts_total = body
+                        .get("watcher_restarts_total")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    println!(
+                        "route /health: {} (watcher_restarts_total={})",
+                        status, watcher_restarts_total
+                    );
+                }
+                Err(_) => println!("route /health: {}", status),
+            }
+        }
         Err(err) => println!("route /health: error ({err})"),
     }
 
-    let status_url = format!("{}/status", config.daemon_base_url());
-    let status_route = client
-        .post(status_url)
-        .json(&StatusRequest {
-            repo_root: repo_root_str.clone(),
-        })
-        .send();
-    match status_route {
-        Ok(resp) => println!("route /status: {}", resp.status()),
-        Err(err) => println!("route /status: error ({err})"),
+    let mut daemon_status: Option<StatusResponse> = None;
+    match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
+        Ok(status) => {
+            println!(
+                "route /status: ok (tracked_files={} embedded_chunks={} dirty_files={})",
+                status.tracked_files, status.embedded_chunks, status.dirty_files
+            );
+            daemon_status = Some(status);
+        }
+        Err(err) => println!("route /status: error ({err:#})"),
     }
 
-    let progress_url = format!("{}/progress", config.daemon_base_url());
-    let progress_route = client
-        .post(progress_url)
-        .json(&IndexProgressRequest {
-            repo_root: repo_root_str.clone(),
-        })
-        .send();
-    match progress_route {
-        Ok(resp) => println!("route /progress: {}", resp.status()),
-        Err(err) => println!("route /progress: error ({err})"),
+    match fetch_index_progress(&config.daemon_base_url(), &repo_root_str) {
+        Ok(progress) => {
+            let mut progress_issues = Vec::new();
+            if progress.processed_files > progress.total_files {
+                progress_issues.push("processed_gt_total");
+            }
+            if progress.active && progress.state == "ready" {
+                progress_issues.push("active_ready_conflict");
+            }
+            if !progress.active && progress.state == "indexing" {
+                progress_issues.push("inactive_indexing_conflict");
+            }
+            if progress.state == "failed" && progress.last_error.is_none() {
+                progress_issues.push("failed_without_error");
+            }
+            println!(
+                "route /progress: ok (state={} phase={} active={} total={} processed={} sanity={})",
+                if progress.state.is_empty() {
+                    "-"
+                } else {
+                    progress.state.as_str()
+                },
+                if progress.phase.is_empty() {
+                    "-"
+                } else {
+                    progress.phase.as_str()
+                },
+                progress.active,
+                progress.total_files,
+                progress.processed_files,
+                if progress_issues.is_empty() {
+                    "ok".to_string()
+                } else {
+                    progress_issues.join(",")
+                }
+            );
+        }
+        Err(err) => println!("route /progress: error ({err:#})"),
+    }
+
+    let mut drift_notes = Vec::new();
+    if let Some(index_state) = &state {
+        if sqlite_files_count != index_state.files.len() {
+            drift_notes.push(format!(
+                "sqlite_files={} state_files={}",
+                sqlite_files_count,
+                index_state.files.len()
+            ));
+        }
+        if sqlite_chunks_count != index_state.chunks.len() {
+            drift_notes.push(format!(
+                "sqlite_chunks={} state_chunks={}",
+                sqlite_chunks_count,
+                index_state.chunks.len()
+            ));
+        }
+    }
+    if let Some(status) = &daemon_status {
+        if status.tracked_files != sqlite_files_count {
+            drift_notes.push(format!(
+                "status_tracked_files={} sqlite_files={}",
+                status.tracked_files, sqlite_files_count
+            ));
+        }
+        if status.embedded_chunks != sqlite_chunks_count {
+            drift_notes.push(format!(
+                "status_embedded_chunks={} sqlite_chunks={}",
+                status.embedded_chunks, sqlite_chunks_count
+            ));
+        }
+    }
+    println!(
+        "index drift: sqlite_files={} sqlite_chunks={} index_progress_rows={} watcher_restarts_total={} notes={}",
+        sqlite_files_count,
+        sqlite_chunks_count,
+        sqlite_index_progress_rows,
+        watcher_restarts_total,
+        if drift_notes.is_empty() {
+            "none".to_string()
+        } else {
+            drift_notes.join("; ")
+        }
+    );
+
+    if sqlite_index_progress_rows > 1 {
+        println!("index progress table: unexpected row count (>1)");
     }
 
     if state
@@ -2251,6 +2383,23 @@ fn send_index_request(base_url: &str, repo_root: &str, hard: bool) -> Result<Ind
         .context("Index request failed")?
         .json()
         .context("Invalid index response JSON")?;
+    Ok(response)
+}
+
+fn fetch_status_snapshot(base_url: &str, repo_root: &str) -> Result<StatusResponse> {
+    let client = daemon_client_with_timeout(Duration::from_secs(STATUS_TIMEOUT_SECS));
+    let url = format!("{base_url}/status");
+    let response: StatusResponse = client
+        .post(url)
+        .json(&StatusRequest {
+            repo_root: repo_root.to_string(),
+        })
+        .send()
+        .context("Failed requesting daemon status")?
+        .error_for_status()
+        .context("Status endpoint returned error")?
+        .json()
+        .context("Invalid status response JSON")?;
     Ok(response)
 }
 
