@@ -17,6 +17,7 @@ use budi_core::rpc::{
     IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryDiagnostics,
     QueryRequest, QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
 };
+use budi_core::{git, index};
 use clap::{ArgAction, Parser, Subcommand};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -24,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
+const SEARCH_QUERY_TIMEOUT_SECS: u64 = 30;
 const HOOK_QUERY_TIMEOUT_SECS: u64 = 12;
 const STATUS_TIMEOUT_SECS: u64 = 120;
 const UPDATE_TIMEOUT_SECS: u64 = 180;
@@ -75,6 +77,21 @@ enum Commands {
         prompt: String,
         #[arg(long)]
         repo_root: Option<PathBuf>,
+    },
+    Search {
+        query: String,
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Stats {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Observe {
         #[command(subcommand)]
@@ -149,6 +166,13 @@ fn main() -> Result<()> {
         Commands::Ignore { pattern, repo_root } => cmd_ignore(repo_root, &pattern),
         Commands::Doctor { repo_root } => cmd_doctor(repo_root),
         Commands::Preview { prompt, repo_root } => cmd_preview(repo_root, &prompt),
+        Commands::Search {
+            query,
+            repo_root,
+            limit,
+            json,
+        } => cmd_search(repo_root, &query, limit, json),
+        Commands::Stats { repo_root, json } => cmd_stats(repo_root, json),
         Commands::Observe { command } => match command {
             ObserveCommands::Enable { repo_root } => cmd_observe_enable(repo_root),
             ObserveCommands::Disable { repo_root } => cmd_observe_disable(repo_root),
@@ -336,6 +360,159 @@ fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str) -> Result<()> {
         );
     }
     println!("\n--- injected context preview ---\n{}", context_preview);
+    Ok(())
+}
+
+fn cmd_search(
+    repo_root: Option<PathBuf>,
+    query: &str,
+    limit: usize,
+    json_output: bool,
+) -> Result<()> {
+    if limit == 0 {
+        anyhow::bail!("--limit must be at least 1");
+    }
+    let repo_root = resolve_repo_root(repo_root)?;
+    let config = config::load_or_default(&repo_root)?;
+    ensure_daemon_running(&repo_root, &config)?;
+    let sanitized_query = sanitize_prompt_for_query(query);
+    let response = query_daemon_with_timeout(
+        &repo_root,
+        &config,
+        &sanitized_query,
+        Some(&repo_root),
+        SEARCH_QUERY_TIMEOUT_SECS,
+    )?;
+    let limited_snippets = response
+        .snippets
+        .iter()
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    if json_output {
+        let payload = json!({
+            "query": query,
+            "branch": response.branch,
+            "head": response.head,
+            "total_candidates": response.total_candidates,
+            "returned": limited_snippets.len(),
+            "diagnostics": response.diagnostics,
+            "snippets": limited_snippets,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("query: {}", query);
+    println!("branch={} head={}", response.branch, response.head);
+    println!(
+        "total candidates={} returned={}",
+        response.total_candidates,
+        limited_snippets.len()
+    );
+    if !response.diagnostics.intent.is_empty() {
+        println!(
+            "intent={} confidence={:.3} top_score={:.3} margin={:.3}",
+            response.diagnostics.intent,
+            response.diagnostics.confidence,
+            response.diagnostics.top_score,
+            response.diagnostics.margin
+        );
+    }
+    for item in &limited_snippets {
+        println!(
+            "- {}:{}-{} score={:.4} reason={}",
+            item.path, item.start_line, item.end_line, item.score, item.reason
+        );
+    }
+    Ok(())
+}
+
+fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    let config = config::load_or_default(&repo_root)?;
+    let state_path = config::state_path(&repo_root)?;
+    let manifest_path = config::manifest_path(&repo_root)?;
+    let tantivy_path = config::tantivy_path(&repo_root)?;
+    let state = index::load_state(&repo_root)?;
+    let manifest = index::load_manifest(&repo_root)?;
+    let daemon_healthy = daemon_health(&config);
+    let hooks_detected = repo_root.join(CLAUDE_LOCAL_SETTINGS).exists();
+    let git_snapshot = git::snapshot(&repo_root).ok();
+
+    let indexed_files = state.as_ref().map_or(0usize, |s| s.files.len());
+    let indexed_chunks = state.as_ref().map_or(0usize, |s| s.chunks.len());
+    let state_updated_at_ts = state.as_ref().map_or(0i64, |s| s.updated_at_ts);
+    let manifest_files = manifest.as_ref().map_or(0usize, |m| m.files.len());
+    let manifest_updated_at_ts = manifest.as_ref().map_or(0i64, |m| m.updated_at_ts);
+    let chunks_per_file = if indexed_files == 0 {
+        0.0
+    } else {
+        indexed_chunks as f64 / indexed_files as f64
+    };
+    let manifest_drift = indexed_files.abs_diff(manifest_files);
+    let state_file_bytes = fs::metadata(&state_path).map(|m| m.len()).unwrap_or(0);
+    let manifest_file_bytes = fs::metadata(&manifest_path).map(|m| m.len()).unwrap_or(0);
+    let (branch, head, dirty_files) = if let Some(snapshot) = git_snapshot {
+        (snapshot.branch, snapshot.head, snapshot.dirty_files.len())
+    } else {
+        ("unknown".to_string(), "unknown".to_string(), 0usize)
+    };
+
+    if json_output {
+        let payload = json!({
+            "repo_root": repo_root.display().to_string(),
+            "branch": branch,
+            "head": head,
+            "dirty_files": dirty_files,
+            "daemon_healthy": daemon_healthy,
+            "hooks_detected": hooks_detected,
+            "indexed_files": indexed_files,
+            "indexed_chunks": indexed_chunks,
+            "chunks_per_file": chunks_per_file,
+            "state_updated_at_ts": state_updated_at_ts,
+            "manifest_files": manifest_files,
+            "manifest_updated_at_ts": manifest_updated_at_ts,
+            "manifest_drift": manifest_drift,
+            "state_file": state_path.display().to_string(),
+            "state_file_bytes": state_file_bytes,
+            "manifest_file": manifest_path.display().to_string(),
+            "manifest_file_bytes": manifest_file_bytes,
+            "tantivy_dir": tantivy_path.display().to_string(),
+            "tantivy_exists": tantivy_path.exists(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("repo: {}", repo_root.display());
+    println!("branch: {}", branch);
+    println!("head: {}", head);
+    println!("dirty files: {}", dirty_files);
+    println!("daemon healthy: {}", daemon_healthy);
+    println!("hooks detected: {}", hooks_detected);
+    println!("indexed files: {}", indexed_files);
+    println!("indexed chunks: {}", indexed_chunks);
+    println!("chunks/file: {:.2}", chunks_per_file);
+    println!("state updated_at_ts: {}", state_updated_at_ts);
+    println!("manifest files: {}", manifest_files);
+    println!("manifest updated_at_ts: {}", manifest_updated_at_ts);
+    println!("manifest drift (file count delta): {}", manifest_drift);
+    println!(
+        "state file: {} ({} bytes)",
+        state_path.display(),
+        state_file_bytes
+    );
+    println!(
+        "manifest file: {} ({} bytes)",
+        manifest_path.display(),
+        manifest_file_bytes
+    );
+    println!(
+        "tantivy dir: {} (exists: {})",
+        tantivy_path.display(),
+        tantivy_path.exists()
+    );
     Ok(())
 }
 

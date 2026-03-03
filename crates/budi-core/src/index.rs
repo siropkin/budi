@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -54,6 +54,13 @@ pub struct RepoIndexState {
     pub files: Vec<FileRecord>,
     pub chunks: Vec<ChunkRecord>,
     pub next_id: u64,
+    pub updated_at_ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoFileManifest {
+    pub repo_root: String,
+    pub files: Vec<FileRecord>,
     pub updated_at_ts: i64,
 }
 
@@ -193,96 +200,49 @@ pub fn build_or_update(
 ) -> Result<IndexWorkspace> {
     let git_snapshot = git::snapshot(repo_root)?;
     let previous = load_state(repo_root)?.unwrap_or_default();
-    let previous_files_by_path: HashMap<String, FileRecord> = previous
-        .files
+    let previous_manifest = load_manifest(repo_root)?.unwrap_or_default();
+    let previous_file_records = if previous_manifest.files.is_empty() {
+        previous.files.clone()
+    } else {
+        previous_manifest.files
+    };
+    let previous_files_by_path: HashMap<String, FileRecord> = previous_file_records
         .iter()
         .map(|file| (file.path.clone(), file.clone()))
         .collect();
-    let previous_hashes: HashMap<String, String> = previous
-        .files
+    let previous_hashes: HashMap<String, String> = previous_file_records
         .iter()
         .map(|f| (f.path.clone(), f.hash.clone()))
         .collect();
     let previous_chunks_by_path: HashMap<String, Vec<ChunkRecord>> =
         group_chunks_by_path(&previous.chunks);
 
-    let files = discover_source_files(repo_root, config)?;
-    let mut current_files = Vec::new();
-    let mut current_hashes = HashMap::new();
-    let hinted_paths: HashSet<String> = changed_hint
-        .map(|paths| {
-            paths
-                .iter()
-                .map(|path| relativize(repo_root, path))
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
-
-    for file in files {
-        let relative = file
-            .strip_prefix(repo_root)
-            .unwrap_or(&file)
-            .to_string_lossy()
-            .to_string();
-        let metadata = match fs::metadata(&file) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                warn!("Skipping unreadable file metadata {}: {}", relative, err);
-                continue;
-            }
-        };
-        let size_bytes = metadata.len();
-        let modified_unix_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-            .unwrap_or_default();
-        let force_rehash = hard || hinted_paths.contains(&relative);
-        let hash = if should_rehash_file(
-            previous_files_by_path.get(&relative),
-            size_bytes,
-            modified_unix_ms,
-            force_rehash,
-        ) {
-            match hash_file(&file) {
-                Ok(hash) => hash,
-                Err(err) => {
-                    warn!("Skipping unhashed file {}: {}", relative, err);
-                    continue;
-                }
-            }
-        } else if let Some(entry) = previous_files_by_path.get(&relative) {
-            entry.hash.clone()
-        } else {
-            match hash_file(&file) {
-                Ok(hash) => hash,
-                Err(err) => {
-                    warn!("Skipping unhashed file {}: {}", relative, err);
-                    continue;
-                }
-            }
-        };
-        if hash.is_empty() {
-            warn!("Skipping file with empty hash {}", relative);
-            continue;
-        }
-        current_hashes.insert(relative.clone(), hash.clone());
-        current_files.push(FileRecord {
-            path: relative,
-            hash,
-            size_bytes,
-            modified_unix_ms,
-        });
-    }
-
-    let changed_set = calculate_changed_set(
-        hard,
-        changed_hint,
-        &previous_hashes,
-        &current_hashes,
+    let hinted_paths = collect_hint_paths(repo_root, changed_hint);
+    let use_manifest_delta = should_use_manifest_delta(
         repo_root,
-    )?;
+        hard,
+        &hinted_paths,
+        &previous_files_by_path,
+        &previous_chunks_by_path,
+    );
+    let (current_files, current_hashes) = if use_manifest_delta {
+        build_current_files_from_manifest_delta(
+            repo_root,
+            config,
+            &previous_files_by_path,
+            &hinted_paths,
+        )?
+    } else {
+        build_current_files_from_discovery(
+            repo_root,
+            config,
+            &previous_files_by_path,
+            hard,
+            &hinted_paths,
+        )?
+    };
+
+    let changed_set = calculate_changed_set(hard, &hinted_paths, &previous_hashes, &current_hashes);
 
     let total_files_to_process = current_files
         .iter()
@@ -484,6 +444,25 @@ pub fn build_or_update(
     emit_progress(
         &mut progress_cb,
         IndexBuildProgress {
+            phase: "saving-manifest".to_string(),
+            total_files: total_files_to_process,
+            processed_files,
+            changed_files,
+            current_file: None,
+            done: false,
+        },
+    );
+    save_manifest(
+        repo_root,
+        &RepoFileManifest {
+            repo_root: state.repo_root.clone(),
+            files: state.files.clone(),
+            updated_at_ts: state.updated_at_ts,
+        },
+    )?;
+    emit_progress(
+        &mut progress_cb,
+        IndexBuildProgress {
             phase: "rebuilding-lexical-index".to_string(),
             total_files: total_files_to_process,
             processed_files,
@@ -536,6 +515,29 @@ pub fn save_state(repo_root: &Path, state: &RepoIndexState) -> Result<()> {
     Ok(())
 }
 
+pub fn load_manifest(repo_root: &Path) -> Result<Option<RepoFileManifest>> {
+    let path = config::manifest_path(repo_root)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("Failed reading {}", path.display()))?;
+    let manifest: RepoFileManifest =
+        serde_json::from_str(&raw).with_context(|| "Invalid budi file manifest".to_string())?;
+    Ok(Some(manifest))
+}
+
+pub fn save_manifest(repo_root: &Path, manifest: &RepoFileManifest) -> Result<()> {
+    let path = config::manifest_path(repo_root)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating {}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(manifest)?;
+    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
+    Ok(())
+}
+
 fn build_hnsw(chunks: &[ChunkRecord]) -> Result<Option<Hnsw<'static, f32, DistCosine>>> {
     if chunks.is_empty() {
         return Ok(None);
@@ -563,21 +565,17 @@ fn build_hnsw(chunks: &[ChunkRecord]) -> Result<Option<Hnsw<'static, f32, DistCo
 
 fn calculate_changed_set(
     hard: bool,
-    changed_hint: Option<&[String]>,
+    hinted_paths: &HashSet<String>,
     previous_hashes: &HashMap<String, String>,
     current_hashes: &HashMap<String, String>,
-    repo_root: &Path,
-) -> Result<HashSet<String>> {
+) -> HashSet<String> {
     if hard {
-        return Ok(current_hashes.keys().cloned().collect());
+        return current_hashes.keys().cloned().collect();
     }
     let mut changed = HashSet::new();
-    if let Some(hint) = changed_hint {
-        for file in hint {
-            let rel = relativize(repo_root, file);
-            if current_hashes.contains_key(&rel) {
-                changed.insert(rel);
-            }
+    for rel in hinted_paths {
+        if current_hashes.contains_key(rel) || previous_hashes.contains_key(rel) {
+            changed.insert(rel.clone());
         }
     }
     for (path, hash) in current_hashes {
@@ -590,7 +588,7 @@ fn calculate_changed_set(
             changed.insert(path.clone());
         }
     }
-    Ok(changed)
+    changed
 }
 
 fn count_deleted_paths(
@@ -603,16 +601,188 @@ fn count_deleted_paths(
         .count()
 }
 
-fn relativize(repo_root: &Path, file: &str) -> String {
-    let path = PathBuf::from(file);
-    if path.is_absolute() {
-        match path.strip_prefix(repo_root) {
-            Ok(stripped) => stripped.to_string_lossy().to_string(),
-            Err(_) => file.to_string(),
-        }
+fn collect_hint_paths(repo_root: &Path, changed_hint: Option<&[String]>) -> HashSet<String> {
+    let Some(changed_hint) = changed_hint else {
+        return HashSet::new();
+    };
+    changed_hint
+        .iter()
+        .filter_map(|raw| normalize_hint_path(repo_root, raw))
+        .collect()
+}
+
+fn normalize_hint_path(repo_root: &Path, raw: &str) -> Option<String> {
+    let candidate = PathBuf::from(raw);
+    let relative = if candidate.is_absolute() {
+        candidate.strip_prefix(repo_root).ok()?.to_path_buf()
     } else {
-        file.to_string()
+        candidate
+    };
+    let mut cleaned = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => cleaned.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
     }
+    if cleaned.as_os_str().is_empty() {
+        return None;
+    }
+    Some(cleaned.to_string_lossy().replace('\\', "/"))
+}
+
+fn should_use_manifest_delta(
+    repo_root: &Path,
+    hard: bool,
+    hinted_paths: &HashSet<String>,
+    previous_files_by_path: &HashMap<String, FileRecord>,
+    previous_chunks_by_path: &HashMap<String, Vec<ChunkRecord>>,
+) -> bool {
+    if hard
+        || hinted_paths.is_empty()
+        || previous_files_by_path.is_empty()
+        || previous_chunks_by_path.is_empty()
+    {
+        return false;
+    }
+    // Use the manifest fast-path only when all hinted existing files are already tracked.
+    // This keeps ignore semantics correct for brand new files by falling back to full discovery.
+    hinted_paths
+        .iter()
+        .all(|path| previous_files_by_path.contains_key(path) || !repo_root.join(path).exists())
+}
+
+fn build_current_files_from_discovery(
+    repo_root: &Path,
+    config: &BudiConfig,
+    previous_files_by_path: &HashMap<String, FileRecord>,
+    hard: bool,
+    hinted_paths: &HashSet<String>,
+) -> Result<(Vec<FileRecord>, HashMap<String, String>)> {
+    let files = discover_source_files(repo_root, config)?;
+    let mut current_files = Vec::with_capacity(files.len());
+    let mut current_hashes = HashMap::with_capacity(files.len());
+
+    for file in files {
+        let relative = file
+            .strip_prefix(repo_root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let metadata = match fs::metadata(&file) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!("Skipping unreadable file metadata {}: {}", relative, err);
+                continue;
+            }
+        };
+        let size_bytes = metadata.len();
+        let modified_unix_ms = file_modified_unix_ms(&metadata);
+        let force_rehash = hard || hinted_paths.contains(&relative);
+        let hash = if should_rehash_file(
+            previous_files_by_path.get(&relative),
+            size_bytes,
+            modified_unix_ms,
+            force_rehash,
+        ) {
+            match hash_file(&file) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    warn!("Skipping unhashed file {}: {}", relative, err);
+                    continue;
+                }
+            }
+        } else if let Some(entry) = previous_files_by_path.get(&relative) {
+            entry.hash.clone()
+        } else {
+            match hash_file(&file) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    warn!("Skipping unhashed file {}: {}", relative, err);
+                    continue;
+                }
+            }
+        };
+        if hash.is_empty() {
+            warn!("Skipping file with empty hash {}", relative);
+            continue;
+        }
+        current_hashes.insert(relative.clone(), hash.clone());
+        current_files.push(FileRecord {
+            path: relative,
+            hash,
+            size_bytes,
+            modified_unix_ms,
+        });
+    }
+
+    current_files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((current_files, current_hashes))
+}
+
+fn build_current_files_from_manifest_delta(
+    repo_root: &Path,
+    config: &BudiConfig,
+    previous_files_by_path: &HashMap<String, FileRecord>,
+    hinted_paths: &HashSet<String>,
+) -> Result<(Vec<FileRecord>, HashMap<String, String>)> {
+    let mut files_by_path = previous_files_by_path.clone();
+    for relative in hinted_paths {
+        let absolute = repo_root.join(relative);
+        if !absolute.exists() || !absolute.is_file() || !is_supported_code_file(&absolute) {
+            files_by_path.remove(relative);
+            continue;
+        }
+        let metadata = match fs::metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!("Skipping unreadable file metadata {}: {}", relative, err);
+                continue;
+            }
+        };
+        if metadata.len() as usize > config.max_file_bytes {
+            files_by_path.remove(relative);
+            continue;
+        }
+        let hash = match hash_file(&absolute) {
+            Ok(hash) => hash,
+            Err(err) => {
+                warn!("Skipping unhashed file {}: {}", relative, err);
+                continue;
+            }
+        };
+        if hash.is_empty() {
+            warn!("Skipping file with empty hash {}", relative);
+            continue;
+        }
+        files_by_path.insert(
+            relative.clone(),
+            FileRecord {
+                path: relative.clone(),
+                hash,
+                size_bytes: metadata.len(),
+                modified_unix_ms: file_modified_unix_ms(&metadata),
+            },
+        );
+    }
+
+    let mut current_files = files_by_path.into_values().collect::<Vec<_>>();
+    current_files.sort_by(|a, b| a.path.cmp(&b.path));
+    let current_hashes = current_files
+        .iter()
+        .map(|record| (record.path.clone(), record.hash.clone()))
+        .collect();
+    Ok((current_files, current_hashes))
+}
+
+fn file_modified_unix_ms(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
 }
 
 fn group_chunks_by_path(chunks: &[ChunkRecord]) -> HashMap<String, Vec<ChunkRecord>> {
@@ -1539,6 +1709,34 @@ mod tests {
         assert!(should_rehash_file(Some(&previous), 100, 1_001, false));
         assert!(should_rehash_file(Some(&previous), 100, 1_000, true));
         assert!(should_rehash_file(None, 100, 1_000, false));
+    }
+
+    #[test]
+    fn hint_paths_are_normalized_and_confined_to_repo() {
+        let repo_root = Path::new("/tmp/budi-repo");
+        assert_eq!(
+            normalize_hint_path(repo_root, "src/lib.rs"),
+            Some("src/lib.rs".to_string())
+        );
+        assert_eq!(
+            normalize_hint_path(repo_root, "./src/lib.rs"),
+            Some("src/lib.rs".to_string())
+        );
+        assert_eq!(normalize_hint_path(repo_root, "../secrets.txt"), None);
+        assert_eq!(normalize_hint_path(repo_root, "/tmp/other/app.rs"), None);
+        assert_eq!(
+            normalize_hint_path(repo_root, "/tmp/budi-repo/src/main.rs"),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn changed_set_marks_hinted_deleted_file() {
+        let hints = HashSet::from(["src/deleted.rs".to_string()]);
+        let previous = HashMap::from([("src/deleted.rs".to_string(), "hash1".to_string())]);
+        let current = HashMap::new();
+        let changed = calculate_changed_set(false, &hints, &previous, &current);
+        assert!(changed.contains("src/deleted.rs"));
     }
 
     #[test]

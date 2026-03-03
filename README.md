@@ -140,7 +140,9 @@ budi index             # incremental re-index
 budi index --hard      # full rebuild
 budi index --hard --progress # full rebuild + live per-file progress + phase
 budi status            # daemon/index/hooks health
+budi stats             # local index + manifest stats
 budi preview "<prompt>"# see context that would be injected
+budi search "<query>"  # run retrieval and list top matching snippets
 budi ignore <path>     # add file to local budi ignore list
 budi observe enable    # start metadata-only local usage logging
 budi observe report    # summarize all logged usage (default: all history)
@@ -160,6 +162,7 @@ How indexing works:
    - keyword/symbol/path search (fast exact matching)
    - semantic search vectors (meaning-based matching)
 4. It stores everything locally on your machine (`~/.local/share/budi/...`).
+5. It keeps a local file manifest (`manifest.json`) so hook-driven updates can re-index only hinted files instead of rescanning the full tree each time.
 
 How prompt-time retrieval works:
 1. You send a prompt in Claude Code.
