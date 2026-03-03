@@ -21,7 +21,6 @@ Installed binaries:
 
 - `budi`
 - `budi-daemon`
-- `budi-bench`
 
 ## Install from prebuilt GitHub release
 

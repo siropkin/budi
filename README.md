@@ -65,7 +65,7 @@ Remove later if needed:
 cd /path/to/your/repo
 budi init
 budi index --hard --progress
-budi status
+budi repo status
 ```
 
 After that, use Claude Code normally.
@@ -139,12 +139,11 @@ budi init              # install/update hooks in current repo
 budi index             # incremental re-index
 budi index --hard      # full rebuild
 budi index --hard --progress # full rebuild + live per-file progress + phase
-budi status            # daemon/index/hooks health
-budi stats             # local index stats (SQLite catalog + Tantivy)
-budi preview "<prompt>"# see context that would be injected
-budi search "<query>"  # run retrieval and list top matching snippets
-budi repo status       # same as status, under organized repo namespace
-budi repo search "<query>"  # same as search under repo namespace
+budi repo status       # daemon/index/hooks health
+budi repo stats        # local index stats (SQLite catalog + Tantivy)
+budi repo preview "<prompt>" # see context that would be injected
+budi repo search "<query>"   # run retrieval and list top matching snippets
+budi bench --prompt "<prompt>" --iterations 30 # retrieval latency/context benchmark
 budi ignore <path>     # add file to local budi ignore list
 budi doctor --deep     # extended consistency/route/retrieval diagnostics
 budi observe enable    # start metadata-only local usage logging
@@ -209,7 +208,7 @@ debug_io_max_chars = 1200
 - `debug_io_full_text = true`: logs full prompt/context text (use carefully)
 - `debug_io_max_chars`: max chars in excerpt mode (`0` = metadata-only, no text excerpts)
 
-`budi preview` now prints retrieval diagnostics (intent, confidence, recommended injection).
+`budi repo preview` now prints retrieval diagnostics (intent, confidence, recommended injection).
 
 ## Observe real usage (day/week)
 
@@ -331,7 +330,6 @@ Optional secret for custom push credentials:
 - `crates/budi-cli`: `budi` CLI and hook handlers
 - `crates/budi-daemon`: background daemon
 - `crates/budi-core`: indexing, retrieval, config, hook schemas
-- `crates/budi-bench`: benchmark harness
 - `scripts/install.sh`: installer
 - `scripts/uninstall.sh`: uninstaller
 - `scripts/setup-observe-launchd.sh`: schedule periodic observe snapshots

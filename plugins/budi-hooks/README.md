@@ -31,7 +31,7 @@ across repos and teams.
 
 - Trigger a normal prompt and confirm `UserPromptSubmit` behavior runs.
 - Edit or write a file and confirm `PostToolUse` hook runs.
-- Run `budi status` to confirm hook/index health.
+- Run `budi repo status` to confirm hook/index health.
 
 ## Security and behavior notes
 

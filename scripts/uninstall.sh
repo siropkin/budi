@@ -67,7 +67,7 @@ main() {
     fi
   fi
 
-  local bins=(budi budi-daemon budi-bench)
+  local bins=(budi budi-daemon)
   for bin in "${bins[@]}"; do
     local target="$BIN_DIR/$bin"
     if [[ -e "$target" ]]; then

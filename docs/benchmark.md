@@ -1,11 +1,11 @@
 # Benchmark Methodology
 
-`budi-bench` provides a reproducible local benchmark for query latency and injected-context size.
+`budi bench` provides a reproducible local benchmark for query latency and injected-context size.
 
 ## Run
 
 ```bash
-budi-bench --prompt "Fix the auth bug in login flow" --iterations 30
+budi bench --prompt "Fix the auth bug in login flow" --iterations 30
 ```
 
 ## Report fields

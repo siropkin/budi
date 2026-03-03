@@ -20,12 +20,14 @@ use budi_core::rpc::{
 use budi_core::{git, index};
 use clap::{ArgAction, Parser, Subcommand};
 use reqwest::blocking::Client;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
 const SEARCH_QUERY_TIMEOUT_SECS: u64 = 30;
+const BENCH_QUERY_TIMEOUT_SECS: u64 = 30;
 const DOCTOR_QUERY_TIMEOUT_SECS: u64 = 8;
 const HOOK_QUERY_TIMEOUT_SECS: u64 = 12;
 const STATUS_TIMEOUT_SECS: u64 = 120;
@@ -61,10 +63,6 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         progress: bool,
     },
-    Status {
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-    },
     Ignore {
         pattern: String,
         #[arg(long)]
@@ -76,25 +74,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         deep: bool,
     },
-    Preview {
+    Bench {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long)]
         prompt: String,
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-    },
-    Search {
-        query: String,
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-        #[arg(long, default_value_t = 8)]
-        limit: usize,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    Stats {
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[arg(long, default_value_t = 20)]
+        iterations: usize,
     },
     Repo {
         #[command(subcommand)]
@@ -172,6 +158,16 @@ enum RepoCommands {
     },
 }
 
+#[derive(Debug, Serialize)]
+struct BenchReport {
+    repo_root: String,
+    iterations: usize,
+    latency_ms_p50: f64,
+    latency_ms_p95: f64,
+    avg_context_chars: f64,
+    avg_context_tokens_estimate: f64,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let default_level = match cli.verbose {
@@ -197,17 +193,13 @@ fn main() -> Result<()> {
             hard,
             progress,
         } => cmd_index(repo_root, hard, progress),
-        Commands::Status { repo_root } => cmd_status(repo_root),
         Commands::Ignore { pattern, repo_root } => cmd_ignore(repo_root, &pattern),
         Commands::Doctor { repo_root, deep } => cmd_doctor(repo_root, deep),
-        Commands::Preview { prompt, repo_root } => cmd_preview(repo_root, &prompt),
-        Commands::Search {
-            query,
+        Commands::Bench {
             repo_root,
-            limit,
-            json,
-        } => cmd_search(repo_root, &query, limit, json),
-        Commands::Stats { repo_root, json } => cmd_stats(repo_root, json),
+            prompt,
+            iterations,
+        } => cmd_bench(repo_root, &prompt, iterations),
         Commands::Repo { command } => match command {
             RepoCommands::Status { repo_root } => cmd_status(repo_root),
             RepoCommands::Stats { repo_root, json } => cmd_stats(repo_root, json),
@@ -474,6 +466,40 @@ fn cmd_search(
             item.path, item.start_line, item.end_line, item.score, item.reason
         );
     }
+    Ok(())
+}
+
+fn cmd_bench(repo_root: Option<PathBuf>, prompt: &str, iterations: usize) -> Result<()> {
+    if iterations == 0 {
+        anyhow::bail!("--iterations must be at least 1");
+    }
+    let repo_root = resolve_repo_root(repo_root)?;
+    let config = config::load_or_default(&repo_root)?;
+    ensure_daemon_running(&repo_root, &config)?;
+    let query_url = format!("{}/query", config.daemon_base_url());
+    let client = daemon_client_with_timeout(Duration::from_secs(BENCH_QUERY_TIMEOUT_SECS));
+
+    let mut latencies_ms = Vec::with_capacity(iterations);
+    let mut context_chars = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let response =
+            send_query_request(&client, &query_url, &repo_root, prompt, Some(&repo_root))
+                .context("Failed benchmark query iteration")?;
+        latencies_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        context_chars.push(response.context.len() as f64);
+    }
+
+    let avg_context_chars = mean(&context_chars);
+    let report = BenchReport {
+        repo_root: repo_root.display().to_string(),
+        iterations,
+        latency_ms_p50: percentile(&latencies_ms, 0.50),
+        latency_ms_p95: percentile(&latencies_ms, 0.95),
+        avg_context_chars,
+        avg_context_tokens_estimate: avg_context_chars / 4.0,
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
@@ -872,6 +898,13 @@ fn percentile(values: &[f64], fraction: f64) -> f64 {
     let last_idx = sorted.len().saturating_sub(1);
     let idx = ((last_idx as f64) * fraction.clamp(0.0, 1.0)).round() as usize;
     sorted[idx.min(last_idx)]
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f64>() / values.len() as f64
 }
 
 fn percentage(part: usize, total: usize) -> f64 {
