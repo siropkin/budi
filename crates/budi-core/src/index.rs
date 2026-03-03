@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use hnsw_rs::prelude::*;
-use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -2833,69 +2832,13 @@ fn discover_source_files(
             .unwrap_or(&[]),
     )?;
 
-    if config.use_git_file_discovery
-        && let Some(files) = discover_source_files_from_git(
-            repo_root,
-            config,
-            &extension_allowlist,
-            &basename_allowlist,
-            &ignore_rules,
-        )?
-    {
-        return Ok(files);
-    }
-
-    let mut files = Vec::new();
-    let mut builder = WalkBuilder::new(repo_root);
-    builder
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true);
-    let filter_root = repo_root.to_path_buf();
-    let filter_rules = ignore_rules.clone();
-    builder.filter_entry(move |entry| {
-        let Some(file_type) = entry.file_type() else {
-            return true;
-        };
-        if !file_type.is_dir() {
-            return true;
-        }
-        let relative = relative_repo_path(entry.path(), &filter_root);
-        if relative.is_empty() {
-            return true;
-        }
-        !should_skip_index_path(&relative, true, &filter_rules)
-    });
-
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let relative = relative_repo_path(path, repo_root);
-        if relative.is_empty() || should_skip_index_path(&relative, false, &ignore_rules) {
-            continue;
-        }
-        if !is_supported_code_file(path, &extension_allowlist, &basename_allowlist) {
-            continue;
-        }
-        let metadata = match fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if metadata.len() as usize > config.max_file_bytes {
-            continue;
-        }
-        files.push(path.to_path_buf());
-    }
-    files.sort();
-    files.dedup();
-    Ok(files)
+    discover_source_files_from_git(
+        repo_root,
+        config,
+        &extension_allowlist,
+        &basename_allowlist,
+        &ignore_rules,
+    )
 }
 
 fn discover_source_files_from_git(
@@ -2904,8 +2847,8 @@ fn discover_source_files_from_git(
     extension_allowlist: &HashSet<String>,
     basename_allowlist: &HashSet<String>,
     ignore_rules: &RepoIgnoreRules,
-) -> Result<Option<Vec<PathBuf>>> {
-    let output = match Command::new("git")
+) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
         .args([
             "ls-files",
             "--cached",
@@ -2915,12 +2858,14 @@ fn discover_source_files_from_git(
         ])
         .current_dir(repo_root)
         .output()
-    {
-        Ok(output) => output,
-        Err(_) => return Ok(None),
-    };
+        .with_context(|| format!("Failed running git ls-files in {}", repo_root.display()))?;
     if !output.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "git ls-files failed in {}: {}",
+            repo_root.display(),
+            stderr.trim()
+        );
     }
 
     let mut files = Vec::new();
@@ -2950,7 +2895,7 @@ fn discover_source_files_from_git(
     }
     files.sort();
     files.dedup();
-    Ok(Some(files))
+    Ok(files)
 }
 
 fn build_effective_extension_allowlist(
@@ -3049,14 +2994,6 @@ fn build_gitignore_matcher(repo_root: &Path, patterns: &[String]) -> Result<Giti
     builder
         .build()
         .with_context(|| "Failed to build ignore matcher")
-}
-
-fn relative_repo_path(path: &Path, repo_root: &Path) -> String {
-    path.strip_prefix(repo_root)
-        .ok()
-        .and_then(|relative| relative.to_str())
-        .unwrap_or_default()
-        .replace('\\', "/")
 }
 
 fn should_skip_index_path(
