@@ -2131,9 +2131,20 @@ fn combine_receiver_method_token(receiver: &str, callee: &str) -> Option<String>
 fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    let mut in_go_import_block = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+        if in_go_import_block {
+            if trimmed.starts_with(')') {
+                in_go_import_block = false;
+                continue;
+            }
+            if let Some((alias, target)) = parse_go_import_clause(trimmed) {
+                push_alias_pair(&mut out, &mut seen, (alias, target));
+            }
             continue;
         }
         if trimmed.starts_with("import ") && trimmed.contains(" from ") {
@@ -2191,8 +2202,28 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
             }
             continue;
         }
+        if trimmed == "import (" || trimmed.starts_with("import(") {
+            in_go_import_block = true;
+            continue;
+        }
+        if trimmed.starts_with("import static ")
+            && let Some((alias, target)) = parse_java_static_import_clause(trimmed)
+        {
+            push_alias_pair(&mut out, &mut seen, (alias, target));
+            continue;
+        }
+        if trimmed.starts_with("import ")
+            && let Some((alias, target)) = parse_java_import_clause(trimmed)
+        {
+            push_alias_pair(&mut out, &mut seen, (alias, target));
+            continue;
+        }
         if trimmed.starts_with("import ") {
             let imported = trimmed.trim_start_matches("import ").trim();
+            if let Some((alias, target)) = parse_go_import_clause(imported) {
+                push_alias_pair(&mut out, &mut seen, (alias, target));
+                continue;
+            }
             for clause in imported.split(',') {
                 if let Some((alias, target)) = parse_import_alias_clause(clause) {
                     push_alias_pair(&mut out, &mut seen, (alias, target));
@@ -2244,6 +2275,13 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
             }
             continue;
         }
+        if trimmed.starts_with("using ")
+            && !trimmed.starts_with("using namespace ")
+            && let Some((alias, target)) = parse_csharp_using_clause(trimmed)
+        {
+            push_alias_pair(&mut out, &mut seen, (alias, target));
+            continue;
+        }
         if trimmed.starts_with("using namespace ")
             && let Some(target) = import_source_token(
                 trimmed
@@ -2264,6 +2302,109 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+fn parse_java_import_clause(line: &str) -> Option<(String, String)> {
+    if !line.starts_with("import ") || !line.ends_with(';') {
+        return None;
+    }
+    let body = line
+        .trim_start_matches("import ")
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    if body.is_empty()
+        || body.starts_with("static ")
+        || body.starts_with('"')
+        || body.starts_with('\'')
+        || body.starts_with('`')
+    {
+        return None;
+    }
+    if body.ends_with(".*") {
+        let target = import_source_token(body.trim_end_matches(".*"))?;
+        return Some((format!("*{}", target.clone()), target));
+    }
+    let alias = last_signal_token(body)?;
+    let target = import_source_token(body).unwrap_or_else(|| alias.clone());
+    Some((alias, target))
+}
+
+fn parse_java_static_import_clause(line: &str) -> Option<(String, String)> {
+    if !line.starts_with("import static ") || !line.ends_with(';') {
+        return None;
+    }
+    let body = line
+        .trim_start_matches("import static ")
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    if body.is_empty() {
+        return None;
+    }
+    if body.ends_with(".*") {
+        let target = import_source_token(body.trim_end_matches(".*"))?;
+        return Some((format!("*{}", target.clone()), target));
+    }
+    let alias = last_signal_token(body)?;
+    let target = import_source_token(body).unwrap_or_else(|| alias.clone());
+    Some((alias, target))
+}
+
+fn parse_csharp_using_clause(line: &str) -> Option<(String, String)> {
+    if !line.starts_with("using ") || !line.ends_with(';') {
+        return None;
+    }
+    let body = line
+        .trim_start_matches("using ")
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    if body.is_empty() || body.starts_with("namespace ") {
+        return None;
+    }
+    if let Some((alias_raw, target_raw)) = body.split_once('=') {
+        let alias = first_signal_token(alias_raw)?;
+        let target = import_source_token(target_raw).unwrap_or_else(|| alias.clone());
+        return Some((alias, target));
+    }
+    if body.starts_with("static ") {
+        let target = import_source_token(body.trim_start_matches("static ").trim())?;
+        return Some((format!("*{}", target.clone()), target));
+    }
+    let target = import_source_token(body)?;
+    Some((format!("*{}", target.clone()), target))
+}
+
+fn parse_go_import_clause(raw: &str) -> Option<(String, String)> {
+    let clause = raw.trim().trim_end_matches(',').trim();
+    if clause.is_empty() || clause == "(" || clause == ")" || clause.starts_with("//") {
+        return None;
+    }
+    if !(clause.contains('"') || clause.contains('`')) {
+        return None;
+    }
+
+    let mut parts = clause.split_whitespace();
+    let first = parts.next()?;
+    let second = parts.next();
+    if second.is_none() {
+        let target = import_source_token(first)?;
+        let alias = last_signal_token(first).unwrap_or_else(|| target.clone());
+        return Some((alias, target));
+    }
+
+    let alias_raw = first;
+    let source_raw = second.unwrap_or_default();
+    if alias_raw == "_" {
+        return None;
+    }
+    let target = import_source_token(source_raw)?;
+    if alias_raw == "." {
+        return Some((format!("*{}", target.clone()), target));
+    }
+    let alias = first_signal_token(alias_raw)?;
+    Some((alias, target))
 }
 
 fn parse_namespace_import_alias(clause: &str) -> Option<String> {
@@ -3551,6 +3692,63 @@ mod tests {
     }
 
     #[test]
+    fn extract_import_aliases_parses_java_import_forms() {
+        let aliases = extract_import_aliases(
+            "import java.util.List;\nimport static com.acme.MathUtil.max;\nimport static com.acme.MathUtil.*;",
+        );
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, target)| alias == "list" && target == "java_util_list")
+        );
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, target)| alias == "max" && target == "com_acme_mathutil_max")
+        );
+        assert!(aliases.iter().any(|(alias, target)| {
+            alias == "*com_acme_mathutil" && target == "com_acme_mathutil"
+        }));
+    }
+
+    #[test]
+    fn extract_import_aliases_parses_csharp_using_forms() {
+        let aliases = extract_import_aliases(
+            "using Alias = Company.Product.FeatureClient;\nusing static Company.Product.MathUtil;\nusing Company.Product.Services;",
+        );
+        assert!(aliases.iter().any(|(alias, target)| {
+            alias == "alias" && target == "company_product_featureclient"
+        }));
+        assert!(aliases.iter().any(|(alias, target)| {
+            alias == "*company_product_mathutil" && target == "company_product_mathutil"
+        }));
+        assert!(aliases.iter().any(|(alias, target)| {
+            alias == "*company_product_services" && target == "company_product_services"
+        }));
+    }
+
+    #[test]
+    fn extract_import_aliases_parses_go_import_block_forms() {
+        let aliases = extract_import_aliases(
+            "import (\n  \"fmt\"\n  api \"github.com/acme/service/api\"\n  . \"github.com/acme/shared/math\"\n  _ \"github.com/lib/pq\"\n)",
+        );
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, target)| alias == "fmt" && target == "fmt")
+        );
+        assert!(
+            aliases.iter().any(|(alias, target)| {
+                alias == "api" && target == "github_com_acme_service_api"
+            })
+        );
+        assert!(aliases.iter().any(|(alias, target)| {
+            alias == "*github_com_acme_shared_math" && target == "github_com_acme_shared_math"
+        }));
+        assert!(!aliases.iter().any(|(alias, _)| alias == "_"));
+    }
+
+    #[test]
     fn reference_resolution_expands_wildcard_targets() {
         let aliases = HashMap::from([(
             "src/controller.py".to_string(),
@@ -3589,6 +3787,22 @@ mod tests {
         ]);
         let selected = first_defined_candidate(&candidates, &defined);
         assert_eq!(selected.as_deref(), Some("orders_process_order"));
+    }
+
+    #[test]
+    fn reference_candidates_prioritize_exact_namespace_aliases() {
+        let aliases = HashMap::from([(
+            "src/service.ts".to_string(),
+            HashMap::from([
+                ("svc".to_string(), "internal_service_client".to_string()),
+                ("*legacy_service".to_string(), "legacy_service".to_string()),
+            ]),
+        )]);
+        let candidates = resolve_reference_candidates("src/service.ts", "svc", &aliases);
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some("internal_service_client")
+        );
     }
 
     #[test]
