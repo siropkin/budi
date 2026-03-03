@@ -2934,30 +2934,28 @@ fn discover_source_files_from_git(
 }
 
 fn load_repo_ignore_rules(repo_root: &Path) -> Result<RepoIgnoreRules> {
-    let ignore_path = config::ignore_path(repo_root)?;
-    if !ignore_path.exists() {
-        return Ok(RepoIgnoreRules {
-            excludes: build_gitignore_matcher(repo_root, &[])?,
-            unignores: build_gitignore_matcher(repo_root, &[])?,
-        });
-    }
-
-    let raw = fs::read_to_string(&ignore_path)
-        .with_context(|| format!("Failed reading {}", ignore_path.display()))?;
     let mut excludes = Vec::new();
     let mut unignores = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+
+    for ignore_path in config::layered_ignore_paths(repo_root)? {
+        if !ignore_path.exists() {
             continue;
         }
-        if let Some(unignore) = trimmed.strip_prefix('!') {
-            let pattern = unignore.trim();
-            if !pattern.is_empty() {
-                unignores.push(pattern.to_string());
+        let raw = fs::read_to_string(&ignore_path)
+            .with_context(|| format!("Failed reading {}", ignore_path.display()))?;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
             }
-        } else {
-            excludes.push(trimmed.to_string());
+            if let Some(unignore) = trimmed.strip_prefix('!') {
+                let pattern = unignore.trim();
+                if !pattern.is_empty() {
+                    unignores.push(pattern.to_string());
+                }
+            } else {
+                excludes.push(trimmed.to_string());
+            }
         }
     }
 

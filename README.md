@@ -141,7 +141,6 @@ budi repo preview "<prompt>" # see context that would be injected
 budi repo search "<query>"   # run retrieval and list top matching snippets
 budi bench --prompt "<prompt>" --iterations 30 # retrieval latency/context benchmark
 budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
-budi ignore <pattern>  # append pattern to repo-local .budiignore
 budi doctor --deep     # extended consistency/route/retrieval diagnostics
 budi observe enable    # start metadata-only local usage logging
 budi observe report    # summarize all logged usage (default: all history)
@@ -155,7 +154,7 @@ budi observe disable   # stop usage logging
 "retrieve useful repo context first, then let Claude generate the answer."
 
 How indexing works:
-1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore` and `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`).
+1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore`, global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`).
 2. It splits indexed files into small chunks (so it can retrieve precise snippets, not whole files).
 3. It builds a local search index for those chunks:
    - keyword/symbol/path search (fast exact matching)

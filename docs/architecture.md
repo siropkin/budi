@@ -22,7 +22,7 @@
 - `budi-cli`: init, index, status, doctor, preview, and hook entrypoints.
 - `budi-daemon`: local HTTP daemon serving query/index/status/update.
 - `budi-core`: shared logic:
-  - file discovery from `git ls-files` (tracked + untracked), respecting `.gitignore` and repo-local `.budiignore` rules (`!unignore` supported), with code-first type filtering via extension and basename allowlists
+  - file discovery from `git ls-files` (tracked + untracked), respecting `.gitignore`, global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` rules (`!unignore` supported), with code-first type filtering via extension and basename allowlists
   - chunking
   - embedding engine (fastembed with lexical-only fallback when unavailable)
   - persistent state

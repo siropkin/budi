@@ -74,11 +74,6 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         progress: bool,
     },
-    Ignore {
-        pattern: String,
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-    },
     Doctor {
         #[arg(long)]
         repo_root: Option<PathBuf>,
@@ -257,7 +252,6 @@ fn main() -> Result<()> {
             hard,
             progress,
         } => cmd_index(repo_root, hard, progress),
-        Commands::Ignore { pattern, repo_root } => cmd_ignore(repo_root, &pattern),
         Commands::Doctor { repo_root, deep } => cmd_doctor(repo_root, deep),
         Commands::Bench {
             repo_root,
@@ -452,28 +446,6 @@ fn cmd_repo_cleanup(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_ignore(repo_root: Option<PathBuf>, pattern: &str) -> Result<()> {
-    let repo_root = resolve_repo_root(repo_root)?;
-    let ignore_file = config::ignore_path(&repo_root)?;
-    let mut existing = String::new();
-    if ignore_file.exists() {
-        existing = fs::read_to_string(&ignore_file)
-            .with_context(|| format!("Failed reading {}", ignore_file.display()))?;
-    }
-    if existing.lines().any(|line| line.trim() == pattern) {
-        println!("Pattern already exists in {}", ignore_file.display());
-        return Ok(());
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&ignore_file)
-        .with_context(|| format!("Failed opening {}", ignore_file.display()))?;
-    writeln!(file, "{pattern}")?;
-    println!("Added `{pattern}` to {}", ignore_file.display());
-    Ok(())
-}
-
 fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
@@ -482,7 +454,14 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     println!(".git: {}", repo_root.join(".git").exists());
     println!("local data dir: {}", paths.data_dir.display());
     println!("config: {}", paths.config_file.exists());
-    println!("budi ignore: {}", config::ignore_path(&repo_root)?.exists());
+    println!(
+        "repo budi ignore: {}",
+        config::ignore_path(&repo_root)?.exists()
+    );
+    println!(
+        "global budi ignore: {}",
+        config::global_ignore_path()?.exists()
+    );
     println!(
         "hook settings: {}",
         repo_root.join(CLAUDE_LOCAL_SETTINGS).exists()

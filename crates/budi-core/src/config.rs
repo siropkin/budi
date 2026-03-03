@@ -11,6 +11,7 @@ pub const BUDI_HOME_DEFAULT_REL: &str = ".local/share/budi";
 pub const BUDI_REPOS_DIR: &str = "repos";
 pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub const BUDI_IGNORE_FILE_NAME: &str = ".budiignore";
+pub const BUDI_GLOBAL_IGNORE_FILE_NAME: &str = "global.budiignore";
 pub const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub const BUDI_INDEX_DIR_NAME: &str = "index";
 pub const BUDI_INDEX_DB_FILE_NAME: &str = "index.sqlite";
@@ -192,6 +193,14 @@ pub fn ignore_path(repo_root: &Path) -> Result<PathBuf> {
     Ok(repo_root.join(BUDI_IGNORE_FILE_NAME))
 }
 
+pub fn global_ignore_path() -> Result<PathBuf> {
+    Ok(budi_home_dir()?.join(BUDI_GLOBAL_IGNORE_FILE_NAME))
+}
+
+pub fn layered_ignore_paths(repo_root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(vec![global_ignore_path()?, ignore_path(repo_root)?])
+}
+
 pub fn index_db_path(repo_root: &Path) -> Result<PathBuf> {
     Ok(repo_paths(repo_root)?.index_db_file)
 }
@@ -254,6 +263,19 @@ pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
     let marker_path = repo_root_marker_path(&paths.data_dir);
     fs::write(&marker_path, canonical_repo_root.display().to_string())
         .with_context(|| format!("Failed writing {}", marker_path.display()))?;
+
+    let global_ignore_file = global_ignore_path()?;
+    if let Some(parent) = global_ignore_file.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    if !global_ignore_file.exists() {
+        fs::write(
+            &global_ignore_file,
+            "# budi global index exclusions (applies to every repo)\n# Prefix with ! to unignore an included path\n",
+        )
+        .with_context(|| format!("Failed writing {}", global_ignore_file.display()))?;
+    }
 
     let ignore_file = ignore_path(repo_root)?;
     if !ignore_file.exists() {
@@ -342,5 +364,14 @@ mod tests {
         let data_dir = PathBuf::from("/tmp/budi-marker-test");
         let marker_path = repo_root_marker_path(&data_dir);
         assert!(marker_path.ends_with(BUDI_REPO_ROOT_MARKER_FILE_NAME));
+    }
+
+    #[test]
+    fn layered_ignore_paths_include_global_then_repo() {
+        let repo_root = Path::new("/tmp/repo");
+        let paths = layered_ignore_paths(repo_root).expect("layered paths");
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].ends_with(BUDI_GLOBAL_IGNORE_FILE_NAME));
+        assert_eq!(paths[1], repo_root.join(BUDI_IGNORE_FILE_NAME));
     }
 }
