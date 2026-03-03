@@ -108,6 +108,9 @@ impl RuntimeIndex {
     }
 
     pub fn search_vector(&self, query_embedding: &[f32], limit: usize) -> Vec<(u64, f32)> {
+        if query_embedding.is_empty() {
+            return Vec::new();
+        }
         let Some(index) = &self.hnsw else {
             return Vec::new();
         };
@@ -248,6 +251,7 @@ pub fn build_or_update(
     let previous_embeddings_by_fingerprint: HashMap<[u8; 32], Vec<f32>> = previous
         .chunks
         .iter()
+        .filter(|chunk| !chunk.embedding.is_empty())
         .map(|chunk| {
             (
                 chunk_fingerprint(&chunk.path, chunk.start_line, chunk.end_line, &chunk.text),
@@ -373,10 +377,11 @@ pub fn build_or_update(
             let new_embeddings = embedder.embed_passages(&missing_passages)?;
             for (position, embedding) in missing_positions.into_iter().zip(new_embeddings) {
                 if let Some(chunk) = pending.get_mut(position) {
-                    if embedding_cache
-                        .entries
-                        .insert(chunk.embedding_cache_key.clone(), embedding.clone())
-                        .is_none()
+                    if !embedding.is_empty()
+                        && embedding_cache
+                            .entries
+                            .insert(chunk.embedding_cache_key.clone(), embedding.clone())
+                            .is_none()
                     {
                         embedding_cache_dirty = true;
                     }
@@ -385,13 +390,12 @@ pub fn build_or_update(
             }
         }
         for chunk in pending {
-            let embedding = chunk
-                .embedding
-                .unwrap_or_else(|| hash_embedding(chunk.text.as_str()));
-            if embedding_cache
-                .entries
-                .insert(chunk.embedding_cache_key.clone(), embedding.clone())
-                .is_none()
+            let embedding = chunk.embedding.unwrap_or_default();
+            if !embedding.is_empty()
+                && embedding_cache
+                    .entries
+                    .insert(chunk.embedding_cache_key.clone(), embedding.clone())
+                    .is_none()
             {
                 embedding_cache_dirty = true;
             }
@@ -538,10 +542,10 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
         let embedding_blob: Vec<u8> = row.get(6)?;
         let embedding = decode_embedding(&embedding_blob).unwrap_or_else(|| {
             warn!(
-                "Invalid embedding payload for chunk id={} path={}, recomputing fallback embedding",
+                "Invalid embedding payload for chunk id={} path={}, using lexical-only fallback",
                 id_i64, path
             );
-            hash_embedding(text.as_str())
+            Vec::new()
         });
         Ok(ChunkRecord {
             id: u64::try_from(id_i64).unwrap_or_default(),
@@ -709,7 +713,10 @@ fn encode_embedding(embedding: &[f32]) -> Vec<u8> {
 }
 
 fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+    if bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     Some(
@@ -738,11 +745,36 @@ fn load_embedding_cache() -> Result<EmbeddingCacheState> {
     if !path.exists() {
         return Ok(EmbeddingCacheState::default());
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("Failed reading {}", path.display()))?;
-    let cache = serde_json::from_str(&raw)
-        .with_context(|| "Invalid global embedding cache JSON".to_string())?;
-    Ok(cache)
+    let conn =
+        Connection::open(&path).with_context(|| format!("Failed opening {}", path.display()))?;
+    ensure_embedding_cache_db_schema(&conn)?;
+
+    let mut entries = HashMap::new();
+    let mut statement = conn.prepare("SELECT content_hash, embedding FROM embeddings")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (content_hash, embedding_blob) = row?;
+        let Some(embedding) = decode_embedding(&embedding_blob) else {
+            warn!(
+                "Skipping invalid cached embedding payload for hash {} in {}",
+                content_hash,
+                path.display()
+            );
+            continue;
+        };
+        if !embedding.is_empty() {
+            entries.insert(content_hash, embedding);
+        }
+    }
+    let updated_at_ts = load_meta_value(&conn, "updated_at_ts")?
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or_default();
+    Ok(EmbeddingCacheState {
+        entries,
+        updated_at_ts,
+    })
 }
 
 fn save_embedding_cache(cache: &EmbeddingCacheState) -> Result<()> {
@@ -751,8 +783,45 @@ fn save_embedding_cache(cache: &EmbeddingCacheState) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed creating {}", parent.display()))?;
     }
-    let raw = serde_json::to_string_pretty(cache)?;
-    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
+    let mut conn =
+        Connection::open(&path).with_context(|| format!("Failed opening {}", path.display()))?;
+    ensure_embedding_cache_db_schema(&conn)?;
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM embeddings", [])?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT OR REPLACE INTO embeddings (content_hash, embedding) VALUES (?1, ?2)",
+        )?;
+        for (content_hash, embedding) in &cache.entries {
+            if embedding.is_empty() {
+                continue;
+            }
+            let payload = encode_embedding(embedding);
+            insert.execute(params![content_hash, payload])?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('updated_at_ts', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![cache.updated_at_ts.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn ensure_embedding_cache_db_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS embeddings (
+            content_hash TEXT PRIMARY KEY,
+            embedding BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        "#,
+    )?;
     Ok(())
 }
 
@@ -760,8 +829,31 @@ fn build_hnsw(chunks: &[ChunkRecord]) -> Result<Option<Hnsw<'static, f32, DistCo
     if chunks.is_empty() {
         return Ok(None);
     }
+    let mut embedding_dim: Option<usize> = None;
+    let mut insert_data: Vec<(&[f32], usize)> = Vec::new();
+    for chunk in chunks {
+        if chunk.embedding.is_empty() {
+            continue;
+        }
+        let dim = chunk.embedding.len();
+        if let Some(expected_dim) = embedding_dim {
+            if expected_dim != dim {
+                warn!(
+                    "Skipping chunk {} due to embedding dimension mismatch (expected {}, got {})",
+                    chunk.id, expected_dim, dim
+                );
+                continue;
+            }
+        } else {
+            embedding_dim = Some(dim);
+        }
+        insert_data.push((chunk.embedding.as_slice(), chunk.id as usize));
+    }
+    if insert_data.is_empty() {
+        return Ok(None);
+    }
     let max_nb_conn = 32usize;
-    let nb_elem = chunks.len();
+    let nb_elem = insert_data.len();
     let nb_layer = 16usize.min((nb_elem as f32).ln().trunc() as usize).max(1);
     let ef_construction = 256usize;
     let mut hnsw: Hnsw<'static, f32, DistCosine> = Hnsw::new(
@@ -771,11 +863,6 @@ fn build_hnsw(chunks: &[ChunkRecord]) -> Result<Option<Hnsw<'static, f32, DistCo
         ef_construction,
         DistCosine {},
     );
-
-    let insert_data: Vec<(&[f32], usize)> = chunks
-        .iter()
-        .map(|chunk| (chunk.embedding.as_slice(), chunk.id as usize))
-        .collect();
     hnsw.parallel_insert_slice(&insert_data);
     hnsw.set_searching_mode(true);
     Ok(Some(hnsw))
@@ -1922,7 +2009,7 @@ fn allocate_chunk_id(fingerprint: &[u8; 32], used_chunk_ids: &mut HashSet<u64>) 
 
 enum EmbeddingBackend {
     Fast(Box<TextEmbedding>),
-    Fallback,
+    Unavailable,
 }
 
 pub struct EmbeddingEngine {
@@ -1944,11 +2031,11 @@ impl EmbeddingEngine {
             }
             Err(err) => {
                 warn!(
-                    "Falling back to deterministic hashing embeddings because fastembed failed: {}",
+                    "Semantic embeddings unavailable because fastembed failed to initialize: {}",
                     err
                 );
                 Self {
-                    backend: EmbeddingBackend::Fallback,
+                    backend: EmbeddingBackend::Unavailable,
                 }
             }
         }
@@ -1957,20 +2044,17 @@ impl EmbeddingEngine {
     fn embed_passages(&mut self, docs: &[String]) -> Result<Vec<Vec<f32>>> {
         match &mut self.backend {
             EmbeddingBackend::Fast(embedder) => Ok(embedder.embed(docs, None)?),
-            EmbeddingBackend::Fallback => Ok(docs.iter().map(|d| hash_embedding(d)).collect()),
+            EmbeddingBackend::Unavailable => Ok(vec![Vec::new(); docs.len()]),
         }
     }
 
-    pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
+    pub fn embed_query(&mut self, query: &str) -> Result<Option<Vec<f32>>> {
         match &mut self.backend {
             EmbeddingBackend::Fast(embedder) => {
                 let rows = embedder.embed(vec![format!("query: {}", query)], None)?;
-                Ok(rows
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| hash_embedding(query)))
+                Ok(rows.into_iter().next())
             }
-            EmbeddingBackend::Fallback => Ok(hash_embedding(query)),
+            EmbeddingBackend::Unavailable => Ok(None),
         }
     }
 }
@@ -1992,36 +2076,6 @@ fn resolve_fastembed_cache_dir() -> PathBuf {
         );
     }
     path
-}
-
-fn hash_embedding(text: &str) -> Vec<f32> {
-    const DIMS: usize = 384;
-    let mut vec = vec![0f32; DIMS];
-    for token in text.split_whitespace() {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(token.as_bytes());
-        let digest = hasher.finalize();
-        let bytes = digest.as_bytes();
-        let idx = (u16::from_le_bytes([bytes[0], bytes[1]]) as usize) % DIMS;
-        let sign = if bytes[2].is_multiple_of(2) {
-            1.0
-        } else {
-            -1.0
-        };
-        let mag = (bytes[3] as f32 / 255.0) + 0.01;
-        vec[idx] += sign * mag;
-    }
-    normalize(vec)
-}
-
-fn normalize(mut vec: Vec<f32>) -> Vec<f32> {
-    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for item in &mut vec {
-            *item /= norm;
-        }
-    }
-    vec
 }
 
 struct TantivyBundle {
@@ -2159,7 +2213,7 @@ fn sanitize_tantivy_query(query: &str) -> String {
         .join(" ")
 }
 
-pub fn embed_query(repo_root: &Path, query: &str) -> Result<Vec<f32>> {
+pub fn embed_query(repo_root: &Path, query: &str) -> Result<Option<Vec<f32>>> {
     let _ = repo_root;
     static QUERY_EMBEDDER: OnceLock<Mutex<EmbeddingEngine>> = OnceLock::new();
     let shared = QUERY_EMBEDDER.get_or_init(|| Mutex::new(EmbeddingEngine::new()));

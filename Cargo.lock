@@ -431,6 +431,7 @@ dependencies = [
  "budi-core",
  "clap",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

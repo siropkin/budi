@@ -33,7 +33,7 @@
 - `~/.local/share/budi/repos/<repo-id>/index/index.sqlite`: transactional catalog for files + chunks + embeddings
 - `~/.local/share/budi/repos/<repo-id>/index/tantivy/`: lexical index files
 - `~/.local/share/budi/fastembed-cache/`: embedding model cache (kept outside repos)
-- `~/.local/share/budi/embedding-cache.json`: global content-hash embedding reuse cache
+- `~/.local/share/budi/embedding-cache.sqlite`: global content-hash embedding reuse cache
 - in-memory daemon cache:
   - HNSW vector graph
   - chunk id map

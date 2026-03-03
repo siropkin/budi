@@ -17,7 +17,7 @@ pub const BUDI_TANTIVY_DIR_NAME: &str = "tantivy";
 pub const BUDI_LOG_DIR_NAME: &str = "logs";
 pub const BUDI_BENCH_DIR_NAME: &str = "benchmarks";
 pub const BUDI_FASTEMBED_CACHE_DIR_NAME: &str = "fastembed-cache";
-pub const BUDI_EMBEDDING_CACHE_FILE_NAME: &str = "embedding-cache.json";
+pub const BUDI_EMBEDDING_CACHE_FILE_NAME: &str = "embedding-cache.sqlite";
 
 pub const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 

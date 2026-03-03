@@ -54,7 +54,7 @@ impl DaemonState {
         retrieval::build_query_response(
             &runtime_guard,
             &request.prompt,
-            &query_embedding,
+            query_embedding.as_deref(),
             &git_snapshot,
             cwd,
             config,

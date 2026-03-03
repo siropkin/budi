@@ -103,7 +103,7 @@ fn retrieval_policy(intent_kind: QueryIntentKind) -> RetrievalPolicy {
 pub fn build_query_response(
     runtime: &RuntimeIndex,
     query: &str,
-    query_embedding: &[f32],
+    query_embedding: Option<&[f32]>,
     git_snapshot: &GitSnapshot,
     cwd: Option<&Path>,
     config: &BudiConfig,
@@ -134,7 +134,9 @@ pub fn build_query_response(
     let has_specific_path_tokens = !specific_path_tokens.is_empty();
     let doc_path_hints = extract_explicit_doc_path_hints(query);
     let lexical = runtime.search_lexical(query, config.topk_lexical)?;
-    let vector = runtime.search_vector(query_embedding, config.topk_vector);
+    let vector = query_embedding
+        .map(|embedding| runtime.search_vector(embedding, config.topk_vector))
+        .unwrap_or_default();
     let symbol_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let path_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let graph_limit = config.topk_lexical.max(config.retrieval_limit * 2);

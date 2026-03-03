@@ -20,6 +20,7 @@ use budi_core::rpc::{
 use budi_core::{git, index};
 use clap::{ArgAction, Parser, Subcommand};
 use reqwest::blocking::Client;
+use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
@@ -631,18 +632,16 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     let mut embedding_cache_valid = false;
     let mut embedding_cache_entries = 0usize;
     if embedding_cache_path.exists()
-        && let Ok(raw) = fs::read_to_string(&embedding_cache_path)
-        && let Ok(parsed) = serde_json::from_str::<Value>(&raw)
+        && let Ok(conn) = Connection::open(&embedding_cache_path)
+        && let Ok(count) = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |row| {
+            row.get::<_, i64>(0)
+        })
     {
         embedding_cache_valid = true;
-        embedding_cache_entries = parsed
-            .get("entries")
-            .and_then(Value::as_object)
-            .map(|entries| entries.len())
-            .unwrap_or(0);
+        embedding_cache_entries = count.max(0) as usize;
     }
     println!(
-        "embedding cache: exists={} valid_json={} entries={}",
+        "embedding cache: exists={} valid_db={} entries={}",
         embedding_cache_path.exists(),
         embedding_cache_valid,
         embedding_cache_entries
