@@ -3077,6 +3077,31 @@ export default function devicerowcell() {
     }
 
     #[test]
+    fn graph_channel_can_beat_lexical_for_usage_intent() {
+        let intent = QueryIntent {
+            kind: QueryIntentKind::SymbolUsage,
+            code_related: true,
+            allow_docs: false,
+            weights: IntentWeights {
+                lexical: 0.9,
+                vector: 0.5,
+                symbol: 2.0,
+                path: 1.4,
+                graph: 1.7,
+            },
+        };
+        let lexical = vec![(1, 1.0)];
+        let vector = Vec::new();
+        let symbol = Vec::new();
+        let path = Vec::new();
+        let graph = vec![(2, 1.3)];
+        let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
+        let lexical_candidate = fused.get(&1).map(|c| c.score).unwrap_or_default();
+        let graph_candidate = fused.get(&2).map(|c| c.score).unwrap_or_default();
+        assert!(graph_candidate > lexical_candidate);
+    }
+
+    #[test]
     fn docs_query_allows_docs() {
         let docs = analyze_query_intent("Show me docs/readme for auth bootstrap");
         let code = analyze_query_intent("Where is auth bootstrap implemented?");

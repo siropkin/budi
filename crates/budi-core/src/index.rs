@@ -1511,4 +1511,69 @@ mod tests {
         ]);
         assert_eq!(count_deleted_paths(&changed, &current), 1);
     }
+
+    #[test]
+    fn chunk_fingerprint_and_id_are_stable() {
+        let fingerprint = chunk_fingerprint("src/lib.rs", 10, 20, "fn test() {}");
+        let mut used_a = HashSet::new();
+        let mut used_b = HashSet::new();
+        let id_a = allocate_chunk_id(&fingerprint, &mut used_a);
+        let id_b = allocate_chunk_id(&fingerprint, &mut used_b);
+        assert_eq!(
+            fingerprint,
+            chunk_fingerprint("src/lib.rs", 10, 20, "fn test() {}")
+        );
+        assert_eq!(id_a, id_b);
+    }
+
+    #[test]
+    fn should_rehash_when_metadata_changes_or_forced() {
+        let previous = FileRecord {
+            path: "src/lib.rs".to_string(),
+            hash: "abc".to_string(),
+            size_bytes: 100,
+            modified_unix_ms: 1_000,
+        };
+        assert!(!should_rehash_file(Some(&previous), 100, 1_000, false));
+        assert!(should_rehash_file(Some(&previous), 101, 1_000, false));
+        assert!(should_rehash_file(Some(&previous), 100, 1_001, false));
+        assert!(should_rehash_file(Some(&previous), 100, 1_000, true));
+        assert!(should_rehash_file(None, 100, 1_000, false));
+    }
+
+    #[test]
+    fn graph_signal_links_references_to_defined_symbols() {
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/service.rs".to_string(),
+                branch: "main".to_string(),
+                head: "abc".to_string(),
+                start_line: 1,
+                end_line: 3,
+                symbol_hint: Some("process_order".to_string()),
+                text: "pub fn process_order() {}".to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/controller.rs".to_string(),
+                branch: "main".to_string(),
+                head: "abc".to_string(),
+                start_line: 1,
+                end_line: 5,
+                symbol_hint: Some("handle_request".to_string()),
+                text:
+                    "use crate::service::process_order;\nfn handle_request() { process_order(); }"
+                        .to_string(),
+                embedding: vec![0.0; 4],
+                updated_at_ts: 0,
+            },
+        ];
+        let (_symbol, _path, graph, _doc) = build_retrieval_signal_indexes(&chunks);
+        let refs = graph.get("process_order").cloned().unwrap_or_default();
+        assert!(refs.contains(&2));
+        assert!(!refs.contains(&1));
+    }
 }

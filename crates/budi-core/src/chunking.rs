@@ -268,3 +268,33 @@ pub fn chunk_text(
     }
     line_window_chunks(content, lines_per_chunk, overlap)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_text;
+
+    #[test]
+    fn falls_back_to_line_windows_for_unknown_extensions() {
+        let content = (0..180)
+            .map(|idx| format!("line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = chunk_text("README.unknown", &content, 40, 10);
+        assert!(chunks.len() > 1);
+    }
+
+    #[test]
+    fn ast_chunking_splits_python_definitions() {
+        let content = r#"
+def alpha():
+    return 1
+
+def beta():
+    return 2
+"#;
+        let chunks = chunk_text("example.py", content, 80, 20);
+        assert!(chunks.len() >= 2);
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("def alpha")));
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("def beta")));
+    }
+}
