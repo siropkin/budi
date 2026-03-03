@@ -31,9 +31,14 @@ pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> Stri
     out.push_str("snippets:\n");
 
     for snippet in snippets {
+        let reasons = if snippet.reasons.is_empty() {
+            "semantic+lexical".to_string()
+        } else {
+            snippet.reasons.join(",")
+        };
         let header = format!(
-            "### {}:{}-{} score={:.4} reason={}\n",
-            snippet.path, snippet.start_line, snippet.end_line, snippet.score, snippet.reason
+            "### {}:{}-{} score={:.4} reasons={}\n",
+            snippet.path, snippet.start_line, snippet.end_line, snippet.score, reasons
         );
         if out.len() + header.len() >= budget {
             break;

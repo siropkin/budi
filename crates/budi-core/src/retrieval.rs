@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::config::BudiConfig;
 use crate::index::RuntimeIndex;
-use crate::rpc::{QueryDiagnostics, QueryResponse, QueryResultItem};
+use crate::rpc::{QueryChannelScores, QueryDiagnostics, QueryResponse, QueryResultItem};
 use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
 
 mod context;
@@ -54,6 +54,7 @@ enum ChannelKind {
 struct CandidateScore {
     score: f32,
     signals: Vec<String>,
+    channel_scores: QueryChannelScores,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,7 @@ struct ScoredChunk {
     score: f32,
     reasons: Vec<String>,
     clause_hits: Vec<usize>,
+    channel_scores: QueryChannelScores,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,6 +146,7 @@ pub fn build_query_response(
         };
         let mut adjusted = candidate.score;
         let mut reasons = candidate.signals;
+        let mut channel_scores = candidate.channel_scores;
         let lower_path = chunk.path.to_ascii_lowercase();
         let lower_text = chunk.text.to_ascii_lowercase();
         if runtime.is_doc_like_chunk(id) && intent.code_related && !intent.allow_docs {
@@ -345,11 +348,13 @@ pub fn build_query_response(
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
         }
+        channel_scores.rerank = adjusted - candidate.score;
         scored.push(ScoredChunk {
             id,
             score: adjusted,
             reasons,
             clause_hits,
+            channel_scores,
         });
     }
 
@@ -464,7 +469,8 @@ fn try_push_scored_chunk(
         start_line: chunk.start_line,
         end_line: chunk.end_line,
         score: candidate.score,
-        reason: candidate.reasons.join(","),
+        reasons: candidate.reasons.clone(),
+        channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
     });
     *selection
@@ -538,9 +544,21 @@ fn apply_channel_scores(
     for (rank, (id, raw_score)) in channel.iter().enumerate() {
         let rr = weight / ((rank as f32) + RRF_K);
         let normalized = normalize_channel_score(*raw_score, kind);
+        let contribution = rr + normalized * weight * 0.35;
         let entry = scores.entry(*id).or_default();
-        entry.score += rr + normalized * weight * 0.35;
+        entry.score += contribution;
+        add_channel_contribution(&mut entry.channel_scores, kind, contribution);
         push_unique_reason(&mut entry.signals, channel_signal_name(kind));
+    }
+}
+
+fn add_channel_contribution(scores: &mut QueryChannelScores, kind: ChannelKind, value: f32) {
+    match kind {
+        ChannelKind::Lexical => scores.lexical += value,
+        ChannelKind::Vector => scores.vector += value,
+        ChannelKind::Symbol => scores.symbol += value,
+        ChannelKind::Path => scores.path += value,
+        ChannelKind::Graph => scores.graph += value,
     }
 }
 
@@ -600,14 +618,7 @@ fn build_diagnostics(
     let margin = (top_score - second_score).max(0.0);
     let top_signals = snippets
         .first()
-        .map(|s| {
-            s.reason
-                .split(',')
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+        .map(|s| s.reasons.clone())
         .unwrap_or_default();
     let confidence = estimate_confidence(top_score, margin, snippets.len(), &top_signals, intent);
 
@@ -2521,6 +2532,86 @@ export default function devicerowcell() {
     }
 
     #[test]
+    fn channel_score_breakdown_tracks_per_channel_contributions() {
+        let intent = QueryIntent {
+            kind: QueryIntentKind::CodeNavigation,
+            code_related: true,
+            allow_docs: false,
+            weights: IntentWeights {
+                lexical: 1.0,
+                vector: 1.0,
+                symbol: 1.0,
+                path: 1.0,
+                graph: 1.0,
+            },
+        };
+        let fused = fuse_channel_scores(
+            &[(7, 10.0)],
+            &[(7, 0.8)],
+            &[(7, 1.0)],
+            &[(7, 1.0)],
+            &[(7, 1.0)],
+            &intent,
+        );
+        let candidate = fused.get(&7).expect("candidate");
+        assert!(candidate.channel_scores.lexical > 0.0);
+        assert!(candidate.channel_scores.vector > 0.0);
+        assert!(candidate.channel_scores.symbol > 0.0);
+        assert!(candidate.channel_scores.path > 0.0);
+        assert!(candidate.channel_scores.graph > 0.0);
+        assert!(
+            candidate
+                .signals
+                .iter()
+                .any(|signal| signal == "lexical-hit")
+        );
+        assert!(
+            candidate
+                .signals
+                .iter()
+                .any(|signal| signal == "semantic-hit")
+        );
+    }
+
+    #[test]
+    fn diagnostics_signals_use_structured_reason_codes() {
+        let intent = QueryIntent {
+            kind: QueryIntentKind::PathLookup,
+            code_related: true,
+            allow_docs: false,
+            weights: IntentWeights {
+                lexical: 1.0,
+                vector: 1.0,
+                symbol: 1.0,
+                path: 1.0,
+                graph: 0.7,
+            },
+        };
+        let diagnostics = build_diagnostics(
+            &intent,
+            &[QueryResultItem {
+                path: "src/router.ts".to_string(),
+                start_line: 10,
+                end_line: 20,
+                score: 0.7,
+                reasons: vec!["path-hit".to_string(), "scope-hit".to_string()],
+                channel_scores: QueryChannelScores::default(),
+                text: "router.get('/health')".to_string(),
+            }],
+            true,
+            true,
+            0.45,
+        );
+        assert!(
+            diagnostics
+                .signals
+                .iter()
+                .any(|signal| signal == "path-hit")
+        );
+        assert!(diagnostics.recommended_injection);
+    }
+
+    #[test]
     fn docs_query_allows_docs() {
         let docs = analyze_query_intent("Show me docs/readme for auth bootstrap");
         let code = analyze_query_intent("Where is auth bootstrap implemented?");
@@ -2668,7 +2759,8 @@ export default function devicerowcell() {
             start_line: 10,
             end_line: 14,
             score: 0.87,
-            reason: "symbol-hit".to_string(),
+            reasons: vec!["symbol-hit".to_string()],
+            channel_scores: QueryChannelScores::default(),
             text: "export const app = true;".to_string(),
         }];
         let context = build_context(&snippets, 4_000);

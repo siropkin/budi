@@ -8,13 +8,45 @@ pub struct QueryRequest {
     pub cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct QueryChannelScores {
+    #[serde(default)]
+    pub lexical: f32,
+    #[serde(default)]
+    pub vector: f32,
+    #[serde(default)]
+    pub symbol: f32,
+    #[serde(default)]
+    pub path: f32,
+    #[serde(default)]
+    pub graph: f32,
+    #[serde(default)]
+    pub rerank: f32,
+}
+
+impl Default for QueryChannelScores {
+    fn default() -> Self {
+        Self {
+            lexical: 0.0,
+            vector: 0.0,
+            symbol: 0.0,
+            path: 0.0,
+            graph: 0.0,
+            rerank: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResultItem {
     pub path: String,
     pub start_line: usize,
     pub end_line: usize,
     pub score: f32,
-    pub reason: String,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub channel_scores: QueryChannelScores,
     pub text: String,
 }
 

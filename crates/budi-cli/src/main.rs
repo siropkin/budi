@@ -15,7 +15,7 @@ use budi_core::hooks::{
 };
 use budi_core::rpc::{
     IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryDiagnostics,
-    QueryRequest, QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
+    QueryRequest, QueryResponse, QueryResultItem, StatusRequest, StatusResponse, UpdateRequest,
 };
 use budi_core::{git, index};
 use clap::{ArgAction, Parser, Subcommand};
@@ -433,8 +433,13 @@ fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str) -> Result<()> {
     }
     for item in &response.snippets {
         println!(
-            "- {}:{}-{} score={:.4} reason={}",
-            item.path, item.start_line, item.end_line, item.score, item.reason
+            "- {}:{}-{} score={:.4} reasons={} channels={}",
+            item.path,
+            item.start_line,
+            item.end_line,
+            item.score,
+            format_snippet_reasons(item),
+            format_snippet_channels(item)
         );
     }
     println!("\n--- injected context preview ---\n{}", context_preview);
@@ -496,8 +501,13 @@ fn cmd_search(
     }
     for item in &limited_snippets {
         println!(
-            "- {}:{}-{} score={:.4} reason={}",
-            item.path, item.start_line, item.end_line, item.score, item.reason
+            "- {}:{}-{} score={:.4} reasons={} channels={}",
+            item.path,
+            item.start_line,
+            item.end_line,
+            item.score,
+            format_snippet_reasons(item),
+            format_snippet_channels(item)
         );
     }
     Ok(())
@@ -594,6 +604,26 @@ fn cmd_eval_retrieval(
         }
     }
     Ok(())
+}
+
+fn format_snippet_reasons(item: &QueryResultItem) -> String {
+    if item.reasons.is_empty() {
+        "semantic+lexical".to_string()
+    } else {
+        item.reasons.join(",")
+    }
+}
+
+fn format_snippet_channels(item: &QueryResultItem) -> String {
+    format!(
+        "lexical={:.3},vector={:.3},symbol={:.3},path={:.3},graph={:.3},rerank={:.3}",
+        item.channel_scores.lexical,
+        item.channel_scores.vector,
+        item.channel_scores.symbol,
+        item.channel_scores.path,
+        item.channel_scores.graph,
+        item.channel_scores.rerank
+    )
 }
 
 fn embedding_integrity_counts(chunks: &[index::ChunkRecord]) -> (usize, usize, usize, usize) {
