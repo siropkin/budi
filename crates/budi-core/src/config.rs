@@ -11,6 +11,7 @@ pub const BUDI_HOME_DEFAULT_REL: &str = ".local/share/budi";
 pub const BUDI_REPOS_DIR: &str = "repos";
 pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub const BUDI_IGNORE_FILE_NAME: &str = ".budiignore";
+pub const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub const BUDI_INDEX_DIR_NAME: &str = "index";
 pub const BUDI_INDEX_DB_FILE_NAME: &str = "index.sqlite";
 pub const BUDI_TANTIVY_DIR_NAME: &str = "tantivy";
@@ -161,8 +162,7 @@ pub fn budi_home_dir() -> Result<PathBuf> {
 }
 
 pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
-    let home = budi_home_dir()?;
-    let repos_root = home.join(BUDI_REPOS_DIR);
+    let repos_root = repos_root_dir()?;
     let repo_id = repo_storage_id(repo_root);
     let data_dir = repos_root.join(repo_id);
     let index_dir = data_dir.join(BUDI_INDEX_DIR_NAME);
@@ -178,6 +178,10 @@ pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
         log_dir,
         bench_dir,
     })
+}
+
+pub fn repos_root_dir() -> Result<PathBuf> {
+    Ok(budi_home_dir()?.join(BUDI_REPOS_DIR))
 }
 
 pub fn config_path(repo_root: &Path) -> Result<PathBuf> {
@@ -208,6 +212,23 @@ pub fn benchmark_root(repo_root: &Path) -> Result<PathBuf> {
     Ok(repo_paths(repo_root)?.bench_dir)
 }
 
+pub fn repo_root_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(BUDI_REPO_ROOT_MARKER_FILE_NAME)
+}
+
+pub fn read_repo_root_marker(data_dir: &Path) -> Option<PathBuf> {
+    let marker = repo_root_marker_path(data_dir);
+    let Ok(raw) = fs::read_to_string(&marker) else {
+        return None;
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
 pub fn fastembed_cache_dir() -> Result<PathBuf> {
     Ok(budi_home_dir()?.join(BUDI_FASTEMBED_CACHE_DIR_NAME))
 }
@@ -228,6 +249,11 @@ pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
         .with_context(|| format!("Failed to create {}", paths.bench_dir.display()))?;
     fs::create_dir_all(repo_root.join(".claude"))
         .with_context(|| "Failed to create .claude".to_string())?;
+    let canonical_repo_root =
+        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let marker_path = repo_root_marker_path(&paths.data_dir);
+    fs::write(&marker_path, canonical_repo_root.display().to_string())
+        .with_context(|| format!("Failed writing {}", marker_path.display()))?;
 
     let ignore_file = ignore_path(repo_root)?;
     if !ignore_file.exists() {
@@ -309,5 +335,12 @@ mod tests {
         let hash_part = id.rsplit('-').next().unwrap_or_default();
         assert_eq!(hash_part.len(), 12);
         assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn repo_root_marker_round_trip() {
+        let data_dir = PathBuf::from("/tmp/budi-marker-test");
+        let marker_path = repo_root_marker_path(&data_dir);
+        assert!(marker_path.ends_with(BUDI_REPO_ROOT_MARKER_FILE_NAME));
     }
 }

@@ -138,12 +138,9 @@ pub struct StatusRequest {
 pub struct StatusResponse {
     pub daemon_version: String,
     pub repo_root: String,
-    pub branch: String,
-    pub head: String,
     pub tracked_files: usize,
     pub embedded_chunks: usize,
     #[serde(default)]
     pub invalid_embeddings: usize,
-    pub dirty_files: usize,
     pub hooks_detected: bool,
 }

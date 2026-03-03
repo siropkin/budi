@@ -189,7 +189,6 @@ impl DaemonState {
         let repo_root = Path::new(&request.repo_root);
         let runtime = self.ensure_loaded(repo_root, config).await?;
         let runtime_guard = runtime.lock().await;
-        let git_snapshot = git::snapshot(repo_root)?;
         let hooks_detected = detect_hooks(repo_root);
         let embedded_chunks = runtime_guard
             .state
@@ -209,12 +208,9 @@ impl DaemonState {
         Ok(StatusResponse {
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             repo_root: request.repo_root,
-            branch: git_snapshot.branch,
-            head: git_snapshot.head,
             tracked_files: runtime_guard.state.files.len(),
             embedded_chunks,
             invalid_embeddings,
-            dirty_files: git_snapshot.dirty_files.len(),
             hooks_detected,
         })
     }

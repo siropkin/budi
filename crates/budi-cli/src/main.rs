@@ -13,11 +13,11 @@ use budi_core::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
 use budi_core::hooks::{
     AsyncSystemMessageOutput, PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput,
 };
+use budi_core::index;
 use budi_core::rpc::{
     IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryDiagnostics,
     QueryRequest, QueryResponse, QueryResultItem, StatusRequest, StatusResponse, UpdateRequest,
 };
-use budi_core::{git, index};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
 use rusqlite::Connection;
@@ -216,6 +216,10 @@ enum RepoCommands {
         #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
         mode: RetrievalModeArg,
     },
+    Cleanup {
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -285,6 +289,7 @@ fn main() -> Result<()> {
                 repo_root,
                 mode,
             } => cmd_preview(repo_root, &prompt, mode),
+            RepoCommands::Cleanup { dry_run } => cmd_repo_cleanup(dry_run),
         },
         Commands::Observe { command } => match command {
             ObserveCommands::Enable { repo_root } => cmd_observe_enable(repo_root),
@@ -363,13 +368,87 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
 
     println!("budi daemon {}", response.daemon_version);
     println!("repo: {}", response.repo_root);
-    println!("branch: {}", response.branch);
-    println!("head: {}", response.head);
     println!("tracked files: {}", response.tracked_files);
     println!("embedded chunks: {}", response.embedded_chunks);
     println!("invalid embeddings: {}", response.invalid_embeddings);
-    println!("dirty files: {}", response.dirty_files);
     println!("hooks detected: {}", response.hooks_detected);
+    Ok(())
+}
+
+fn cmd_repo_cleanup(dry_run: bool) -> Result<()> {
+    let repos_root = config::repos_root_dir()?;
+    if !repos_root.exists() {
+        println!("No local repo storage found at {}", repos_root.display());
+        return Ok(());
+    }
+
+    let mut scanned_dirs = 0usize;
+    let mut active_dirs = 0usize;
+    let mut unknown_dirs = 0usize;
+    let mut stale_dirs = Vec::new();
+    for entry in fs::read_dir(&repos_root)
+        .with_context(|| format!("Failed reading {}", repos_root.display()))?
+    {
+        let entry = entry?;
+        let data_dir = entry.path();
+        if !data_dir.is_dir() {
+            continue;
+        }
+        scanned_dirs = scanned_dirs.saturating_add(1);
+        let Some(repo_root) = config::read_repo_root_marker(&data_dir) else {
+            unknown_dirs = unknown_dirs.saturating_add(1);
+            continue;
+        };
+        if repo_root.join(".git").exists() {
+            active_dirs = active_dirs.saturating_add(1);
+            continue;
+        }
+        stale_dirs.push((data_dir, repo_root));
+    }
+
+    println!("repo storage root: {}", repos_root.display());
+    println!(
+        "scanned={} active={} stale={} unknown_without_marker={}",
+        scanned_dirs,
+        active_dirs,
+        stale_dirs.len(),
+        unknown_dirs
+    );
+    if stale_dirs.is_empty() {
+        println!("No stale repo state directories found.");
+        if unknown_dirs > 0 {
+            println!(
+                "Kept {} directories because they do not have a repo-root marker (legacy layout).",
+                unknown_dirs
+            );
+        }
+        return Ok(());
+    }
+    for (data_dir, repo_root) in &stale_dirs {
+        println!(
+            "- stale: {} (repo_root marker points to missing/non-git path: {})",
+            data_dir.display(),
+            repo_root.display()
+        );
+    }
+    if dry_run {
+        println!("Dry run only: no directories removed.");
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    for (data_dir, _) in stale_dirs {
+        fs::remove_dir_all(&data_dir)
+            .with_context(|| format!("Failed removing stale dir {}", data_dir.display()))?;
+        removed = removed.saturating_add(1);
+    }
+    println!("Removed {} stale repo state directorie(s).", removed);
+    if unknown_dirs > 0 {
+        println!(
+            "Kept {} markerless directories; migrate or prune them manually if needed.",
+            unknown_dirs
+        );
+    }
     Ok(())
 }
 
@@ -796,7 +875,6 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     let state = index::load_state(&repo_root)?;
     let daemon_healthy = daemon_health(&config);
     let hooks_detected = repo_root.join(CLAUDE_LOCAL_SETTINGS).exists();
-    let git_snapshot = git::snapshot(&repo_root).ok();
 
     let indexed_files = state.as_ref().map_or(0usize, |s| s.files.len());
     let indexed_chunks = state.as_ref().map_or(0usize, |s| s.chunks.len());
@@ -811,18 +889,10 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
         indexed_chunks as f64 / indexed_files as f64
     };
     let index_db_bytes = fs::metadata(&index_db_path).map(|m| m.len()).unwrap_or(0);
-    let (branch, head, dirty_files) = if let Some(snapshot) = git_snapshot {
-        (snapshot.branch, snapshot.head, snapshot.dirty_files.len())
-    } else {
-        ("unknown".to_string(), "unknown".to_string(), 0usize)
-    };
 
     if json_output {
         let payload = json!({
             "repo_root": repo_root.display().to_string(),
-            "branch": branch,
-            "head": head,
-            "dirty_files": dirty_files,
             "daemon_healthy": daemon_healthy,
             "hooks_detected": hooks_detected,
             "indexed_files": indexed_files,
@@ -844,9 +914,6 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     }
 
     println!("repo: {}", repo_root.display());
-    println!("branch: {}", branch);
-    println!("head: {}", head);
-    println!("dirty files: {}", dirty_files);
     println!("daemon healthy: {}", daemon_healthy);
     println!("hooks detected: {}", hooks_detected);
     println!("indexed files: {}", indexed_files);
@@ -1043,11 +1110,8 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
         Ok(status) => {
             println!(
-                "route /status: ok (tracked_files={} embedded_chunks={} invalid_embeddings={} dirty_files={})",
-                status.tracked_files,
-                status.embedded_chunks,
-                status.invalid_embeddings,
-                status.dirty_files
+                "route /status: ok (tracked_files={} embedded_chunks={} invalid_embeddings={})",
+                status.tracked_files, status.embedded_chunks, status.invalid_embeddings
             );
             daemon_status = Some(status);
         }
