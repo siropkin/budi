@@ -62,6 +62,16 @@ struct ScoredChunk {
     clause_hits: Vec<usize>,
 }
 
+#[derive(Debug, Default)]
+struct SnippetSelectionState {
+    snippets: Vec<QueryResultItem>,
+    seen_fingerprints: HashSet<String>,
+    snippets_per_path: HashMap<String, usize>,
+    snippets_per_bucket: HashMap<String, usize>,
+    per_file_limit: usize,
+    per_bucket_limit: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 enum QueryClauseKind {
     Definition,
@@ -434,15 +444,22 @@ pub fn build_query_response(
     }
 
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let mut snippets = Vec::new();
-    let mut seen_fingerprints = HashSet::new();
-    let mut snippets_per_path: HashMap<String, usize> = HashMap::new();
     let per_file_limit = if matches!(intent.kind, QueryIntentKind::SymbolUsage) {
         1
     } else if matches!(intent.kind, QueryIntentKind::TestLookup) {
         3
     } else {
         2
+    };
+    let per_bucket_limit = if matches!(intent.kind, QueryIntentKind::TestLookup) {
+        4
+    } else {
+        2
+    };
+    let mut selection = SnippetSelectionState {
+        per_file_limit,
+        per_bucket_limit,
+        ..SnippetSelectionState::default()
     };
     let selection_window = config
         .retrieval_limit
@@ -470,51 +487,37 @@ pub fn build_query_response(
                 {
                     continue;
                 }
-                if try_push_scored_chunk(
-                    runtime,
-                    candidate,
-                    &mut snippets,
-                    &mut seen_fingerprints,
-                    &mut snippets_per_path,
-                    per_file_limit,
-                ) {
+                if try_push_scored_chunk(runtime, candidate, &mut selection) {
                     break;
                 }
             }
-            if snippets.len() >= config.retrieval_limit {
+            if selection.snippets.len() >= config.retrieval_limit {
                 break;
             }
         }
     }
 
     for candidate in &ranked_candidates {
-        if snippets.len() >= config.retrieval_limit {
+        if selection.snippets.len() >= config.retrieval_limit {
             break;
         }
-        let _ = try_push_scored_chunk(
-            runtime,
-            candidate,
-            &mut snippets,
-            &mut seen_fingerprints,
-            &mut snippets_per_path,
-            per_file_limit,
-        );
+        let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
 
     let diagnostics = build_diagnostics(
         &intent,
-        &snippets,
+        &selection.snippets,
         config.smart_skip_enabled,
         config.skip_non_code_prompts,
         config.min_confidence_to_inject,
     );
-    let context = build_context(git_snapshot, &snippets, config.context_char_budget);
+    let context = build_context(&selection.snippets, config.context_char_budget);
     Ok(QueryResponse {
         branch: git_snapshot.branch.clone(),
         head: git_snapshot.head.clone(),
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
-        snippets,
+        snippets: selection.snippets,
         diagnostics,
     })
 }
@@ -522,26 +525,33 @@ pub fn build_query_response(
 fn try_push_scored_chunk(
     runtime: &RuntimeIndex,
     candidate: &ScoredChunk,
-    snippets: &mut Vec<QueryResultItem>,
-    seen_fingerprints: &mut HashSet<String>,
-    snippets_per_path: &mut HashMap<String, usize>,
-    per_file_limit: usize,
+    selection: &mut SnippetSelectionState,
 ) -> bool {
     let Some(chunk) = runtime.chunk(candidate.id) else {
         return false;
     };
-    let path_count = snippets_per_path
+    let path_count = selection
+        .snippets_per_path
         .get(&chunk.path)
         .copied()
         .unwrap_or_default();
-    if path_count >= per_file_limit {
+    if path_count >= selection.per_file_limit {
+        return false;
+    }
+    let bucket = path_diversity_bucket(&chunk.path);
+    let bucket_count = selection
+        .snippets_per_bucket
+        .get(&bucket)
+        .copied()
+        .unwrap_or_default();
+    if bucket_count >= selection.per_bucket_limit {
         return false;
     }
     let fingerprint = snippet_fingerprint(&chunk.text);
-    if !seen_fingerprints.insert(fingerprint) {
+    if !selection.seen_fingerprints.insert(fingerprint) {
         return false;
     }
-    snippets.push(QueryResultItem {
+    selection.snippets.push(QueryResultItem {
         path: chunk.path.clone(),
         start_line: chunk.start_line,
         end_line: chunk.end_line,
@@ -549,8 +559,25 @@ fn try_push_scored_chunk(
         reason: candidate.reasons.join(","),
         text: chunk.text.clone(),
     });
-    *snippets_per_path.entry(chunk.path.clone()).or_insert(0) += 1;
+    *selection
+        .snippets_per_path
+        .entry(chunk.path.clone())
+        .or_insert(0) += 1;
+    *selection.snippets_per_bucket.entry(bucket).or_insert(0) += 1;
     true
+}
+
+fn path_diversity_bucket(path: &str) -> String {
+    let mut parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase());
+    let first = parts.next().unwrap_or_else(|| "root".to_string());
+    if let Some(second) = parts.next() {
+        format!("{first}/{second}")
+    } else {
+        first
+    }
 }
 
 fn fuse_channel_scores(
@@ -2425,31 +2452,9 @@ fn matches_doc_path_hint(path: &str, hints: &[String]) -> bool {
     hints.iter().any(|hint| lower_path.contains(hint))
 }
 
-fn build_context(
-    git_snapshot: &GitSnapshot,
-    snippets: &[QueryResultItem],
-    budget: usize,
-) -> String {
+fn build_context(snippets: &[QueryResultItem], budget: usize) -> String {
     let mut out = String::new();
     out.push_str("[budi deterministic context]\n");
-    out.push_str(&format!("branch: {}\n", git_snapshot.branch));
-    out.push_str(&format!("head: {}\n", git_snapshot.head));
-    if !git_snapshot.recent_commits.is_empty() {
-        out.push_str("recent_commits:\n");
-        for commit in &git_snapshot.recent_commits {
-            out.push_str("- ");
-            out.push_str(commit);
-            out.push('\n');
-        }
-    }
-    if !git_snapshot.dirty_files.is_empty() {
-        out.push_str("dirty_files:\n");
-        for file in &git_snapshot.dirty_files {
-            out.push_str("- ");
-            out.push_str(file);
-            out.push('\n');
-        }
-    }
     out.push_str("snippets:\n");
 
     for snippet in snippets {
@@ -2859,5 +2864,29 @@ export default function devicerowcell() {
             &[],
             QueryIntentKind::PathLookup
         ));
+    }
+
+    #[test]
+    fn build_context_excludes_git_metadata_lines() {
+        let snippets = vec![QueryResultItem {
+            path: "src/app.ts".to_string(),
+            start_line: 10,
+            end_line: 14,
+            score: 0.87,
+            reason: "symbol-hit".to_string(),
+            text: "export const app = true;".to_string(),
+        }];
+        let context = build_context(&snippets, 4_000);
+        assert!(context.contains("[budi deterministic context]"));
+        assert!(context.contains("snippets:"));
+        assert!(!context.contains("branch:"));
+        assert!(!context.contains("recent_commits:"));
+        assert!(!context.contains("dirty_files:"));
+    }
+
+    #[test]
+    fn path_diversity_bucket_uses_first_two_segments() {
+        assert_eq!(path_diversity_bucket("src/routes/home.tsx"), "src/routes");
+        assert_eq!(path_diversity_bucket("README.md"), "readme.md");
     }
 }
