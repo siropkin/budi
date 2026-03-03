@@ -57,6 +57,9 @@ pub struct RepoIndexState {
 pub struct IndexBuildReport {
     pub indexed_files: usize,
     pub indexed_chunks: usize,
+    pub embedded_chunks: usize,
+    pub missing_embeddings: usize,
+    pub repaired_embeddings: usize,
     pub changed_files: usize,
     pub limit_reached: bool,
 }
@@ -339,6 +342,7 @@ pub fn build_or_update(
     let embedding_retry_backoff_ms = config.embedding_retry_backoff_ms.max(1);
     let mut pending_chunks: Vec<PendingChunk> = Vec::new();
     let mut missing_embedding_queue: Vec<(usize, String)> = Vec::new();
+    let mut repaired_embeddings = 0usize;
 
     emit_progress(
         &mut progress_cb,
@@ -575,6 +579,35 @@ pub fn build_or_update(
         });
     }
 
+    if embedder.is_available() {
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "reconciling-embeddings".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+        repaired_embeddings = reconcile_missing_chunk_embeddings(
+            &mut chunks,
+            &mut embedder,
+            &mut embedding_cache,
+            &mut embedding_cache_dirty,
+            embedding_batch_size,
+            embedding_retry_attempts,
+            embedding_retry_backoff_ms,
+        )?;
+    }
+
+    let missing_embeddings = chunks
+        .iter()
+        .filter(|chunk| chunk.embedding.is_empty())
+        .count();
+    let embedded_chunks = chunks.len().saturating_sub(missing_embeddings);
+
     if embedding_cache_dirty {
         emit_progress(
             &mut progress_cb,
@@ -641,6 +674,9 @@ pub fn build_or_update(
     let report = IndexBuildReport {
         indexed_files: state.files.len(),
         indexed_chunks: state.chunks.len(),
+        embedded_chunks,
+        missing_embeddings,
+        repaired_embeddings,
         changed_files,
         limit_reached,
     };
@@ -3089,6 +3125,67 @@ fn embed_passages_with_retry(
     Ok(Vec::new())
 }
 
+fn reconcile_missing_chunk_embeddings(
+    chunks: &mut [ChunkRecord],
+    embedder: &mut EmbeddingEngine,
+    embedding_cache: &mut EmbeddingCacheState,
+    embedding_cache_dirty: &mut bool,
+    batch_size: usize,
+    retry_attempts: usize,
+    retry_backoff_ms: u64,
+) -> Result<usize> {
+    let mut missing_indices = Vec::new();
+    for (idx, chunk) in chunks.iter().enumerate() {
+        if chunk.embedding.is_empty() {
+            missing_indices.push(idx);
+        }
+    }
+    if missing_indices.is_empty() {
+        return Ok(0);
+    }
+
+    let mut repaired = 0usize;
+    for batch in missing_indices.chunks(batch_size.max(1)) {
+        let passages = batch
+            .iter()
+            .map(|idx| format!("passage: {}", chunks[*idx].text))
+            .collect::<Vec<_>>();
+        let embeddings =
+            embed_passages_with_retry(embedder, &passages, retry_attempts, retry_backoff_ms)?;
+        if embeddings.len() != batch.len() {
+            warn!(
+                "Embedding reconcile count mismatch: requested={} returned={}",
+                batch.len(),
+                embeddings.len()
+            );
+        }
+        for (chunk_idx, embedding) in batch.iter().zip(embeddings.into_iter()) {
+            if embedding.is_empty() {
+                continue;
+            }
+            if let Some(chunk) = chunks.get_mut(*chunk_idx) {
+                chunk.embedding = embedding.clone();
+                let cache_key = embedding_content_hash(&chunk.text);
+                if embedding_cache
+                    .entries
+                    .insert(cache_key, embedding)
+                    .is_none()
+                {
+                    *embedding_cache_dirty = true;
+                }
+                repaired = repaired.saturating_add(1);
+            }
+        }
+    }
+    if repaired > 0 {
+        info!(
+            "Reconciled {} missing chunk embeddings after indexing.",
+            repaired
+        );
+    }
+    Ok(repaired)
+}
+
 enum EmbeddingBackend {
     Fast(Box<TextEmbedding>),
     Unavailable,
@@ -3128,6 +3225,10 @@ impl EmbeddingEngine {
             EmbeddingBackend::Fast(embedder) => Ok(embedder.embed(docs, None)?),
             EmbeddingBackend::Unavailable => Ok(vec![Vec::new(); docs.len()]),
         }
+    }
+
+    fn is_available(&self) -> bool {
+        matches!(self.backend, EmbeddingBackend::Fast(_))
     }
 
     pub fn embed_query(&mut self, query: &str) -> Result<Option<Vec<f32>>> {
@@ -3862,5 +3963,47 @@ mod tests {
         assert!(allowlist.contains("rs"));
         assert!(allowlist.contains("tsx"));
         assert!(!allowlist.contains(".rs"));
+    }
+
+    #[test]
+    fn reconcile_missing_embeddings_is_noop_when_backend_unavailable() {
+        let mut chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/lib.rs".to_string(),
+                start_line: 1,
+                end_line: 8,
+                symbol_hint: None,
+                text: "fn alpha() {}".to_string(),
+                embedding: Vec::new(),
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/lib.rs".to_string(),
+                start_line: 10,
+                end_line: 18,
+                symbol_hint: None,
+                text: "fn beta() {}".to_string(),
+                embedding: vec![0.2, 0.4],
+            },
+        ];
+        let mut embedder = EmbeddingEngine {
+            backend: EmbeddingBackend::Unavailable,
+        };
+        let mut cache = EmbeddingCacheState::default();
+        let mut cache_dirty = false;
+        let repaired = reconcile_missing_chunk_embeddings(
+            &mut chunks,
+            &mut embedder,
+            &mut cache,
+            &mut cache_dirty,
+            8,
+            2,
+            1,
+        )
+        .expect("reconcile should succeed");
+        assert_eq!(repaired, 0);
+        assert!(chunks[0].embedding.is_empty());
+        assert!(!cache_dirty);
     }
 }

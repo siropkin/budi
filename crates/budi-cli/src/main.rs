@@ -277,10 +277,13 @@ fn cmd_index(repo_root: Option<PathBuf>, hard: bool, progress: bool) -> Result<(
         )?
     };
     println!(
-        "Index {}: files={}, chunks={}, changed_files={}",
+        "Index {}: files={}, chunks={}, embedded={}, missing_embeddings={}, repaired_embeddings={}, changed_files={}",
         response.index_status,
         response.indexed_files,
         response.indexed_chunks,
+        response.embedded_chunks,
+        response.missing_embeddings,
+        response.repaired_embeddings,
         response.changed_files
     );
     Ok(())
@@ -515,6 +518,13 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
 
     let indexed_files = state.as_ref().map_or(0usize, |s| s.files.len());
     let indexed_chunks = state.as_ref().map_or(0usize, |s| s.chunks.len());
+    let embedded_chunks = state.as_ref().map_or(0usize, |s| {
+        s.chunks
+            .iter()
+            .filter(|chunk| !chunk.embedding.is_empty())
+            .count()
+    });
+    let missing_embeddings = indexed_chunks.saturating_sub(embedded_chunks);
     let catalog_updated_at_ts = state.as_ref().map_or(0i64, |s| s.updated_at_ts);
     let chunks_per_file = if indexed_files == 0 {
         0.0
@@ -538,6 +548,8 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
             "hooks_detected": hooks_detected,
             "indexed_files": indexed_files,
             "indexed_chunks": indexed_chunks,
+            "embedded_chunks": embedded_chunks,
+            "missing_embeddings": missing_embeddings,
             "chunks_per_file": chunks_per_file,
             "catalog_updated_at_ts": catalog_updated_at_ts,
             "index_db_file": index_db_path.display().to_string(),
@@ -558,6 +570,8 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     println!("hooks detected: {}", hooks_detected);
     println!("indexed files: {}", indexed_files);
     println!("indexed chunks: {}", indexed_chunks);
+    println!("embedded chunks: {}", embedded_chunks);
+    println!("missing embeddings: {}", missing_embeddings);
     println!("chunks/file: {:.2}", chunks_per_file);
     println!("catalog updated_at_ts: {}", catalog_updated_at_ts);
     println!(
@@ -615,6 +629,8 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     let mut duplicate_file_paths = 0usize;
     let mut duplicate_chunk_ids = 0usize;
     let mut orphan_chunks = 0usize;
+    let mut state_embedded_chunks = 0usize;
+    let mut state_missing_embeddings = 0usize;
     if let Some(index_state) = &state {
         let mut seen_paths: HashSet<&str> = HashSet::new();
         for file in &index_state.files {
@@ -635,11 +651,20 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
             if !file_paths.contains(chunk.path.as_str()) {
                 orphan_chunks = orphan_chunks.saturating_add(1);
             }
+            if chunk.embedding.is_empty() {
+                state_missing_embeddings = state_missing_embeddings.saturating_add(1);
+            } else {
+                state_embedded_chunks = state_embedded_chunks.saturating_add(1);
+            }
         }
     }
     println!(
         "catalog consistency: duplicate_file_paths={} duplicate_chunk_ids={} orphan_chunks={}",
         duplicate_file_paths, duplicate_chunk_ids, orphan_chunks
+    );
+    println!(
+        "embedding coverage: embedded_chunks={} missing_embeddings={}",
+        state_embedded_chunks, state_missing_embeddings
     );
 
     let tantivy_entries = fs::read_dir(&tantivy_path)

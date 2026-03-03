@@ -93,6 +93,9 @@ impl DaemonState {
         Ok(IndexResponse {
             indexed_files: workspace.report.indexed_files,
             indexed_chunks: workspace.report.indexed_chunks,
+            embedded_chunks: workspace.report.embedded_chunks,
+            missing_embeddings: workspace.report.missing_embeddings,
+            repaired_embeddings: workspace.report.repaired_embeddings,
             changed_files: workspace.report.changed_files,
             index_status: if workspace.report.limit_reached {
                 "limit_reached".to_string()
@@ -113,10 +116,14 @@ impl DaemonState {
             .await;
         self.kick_update_processor(&repo_key, config).await;
 
-        let (indexed_files, indexed_chunks) = self.runtime_counts(&repo_key).await;
+        let (indexed_files, indexed_chunks, embedded_chunks, missing_embeddings) =
+            self.runtime_counts(&repo_key).await;
         Ok(IndexResponse {
             indexed_files,
             indexed_chunks,
+            embedded_chunks,
+            missing_embeddings,
+            repaired_embeddings: 0,
             changed_files: changed_count,
             index_status: "scheduled".to_string(),
         })
@@ -417,13 +424,25 @@ impl DaemonState {
         }
     }
 
-    async fn runtime_counts(&self, repo_key: &str) -> (usize, usize) {
+    async fn runtime_counts(&self, repo_key: &str) -> (usize, usize, usize, usize) {
         let runtime = { self.repos.read().await.get(repo_key).cloned() };
         if let Some(runtime) = runtime {
             let guard = runtime.lock().await;
-            (guard.state.files.len(), guard.state.chunks.len())
+            let embedded_chunks = guard
+                .state
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.embedding.is_empty())
+                .count();
+            let missing_embeddings = guard.state.chunks.len().saturating_sub(embedded_chunks);
+            (
+                guard.state.files.len(),
+                guard.state.chunks.len(),
+                embedded_chunks,
+                missing_embeddings,
+            )
         } else {
-            (0, 0)
+            (0, 0, 0, 0)
         }
     }
 

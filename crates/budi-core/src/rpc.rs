@@ -49,6 +49,12 @@ pub struct IndexRequest {
 pub struct IndexResponse {
     pub indexed_files: usize,
     pub indexed_chunks: usize,
+    #[serde(default)]
+    pub embedded_chunks: usize,
+    #[serde(default)]
+    pub missing_embeddings: usize,
+    #[serde(default)]
+    pub repaired_embeddings: usize,
     pub changed_files: usize,
     #[serde(default = "default_index_status")]
     pub index_status: String,
