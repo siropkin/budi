@@ -32,7 +32,7 @@ use prompt_controls::PromptDirectives;
 use prompt_controls::{
     evaluate_context_skip, excerpt, parse_prompt_directives, sanitize_prompt_for_query,
 };
-use retrieval_eval::{RetrievalEvalReport, run_retrieval_eval};
+use retrieval_eval::{RetrievalEvalReport, load_retrieval_eval_report, run_retrieval_eval};
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
@@ -158,7 +158,22 @@ enum EvalCommands {
         json: bool,
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        fail_on_regression: bool,
+        #[arg(long, default_value_t = 0.0)]
+        max_regression: f64,
     },
+}
+
+#[derive(Debug, Clone)]
+struct EvalRetrievalOptions {
+    json_output: bool,
+    out_dir: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+    fail_on_regression: bool,
+    max_regression: f64,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -278,7 +293,19 @@ fn main() -> Result<()> {
                 mode,
                 json,
                 out_dir,
-            } => cmd_eval_retrieval(repo_root, fixtures, limit, mode, json, out_dir),
+                baseline,
+                fail_on_regression,
+                max_regression,
+            } => {
+                let options = EvalRetrievalOptions {
+                    json_output: json,
+                    out_dir,
+                    baseline,
+                    fail_on_regression,
+                    max_regression,
+                };
+                cmd_eval_retrieval(repo_root, fixtures, limit, mode, options)
+            }
         },
         Commands::Repo { command } => match command {
             RepoCommands::List { stale_only } => cmd_repo_list(stale_only),
@@ -774,9 +801,18 @@ fn cmd_eval_retrieval(
     fixtures: Option<PathBuf>,
     limit: usize,
     mode: RetrievalModeArg,
-    json_output: bool,
-    out_dir: Option<PathBuf>,
+    options: EvalRetrievalOptions,
 ) -> Result<()> {
+    let EvalRetrievalOptions {
+        json_output,
+        out_dir,
+        baseline,
+        fail_on_regression,
+        max_regression,
+    } = options;
+    if max_regression < 0.0 {
+        anyhow::bail!("--max-regression must be non-negative");
+    }
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
@@ -799,13 +835,40 @@ fn cmd_eval_retrieval(
         },
     )?;
     let artifact_path = persist_retrieval_eval_report(&repo_root, out_dir.as_deref(), &report)?;
+    let baseline_path =
+        resolve_retrieval_eval_baseline(baseline.as_deref(), &artifact_path, mode.as_rpc_mode())?;
+    let regression = if let Some(path) = baseline_path.as_deref() {
+        let baseline_report = load_retrieval_eval_report(path)?;
+        Some(build_retrieval_eval_regression(
+            &artifact_path,
+            &report,
+            path,
+            &baseline_report,
+            max_regression,
+        ))
+    } else {
+        None
+    };
+    let regression_failed = if fail_on_regression {
+        match regression.as_ref() {
+            Some(summary) => !summary.passed,
+            None => true,
+        }
+    } else {
+        false
+    };
 
     if json_output {
         let payload = json!({
             "artifact_path": artifact_path.display().to_string(),
+            "baseline_artifact": baseline_path.as_ref().map(|path| path.display().to_string()),
+            "regression": regression,
             "report": report,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
+        if regression_failed {
+            anyhow::bail!("retrieval regression gate failed");
+        }
         return Ok(());
     }
 
@@ -884,8 +947,190 @@ fn cmd_eval_retrieval(
             println!("  error={err}");
         }
     }
+    if let Some(summary) = &regression {
+        println!(
+            "regression: baseline={} current={} max_drop={:.3} comparable={} passed={}",
+            summary.baseline_artifact,
+            summary.current_artifact,
+            summary.max_regression,
+            summary.comparable,
+            summary.passed
+        );
+        if !summary.scope_mismatches.is_empty() {
+            println!(
+                "regression scope mismatches: {}",
+                summary.scope_mismatches.join("; ")
+            );
+        } else {
+            for check in &summary.checks {
+                println!(
+                    "- {} baseline={:.3} current={:.3} delta={:+.3} allowed_drop={:.3} passed={}",
+                    check.metric,
+                    check.baseline,
+                    check.current,
+                    check.delta,
+                    check.max_drop,
+                    check.passed
+                );
+            }
+        }
+    } else {
+        println!("regression: baseline=none (no prior artifact found)");
+    }
     println!("artifact: {}", artifact_path.display());
+    if regression_failed {
+        anyhow::bail!("retrieval regression gate failed");
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RetrievalEvalRegressionCheck {
+    metric: String,
+    baseline: f64,
+    current: f64,
+    delta: f64,
+    max_drop: f64,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RetrievalEvalRegressionSummary {
+    baseline_artifact: String,
+    current_artifact: String,
+    max_regression: f64,
+    comparable: bool,
+    scope_mismatches: Vec<String>,
+    checks: Vec<RetrievalEvalRegressionCheck>,
+    passed: bool,
+}
+
+fn resolve_retrieval_eval_baseline(
+    explicit_baseline: Option<&Path>,
+    current_artifact: &Path,
+    retrieval_mode: &str,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit_baseline {
+        return Ok(Some(path.to_path_buf()));
+    }
+    let Some(parent) = current_artifact.parent() else {
+        return Ok(None);
+    };
+    find_previous_retrieval_eval_artifact(parent, retrieval_mode, current_artifact)
+}
+
+fn find_previous_retrieval_eval_artifact(
+    output_dir: &Path,
+    retrieval_mode: &str,
+    current_artifact: &Path,
+) -> Result<Option<PathBuf>> {
+    if !output_dir.exists() {
+        return Ok(None);
+    }
+    let mode = retrieval_mode.replace('-', "_");
+    let expected_prefix = format!("retrieval-{mode}-");
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(output_dir)
+        .with_context(|| format!("Failed reading eval artifact dir {}", output_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path == current_artifact || !path.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name.starts_with(&expected_prefix) && file_name.ends_with(".json") {
+            candidates.push(path);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .file_name()
+            .and_then(|name| name.to_str())
+            .cmp(&left.file_name().and_then(|name| name.to_str()))
+    });
+    Ok(candidates.into_iter().next())
+}
+
+fn build_retrieval_eval_regression(
+    current_artifact: &Path,
+    current: &RetrievalEvalReport,
+    baseline_artifact: &Path,
+    baseline: &RetrievalEvalReport,
+    max_regression: f64,
+) -> RetrievalEvalRegressionSummary {
+    let mut scope_mismatches = Vec::new();
+    if baseline.fixtures_path != current.fixtures_path {
+        scope_mismatches.push(format!(
+            "fixtures_path differs (baseline={} current={})",
+            baseline.fixtures_path, current.fixtures_path
+        ));
+    }
+    if baseline.retrieval_mode != current.retrieval_mode {
+        scope_mismatches.push(format!(
+            "retrieval_mode differs (baseline={} current={})",
+            baseline.retrieval_mode, current.retrieval_mode
+        ));
+    }
+    if baseline.limit != current.limit {
+        scope_mismatches.push(format!(
+            "limit differs (baseline={} current={})",
+            baseline.limit, current.limit
+        ));
+    }
+    let comparable = scope_mismatches.is_empty();
+    let checks = if comparable {
+        vec![
+            build_regression_check(
+                "hit_at_3",
+                baseline.metrics.hit_at_3,
+                current.metrics.hit_at_3,
+                max_regression,
+            ),
+            build_regression_check(
+                "mrr",
+                baseline.metrics.mrr,
+                current.metrics.mrr,
+                max_regression,
+            ),
+            build_regression_check(
+                "f1_at_3",
+                baseline.metrics.f1_at_3,
+                current.metrics.f1_at_3,
+                max_regression,
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
+    let passed = comparable && checks.iter().all(|check| check.passed);
+    RetrievalEvalRegressionSummary {
+        baseline_artifact: baseline_artifact.display().to_string(),
+        current_artifact: current_artifact.display().to_string(),
+        max_regression,
+        comparable,
+        scope_mismatches,
+        checks,
+        passed,
+    }
+}
+
+fn build_regression_check(
+    metric: &str,
+    baseline: f64,
+    current: f64,
+    max_regression: f64,
+) -> RetrievalEvalRegressionCheck {
+    let delta = current - baseline;
+    RetrievalEvalRegressionCheck {
+        metric: metric.to_string(),
+        baseline,
+        current,
+        delta,
+        max_drop: max_regression,
+        passed: delta >= -max_regression,
+    }
 }
 
 fn format_snippet_reasons(item: &QueryResultItem) -> String {
@@ -2948,6 +3193,36 @@ fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> 
 mod tests {
     use super::*;
 
+    fn make_eval_report(fixtures_path: &str, retrieval_mode: &str) -> RetrievalEvalReport {
+        RetrievalEvalReport {
+            repo_root: "/tmp/repo".to_string(),
+            fixtures_path: fixtures_path.to_string(),
+            retrieval_mode: retrieval_mode.to_string(),
+            limit: 8,
+            total_cases: 1,
+            scored_cases: 1,
+            cases_with_errors: 0,
+            metrics: retrieval_eval::RetrievalEvalMetrics {
+                cases: 1,
+                hit_at_1: 0.0,
+                hit_at_3: 0.0,
+                hit_at_5: 0.0,
+                mrr: 0.0,
+                precision_at_1: 0.0,
+                precision_at_3: 0.0,
+                precision_at_5: 0.0,
+                recall_at_1: 0.0,
+                recall_at_3: 0.0,
+                recall_at_5: 0.0,
+                f1_at_1: 0.0,
+                f1_at_3: 0.0,
+                f1_at_5: 0.0,
+            },
+            per_intent_metrics: HashMap::new(),
+            results: Vec::new(),
+        }
+    }
+
     #[test]
     fn parses_prompt_directives() {
         let d = parse_prompt_directives("please @nobudi for this prompt");
@@ -3109,5 +3384,48 @@ mod tests {
         assert_eq!(summary.retrieval_margin_count, 1);
         assert_eq!(summary.snippets_count_count, 1);
         assert_eq!(summary.total_candidates_count, 1);
+    }
+
+    #[test]
+    fn eval_regression_gate_detects_metric_drop() {
+        let mut baseline = make_eval_report("/tmp/fixtures.json", "hybrid");
+        baseline.metrics.hit_at_3 = 0.80;
+        baseline.metrics.mrr = 0.70;
+        baseline.metrics.f1_at_3 = 0.65;
+
+        let mut current = make_eval_report("/tmp/fixtures.json", "hybrid");
+        current.metrics.hit_at_3 = 0.79;
+        current.metrics.mrr = 0.69;
+        current.metrics.f1_at_3 = 0.50;
+
+        let summary = build_retrieval_eval_regression(
+            Path::new("/tmp/current.json"),
+            &current,
+            Path::new("/tmp/baseline.json"),
+            &baseline,
+            0.02,
+        );
+        assert!(summary.comparable);
+        assert!(!summary.passed);
+        assert_eq!(summary.checks.len(), 3);
+        let failed_checks = summary.checks.iter().filter(|check| !check.passed).count();
+        assert_eq!(failed_checks, 1);
+    }
+
+    #[test]
+    fn eval_regression_requires_matching_scope() {
+        let baseline = make_eval_report("/tmp/fixtures_a.json", "hybrid");
+        let current = make_eval_report("/tmp/fixtures_b.json", "vector");
+        let summary = build_retrieval_eval_regression(
+            Path::new("/tmp/current.json"),
+            &current,
+            Path::new("/tmp/baseline.json"),
+            &baseline,
+            0.01,
+        );
+        assert!(!summary.comparable);
+        assert!(!summary.passed);
+        assert!(!summary.scope_mismatches.is_empty());
+        assert!(summary.checks.is_empty());
     }
 }

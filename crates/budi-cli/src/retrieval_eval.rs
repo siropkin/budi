@@ -24,7 +24,7 @@ struct RetrievalEvalCase {
     expected_intent: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RetrievalEvalCaseResult {
     pub(crate) query: String,
     pub(crate) expected_intent: Option<String>,
@@ -40,7 +40,7 @@ pub(crate) struct RetrievalEvalCaseResult {
     pub(crate) error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct RetrievalEvalMetrics {
     pub(crate) cases: usize,
     pub(crate) hit_at_1: f64,
@@ -58,7 +58,7 @@ pub(crate) struct RetrievalEvalMetrics {
     pub(crate) f1_at_5: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RetrievalEvalReport {
     pub(crate) repo_root: String,
     pub(crate) fixtures_path: String,
@@ -263,6 +263,13 @@ impl MetricsAccumulator {
             f1_at_5: self.f1_at_5_sum / denom,
         }
     }
+}
+
+pub(crate) fn load_retrieval_eval_report(path: &Path) -> Result<RetrievalEvalReport> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("Failed reading retrieval eval artifact {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("Invalid retrieval eval artifact JSON {}", path.display()))
 }
 
 fn score_bucket(expected_intent: Option<&str>, response: &QueryResponse) -> String {

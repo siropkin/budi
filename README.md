@@ -208,7 +208,7 @@ debug_io_max_chars = 1200
 
 `budi repo preview` now prints retrieval diagnostics (intent, confidence, recommended injection).
 
-`budi eval retrieval` runs an offline retrieval-quality check against JSON fixtures and reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) with per-intent breakdowns. It also writes a timestamped JSON artifact to `./.budi/eval/runs/` (or `--out-dir`), making regressions easy to compare over time. If `--fixtures` is omitted, it reads `./.budi/eval/retrieval.json` in the repo root.
+`budi eval retrieval` runs an offline retrieval-quality check against JSON fixtures and reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) with per-intent breakdowns. It also writes a timestamped JSON artifact to `./.budi/eval/runs/` (or `--out-dir`) and can compare against a prior artifact (`--baseline` or auto-previous artifact) with optional regression gating via `--fail-on-regression --max-regression <drop>`. If `--fixtures` is omitted, it reads `./.budi/eval/retrieval.json` in the repo root.
 
 ## Observe real usage (day/week)
 

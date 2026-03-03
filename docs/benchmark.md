@@ -29,9 +29,10 @@ Use fixture-driven retrieval evaluation to track ranking quality over time:
 
 ```bash
 budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
+budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid --fail-on-regression --max-regression 0.01
 ```
 
-This reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) from expected-path fixtures, plus per-intent rollups and a persisted JSON artifact under `./.budi/eval/runs/` (or `--out-dir`).
+This reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) from expected-path fixtures, plus per-intent rollups and a persisted JSON artifact under `./.budi/eval/runs/` (or `--out-dir`). When regression gating is enabled, the current artifact is compared against `--baseline` or the latest prior artifact for the same retrieval mode.
 
 ## Debug logging during A/B runs
 
