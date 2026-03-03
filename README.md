@@ -166,7 +166,7 @@ How indexing works:
 How prompt-time retrieval works:
 1. You send a prompt in Claude Code.
 2. `budi` searches the local index (keyword + semantic + symbol/path + resolver-backed call-graph signals).
-3. It ranks snippets with an intent-aware policy (core channels first, lightweight re-rank rules) and injects a small deterministic context block.
+3. It ranks snippets with an intent-aware policy (core channels first, lightweight re-rank rules), then adds a small deterministic graph-neighbor expansion around top hits before injecting context.
 4. Claude answers with better repo grounding and fewer "where is this defined?" steps.
 5. After file edits, `budi` updates the index in the background from hook hints and daemon file-watch events, plus a periodic reconcile pass to catch missed events.
 

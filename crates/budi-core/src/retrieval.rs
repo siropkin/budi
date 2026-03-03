@@ -11,6 +11,7 @@ use context::{SnippetSelectionState, build_context, path_diversity_bucket, snipp
 mod context;
 
 const RRF_K: f32 = 60.0;
+const GRAPH_NEIGHBOR_EXPANSION_LIMIT: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetrievalMode {
@@ -474,6 +475,14 @@ pub fn build_query_response(
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
+    expand_graph_neighbors(
+        runtime,
+        &mut selection,
+        config
+            .retrieval_limit
+            .saturating_add(GRAPH_NEIGHBOR_EXPANSION_LIMIT),
+        GRAPH_NEIGHBOR_EXPANSION_LIMIT,
+    );
 
     let diagnostics = build_diagnostics(
         &intent,
@@ -529,12 +538,116 @@ fn try_push_scored_chunk(
         channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
     });
+    selection.selected_chunk_ids.push(candidate.id);
     *selection
         .snippets_per_path
         .entry(chunk.path.clone())
         .or_insert(0) += 1;
     *selection.snippets_per_bucket.entry(bucket).or_insert(0) += 1;
     true
+}
+
+fn expand_graph_neighbors(
+    runtime: &RuntimeIndex,
+    selection: &mut SnippetSelectionState,
+    target_total: usize,
+    expansion_limit: usize,
+) {
+    if expansion_limit == 0
+        || selection.snippets.is_empty()
+        || selection.snippets.len() >= target_total
+        || selection.selected_chunk_ids.is_empty()
+    {
+        return;
+    }
+
+    let seed_ids = selection
+        .selected_chunk_ids
+        .iter()
+        .copied()
+        .take(3)
+        .collect::<Vec<_>>();
+    if seed_ids.is_empty() {
+        return;
+    }
+
+    let mut selected_ids = selection
+        .selected_chunk_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut neighbor_scores: HashMap<u64, f32> = HashMap::new();
+    for (seed_idx, seed_id) in seed_ids.iter().enumerate() {
+        let Some(seed_chunk) = runtime.chunk(*seed_id) else {
+            continue;
+        };
+        let seed_tokens = graph_neighbor_seed_tokens(&seed_chunk.path, &seed_chunk.text);
+        if seed_tokens.is_empty() {
+            continue;
+        }
+        let neighbor_window = expansion_limit.saturating_mul(6).max(12);
+        for (neighbor_id, raw_score) in runtime.search_graph_tokens(&seed_tokens, neighbor_window) {
+            if neighbor_id == *seed_id || selected_ids.contains(&neighbor_id) {
+                continue;
+            }
+            let seed_priority_bonus = 0.03f32 / ((seed_idx as f32) + 1.0);
+            let candidate_score = raw_score + seed_priority_bonus;
+            let entry = neighbor_scores.entry(neighbor_id).or_insert(f32::MIN);
+            if candidate_score > *entry {
+                *entry = candidate_score;
+            }
+        }
+    }
+    if neighbor_scores.is_empty() {
+        return;
+    }
+
+    let mut ordered_neighbors = neighbor_scores.into_iter().collect::<Vec<_>>();
+    ordered_neighbors.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let mut added = 0usize;
+    for (neighbor_id, neighbor_score) in ordered_neighbors {
+        if added >= expansion_limit || selection.snippets.len() >= target_total {
+            break;
+        }
+        if selected_ids.contains(&neighbor_id) {
+            continue;
+        }
+        let candidate = ScoredChunk {
+            id: neighbor_id,
+            score: neighbor_score,
+            reasons: vec!["graph-neighbor".to_string(), "graph-hit".to_string()],
+            clause_hits: Vec::new(),
+            channel_scores: QueryChannelScores {
+                graph: neighbor_score.max(0.0),
+                ..QueryChannelScores::default()
+            },
+        };
+        if try_push_scored_chunk(runtime, &candidate, selection) {
+            selected_ids.insert(neighbor_id);
+            added = added.saturating_add(1);
+        }
+    }
+}
+
+fn graph_neighbor_seed_tokens(path: &str, text: &str) -> Vec<String> {
+    let mut out = extract_query_symbol_tokens(text);
+    if out.len() < 4 {
+        for token in extract_query_path_tokens(path) {
+            if out.iter().any(|existing| existing == &token) {
+                continue;
+            }
+            out.push(token);
+        }
+    }
+    out.retain(|token| token.len() >= 3 && !is_query_noise_token(token));
+    out.truncate(8);
+    out
 }
 
 fn fuse_channel_scores(
@@ -2845,6 +2958,23 @@ export default function devicerowcell() {
     fn path_diversity_bucket_uses_first_two_segments() {
         assert_eq!(path_diversity_bucket("src/routes/home.tsx"), "src/routes");
         assert_eq!(path_diversity_bucket("README.md"), "readme.md");
+    }
+
+    #[test]
+    fn graph_neighbor_seed_tokens_extract_symbol_like_identifiers() {
+        let tokens = graph_neighbor_seed_tokens(
+            "src/router/controller.ts",
+            "const routeOwnerMap = useRouteOwnerMap(queryContext);",
+        );
+        assert!(tokens.iter().any(|token| token == "routeownermap"));
+        assert!(tokens.iter().any(|token| token == "querycontext"));
+    }
+
+    #[test]
+    fn graph_neighbor_seed_tokens_falls_back_to_path_hints() {
+        let tokens = graph_neighbor_seed_tokens("src/features/auth/owner_map.ts", "let x = 1;");
+        assert!(tokens.iter().any(|token| token == "owner"));
+        assert!(tokens.iter().any(|token| token == "auth"));
     }
 
     #[test]

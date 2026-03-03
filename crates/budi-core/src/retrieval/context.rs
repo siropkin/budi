@@ -5,6 +5,7 @@ use crate::rpc::QueryResultItem;
 #[derive(Debug, Default)]
 pub(super) struct SnippetSelectionState {
     pub(super) snippets: Vec<QueryResultItem>,
+    pub(super) selected_chunk_ids: Vec<u64>,
     pub(super) seen_fingerprints: HashSet<String>,
     pub(super) snippets_per_path: HashMap<String, usize>,
     pub(super) snippets_per_bucket: HashMap<String, usize>,
