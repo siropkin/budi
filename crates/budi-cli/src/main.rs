@@ -439,6 +439,8 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     println!("tracked files: {}", response.tracked_files);
     println!("embedded chunks: {}", response.embedded_chunks);
     println!("invalid embeddings: {}", response.invalid_embeddings);
+    println!("update retries: {}", response.update_retries);
+    println!("update failures: {}", response.update_failures);
     println!("hooks detected: {}", response.hooks_detected);
     Ok(())
 }
@@ -1484,8 +1486,12 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
         Ok(status) => {
             println!(
-                "route /status: ok (tracked_files={} embedded_chunks={} invalid_embeddings={})",
-                status.tracked_files, status.embedded_chunks, status.invalid_embeddings
+                "route /status: ok (tracked_files={} embedded_chunks={} invalid_embeddings={} update_retries={} update_failures={})",
+                status.tracked_files,
+                status.embedded_chunks,
+                status.invalid_embeddings,
+                status.update_retries,
+                status.update_failures
             );
             daemon_status = Some(status);
         }
@@ -1567,6 +1573,12 @@ fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
                 "status_invalid_embeddings={} state_invalid_embeddings={}",
                 status.invalid_embeddings, state_invalid_embeddings
             ));
+        }
+        if status.update_retries > 0 {
+            drift_notes.push(format!("status_update_retries={}", status.update_retries));
+        }
+        if status.update_failures > 0 {
+            drift_notes.push(format!("status_update_failures={}", status.update_failures));
         }
     }
     println!(

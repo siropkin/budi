@@ -147,4 +147,8 @@ pub struct StatusResponse {
     #[serde(default)]
     pub invalid_embeddings: usize,
     pub hooks_detected: bool,
+    #[serde(default)]
+    pub update_retries: u64,
+    #[serde(default)]
+    pub update_failures: u64,
 }

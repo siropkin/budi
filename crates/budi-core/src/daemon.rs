@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
@@ -15,6 +15,9 @@ use crate::rpc::{
 };
 
 const PROGRESS_PERSIST_INTERVAL_MS: u128 = 2_000;
+const WRITE_RETRY_ATTEMPTS: usize = 3;
+const WRITE_RETRY_BASE_DELAY_MS: u64 = 75;
+const WRITE_RETRY_MAX_DELAY_MS: u64 = 600;
 
 #[derive(Clone, Default)]
 pub struct DaemonState {
@@ -24,6 +27,7 @@ pub struct DaemonState {
     queued_updates: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     queued_reconciles: Arc<Mutex<HashSet<String>>>,
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
+    update_metrics: Arc<StdMutex<HashMap<String, UpdateRetryMetrics>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +76,22 @@ struct IndexProgressSnapshot {
     last_persist_phase: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct UpdateRetryMetrics {
+    retries: u64,
+    failures: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BuildRetryRequest<'a> {
+    repo_root: &'a Path,
+    repo_key: &'a str,
+    hard: bool,
+    changed_hint: Option<&'a [String]>,
+    options: Option<&'a index::IndexBuildOptions>,
+    trigger: &'a str,
+}
+
 impl DaemonState {
     pub fn new() -> Self {
         Self::default()
@@ -107,12 +127,16 @@ impl DaemonState {
         let mut progress_cb = move |progress: index::IndexBuildProgress| {
             state_for_progress.update_progress(&repo_for_progress, hard, progress);
         };
-        let workspace = match index::build_or_update(
-            repo_root,
+        let workspace = match self.run_build_or_update_with_retry(
+            BuildRetryRequest {
+                repo_root,
+                repo_key: &request.repo_root,
+                hard: request.hard,
+                changed_hint: None,
+                options: Some(&build_options),
+                trigger: "index",
+            },
             config,
-            request.hard,
-            None,
-            Some(&build_options),
             Some(&mut progress_cb),
         ) {
             Ok(workspace) => workspace,
@@ -216,6 +240,7 @@ impl DaemonState {
         let runtime = self.ensure_loaded(repo_root, config).await?;
         let runtime_guard = runtime.lock().await;
         let hooks_detected = detect_hooks(repo_root);
+        let update_metrics = self.update_retry_metrics(&request.repo_root);
         let embedded_chunks = runtime_guard
             .state
             .chunks
@@ -238,6 +263,8 @@ impl DaemonState {
             embedded_chunks,
             invalid_embeddings,
             hooks_detected,
+            update_retries: update_metrics.retries,
+            update_failures: update_metrics.failures,
         })
     }
 
@@ -266,12 +293,86 @@ impl DaemonState {
         let state = if let Some(state) = index::load_state(repo_root)? {
             state
         } else {
-            let workspace = index::build_or_update(repo_root, config, false, None, None, None)?;
+            let workspace = self.run_build_or_update_with_retry(
+                BuildRetryRequest {
+                    repo_root,
+                    repo_key: &key,
+                    hard: false,
+                    changed_hint: None,
+                    options: None,
+                    trigger: "initial-load",
+                },
+                config,
+                None,
+            )?;
             workspace.state
         };
         let runtime = Arc::new(Mutex::new(RuntimeIndex::from_state(repo_root, state)?));
         self.repos.write().await.insert(key, runtime.clone());
         Ok(runtime)
+    }
+
+    fn run_build_or_update_with_retry(
+        &self,
+        request: BuildRetryRequest<'_>,
+        config: &BudiConfig,
+        mut progress_cb: Option<&mut dyn FnMut(index::IndexBuildProgress)>,
+    ) -> Result<index::IndexWorkspace> {
+        let mut attempt = 0usize;
+        loop {
+            match index::build_or_update(
+                request.repo_root,
+                config,
+                request.hard,
+                request.changed_hint,
+                request.options,
+                progress_cb.take(),
+            ) {
+                Ok(workspace) => return Ok(workspace),
+                Err(err) if attempt < WRITE_RETRY_ATTEMPTS && is_transient_write_failure(&err) => {
+                    let delay = retry_backoff_delay(attempt);
+                    attempt += 1;
+                    self.bump_update_retries(request.repo_key, 1);
+                    tracing::warn!(
+                        "Transient write failure for {} (trigger={} attempt={}/{} delay_ms={}): {:#}",
+                        request.repo_key,
+                        request.trigger,
+                        attempt,
+                        WRITE_RETRY_ATTEMPTS,
+                        delay.as_millis(),
+                        err
+                    );
+                    std::thread::sleep(delay);
+                }
+                Err(err) => {
+                    self.bump_update_failures(request.repo_key, 1);
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    fn bump_update_retries(&self, repo_key: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut guard = self.update_metrics_guard();
+        let entry = guard.entry(repo_key.to_string()).or_default();
+        entry.retries = entry.retries.saturating_add(count);
+    }
+
+    fn bump_update_failures(&self, repo_key: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut guard = self.update_metrics_guard();
+        let entry = guard.entry(repo_key.to_string()).or_default();
+        entry.failures = entry.failures.saturating_add(count);
+    }
+
+    fn update_retry_metrics(&self, repo_key: &str) -> UpdateRetryMetrics {
+        let guard = self.update_metrics_guard();
+        guard.get(repo_key).copied().unwrap_or_default()
     }
 
     fn start_progress(&self, repo_root: &str, hard: bool) {
@@ -459,6 +560,15 @@ impl DaemonState {
         }
     }
 
+    fn update_metrics_guard(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, UpdateRetryMetrics>> {
+        match self.update_metrics.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     async fn queue_update_paths(&self, repo_key: &str, changed_files: &[String]) {
         let mut queue = self.queued_updates.lock().await;
         let entry = queue.entry(repo_key.to_string()).or_default();
@@ -557,21 +667,44 @@ impl DaemonState {
                 break;
             }
 
-            let workspace = match if reconcile_requested {
-                index::build_or_update(repo_root, &config, false, None, None, None)
+            let trigger = if reconcile_requested {
+                "reconcile"
             } else {
-                index::build_or_update(repo_root, &config, false, Some(&changed_files), None, None)
+                "watch/hook"
+            };
+            let workspace = match if reconcile_requested {
+                self.run_build_or_update_with_retry(
+                    BuildRetryRequest {
+                        repo_root,
+                        repo_key: &repo_key,
+                        hard: false,
+                        changed_hint: None,
+                        options: None,
+                        trigger,
+                    },
+                    &config,
+                    None,
+                )
+            } else {
+                self.run_build_or_update_with_retry(
+                    BuildRetryRequest {
+                        repo_root,
+                        repo_key: &repo_key,
+                        hard: false,
+                        changed_hint: Some(&changed_files),
+                        options: None,
+                        trigger,
+                    },
+                    &config,
+                    None,
+                )
             } {
                 Ok(workspace) => workspace,
                 Err(err) => {
                     tracing::warn!(
                         "Background update failed for {} (trigger={} files={}): {:#}",
                         repo_key,
-                        if reconcile_requested {
-                            "reconcile"
-                        } else {
-                            "watch/hook"
-                        },
+                        trigger,
                         changed_files.len(),
                         err
                     );
@@ -582,11 +715,7 @@ impl DaemonState {
                 tracing::warn!(
                     "Background update hit index budget limits for {} (trigger={} files={})",
                     repo_key,
-                    if reconcile_requested {
-                        "reconcile"
-                    } else {
-                        "watch/hook"
-                    },
+                    trigger,
                     changed_files.len()
                 );
             }
@@ -607,6 +736,24 @@ impl DaemonState {
                 .insert(repo_key.clone(), Arc::new(Mutex::new(runtime)));
         }
     }
+}
+
+fn is_transient_write_failure(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_ascii_lowercase();
+    message.contains("database is locked")
+        || message.contains("database busy")
+        || message.contains("database table is locked")
+        || message.contains("resource temporarily unavailable")
+        || message.contains("temporarily unavailable")
+}
+
+fn retry_backoff_delay(attempt: usize) -> Duration {
+    let exponent = u32::try_from(attempt).unwrap_or(u32::MAX).min(10);
+    let multiplier = 2u64.saturating_pow(exponent);
+    let delay_ms = WRITE_RETRY_BASE_DELAY_MS
+        .saturating_mul(multiplier)
+        .min(WRITE_RETRY_MAX_DELAY_MS);
+    Duration::from_millis(delay_ms)
 }
 
 fn detect_hooks(repo_root: &Path) -> bool {
