@@ -21,16 +21,18 @@ use budi_core::{git, index};
 use clap::{ArgAction, Parser, Subcommand};
 use reqwest::blocking::Client;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
 mod prompt_controls;
+mod retrieval_eval;
 #[cfg(test)]
 use prompt_controls::PromptDirectives;
 use prompt_controls::{
     evaluate_context_skip, excerpt, parse_prompt_directives, sanitize_prompt_for_query,
 };
+use retrieval_eval::run_retrieval_eval;
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
@@ -196,45 +198,6 @@ struct BenchReport {
     latency_ms_p95: f64,
     avg_context_chars: f64,
     avg_context_tokens_estimate: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RetrievalEvalCase {
-    query: String,
-    #[serde(
-        default,
-        alias = "expected_paths",
-        alias = "expected",
-        alias = "expects"
-    )]
-    expect_paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RetrievalEvalCaseResult {
-    query: String,
-    expected_paths: Vec<String>,
-    rank: Option<usize>,
-    top_paths: Vec<String>,
-    intent: String,
-    confidence: f32,
-    recommended_injection: bool,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RetrievalEvalReport {
-    repo_root: String,
-    fixtures_path: String,
-    limit: usize,
-    total_cases: usize,
-    scored_cases: usize,
-    cases_with_errors: usize,
-    hit_at_1: f64,
-    hit_at_3: f64,
-    hit_at_5: f64,
-    mrr: f64,
-    results: Vec<RetrievalEvalCaseResult>,
 }
 
 fn main() -> Result<()> {
@@ -580,110 +543,20 @@ fn cmd_eval_retrieval(
     limit: usize,
     json_output: bool,
 ) -> Result<()> {
-    if limit == 0 {
-        anyhow::bail!("--limit must be at least 1");
-    }
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
-
-    let fixtures_path = fixtures.unwrap_or_else(|| default_retrieval_eval_path(&repo_root));
-    if !fixtures_path.exists() {
-        anyhow::bail!(
-            "Retrieval fixture file not found: {} (use --fixtures or create default fixture file)",
-            fixtures_path.display()
-        );
-    }
-
-    let fixture_text = fs::read_to_string(&fixtures_path)
-        .with_context(|| format!("Failed reading {}", fixtures_path.display()))?;
-    let cases: Vec<RetrievalEvalCase> = serde_json::from_str(&fixture_text)
-        .with_context(|| format!("Failed parsing JSON fixture {}", fixtures_path.display()))?;
-    if cases.is_empty() {
-        anyhow::bail!("Retrieval fixture {} has no cases", fixtures_path.display());
-    }
-
-    let mut report = RetrievalEvalReport {
-        repo_root: repo_root.display().to_string(),
-        fixtures_path: fixtures_path.display().to_string(),
-        limit,
-        total_cases: cases.len(),
-        scored_cases: 0,
-        cases_with_errors: 0,
-        hit_at_1: 0.0,
-        hit_at_3: 0.0,
-        hit_at_5: 0.0,
-        mrr: 0.0,
-        results: Vec::with_capacity(cases.len()),
-    };
-
-    for case in cases {
-        let sanitized_query = sanitize_prompt_for_query(&case.query);
-        let result = query_daemon_with_timeout(
+    let fixtures_path =
+        fixtures.unwrap_or_else(|| repo_root.join(".budi").join("eval").join("retrieval.json"));
+    let report = run_retrieval_eval(&repo_root, &fixtures_path, limit, |sanitized_query| {
+        query_daemon_with_timeout(
             &repo_root,
             &config,
-            &sanitized_query,
+            sanitized_query,
             Some(&repo_root),
             EVAL_QUERY_TIMEOUT_SECS,
-        );
-        match result {
-            Ok(response) => {
-                let top_paths = response
-                    .snippets
-                    .iter()
-                    .take(limit)
-                    .map(|item| item.path.clone())
-                    .collect::<Vec<_>>();
-                let rank = evaluate_retrieval_rank(&top_paths, &case.expect_paths);
-                if !case.expect_paths.is_empty() {
-                    report.scored_cases = report.scored_cases.saturating_add(1);
-                    if let Some(position) = rank {
-                        if position <= 1 {
-                            report.hit_at_1 += 1.0;
-                        }
-                        if position <= 3 {
-                            report.hit_at_3 += 1.0;
-                        }
-                        if position <= 5 {
-                            report.hit_at_5 += 1.0;
-                        }
-                        report.mrr += 1.0 / (position as f64);
-                    }
-                }
-                report.results.push(RetrievalEvalCaseResult {
-                    query: case.query,
-                    expected_paths: case.expect_paths,
-                    rank,
-                    top_paths,
-                    intent: response.diagnostics.intent,
-                    confidence: response.diagnostics.confidence,
-                    recommended_injection: response.diagnostics.recommended_injection,
-                    error: None,
-                });
-            }
-            Err(err) => {
-                report.cases_with_errors = report.cases_with_errors.saturating_add(1);
-                report.results.push(RetrievalEvalCaseResult {
-                    query: case.query,
-                    expected_paths: case.expect_paths,
-                    rank: None,
-                    top_paths: Vec::new(),
-                    intent: String::new(),
-                    confidence: 0.0,
-                    recommended_injection: false,
-                    error: Some(err.to_string()),
-                });
-            }
-        }
-    }
-
-    if report.scored_cases > 0 {
-        let denom = report.scored_cases as f64;
-        report.hit_at_1 /= denom;
-        report.hit_at_3 /= denom;
-        report.hit_at_5 /= denom;
-        report.mrr /= denom;
-    }
+        )
+    })?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -721,31 +594,6 @@ fn cmd_eval_retrieval(
         }
     }
     Ok(())
-}
-
-fn default_retrieval_eval_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".budi").join("eval").join("retrieval.json")
-}
-
-fn evaluate_retrieval_rank(top_paths: &[String], expected_paths: &[String]) -> Option<usize> {
-    for (idx, path) in top_paths.iter().enumerate() {
-        if expected_paths
-            .iter()
-            .any(|expected| path_matches_expected(path, expected))
-        {
-            return Some(idx + 1);
-        }
-    }
-    None
-}
-
-fn path_matches_expected(actual: &str, expected: &str) -> bool {
-    let expected = expected.trim().trim_start_matches("./");
-    if expected.is_empty() {
-        return false;
-    }
-    let actual = actual.trim_start_matches("./");
-    actual == expected || actual.ends_with(expected)
 }
 
 fn embedding_integrity_counts(chunks: &[index::ChunkRecord]) -> (usize, usize, usize, usize) {
@@ -2933,36 +2781,5 @@ mod tests {
         assert_eq!(summary.retrieval_margin_count, 1);
         assert_eq!(summary.snippets_count_count, 1);
         assert_eq!(summary.total_candidates_count, 1);
-    }
-
-    #[test]
-    fn path_matches_expected_supports_exact_and_suffix_matches() {
-        assert!(path_matches_expected(
-            "crates/budi-core/src/retrieval.rs",
-            "crates/budi-core/src/retrieval.rs"
-        ));
-        assert!(path_matches_expected(
-            "crates/budi-core/src/retrieval.rs",
-            "src/retrieval.rs"
-        ));
-        assert!(!path_matches_expected(
-            "crates/budi-core/src/index.rs",
-            "src/retrieval.rs"
-        ));
-    }
-
-    #[test]
-    fn evaluate_retrieval_rank_returns_first_match_rank() {
-        let top_paths = vec![
-            "crates/budi-core/src/index.rs".to_string(),
-            "crates/budi-core/src/retrieval.rs".to_string(),
-            "crates/budi-cli/src/main.rs".to_string(),
-        ];
-        let expected = vec![
-            "src/retrieval.rs".to_string(),
-            "src/prompt_controls.rs".to_string(),
-        ];
-        let rank = evaluate_retrieval_rank(&top_paths, &expected);
-        assert_eq!(rank, Some(2));
     }
 }
