@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -216,6 +216,7 @@ pub struct PersistedIndexProgress {
 #[derive(Debug)]
 struct PendingChunk {
     id: u64,
+    path: String,
     start_line: usize,
     end_line: usize,
     symbol_hint: Option<String>,
@@ -333,6 +334,11 @@ pub fn build_or_update(
     let mut chunks = Vec::new();
     let mut changed_files = deleted_files;
     let mut processed_files = 0usize;
+    let embedding_batch_size = config.embedding_batch_size.max(1);
+    let embedding_retry_attempts = config.embedding_retry_attempts.max(1);
+    let embedding_retry_backoff_ms = config.embedding_retry_backoff_ms.max(1);
+    let mut pending_chunks: Vec<PendingChunk> = Vec::new();
+    let mut missing_embedding_queue: Vec<(usize, String)> = Vec::new();
 
     emit_progress(
         &mut progress_cb,
@@ -347,7 +353,7 @@ pub fn build_or_update(
     );
 
     for file in &current_files {
-        if chunks.len() >= config.max_index_chunks {
+        if chunks.len() + pending_chunks.len() >= config.max_index_chunks {
             limit_reached = true;
             info!(
                 "Index chunk budget reached (max_index_chunks={}): stopping chunk ingestion.",
@@ -360,13 +366,15 @@ pub fn build_or_update(
             || !previous_chunks_by_path.contains_key(&file.path);
         if !should_process {
             if let Some(existing) = previous_chunks_by_path.get(&file.path) {
-                let remaining = config.max_index_chunks.saturating_sub(chunks.len());
+                let remaining = config
+                    .max_index_chunks
+                    .saturating_sub(chunks.len() + pending_chunks.len());
                 if remaining == 0 {
                     limit_reached = true;
                     break;
                 }
                 for chunk in existing {
-                    if chunks.len() >= config.max_index_chunks {
+                    if chunks.len() + pending_chunks.len() >= config.max_index_chunks {
                         limit_reached = true;
                         break;
                     }
@@ -434,12 +442,8 @@ pub fn build_or_update(
             );
             continue;
         }
-
-        let mut pending = Vec::with_capacity(chunked.len());
-        let mut missing_passages = Vec::new();
-        let mut missing_positions = Vec::new();
         for chunk in chunked {
-            if chunks.len() + pending.len() >= config.max_index_chunks {
+            if chunks.len() + pending_chunks.len() >= config.max_index_chunks {
                 limit_reached = true;
                 break;
             }
@@ -451,12 +455,13 @@ pub fn build_or_update(
                 .get(&fingerprint)
                 .cloned()
                 .or_else(|| embedding_cache.entries.get(&embedding_cache_key).cloned());
+            let pending_index = pending_chunks.len();
             if embedding.is_none() {
-                missing_positions.push(pending.len());
-                missing_passages.push(format!("passage: {}", chunk.text));
+                missing_embedding_queue.push((pending_index, format!("passage: {}", chunk.text)));
             }
-            pending.push(PendingChunk {
+            pending_chunks.push(PendingChunk {
                 id,
+                path: file.path.clone(),
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,
                 symbol_hint: chunk.symbol_hint,
@@ -465,44 +470,31 @@ pub fn build_or_update(
                 embedding,
             });
         }
-        if pending.is_empty() && limit_reached {
+        if limit_reached {
             break;
         }
-        if !missing_passages.is_empty() {
-            let new_embeddings = embedder.embed_passages(&missing_passages)?;
-            for (position, embedding) in missing_positions.into_iter().zip(new_embeddings) {
-                if let Some(chunk) = pending.get_mut(position) {
-                    if !embedding.is_empty()
-                        && embedding_cache
-                            .entries
-                            .insert(chunk.embedding_cache_key.clone(), embedding.clone())
-                            .is_none()
-                    {
-                        embedding_cache_dirty = true;
-                    }
-                    chunk.embedding = Some(embedding);
-                }
-            }
-        }
-        for chunk in pending {
-            let embedding = chunk.embedding.unwrap_or_default();
-            if !embedding.is_empty()
-                && embedding_cache
-                    .entries
-                    .insert(chunk.embedding_cache_key.clone(), embedding.clone())
-                    .is_none()
-            {
-                embedding_cache_dirty = true;
-            }
-            chunks.push(ChunkRecord {
-                id: chunk.id,
-                path: file.path.clone(),
-                start_line: chunk.start_line,
-                end_line: chunk.end_line,
-                symbol_hint: chunk.symbol_hint,
-                text: chunk.text.clone(),
-                embedding,
-            });
+
+        if missing_embedding_queue.len() >= embedding_batch_size {
+            emit_progress(
+                &mut progress_cb,
+                IndexBuildProgress {
+                    phase: "embedding-batch".to_string(),
+                    total_files: total_files_to_process,
+                    processed_files,
+                    changed_files,
+                    current_file: None,
+                    done: false,
+                },
+            );
+            flush_missing_embedding_queue(
+                &mut embedder,
+                &mut pending_chunks,
+                &mut missing_embedding_queue,
+                &mut embedding_cache,
+                &mut embedding_cache_dirty,
+                embedding_retry_attempts,
+                embedding_retry_backoff_ms,
+            )?;
         }
 
         processed_files += 1;
@@ -521,6 +513,68 @@ pub fn build_or_update(
             break;
         }
     }
+
+    if !missing_embedding_queue.is_empty() {
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "embedding-batch".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+        flush_missing_embedding_queue(
+            &mut embedder,
+            &mut pending_chunks,
+            &mut missing_embedding_queue,
+            &mut embedding_cache,
+            &mut embedding_cache_dirty,
+            embedding_retry_attempts,
+            embedding_retry_backoff_ms,
+        )?;
+    }
+
+    if !pending_chunks.is_empty() {
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "finalizing-chunks".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+    }
+    for chunk in pending_chunks {
+        if chunks.len() >= config.max_index_chunks {
+            limit_reached = true;
+            break;
+        }
+        let embedding = chunk.embedding.unwrap_or_default();
+        if !embedding.is_empty()
+            && embedding_cache
+                .entries
+                .insert(chunk.embedding_cache_key.clone(), embedding.clone())
+                .is_none()
+        {
+            embedding_cache_dirty = true;
+        }
+        chunks.push(ChunkRecord {
+            id: chunk.id,
+            path: chunk.path,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            symbol_hint: chunk.symbol_hint,
+            text: chunk.text,
+            embedding,
+        });
+    }
+
     if embedding_cache_dirty {
         emit_progress(
             &mut progress_cb,
@@ -2822,6 +2876,76 @@ fn allocate_chunk_id(fingerprint: &[u8; 32], used_chunk_ids: &mut HashSet<u64>) 
         }
         nonce = nonce.saturating_add(1);
     }
+}
+
+fn flush_missing_embedding_queue(
+    embedder: &mut EmbeddingEngine,
+    pending_chunks: &mut [PendingChunk],
+    missing_embedding_queue: &mut Vec<(usize, String)>,
+    embedding_cache: &mut EmbeddingCacheState,
+    embedding_cache_dirty: &mut bool,
+    retry_attempts: usize,
+    retry_backoff_ms: u64,
+) -> Result<()> {
+    if missing_embedding_queue.is_empty() {
+        return Ok(());
+    }
+    let requests = std::mem::take(missing_embedding_queue);
+    let passages = requests
+        .iter()
+        .map(|(_, passage)| passage.clone())
+        .collect::<Vec<_>>();
+    let embeddings =
+        embed_passages_with_retry(embedder, &passages, retry_attempts, retry_backoff_ms)?;
+    if embeddings.len() != requests.len() {
+        warn!(
+            "Embedding batch count mismatch: requested={} returned={}",
+            requests.len(),
+            embeddings.len()
+        );
+    }
+    for ((pending_index, _), embedding) in requests.into_iter().zip(embeddings.into_iter()) {
+        let Some(chunk) = pending_chunks.get_mut(pending_index) else {
+            continue;
+        };
+        if !embedding.is_empty()
+            && embedding_cache
+                .entries
+                .insert(chunk.embedding_cache_key.clone(), embedding.clone())
+                .is_none()
+        {
+            *embedding_cache_dirty = true;
+        }
+        chunk.embedding = Some(embedding);
+    }
+    Ok(())
+}
+
+fn embed_passages_with_retry(
+    embedder: &mut EmbeddingEngine,
+    docs: &[String],
+    retry_attempts: usize,
+    retry_backoff_ms: u64,
+) -> Result<Vec<Vec<f32>>> {
+    let attempts = retry_attempts.max(1);
+    for attempt in 1..=attempts {
+        match embedder.embed_passages(docs) {
+            Ok(rows) => return Ok(rows),
+            Err(err) => {
+                if attempt == attempts {
+                    return Err(err);
+                }
+                let backoff_factor = 1u64 << (attempt - 1).min(10);
+                let wait_ms = retry_backoff_ms.saturating_mul(backoff_factor).max(1);
+                warn!(
+                    "Embedding batch failed (attempt {}/{}): {}. Retrying in {}ms.",
+                    attempt, attempts, err, wait_ms
+                );
+                std::thread::sleep(Duration::from_millis(wait_ms));
+            }
+        }
+    }
+    Ok(Vec::new())
 }
 
 enum EmbeddingBackend {
