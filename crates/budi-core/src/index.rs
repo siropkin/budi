@@ -178,7 +178,16 @@ struct PendingChunk {
     end_line: usize,
     symbol_hint: Option<String>,
     text: String,
+    embedding_cache_key: String,
     embedding: Option<Vec<f32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct EmbeddingCacheState {
+    #[serde(default)]
+    entries: HashMap<String, Vec<f32>>,
+    #[serde(default)]
+    updated_at_ts: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +273,8 @@ pub fn build_or_update(
             )
         })
         .collect();
+    let mut embedding_cache = load_embedding_cache_or_default();
+    let mut embedding_cache_dirty = false;
     let mut used_chunk_ids = HashSet::new();
     let mut chunks = Vec::new();
     let mut changed_files = deleted_files;
@@ -357,9 +368,11 @@ pub fn build_or_update(
             let fingerprint =
                 chunk_fingerprint(&file.path, chunk.start_line, chunk.end_line, &chunk.text);
             let id = allocate_chunk_id(&fingerprint, &mut used_chunk_ids);
+            let embedding_cache_key = embedding_content_hash(&chunk.text);
             let embedding = previous_embeddings_by_fingerprint
                 .get(&fingerprint)
-                .cloned();
+                .cloned()
+                .or_else(|| embedding_cache.entries.get(&embedding_cache_key).cloned());
             if embedding.is_none() {
                 missing_positions.push(pending.len());
                 missing_passages.push(format!("passage: {}", chunk.text));
@@ -370,6 +383,7 @@ pub fn build_or_update(
                 end_line: chunk.end_line,
                 symbol_hint: chunk.symbol_hint,
                 text: chunk.text,
+                embedding_cache_key,
                 embedding,
             });
         }
@@ -377,11 +391,28 @@ pub fn build_or_update(
             let new_embeddings = embedder.embed_passages(&missing_passages)?;
             for (position, embedding) in missing_positions.into_iter().zip(new_embeddings) {
                 if let Some(chunk) = pending.get_mut(position) {
+                    if embedding_cache
+                        .entries
+                        .insert(chunk.embedding_cache_key.clone(), embedding.clone())
+                        .is_none()
+                    {
+                        embedding_cache_dirty = true;
+                    }
                     chunk.embedding = Some(embedding);
                 }
             }
         }
         for chunk in pending {
+            let embedding = chunk
+                .embedding
+                .unwrap_or_else(|| hash_embedding(chunk.text.as_str()));
+            if embedding_cache
+                .entries
+                .insert(chunk.embedding_cache_key.clone(), embedding.clone())
+                .is_none()
+            {
+                embedding_cache_dirty = true;
+            }
             chunks.push(ChunkRecord {
                 id: chunk.id,
                 path: file.path.clone(),
@@ -391,9 +422,7 @@ pub fn build_or_update(
                 end_line: chunk.end_line,
                 symbol_hint: chunk.symbol_hint,
                 text: chunk.text.clone(),
-                embedding: chunk
-                    .embedding
-                    .unwrap_or_else(|| hash_embedding(chunk.text.as_str())),
+                embedding,
                 updated_at_ts: Utc::now().timestamp(),
             });
         }
@@ -410,6 +439,23 @@ pub fn build_or_update(
                 done: false,
             },
         );
+    }
+    if embedding_cache_dirty {
+        emit_progress(
+            &mut progress_cb,
+            IndexBuildProgress {
+                phase: "saving-embedding-cache".to_string(),
+                total_files: total_files_to_process,
+                processed_files,
+                changed_files,
+                current_file: None,
+                done: false,
+            },
+        );
+        embedding_cache.updated_at_ts = Utc::now().timestamp();
+        if let Err(err) = save_embedding_cache(&embedding_cache) {
+            warn!("Failed saving global embedding cache: {:#}", err);
+        }
     }
 
     chunks.sort_by(|a, b| (&a.path, a.start_line).cmp(&(&b.path, b.start_line)));
@@ -534,6 +580,42 @@ pub fn save_manifest(repo_root: &Path, manifest: &RepoFileManifest) -> Result<()
             .with_context(|| format!("Failed creating {}", parent.display()))?;
     }
     let raw = serde_json::to_string_pretty(manifest)?;
+    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
+    Ok(())
+}
+
+fn load_embedding_cache_or_default() -> EmbeddingCacheState {
+    match load_embedding_cache() {
+        Ok(cache) => cache,
+        Err(err) => {
+            warn!(
+                "Failed loading global embedding cache, starting empty: {:#}",
+                err
+            );
+            EmbeddingCacheState::default()
+        }
+    }
+}
+
+fn load_embedding_cache() -> Result<EmbeddingCacheState> {
+    let path = config::embedding_cache_path()?;
+    if !path.exists() {
+        return Ok(EmbeddingCacheState::default());
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("Failed reading {}", path.display()))?;
+    let cache = serde_json::from_str(&raw)
+        .with_context(|| "Invalid global embedding cache JSON".to_string())?;
+    Ok(cache)
+}
+
+fn save_embedding_cache(cache: &EmbeddingCacheState) -> Result<()> {
+    let path = config::embedding_cache_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating {}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(cache)?;
     fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
     Ok(())
 }
@@ -1358,6 +1440,10 @@ fn chunk_fingerprint(path: &str, start_line: usize, end_line: usize, text: &str)
     *hasher.finalize().as_bytes()
 }
 
+fn embedding_content_hash(text: &str) -> String {
+    blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
 fn allocate_chunk_id(fingerprint: &[u8; 32], used_chunk_ids: &mut HashSet<u64>) -> u64 {
     let mut nonce: u64 = 0;
     loop {
@@ -1694,6 +1780,15 @@ mod tests {
             chunk_fingerprint("src/lib.rs", 10, 20, "fn test() {}")
         );
         assert_eq!(id_a, id_b);
+    }
+
+    #[test]
+    fn embedding_content_hash_is_stable() {
+        let a = embedding_content_hash("fn test() { println!(\"hi\"); }");
+        let b = embedding_content_hash("fn test() { println!(\"hi\"); }");
+        let c = embedding_content_hash("fn test() { println!(\"bye\"); }");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

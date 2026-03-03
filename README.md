@@ -163,6 +163,7 @@ How indexing works:
    - semantic search vectors (meaning-based matching)
 4. It stores everything locally on your machine (`~/.local/share/budi/...`).
 5. It keeps a local file manifest (`manifest.json`) so hook-driven updates can re-index only hinted files instead of rescanning the full tree each time.
+6. It keeps a global embedding cache (`~/.local/share/budi/embedding-cache.json`) keyed by chunk content hash, so repeated code text is not re-embedded on every run.
 
 How prompt-time retrieval works:
 1. You send a prompt in Claude Code.
