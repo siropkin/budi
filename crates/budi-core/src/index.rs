@@ -1663,11 +1663,17 @@ fn resolve_reference_token(
     if !token.is_empty() {
         resolved.insert(token.to_string());
     }
-    if let Some(target) = file_import_aliases
-        .get(path)
-        .and_then(|aliases| aliases.get(token))
-    {
-        resolved.insert(target.clone());
+    if let Some(aliases) = file_import_aliases.get(path) {
+        if let Some(target) = aliases.get(token) {
+            resolved.insert(target.clone());
+        }
+        let wildcard_targets = wildcard_import_targets(path, aliases);
+        for target in wildcard_targets {
+            resolved.insert(target.clone());
+            if let Some(expanded) = combine_receiver_method_token(&target, token) {
+                resolved.insert(expanded);
+            }
+        }
     }
     resolved
 }
@@ -1782,9 +1788,22 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
             continue;
         }
         if trimmed.starts_with("from ") && trimmed.contains(" import ") {
-            if let Some((_, imported)) = trimmed.split_once(" import ") {
+            if let Some((module_path, imported)) = trimmed.split_once(" import ") {
+                let source_token =
+                    import_source_token(module_path.trim_start_matches("from ").trim());
                 for clause in imported.split(',') {
-                    if let Some((alias, target)) = parse_import_alias_clause(clause) {
+                    let piece = clause.trim();
+                    if piece == "*"
+                        && let Some(target) = source_token.clone()
+                    {
+                        push_alias_pair(
+                            &mut out,
+                            &mut seen,
+                            (format!("*{}", target.clone()), target),
+                        );
+                        continue;
+                    }
+                    if let Some((alias, target)) = parse_import_alias_clause(piece) {
                         push_alias_pair(&mut out, &mut seen, (alias, target));
                     }
                 }
@@ -1805,6 +1824,15 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
                 .trim_start_matches("use ")
                 .trim()
                 .trim_end_matches(';');
+            if body.ends_with("::*")
+                && let Some(target) = import_source_token(body.trim_end_matches("::*"))
+            {
+                push_alias_pair(
+                    &mut out,
+                    &mut seen,
+                    (format!("*{}", target.clone()), target),
+                );
+            }
             if body.contains('{') && body.contains('}') {
                 if let Some((prefix, rest)) = body.split_once('{')
                     && let Some((inside, _)) = rest.split_once('}')
@@ -1812,6 +1840,16 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
                     for clause in inside.split(',') {
                         let piece = clause.trim();
                         if piece.is_empty() {
+                            continue;
+                        }
+                        if piece == "*"
+                            && let Some(target) = import_source_token(prefix.trim())
+                        {
+                            push_alias_pair(
+                                &mut out,
+                                &mut seen,
+                                (format!("*{}", target.clone()), target),
+                            );
                             continue;
                         }
                         let combined = format!("{}::{}", prefix.trim(), piece);
@@ -1823,6 +1861,21 @@ fn extract_import_aliases(text: &str) -> Vec<(String, String)> {
             } else if let Some((alias, target)) = parse_import_alias_clause(body) {
                 push_alias_pair(&mut out, &mut seen, (alias, target));
             }
+            continue;
+        }
+        if trimmed.starts_with("using namespace ")
+            && let Some(target) = import_source_token(
+                trimmed
+                    .trim_start_matches("using namespace ")
+                    .trim()
+                    .trim_end_matches(';'),
+            )
+        {
+            push_alias_pair(
+                &mut out,
+                &mut seen,
+                (format!("*{}", target.clone()), target),
+            );
             continue;
         }
         if let Some(alias) = parse_require_alias(trimmed) {
@@ -1847,17 +1900,44 @@ fn import_source_token(raw: &str) -> Option<String> {
     if cleaned.is_empty() {
         return None;
     }
-    let file_like = cleaned.rsplit('/').next().unwrap_or(cleaned);
-    let stem = file_like
-        .split_once('.')
-        .map(|(stem, _)| stem)
-        .unwrap_or(file_like);
-    let tokens = extract_signal_tokens(stem);
+    let normalized = cleaned.replace("::", "_").replace(['\\', '/', '.'], "_");
+    let tokens = extract_signal_tokens(&normalized);
     if tokens.is_empty() {
         last_signal_token(cleaned)
     } else {
         Some(tokens.join("_"))
     }
+}
+
+fn wildcard_import_targets(path: &str, aliases: &HashMap<String, String>) -> Vec<String> {
+    let mut targets = aliases
+        .iter()
+        .filter_map(|(alias, target)| {
+            if alias.starts_with('*') && !target.is_empty() {
+                Some(target.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|target| import_distance_from_path(path, target));
+    targets.dedup();
+    targets.truncate(6);
+    targets
+}
+
+fn import_distance_from_path(path: &str, target: &str) -> usize {
+    let path_tokens = extract_signal_tokens(path);
+    let target_tokens = extract_signal_tokens(target);
+    if path_tokens.is_empty() || target_tokens.is_empty() {
+        return usize::MAX / 4;
+    }
+    let shared_prefix = path_tokens
+        .iter()
+        .zip(target_tokens.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    path_tokens.len() + target_tokens.len() - (shared_prefix * 2)
 }
 
 fn parse_import_alias_clause(clause: &str) -> Option<(String, String)> {
@@ -2740,5 +2820,36 @@ mod tests {
         assert!(resolved.contains("client_fetchflags"));
         assert!(resolved.contains("service_fetchflags"));
         assert!(resolved.contains("service_client_fetchflags"));
+    }
+
+    #[test]
+    fn extract_import_aliases_parses_python_wildcard_imports() {
+        let aliases = extract_import_aliases("from app.services import *");
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, target)| alias == "*app_services" && target == "app_services")
+        );
+    }
+
+    #[test]
+    fn extract_import_aliases_parses_rust_wildcard_use() {
+        let aliases = extract_import_aliases("use crate::services::*;");
+        assert!(
+            aliases
+                .iter()
+                .any(|(alias, target)| alias == "*crate_services" && target == "crate_services")
+        );
+    }
+
+    #[test]
+    fn reference_resolution_expands_wildcard_targets() {
+        let aliases = HashMap::from([(
+            "src/controller.py".to_string(),
+            HashMap::from([("*app_services".to_string(), "app_services".to_string())]),
+        )]);
+        let resolved = resolve_reference_token("src/controller.py", "process_order", &aliases);
+        assert!(resolved.contains("process_order"));
+        assert!(resolved.contains("app_services_process_order"));
     }
 }
