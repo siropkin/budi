@@ -78,30 +78,6 @@ struct QueryClause {
     tokens: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RetrievalPolicy {
-    apply_route_ownership_rules: bool,
-}
-
-fn retrieval_policy(intent_kind: QueryIntentKind) -> RetrievalPolicy {
-    match intent_kind {
-        // Keep route ownership rules for explicit "where is this symbol rendered/owned" prompts,
-        // but prune broad focus/config/routing rule packs that were too ad-hoc.
-        QueryIntentKind::SymbolDefinition => RetrievalPolicy {
-            apply_route_ownership_rules: true,
-        },
-        QueryIntentKind::SymbolUsage
-        | QueryIntentKind::PathLookup
-        | QueryIntentKind::Architecture
-        | QueryIntentKind::Docs
-        | QueryIntentKind::CodeNavigation
-        | QueryIntentKind::TestLookup
-        | QueryIntentKind::NonCode => RetrievalPolicy {
-            apply_route_ownership_rules: false,
-        },
-    }
-}
-
 pub fn build_query_response(
     runtime: &RuntimeIndex,
     query: &str,
@@ -111,20 +87,15 @@ pub fn build_query_response(
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
     let intent = analyze_query_intent(query);
-    let policy = retrieval_policy(intent.kind);
     let query_lower = query.to_ascii_lowercase();
     let i18n_keys = extract_query_i18n_keys(query);
     let scope_hints = extract_scope_path_hints(query);
     let clauses = extract_query_clauses(query);
-    let workflow_docs_focus =
-        matches!(intent.kind, QueryIntentKind::Docs) && is_workflow_docs_query(&query_lower);
     let wants_test_artifacts = contains_any(
         &query_lower,
         &["test", "tests", "unit", "spec", "mock", "fixture"],
     );
     let symbol_tokens = extract_query_symbol_tokens(query);
-    let route_ownership_focus = policy.apply_route_ownership_rules
-        && is_route_ownership_query(&query_lower, &symbol_tokens, intent.kind);
     let mut path_tokens = extract_query_path_tokens(query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(query, &intent, &mut path_tokens);
@@ -195,16 +166,7 @@ pub fn build_query_response(
                 adjusted += 0.14 + (specific_path_matches as f32).min(2.0) * 0.02;
                 push_unique_reason(&mut reasons, "specific-path-hit");
             } else if path_token_matches > 0 {
-                let generic_only_penalty = if route_ownership_focus
-                    && contains_path_fragment(
-                        &lower_path,
-                        &["route", "routes", "routing", "router"],
-                    ) {
-                    0.04
-                } else {
-                    0.18
-                };
-                adjusted -= generic_only_penalty;
+                adjusted -= 0.18;
                 push_unique_reason(&mut reasons, "generic-path-only");
             }
         }
@@ -230,12 +192,7 @@ pub fn build_query_response(
                 adjusted += 0.08;
                 push_unique_reason(&mut reasons, "path-intent-boost");
             } else {
-                let weak_path_penalty = if has_specific_path_tokens && !route_ownership_focus {
-                    0.14
-                } else {
-                    0.08
-                };
-                adjusted -= weak_path_penalty;
+                adjusted -= 0.14;
                 push_unique_reason(&mut reasons, "weak-path-signal");
             }
         }
@@ -267,15 +224,6 @@ pub fn build_query_response(
                 adjusted -= 0.24;
                 push_unique_reason(&mut reasons, "experimental-doc-penalty");
             }
-            if workflow_docs_focus {
-                if lower_path.starts_with("docs/") {
-                    adjusted += 0.16;
-                    push_unique_reason(&mut reasons, "workflow-docs-hit");
-                } else if lower_path.ends_with("/readme.md") {
-                    adjusted -= 0.12;
-                    push_unique_reason(&mut reasons, "workflow-docs-miss");
-                }
-            }
             if matches_doc_path_hint(&chunk.path, &doc_path_hints) {
                 adjusted += 0.35;
                 push_unique_reason(&mut reasons, "doc-path-hit");
@@ -298,18 +246,6 @@ pub fn build_query_response(
             } else {
                 adjusted -= 0.04;
                 push_unique_reason(&mut reasons, "architecture-anchor-miss");
-            }
-            if contains_any(&query_lower, &["repository", "repo"]) {
-                if lower_path == "readme.md" || lower_path.starts_with("docs/") {
-                    adjusted += 0.22;
-                    push_unique_reason(&mut reasons, "repo-architecture-hit");
-                } else if lower_path.ends_with("/readme.md") {
-                    adjusted -= 0.18;
-                    push_unique_reason(&mut reasons, "repo-architecture-miss");
-                } else if lower_path.contains("/docs/") && !lower_path.starts_with("docs/") {
-                    adjusted -= 0.06;
-                    push_unique_reason(&mut reasons, "repo-architecture-miss");
-                }
             }
         }
         if !i18n_keys.is_empty() {
@@ -351,21 +287,6 @@ pub fn build_query_response(
         let definition_hits = count_symbol_definition_hits(&lower_text, &symbol_tokens);
         let import_hits = count_symbol_import_hits(&lower_text, &symbol_tokens);
         let symbol_reference_hits = count_symbol_reference_hits(&lower_text, &symbol_tokens);
-        if policy.apply_route_ownership_rules
-            && route_ownership_focus
-            && contains_path_fragment(&lower_path, &["route", "routes", "routing", "router"])
-        {
-            if import_hits > 0 {
-                adjusted += 0.26;
-                push_unique_reason(&mut reasons, "route-ownership-hit");
-            } else if symbol_reference_hits > 0 {
-                adjusted += 0.12;
-                push_unique_reason(&mut reasons, "route-ownership-hit");
-            } else {
-                adjusted -= 0.06;
-                push_unique_reason(&mut reasons, "route-ownership-miss");
-            }
-        }
         if matches!(intent.kind, QueryIntentKind::SymbolDefinition) {
             if definition_hits > 0 {
                 adjusted += 0.20 + (definition_hits as f32).min(2.0) * 0.05;
@@ -1913,32 +1834,6 @@ fn is_low_signal_code_path(lower_path: &str) -> bool {
         || lower_path.ends_with(".semgrep.yml")
 }
 
-fn is_workflow_docs_query(query_lower: &str) -> bool {
-    contains_any(
-        query_lower,
-        &[
-            "workflow",
-            "development workflow",
-            "daily workflow",
-            "onboarding",
-            "getting started",
-            "developer workflow",
-        ],
-    )
-}
-
-fn is_route_ownership_query(
-    query_lower: &str,
-    symbol_tokens: &[String],
-    intent_kind: QueryIntentKind,
-) -> bool {
-    !symbol_tokens.is_empty()
-        && contains_any(query_lower, &["render", "renders", "rendered"])
-        && contains_any(query_lower, &["route", "routes", "router", "routing"])
-        && (contains_any(query_lower, &["define", "defined", "definition"])
-            || matches!(intent_kind, QueryIntentKind::SymbolDefinition))
-}
-
 fn augment_path_tokens_for_intent(
     query: &str,
     intent: &QueryIntent,
@@ -2764,43 +2659,6 @@ export default function devicerowcell() {
         let intent = analyze_query_intent("How is localization asset generation wired?");
         assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
         assert!(intent.code_related);
-    }
-
-    #[test]
-    fn retrieval_policy_prunes_advanced_focus_and_config_rules() {
-        let policy = retrieval_policy(QueryIntentKind::PathLookup);
-        assert!(!policy.apply_route_ownership_rules);
-    }
-
-    #[test]
-    fn retrieval_policy_keeps_symbol_definition_route_ownership() {
-        let policy = retrieval_policy(QueryIntentKind::SymbolDefinition);
-        assert!(policy.apply_route_ownership_rules);
-    }
-
-    #[test]
-    fn detects_workflow_docs_queries() {
-        assert!(is_workflow_docs_query(
-            "show docs explaining daily development workflow"
-        ));
-        assert!(!is_workflow_docs_query(
-            "show docs for camera auth endpoints"
-        ));
-    }
-
-    #[test]
-    fn detects_route_ownership_queries() {
-        let symbols = vec!["settingsrouterpage".to_string()];
-        assert!(is_route_ownership_query(
-            "which route renders settingsrouterpage and where is that page defined?",
-            &symbols,
-            QueryIntentKind::SymbolDefinition
-        ));
-        assert!(!is_route_ownership_query(
-            "which route renders the page and where is that page defined?",
-            &[],
-            QueryIntentKind::PathLookup
-        ));
     }
 
     #[test]
