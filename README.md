@@ -153,8 +153,8 @@ budi observe disable   # stop usage logging
 "retrieve useful repo context first, then let Claude generate the answer."
 
 How indexing works:
-1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore` and `.budiignore` (`!unignore` supported).
-2. It splits code/docs into small chunks (so it can retrieve precise snippets, not whole files).
+1. `budi index --hard` scans git-listed files in your repo (`git ls-files`), respecting `.gitignore` and `.budiignore` (`!unignore` supported), then applies a code-first file-type policy (`index_extensions` + extensionless `index_basenames`).
+2. It splits indexed files into small chunks (so it can retrieve precise snippets, not whole files).
 3. It builds a local search index for those chunks:
    - keyword/symbol/path search (fast exact matching)
    - semantic search vectors (meaning-based matching)

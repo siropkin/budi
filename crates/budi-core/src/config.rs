@@ -36,6 +36,7 @@ pub struct BudiConfig {
     pub max_file_bytes: usize,
     pub use_git_file_discovery: bool,
     pub index_extensions: Vec<String>,
+    pub index_basenames: Vec<String>,
     pub embedding_batch_size: usize,
     pub embedding_retry_attempts: usize,
     pub embedding_retry_backoff_ms: u64,
@@ -63,6 +64,7 @@ impl Default for BudiConfig {
             max_file_bytes: 1_500_000,
             use_git_file_discovery: true,
             index_extensions: default_index_extensions(),
+            index_basenames: default_index_basenames(),
             embedding_batch_size: 96,
             embedding_retry_attempts: 3,
             embedding_retry_backoff_ms: 75,
@@ -106,13 +108,18 @@ fn default_index_extensions() -> Vec<String> {
         "scala".to_string(),
         "sql".to_string(),
         "sh".to_string(),
-        "yaml".to_string(),
-        "yml".to_string(),
-        "toml".to_string(),
-        "md".to_string(),
         "graphql".to_string(),
         "proto".to_string(),
-        "tf".to_string(),
+    ]
+}
+
+fn default_index_basenames() -> Vec<String> {
+    vec![
+        "Dockerfile".to_string(),
+        "Makefile".to_string(),
+        "Rakefile".to_string(),
+        "Gemfile".to_string(),
+        "Procfile".to_string(),
     ]
 }
 

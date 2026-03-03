@@ -1423,12 +1423,13 @@ fn build_current_files_from_metadata_delta(
     hinted_paths: &HashSet<String>,
 ) -> Result<(Vec<FileRecord>, HashMap<String, String>)> {
     let extension_allowlist = build_extension_allowlist(config);
+    let basename_allowlist = build_basename_allowlist(config);
     let mut files_by_path = previous_files_by_path.clone();
     for relative in hinted_paths {
         let absolute = repo_root.join(relative);
         if !absolute.exists()
             || !absolute.is_file()
-            || !is_supported_code_file(&absolute, &extension_allowlist)
+            || !is_supported_code_file(&absolute, &extension_allowlist, &basename_allowlist)
         {
             files_by_path.remove(relative);
             continue;
@@ -2746,11 +2747,17 @@ struct RepoIgnoreRules {
 
 fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<PathBuf>> {
     let extension_allowlist = build_extension_allowlist(config);
+    let basename_allowlist = build_basename_allowlist(config);
     let ignore_rules = load_repo_ignore_rules(repo_root)?;
 
     if config.use_git_file_discovery
-        && let Some(files) =
-            discover_source_files_from_git(repo_root, config, &extension_allowlist, &ignore_rules)?
+        && let Some(files) = discover_source_files_from_git(
+            repo_root,
+            config,
+            &extension_allowlist,
+            &basename_allowlist,
+            &ignore_rules,
+        )?
     {
         return Ok(files);
     }
@@ -2791,7 +2798,7 @@ fn discover_source_files(repo_root: &Path, config: &BudiConfig) -> Result<Vec<Pa
         if relative.is_empty() || should_skip_index_path(&relative, false, &ignore_rules) {
             continue;
         }
-        if !is_supported_code_file(path, &extension_allowlist) {
+        if !is_supported_code_file(path, &extension_allowlist, &basename_allowlist) {
             continue;
         }
         let metadata = match fs::metadata(path) {
@@ -2812,6 +2819,7 @@ fn discover_source_files_from_git(
     repo_root: &Path,
     config: &BudiConfig,
     extension_allowlist: &HashSet<String>,
+    basename_allowlist: &HashSet<String>,
     ignore_rules: &RepoIgnoreRules,
 ) -> Result<Option<Vec<PathBuf>>> {
     let output = match Command::new("git")
@@ -2845,7 +2853,7 @@ fn discover_source_files_from_git(
         if !absolute.exists() || !absolute.is_file() {
             continue;
         }
-        if !is_supported_code_file(&absolute, extension_allowlist) {
+        if !is_supported_code_file(&absolute, extension_allowlist, basename_allowlist) {
             continue;
         }
         let metadata = match fs::metadata(&absolute) {
@@ -2973,6 +2981,25 @@ fn build_extension_allowlist(config: &BudiConfig) -> HashSet<String> {
         .collect()
 }
 
+fn build_basename_allowlist(config: &BudiConfig) -> HashSet<String> {
+    let source = if config.index_basenames.is_empty() {
+        BudiConfig::default().index_basenames
+    } else {
+        config.index_basenames.clone()
+    };
+    source
+        .iter()
+        .filter_map(|name| {
+            let normalized = name.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect()
+}
+
 fn is_always_skipped_dir_name(name: &str) -> bool {
     matches!(
         name,
@@ -2994,11 +3021,20 @@ fn is_always_skipped_dir_name(name: &str) -> bool {
     )
 }
 
-fn is_supported_code_file(path: &Path, extension_allowlist: &HashSet<String>) -> bool {
-    let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+fn is_supported_code_file(
+    path: &Path,
+    extension_allowlist: &HashSet<String>,
+    basename_allowlist: &HashSet<String>,
+) -> bool {
+    if let Some(ext) = path.extension().and_then(|value| value.to_str())
+        && extension_allowlist.contains(&ext.to_ascii_lowercase())
+    {
+        return true;
+    }
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
-    extension_allowlist.contains(&ext.to_ascii_lowercase())
+    basename_allowlist.contains(&file_name.to_ascii_lowercase())
 }
 
 fn hash_file(path: &Path) -> Result<String> {
@@ -3963,6 +3999,57 @@ mod tests {
         assert!(allowlist.contains("rs"));
         assert!(allowlist.contains("tsx"));
         assert!(!allowlist.contains(".rs"));
+    }
+
+    #[test]
+    fn basename_allowlist_normalizes_configured_values() {
+        let config = BudiConfig {
+            index_basenames: vec![
+                " Dockerfile ".to_string(),
+                "MAKEFILE".to_string(),
+                "".to_string(),
+            ],
+            ..BudiConfig::default()
+        };
+        let allowlist = build_basename_allowlist(&config);
+        assert!(allowlist.contains("dockerfile"));
+        assert!(allowlist.contains("makefile"));
+    }
+
+    #[test]
+    fn extensionless_basenames_can_be_indexed_by_policy() {
+        let config = BudiConfig {
+            index_extensions: vec!["rs".to_string()],
+            index_basenames: vec!["Dockerfile".to_string(), "Makefile".to_string()],
+            ..BudiConfig::default()
+        };
+        let ext_allowlist = build_extension_allowlist(&config);
+        let basename_allowlist = build_basename_allowlist(&config);
+        assert!(is_supported_code_file(
+            Path::new("Dockerfile"),
+            &ext_allowlist,
+            &basename_allowlist
+        ));
+        assert!(is_supported_code_file(
+            Path::new("Makefile"),
+            &ext_allowlist,
+            &basename_allowlist
+        ));
+        assert!(!is_supported_code_file(
+            Path::new("README"),
+            &ext_allowlist,
+            &basename_allowlist
+        ));
+    }
+
+    #[test]
+    fn default_extension_policy_prunes_docs_and_config_noise() {
+        let allowlist = build_extension_allowlist(&BudiConfig::default());
+        assert!(!allowlist.contains("md"));
+        assert!(!allowlist.contains("yaml"));
+        assert!(!allowlist.contains("toml"));
+        assert!(allowlist.contains("rs"));
+        assert!(allowlist.contains("py"));
     }
 
     #[test]
