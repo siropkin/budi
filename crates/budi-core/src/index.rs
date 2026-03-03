@@ -71,6 +71,7 @@ pub struct RuntimeIndex {
     tantivy: TantivyBundle,
     symbol_to_chunk_ids: HashMap<String, Vec<u64>>,
     path_token_to_chunk_ids: HashMap<String, Vec<u64>>,
+    graph_token_to_chunk_ids: HashMap<String, Vec<u64>>,
     doc_like_chunk_ids: HashSet<u64>,
 }
 
@@ -82,8 +83,12 @@ impl RuntimeIndex {
         }
         let hnsw = build_hnsw(&state.chunks)?;
         let tantivy = TantivyBundle::open_or_rebuild(repo_root, &state.chunks)?;
-        let (symbol_to_chunk_ids, path_token_to_chunk_ids, doc_like_chunk_ids) =
-            build_retrieval_signal_indexes(&state.chunks);
+        let (
+            symbol_to_chunk_ids,
+            path_token_to_chunk_ids,
+            graph_token_to_chunk_ids,
+            doc_like_chunk_ids,
+        ) = build_retrieval_signal_indexes(&state.chunks);
         Ok(Self {
             state,
             id_to_chunk,
@@ -91,6 +96,7 @@ impl RuntimeIndex {
             tantivy,
             symbol_to_chunk_ids,
             path_token_to_chunk_ids,
+            graph_token_to_chunk_ids,
             doc_like_chunk_ids,
         })
     }
@@ -132,6 +138,10 @@ impl RuntimeIndex {
         score_from_token_map(&self.path_token_to_chunk_ids, query_tokens, limit, false)
     }
 
+    pub fn search_graph_tokens(&self, query_tokens: &[String], limit: usize) -> Vec<(u64, f32)> {
+        score_from_token_map(&self.graph_token_to_chunk_ids, query_tokens, limit, true)
+    }
+
     pub fn is_doc_like_chunk(&self, chunk_id: u64) -> bool {
         self.doc_like_chunk_ids.contains(&chunk_id)
     }
@@ -148,6 +158,7 @@ pub struct IndexWorkspace {
 }
 
 type RetrievalSignalIndexes = (
+    HashMap<String, Vec<u64>>,
     HashMap<String, Vec<u64>>,
     HashMap<String, Vec<u64>>,
     HashSet<u64>,
@@ -627,7 +638,11 @@ fn emit_progress(
 fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalIndexes {
     let mut symbol_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut path_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut graph_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut doc_like_chunk_ids: HashSet<u64> = HashSet::new();
+    let mut defined_tokens: HashSet<String> = HashSet::new();
+    let mut file_reference_tokens: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut file_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
 
     for chunk in chunks {
         if is_doc_like_path(&chunk.path) {
@@ -638,6 +653,20 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         for token in symbol_tokens {
             symbol_to_chunk_ids.entry(token).or_default().push(chunk.id);
         }
+        for token in extract_definition_tokens(&chunk.text, chunk.symbol_hint.as_deref()) {
+            defined_tokens.insert(token);
+        }
+        let references = extract_reference_tokens(&chunk.text);
+        if !references.is_empty() {
+            let entry = file_reference_tokens.entry(chunk.path.clone()).or_default();
+            for token in references {
+                entry.insert(token);
+            }
+        }
+        file_chunk_ids
+            .entry(chunk.path.clone())
+            .or_default()
+            .push(chunk.id);
 
         let path_tokens = extract_path_tokens(&chunk.path);
         for token in path_tokens {
@@ -648,12 +677,29 @@ fn build_retrieval_signal_indexes(chunks: &[ChunkRecord]) -> RetrievalSignalInde
         }
     }
 
+    for (path, references) in &file_reference_tokens {
+        let Some(chunk_ids) = file_chunk_ids.get(path) else {
+            continue;
+        };
+        for token in references {
+            if !defined_tokens.contains(token) {
+                continue;
+            }
+            graph_token_to_chunk_ids
+                .entry(token.clone())
+                .or_default()
+                .extend(chunk_ids.iter().copied());
+        }
+    }
+
     dedup_index_values(&mut symbol_to_chunk_ids);
     dedup_index_values(&mut path_token_to_chunk_ids);
+    dedup_index_values(&mut graph_token_to_chunk_ids);
 
     (
         symbol_to_chunk_ids,
         path_token_to_chunk_ids,
+        graph_token_to_chunk_ids,
         doc_like_chunk_ids,
     )
 }
@@ -761,6 +807,184 @@ fn extract_symbol_tokens(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn extract_definition_tokens(text: &str, symbol_hint: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(hint) = symbol_hint {
+        for token in extract_signal_tokens(hint) {
+            if seen.insert(token.clone()) {
+                out.push(token);
+            }
+        }
+    }
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !looks_like_definition_line(trimmed) {
+            continue;
+        }
+        if let Some(token) = extract_definition_name(trimmed) {
+            if !is_signal_token(&token) {
+                continue;
+            }
+            let normalized = token.to_ascii_lowercase();
+            if seen.insert(normalized.clone()) {
+                out.push(normalized);
+            }
+        }
+    }
+
+    out
+}
+
+fn looks_like_definition_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("fn ")
+        || lower.starts_with("pub fn ")
+        || lower.starts_with("async fn ")
+        || lower.starts_with("pub async fn ")
+        || lower.starts_with("def ")
+        || lower.starts_with("class ")
+        || lower.starts_with("interface ")
+        || lower.starts_with("struct ")
+        || lower.starts_with("enum ")
+        || lower.starts_with("trait ")
+        || lower.starts_with("impl ")
+        || lower.starts_with("function ")
+        || lower.starts_with("export function ")
+        || lower.starts_with("export class ")
+        || lower.starts_with("export const ")
+        || lower.starts_with("const ")
+        || lower.starts_with("let ")
+        || lower.starts_with("var ")
+        || lower.starts_with("type ")
+}
+
+fn extract_definition_name(line: &str) -> Option<String> {
+    let mut normalized = line.trim_start();
+    for prefix in [
+        "pub ", "async ", "export ", "default ", "static ", "const ", "let ", "var ",
+    ] {
+        while normalized.starts_with(prefix) {
+            normalized = normalized[prefix.len()..].trim_start();
+        }
+    }
+    for keyword in [
+        "fn ",
+        "def ",
+        "class ",
+        "interface ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "impl ",
+        "function ",
+        "type ",
+    ] {
+        if normalized.starts_with(keyword) {
+            normalized = normalized[keyword.len()..].trim_start();
+            break;
+        }
+    }
+    let candidate = normalized
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or_default();
+    if candidate.len() < 3 {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+fn extract_reference_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !looks_like_reference_line(trimmed) {
+            continue;
+        }
+        for token in extract_signal_tokens(trimmed) {
+            if seen.insert(token.clone()) {
+                out.push(token);
+            }
+        }
+    }
+    out
+}
+
+fn looks_like_reference_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("import ")
+        || lower.starts_with("from ")
+        || lower.starts_with("use ")
+        || lower.contains(" require(")
+        || lower.contains("::")
+        || lower.contains("->")
+        || lower.contains("router.")
+        || lower.contains("service.")
+        || lower.contains("client.")
+        || (lower.contains('.') && lower.contains('('))
+}
+
+fn extract_signal_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+    {
+        if !is_signal_token(raw) {
+            continue;
+        }
+        let token = raw.to_ascii_lowercase();
+        if seen.insert(token.clone()) {
+            out.push(token);
+        }
+    }
+    out
+}
+
+fn is_signal_token(raw: &str) -> bool {
+    if raw.len() < 3 || raw.len() > 64 {
+        return false;
+    }
+    if !raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    let lower = raw.to_ascii_lowercase();
+    !matches!(
+        lower.as_str(),
+        "const"
+            | "return"
+            | "import"
+            | "from"
+            | "class"
+            | "false"
+            | "true"
+            | "default"
+            | "export"
+            | "interface"
+            | "struct"
+            | "enum"
+            | "value"
+            | "self"
+            | "this"
+            | "null"
+            | "none"
+            | "some"
+            | "let"
+            | "var"
+            | "fn"
+            | "def"
+            | "type"
+            | "impl"
+            | "trait"
+            | "for"
+    )
 }
 
 fn is_symbol_like_token(raw: &str) -> bool {

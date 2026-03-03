@@ -36,6 +36,7 @@ struct IntentWeights {
     vector: f32,
     symbol: f32,
     path: f32,
+    graph: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +45,7 @@ enum ChannelKind {
     Vector,
     Symbol,
     Path,
+    Graph,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -170,6 +172,7 @@ pub fn build_query_response(
     let vector = runtime.search_vector(query_embedding, config.topk_vector);
     let symbol_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let path_limit = config.topk_lexical.max(config.retrieval_limit * 2);
+    let graph_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let symbol = diversify_channel_by_path(
         runtime,
         &runtime.search_symbol_tokens(&symbol_tokens, symbol_limit),
@@ -180,7 +183,12 @@ pub fn build_query_response(
         &runtime.search_path_tokens(&path_tokens, path_limit),
         path_limit,
     );
-    let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &intent);
+    let graph = diversify_channel_by_path(
+        runtime,
+        &runtime.search_graph_tokens(&symbol_tokens, graph_limit),
+        graph_limit,
+    );
+    let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
 
     let dirty_set: std::collections::HashSet<&str> = git_snapshot
         .dirty_files
@@ -610,8 +618,13 @@ pub fn build_query_response(
             }
         }
         if matches!(intent.kind, QueryIntentKind::SymbolUsage) {
-            if reasons.iter().any(|r| r == "symbol-hit") {
-                adjusted += 0.25;
+            let has_symbol_signal = reasons.iter().any(|r| r == "symbol-hit");
+            let has_graph_signal = reasons.iter().any(|r| r == "graph-hit");
+            if has_symbol_signal || has_graph_signal {
+                adjusted += if has_graph_signal { 0.30 } else { 0.25 };
+                if has_graph_signal {
+                    push_unique_reason(&mut reasons, "graph-usage-hit");
+                }
             } else {
                 adjusted -= 0.12;
             }
@@ -782,7 +795,7 @@ pub fn build_query_response(
     Ok(QueryResponse {
         branch: git_snapshot.branch.clone(),
         head: git_snapshot.head.clone(),
-        total_candidates: lexical.len() + vector.len() + symbol.len() + path.len(),
+        total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
         snippets,
         diagnostics,
@@ -828,6 +841,7 @@ fn fuse_channel_scores(
     vector: &[(u64, f32)],
     symbol: &[(u64, f32)],
     path: &[(u64, f32)],
+    graph: &[(u64, f32)],
     intent: &QueryIntent,
 ) -> HashMap<u64, CandidateScore> {
     let mut scores: HashMap<u64, CandidateScore> = HashMap::new();
@@ -850,6 +864,7 @@ fn fuse_channel_scores(
         ChannelKind::Symbol,
     );
     apply_channel_scores(&mut scores, path, intent.weights.path, ChannelKind::Path);
+    apply_channel_scores(&mut scores, graph, intent.weights.graph, ChannelKind::Graph);
     scores
 }
 
@@ -894,7 +909,9 @@ fn normalize_channel_score(raw_score: f32, kind: ChannelKind) -> f32 {
     match kind {
         ChannelKind::Lexical => (raw_score / 25.0).clamp(0.0, 1.0),
         ChannelKind::Vector => raw_score.clamp(0.0, 1.0),
-        ChannelKind::Symbol | ChannelKind::Path => (raw_score / 2.0).clamp(0.0, 1.0),
+        ChannelKind::Symbol | ChannelKind::Path | ChannelKind::Graph => {
+            (raw_score / 2.0).clamp(0.0, 1.0)
+        }
     }
 }
 
@@ -904,6 +921,7 @@ fn channel_signal_name(kind: ChannelKind) -> &'static str {
         ChannelKind::Vector => "semantic-hit",
         ChannelKind::Symbol => "symbol-hit",
         ChannelKind::Path => "path-hit",
+        ChannelKind::Graph => "graph-hit",
     }
 }
 
@@ -1030,10 +1048,9 @@ fn estimate_confidence(
             | QueryIntentKind::SymbolDefinition
             | QueryIntentKind::PathLookup
             | QueryIntentKind::TestLookup
-    ) && top_signals
-        .iter()
-        .any(|s| s == "symbol-hit" || s == "path-hit" || s == "path-token-match")
-    {
+    ) && top_signals.iter().any(|s| {
+        s == "symbol-hit" || s == "path-hit" || s == "path-token-match" || s == "graph-hit"
+    }) {
         confidence += 0.10;
     }
     if matches!(intent.kind, QueryIntentKind::Docs) {
@@ -1423,6 +1440,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.5,
                 symbol: 0.2,
                 path: 0.2,
+                graph: 0.1,
             },
         };
     }
@@ -1437,6 +1455,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.8,
                 symbol: 0.4,
                 path: 0.8,
+                graph: 0.3,
             },
         };
     }
@@ -1451,6 +1470,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.6,
                 symbol: 1.0,
                 path: 1.8,
+                graph: 0.9,
             },
         };
     }
@@ -1465,6 +1485,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.5,
                 symbol: 0.8,
                 path: 1.9,
+                graph: 0.8,
             },
         };
     }
@@ -1479,6 +1500,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.45,
                 symbol: 2.2,
                 path: 1.2,
+                graph: 1.0,
             },
         };
     }
@@ -1493,6 +1515,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.5,
                 symbol: 2.0,
                 path: 1.4,
+                graph: 1.7,
             },
         };
     }
@@ -1506,6 +1529,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 1.1,
                 symbol: 0.7,
                 path: 0.9,
+                graph: 0.5,
             },
         };
     }
@@ -1519,6 +1543,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.45,
                 symbol: 1.0,
                 path: 2.0,
+                graph: 0.7,
             },
         };
     }
@@ -1532,6 +1557,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 1.1,
                 symbol: 0.7,
                 path: 0.9,
+                graph: 0.5,
             },
         };
     }
@@ -1552,6 +1578,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
                 vector: 0.6,
                 symbol: 0.3,
                 path: 0.3,
+                graph: 0.2,
             },
         };
     }
@@ -1564,6 +1591,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
             vector: 0.9,
             symbol: 1.1,
             path: 1.0,
+            graph: 0.8,
         },
     }
 }
@@ -3030,6 +3058,7 @@ export default function devicerowcell() {
                 vector: 0.5,
                 symbol: 2.0,
                 path: 1.4,
+                graph: 1.7,
             },
         };
         // Candidate 1 wins lexical, candidate 2 wins symbol. Usage intent should favor candidate 2.
@@ -3037,7 +3066,8 @@ export default function devicerowcell() {
         let vector = vec![(1, 0.6)];
         let symbol = vec![(2, 1.5)];
         let path = vec![(2, 0.9)];
-        let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &intent);
+        let graph = vec![(2, 1.2)];
+        let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
         let c1 = fused.get(&1).map(|c| c.score).unwrap_or_default();
         let c2 = fused.get(&2).map(|c| c.score).unwrap_or_default();
         assert!(
@@ -3130,6 +3160,7 @@ export default function devicerowcell() {
                 vector: 0.8,
                 symbol: 0.4,
                 path: 0.8,
+                graph: 0.3,
             },
         };
         let confidence = estimate_confidence(
@@ -3153,6 +3184,7 @@ export default function devicerowcell() {
                 vector: 1.0,
                 symbol: 1.0,
                 path: 1.0,
+                graph: 0.7,
             },
         };
         let confidence = estimate_confidence(
@@ -3180,6 +3212,7 @@ export default function devicerowcell() {
                 vector: 1.0,
                 symbol: 1.0,
                 path: 1.0,
+                graph: 0.8,
             },
         };
         let diagnostics = build_diagnostics(&intent, &[], true, true, 0.45);
