@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -25,6 +26,10 @@ use crate::git;
 pub struct FileRecord {
     pub path: String,
     pub hash: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub modified_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +153,16 @@ type RetrievalSignalIndexes = (
     HashSet<u64>,
 );
 
+#[derive(Debug)]
+struct PendingChunk {
+    id: u64,
+    start_line: usize,
+    end_line: usize,
+    symbol_hint: Option<String>,
+    text: String,
+    embedding: Option<Vec<f32>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct IndexBuildProgress {
     pub phase: String,
@@ -167,6 +182,11 @@ pub fn build_or_update(
 ) -> Result<IndexWorkspace> {
     let git_snapshot = git::snapshot(repo_root)?;
     let previous = load_state(repo_root)?.unwrap_or_default();
+    let previous_files_by_path: HashMap<String, FileRecord> = previous
+        .files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
+        .collect();
     let previous_hashes: HashMap<String, String> = previous
         .files
         .iter()
@@ -178,6 +198,14 @@ pub fn build_or_update(
     let files = discover_source_files(repo_root, config)?;
     let mut current_files = Vec::new();
     let mut current_hashes = HashMap::new();
+    let hinted_paths: HashSet<String> = changed_hint
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| relativize(repo_root, path))
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
 
     for file in files {
         let relative = file
@@ -185,11 +213,55 @@ pub fn build_or_update(
             .unwrap_or(&file)
             .to_string_lossy()
             .to_string();
-        let hash = hash_file(&file)?;
+        let metadata = match fs::metadata(&file) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!("Skipping unreadable file metadata {}: {}", relative, err);
+                continue;
+            }
+        };
+        let size_bytes = metadata.len();
+        let modified_unix_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or_default();
+        let force_rehash = hard || hinted_paths.contains(&relative);
+        let hash = if should_rehash_file(
+            previous_files_by_path.get(&relative),
+            size_bytes,
+            modified_unix_ms,
+            force_rehash,
+        ) {
+            match hash_file(&file) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    warn!("Skipping unhashed file {}: {}", relative, err);
+                    continue;
+                }
+            }
+        } else if let Some(entry) = previous_files_by_path.get(&relative) {
+            entry.hash.clone()
+        } else {
+            match hash_file(&file) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    warn!("Skipping unhashed file {}: {}", relative, err);
+                    continue;
+                }
+            }
+        };
+        if hash.is_empty() {
+            warn!("Skipping file with empty hash {}", relative);
+            continue;
+        }
         current_hashes.insert(relative.clone(), hash.clone());
         current_files.push(FileRecord {
             path: relative,
             hash,
+            size_bytes,
+            modified_unix_ms,
         });
     }
 
@@ -211,7 +283,17 @@ pub fn build_or_update(
 
     let deleted_files = count_deleted_paths(&changed_set, &current_hashes);
     let mut embedder = EmbeddingEngine::new();
-    let mut next_id = previous.next_id.max(1);
+    let previous_embeddings_by_fingerprint: HashMap<[u8; 32], Vec<f32>> = previous
+        .chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk_fingerprint(&chunk.path, chunk.start_line, chunk.end_line, &chunk.text),
+                chunk.embedding.clone(),
+            )
+        })
+        .collect();
+    let mut used_chunk_ids = HashSet::new();
     let mut chunks = Vec::new();
     let mut changed_files = deleted_files;
     let mut processed_files = 0usize;
@@ -234,6 +316,9 @@ pub fn build_or_update(
             || !previous_chunks_by_path.contains_key(&file.path);
         if !should_process {
             if let Some(existing) = previous_chunks_by_path.get(&file.path) {
+                for chunk in existing {
+                    used_chunk_ids.insert(chunk.id);
+                }
                 chunks.extend(existing.clone());
             }
             continue;
@@ -289,25 +374,52 @@ pub fn build_or_update(
             continue;
         }
 
-        let passages: Vec<String> = chunked
-            .iter()
-            .map(|chunk| format!("passage: {}", chunk.text))
-            .collect();
-        let embeddings = embedder.embed_passages(&passages)?;
-        for (chunk, embedding) in chunked.into_iter().zip(embeddings) {
+        let mut pending = Vec::with_capacity(chunked.len());
+        let mut missing_passages = Vec::new();
+        let mut missing_positions = Vec::new();
+        for chunk in chunked {
+            let fingerprint =
+                chunk_fingerprint(&file.path, chunk.start_line, chunk.end_line, &chunk.text);
+            let id = allocate_chunk_id(&fingerprint, &mut used_chunk_ids);
+            let embedding = previous_embeddings_by_fingerprint
+                .get(&fingerprint)
+                .cloned();
+            if embedding.is_none() {
+                missing_positions.push(pending.len());
+                missing_passages.push(format!("passage: {}", chunk.text));
+            }
+            pending.push(PendingChunk {
+                id,
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                symbol_hint: chunk.symbol_hint,
+                text: chunk.text,
+                embedding,
+            });
+        }
+        if !missing_passages.is_empty() {
+            let new_embeddings = embedder.embed_passages(&missing_passages)?;
+            for (position, embedding) in missing_positions.into_iter().zip(new_embeddings) {
+                if let Some(chunk) = pending.get_mut(position) {
+                    chunk.embedding = Some(embedding);
+                }
+            }
+        }
+        for chunk in pending {
             chunks.push(ChunkRecord {
-                id: next_id,
+                id: chunk.id,
                 path: file.path.clone(),
                 branch: git_snapshot.branch.clone(),
                 head: git_snapshot.head.clone(),
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,
                 symbol_hint: chunk.symbol_hint,
-                text: chunk.text,
-                embedding,
+                text: chunk.text.clone(),
+                embedding: chunk
+                    .embedding
+                    .unwrap_or_else(|| hash_embedding(chunk.text.as_str())),
                 updated_at_ts: Utc::now().timestamp(),
             });
-            next_id += 1;
         }
 
         processed_files += 1;
@@ -325,6 +437,12 @@ pub fn build_or_update(
     }
 
     chunks.sort_by(|a, b| (&a.path, a.start_line).cmp(&(&b.path, b.start_line)));
+    let next_id = chunks
+        .iter()
+        .map(|chunk| chunk.id)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1);
 
     let state = RepoIndexState {
         repo_root: repo_root.display().to_string(),
@@ -812,6 +930,51 @@ fn is_supported_code_file(path: &Path) -> bool {
 fn hash_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("Failed reading {}", path.display()))?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn should_rehash_file(
+    previous: Option<&FileRecord>,
+    size_bytes: u64,
+    modified_unix_ms: u64,
+    force_rehash: bool,
+) -> bool {
+    if force_rehash {
+        return true;
+    }
+    let Some(previous) = previous else {
+        return true;
+    };
+    previous.hash.is_empty()
+        || previous.size_bytes != size_bytes
+        || previous.modified_unix_ms != modified_unix_ms
+}
+
+fn chunk_fingerprint(path: &str, start_line: usize, end_line: usize, text: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(path.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&(start_line as u64).to_le_bytes());
+    hasher.update(&(end_line as u64).to_le_bytes());
+    hasher.update(text.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn allocate_chunk_id(fingerprint: &[u8; 32], used_chunk_ids: &mut HashSet<u64>) -> u64 {
+    let mut nonce: u64 = 0;
+    loop {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(fingerprint);
+        hasher.update(&nonce.to_le_bytes());
+        let digest = hasher.finalize();
+        let bytes = digest.as_bytes();
+        let mut id_bytes = [0u8; 8];
+        id_bytes.copy_from_slice(&bytes[..8]);
+        let id = u64::from_le_bytes(id_bytes);
+        if used_chunk_ids.insert(id) {
+            return id;
+        }
+        nonce = nonce.saturating_add(1);
+    }
 }
 
 enum EmbeddingBackend {
