@@ -27,6 +27,8 @@ use crate::index_scope::{
     is_supported_code_file,
 };
 
+const SQLITE_CHUNK_ID_MAX: u64 = i64::MAX as u64;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
     pub path: String,
@@ -903,7 +905,7 @@ pub fn save_state(
                     .filter(|chunk| delta_paths.contains(&chunk.path))
                 {
                     chunk_stmt.execute(params![
-                        i64::try_from(chunk.id).unwrap_or(i64::MAX),
+                        chunk_id_to_sql(chunk.id),
                         &chunk.path,
                         i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
                         i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
@@ -940,7 +942,7 @@ pub fn save_state(
             )?;
             for chunk in &state.chunks {
                 chunk_stmt.execute(params![
-                    i64::try_from(chunk.id).unwrap_or(i64::MAX),
+                    chunk_id_to_sql(chunk.id),
                     &chunk.path,
                     i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
                     i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
@@ -3183,12 +3185,18 @@ fn allocate_chunk_id(fingerprint: &[u8; 32], used_chunk_ids: &mut HashSet<u64>) 
         let bytes = digest.as_bytes();
         let mut id_bytes = [0u8; 8];
         id_bytes.copy_from_slice(&bytes[..8]);
-        let id = u64::from_le_bytes(id_bytes);
+        // SQLite integer primary keys are signed 64-bit; keep ids in-range so we never
+        // collapse distinct u64 ids during DB writes.
+        let id = u64::from_le_bytes(id_bytes) & SQLITE_CHUNK_ID_MAX;
         if used_chunk_ids.insert(id) {
             return id;
         }
         nonce = nonce.saturating_add(1);
     }
+}
+
+fn chunk_id_to_sql(id: u64) -> i64 {
+    i64::try_from(id & SQLITE_CHUNK_ID_MAX).unwrap_or(i64::MAX)
 }
 
 fn flush_missing_embedding_queue(
@@ -3704,6 +3712,19 @@ mod tests {
             chunk_fingerprint("src/lib.rs", 10, 20, "fn test() {}")
         );
         assert_eq!(id_a, id_b);
+        assert!(id_a <= SQLITE_CHUNK_ID_MAX);
+    }
+
+    #[test]
+    fn allocated_chunk_ids_are_sqlite_compatible_and_unique() {
+        let mut used = HashSet::new();
+        for i in 0..2_000 {
+            let fingerprint =
+                chunk_fingerprint("src/lib.rs", i, i + 1, &format!("fn generated_{i}() {{}}"));
+            let id = allocate_chunk_id(&fingerprint, &mut used);
+            assert!(id <= SQLITE_CHUNK_ID_MAX);
+        }
+        assert_eq!(used.len(), 2_000);
     }
 
     #[test]

@@ -275,14 +275,6 @@ pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
         .with_context(|| format!("Failed writing {}", global_ignore_file.display()))?;
     }
 
-    let ignore_file = ignore_path(repo_root)?;
-    if !ignore_file.exists() {
-        fs::write(
-            &ignore_file,
-            "# budi index exclusions (gitignore-style)\n# Prefix with ! to unignore an included path\n",
-        )
-        .with_context(|| format!("Failed writing {}", ignore_file.display()))?;
-    }
     Ok(())
 }
 
