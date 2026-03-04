@@ -26,9 +26,23 @@ pub(super) fn path_diversity_bucket(path: &str) -> String {
     }
 }
 
-pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> String {
+pub(super) fn build_context(
+    snippets: &[QueryResultItem],
+    budget: usize,
+    runtime_config_focus: bool,
+) -> String {
     let mut out = String::new();
     out.push_str("[budi deterministic context]\n");
+    out.push_str("rules:\n");
+    out.push_str("- Use only file paths shown in snippets for exact-path answers.\n");
+    out.push_str(
+        "- If snippets support fewer files than requested, return fewer instead of guessing.\n",
+    );
+    if runtime_config_focus {
+        out.push_str(
+            "- For runtime config/env prompts, prioritize runtime loaders/validators over build-time config.\n",
+        );
+    }
     out.push_str("snippets:\n");
 
     for snippet in snippets {

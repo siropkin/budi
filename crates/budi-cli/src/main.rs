@@ -397,6 +397,7 @@ fn cmd_index(
 fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
+    ensure_daemon_running(&repo_root, &config)?;
     let response =
         fetch_status_snapshot(&config.daemon_base_url(), &repo_root.display().to_string())
             .context("Status endpoint returned error")?;
@@ -2251,29 +2252,178 @@ fn ensure_daemon_running(repo_root: &Path, config: &BudiConfig) -> Result<()> {
     // Avoid duplicate daemon spawns when an existing process is still booting
     // or temporarily busy and not answering /health yet.
     if daemon_port_is_listening(config) {
-        for _ in 0..16 {
-            if daemon_health_with_timeout(config, Duration::from_millis(250)) {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(250));
+        if wait_for_daemon_health(
+            config,
+            24,
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+        ) {
+            return Ok(());
+        }
+        if restart_unhealthy_daemon_listener(repo_root, config)? {
+            return Ok(());
         }
         anyhow::bail!(
-            "Daemon port is occupied but health endpoint is unavailable at {}",
-            config.daemon_base_url()
+            "Daemon port is occupied but health endpoint is unavailable at {}. \
+If another process is restarting budi-daemon, retry in a few seconds. \
+Otherwise run `budi init` to restart the daemon.",
+            config.daemon_base_url(),
         );
     }
 
     spawn_daemon_process(repo_root, config)?;
-    for _ in 0..80 {
-        if daemon_health_with_timeout(config, Duration::from_millis(500)) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(150));
+    if wait_for_daemon_health(
+        config,
+        80,
+        Duration::from_millis(500),
+        Duration::from_millis(150),
+    ) {
+        return Ok(());
     }
     anyhow::bail!(
         "Daemon failed to become healthy at {}",
         config.daemon_base_url()
     );
+}
+
+fn wait_for_daemon_health(
+    config: &BudiConfig,
+    retries: usize,
+    request_timeout: Duration,
+    sleep_interval: Duration,
+) -> bool {
+    for attempt in 0..retries {
+        if daemon_health_with_timeout(config, request_timeout) {
+            return true;
+        }
+        if attempt + 1 < retries {
+            thread::sleep(sleep_interval);
+        }
+    }
+    false
+}
+
+fn restart_unhealthy_daemon_listener(repo_root: &Path, config: &BudiConfig) -> Result<bool> {
+    let listener_pids = daemon_listener_pids(config.daemon_port)?;
+    if listener_pids.is_empty() {
+        return Ok(false);
+    }
+
+    let mut killed_any = false;
+    for pid in listener_pids {
+        let Some(command_line) = daemon_process_command(pid) else {
+            continue;
+        };
+        if !is_budi_daemon_command_for_port(&command_line, config.daemon_port) {
+            continue;
+        }
+        if kill_process(pid, "-TERM")? {
+            killed_any = true;
+        }
+    }
+    if !killed_any {
+        return Ok(false);
+    }
+
+    if !wait_for_port_release(config, 30, Duration::from_millis(120)) {
+        for pid in daemon_listener_pids(config.daemon_port)? {
+            let Some(command_line) = daemon_process_command(pid) else {
+                continue;
+            };
+            if is_budi_daemon_command_for_port(&command_line, config.daemon_port) {
+                let _ = kill_process(pid, "-KILL");
+            }
+        }
+    }
+    if daemon_port_is_listening(config) {
+        return Ok(false);
+    }
+
+    spawn_daemon_process(repo_root, config)?;
+    Ok(wait_for_daemon_health(
+        config,
+        80,
+        Duration::from_millis(500),
+        Duration::from_millis(150),
+    ))
+}
+
+fn wait_for_port_release(config: &BudiConfig, retries: usize, sleep_interval: Duration) -> bool {
+    for attempt in 0..retries {
+        if !daemon_port_is_listening(config) {
+            return true;
+        }
+        if attempt + 1 < retries {
+            thread::sleep(sleep_interval);
+        }
+    }
+    !daemon_port_is_listening(config)
+}
+
+fn daemon_listener_pids(port: u16) -> Result<Vec<u32>> {
+    let output = match Command::new("lsof")
+        .arg("-nP")
+        .arg(format!("-tiTCP:{port}"))
+        .arg("-sTCP:LISTEN")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).context("Failed to inspect listener pids via lsof"),
+    };
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
+}
+
+fn daemon_process_command(pid: u32) -> Option<String> {
+    let output = match Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("command=")
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return None,
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn is_budi_daemon_command_for_port(command: &str, port: u16) -> bool {
+    let spaced_port_flag = format!("--port {port}");
+    let inline_port_flag = format!("--port={port}");
+    command.contains("budi-daemon")
+        && command.contains("serve")
+        && (command.contains(&spaced_port_flag) || command.contains(&inline_port_flag))
+}
+
+fn kill_process(pid: u32, signal: &str) -> Result<bool> {
+    let status = match Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .status()
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Failed to send {signal} to pid {pid} via kill"));
+        }
+    };
+    Ok(status.success())
 }
 
 fn daemon_port_is_listening(config: &BudiConfig) -> bool {
@@ -2782,5 +2932,16 @@ mod tests {
         assert!(!summary.passed);
         assert!(!summary.scope_mismatches.is_empty());
         assert!(summary.checks.is_empty());
+    }
+
+    #[test]
+    fn daemon_command_match_is_port_scoped() {
+        let cmd = "/usr/local/bin/budi-daemon serve --host 127.0.0.1 --port 7878";
+        assert!(is_budi_daemon_command_for_port(cmd, 7878));
+        assert!(!is_budi_daemon_command_for_port(cmd, 9999));
+        assert!(!is_budi_daemon_command_for_port(
+            "python3 -m http.server 7878",
+            7878
+        ));
     }
 }

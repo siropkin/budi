@@ -288,10 +288,9 @@ def ensure_debug_io_enabled(repo_root: Path) -> str:
             raw += f"{key} = {value}\n"
     if raw != original_raw:
         cfg_path.write_text(raw)
-
-    # restart daemon so updated config is applied during hook runs
-    run_cmd(["pkill", "-f", "budi-daemon serve"], cwd=repo_root, timeout_sec=30)
-    run_cmd(["budi", "init"], cwd=repo_root, timeout_sec=120)
+    # Keep benchmark runs non-disruptive for other terminals. Hooks and daemon
+    # read repo config per request, so a forced global daemon restart is not
+    # required here.
     return original_raw
 
 
@@ -302,8 +301,6 @@ def restore_debug_io_config(repo_root: Path, original_raw: str) -> None:
     current_raw = cfg_path.read_text()
     if current_raw != original_raw:
         cfg_path.write_text(original_raw)
-    run_cmd(["pkill", "-f", "budi-daemon serve"], cwd=repo_root, timeout_sec=30)
-    run_cmd(["budi", "init"], cwd=repo_root, timeout_sec=120)
 
 
 def run_claude_prompt(

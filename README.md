@@ -226,21 +226,62 @@ Prompt inputs supported:
 
 Every benchmark output includes a prompt-set fingerprint (SHA256), so different runs are easy to compare fairly.
 
+### Stronger pass (recommended)
+
+To reduce variance, use 10-20 prompts and run 2-3 repeats with the same prompt file:
+
+```bash
+for i in 1 2; do
+  python3 scripts/ab_benchmark_runner.py \
+    --repo-root "/path/to/repo" \
+    --prompts-file "./prompts-strong.json" \
+    --out-dir "./tmp/ab_run_${i}" \
+    --run-label "strong-pass-r${i}"
+done
+```
+
+Then aggregate all repeat artifacts:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+runs = [Path("./tmp/ab_run_1/ab-results.json"), Path("./tmp/ab_run_2/ab-results.json")]
+rows = []
+for path in runs:
+    payload = json.loads(path.read_text())
+    print(path, payload["prompt_set"]["fingerprint_sha256"])
+    rows.extend(payload["rows"])
+
+judges = [r["judge"] for r in rows if r.get("judge", {}).get("ok")]
+with_wins = sum(1 for j in judges if j.get("winner") == "with_budi")
+no_wins = sum(1 for j in judges if j.get("winner") == "no_budi")
+ties = sum(1 for j in judges if j.get("winner") == "tie")
+
+avg_no = sum(float(j.get("score_no_budi", 0)) for j in judges) / max(len(judges), 1)
+avg_with = sum(float(j.get("score_with_budi", 0)) for j in judges) / max(len(judges), 1)
+
+print("judge wins:", {"with_budi": with_wins, "no_budi": no_wins, "ties": ties})
+print("quality uplift (with-no):", round(avg_with - avg_no, 4))
+PY
+```
+
 ## Real run snapshot
 
-Latest judged cross-repo A/B sweep (`scripts/ab_benchmark_runner.py`, measured on 2026-03-02):
-- 16 repos, 32 prompts total (32 judged).
-- Overall result: faster and cheaper with `budi`, while quality was mixed in this run.
+Latest judged cross-repo A/B sweep (`scripts/ab_benchmark_runner.py`, measured on 2026-03-04):
+- 15 anonymized repos (`repo_01` ... `repo_15`), 30 prompts total (30 judged).
+- Overall result: faster, cheaper, and higher judged quality/grounding with `budi` in this run.
 
 | What changed with `budi` | Result |
 | --- | --- |
-| API speed | 8.84% faster |
-| End-to-end speed (wall time) | 9.25% faster |
-| Total cost | 32.01% lower |
-| Quality winner count | 13 (`with_budi`) / 17 (`no_budi`) / 2 tie |
-| Repos improved | 10/16 faster API, 11/16 faster wall time, 14/16 cheaper |
+| API speed | 2.95% faster |
+| End-to-end speed (wall time) | 3.03% faster |
+| Total cost | 17.56% lower |
+| Quality winner count | 18 (`with_budi`) / 9 (`no_budi`) / 3 tie |
+| Repos improved | 10/15 faster API, 12/15 faster wall time, 14/15 cheaper |
 
-Technical note (for deeper comparison): aggregate quality delta `-0.27`, grounding delta `-0.21`; median per-repo deltas were API `-2.89%`, wall `-2.80%`, and cost `-25.39%`.
+Technical note (for deeper comparison): aggregate quality delta `+0.51`, grounding delta `+0.87`; median per-repo deltas were API `-7.47%`, wall `-7.02%`, and cost `-17.76%`.
 
 How this snapshot was produced (simple):
 - We ran the same small prompt set across a mix of local repos (frontend-style, backend-style, infra, and tools).

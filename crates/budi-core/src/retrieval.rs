@@ -54,6 +54,7 @@ enum QueryIntentKind {
     SymbolUsage,
     SymbolDefinition,
     PathLookup,
+    RuntimeConfig,
     Architecture,
     Docs,
     CodeNavigation,
@@ -235,6 +236,7 @@ pub fn build_query_response(
         if matches!(
             intent.kind,
             QueryIntentKind::PathLookup
+                | QueryIntentKind::RuntimeConfig
                 | QueryIntentKind::CodeNavigation
                 | QueryIntentKind::TestLookup
                 | QueryIntentKind::SymbolDefinition
@@ -252,6 +254,26 @@ pub fn build_query_response(
             } else {
                 adjusted -= 0.14;
                 push_unique_reason(&mut reasons, "weak-path-signal");
+            }
+        }
+        if matches!(intent.kind, QueryIntentKind::RuntimeConfig) {
+            let runtime_path_hits = count_runtime_config_path_hits(&lower_path);
+            let runtime_text_hits = count_runtime_config_text_hits(&lower_text);
+            if runtime_path_hits > 0 {
+                adjusted += 0.16 + (runtime_path_hits as f32).min(2.0) * 0.03;
+                push_unique_reason(&mut reasons, "runtime-config-path-hit");
+            }
+            if runtime_text_hits > 0 {
+                adjusted += 0.22 + (runtime_text_hits as f32).min(2.0) * 0.04;
+                push_unique_reason(&mut reasons, "runtime-config-code-hit");
+            }
+            if is_build_only_config_path(&lower_path) {
+                adjusted -= if runtime_text_hits > 0 { 0.08 } else { 0.28 };
+                push_unique_reason(&mut reasons, "build-config-penalty");
+            }
+            if runtime_path_hits == 0 && runtime_text_hits == 0 {
+                adjusted -= 0.08;
+                push_unique_reason(&mut reasons, "runtime-config-miss");
             }
         }
         if !scope_hints.is_empty() {
@@ -485,7 +507,11 @@ pub fn build_query_response(
         config.skip_non_code_prompts,
         config.min_confidence_to_inject,
     );
-    let context = build_context(&selection.snippets, config.context_char_budget);
+    let context = build_context(
+        &selection.snippets,
+        config.context_char_budget,
+        matches!(intent.kind, QueryIntentKind::RuntimeConfig),
+    );
     Ok(QueryResponse {
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
@@ -854,6 +880,7 @@ fn estimate_confidence(
         QueryIntentKind::SymbolUsage
             | QueryIntentKind::SymbolDefinition
             | QueryIntentKind::PathLookup
+            | QueryIntentKind::RuntimeConfig
             | QueryIntentKind::TestLookup
     ) && top_signals.iter().any(|s| {
         s == "symbol-hit" || s == "path-hit" || s == "path-token-match" || s == "graph-hit"
@@ -881,6 +908,7 @@ fn intent_name(kind: QueryIntentKind) -> &'static str {
         QueryIntentKind::SymbolUsage => "symbol-usage",
         QueryIntentKind::SymbolDefinition => "symbol-definition",
         QueryIntentKind::PathLookup => "path-lookup",
+        QueryIntentKind::RuntimeConfig => "runtime-config",
         QueryIntentKind::Architecture => "architecture",
         QueryIntentKind::Docs => "docs",
         QueryIntentKind::CodeNavigation => "code-navigation",
@@ -1075,6 +1103,47 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
             "pipeline",
         ],
     );
+    let runtime_config_intent = contains_any(
+        &lower,
+        &[
+            "runtime configuration",
+            "runtime config",
+            "environment variables",
+            "environment variable",
+            "env vars",
+            "env var",
+            "dotenv",
+            "loaded/validated",
+            "load/validate",
+            "loaded and validated",
+            "load and validate",
+        ],
+    ) || (contains_any_word(
+        &lower,
+        &[
+            "runtime",
+            "config",
+            "configuration",
+            "settings",
+            "environment",
+            "env",
+            "dotenv",
+        ],
+    ) && contains_any(
+        &lower,
+        &[
+            "load",
+            "loads",
+            "loaded",
+            "read",
+            "reads",
+            "parsed",
+            "parse",
+            "validate",
+            "validated",
+            "validation",
+        ],
+    ));
 
     let code_markers = contains_any_word(
         &lower,
@@ -1287,6 +1356,21 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
         };
     }
 
+    if runtime_config_intent {
+        return QueryIntent {
+            kind: QueryIntentKind::RuntimeConfig,
+            code_related: true,
+            allow_docs: false,
+            weights: IntentWeights {
+                lexical: 1.2,
+                vector: 0.4,
+                symbol: 1.1,
+                path: 2.2,
+                graph: 0.6,
+            },
+        };
+    }
+
     if definition_intent {
         return QueryIntent {
             kind: QueryIntentKind::SymbolDefinition,
@@ -1364,6 +1448,7 @@ fn analyze_query_intent(query: &str) -> QueryIntent {
         && !usage_intent
         && !test_intent
         && !tooling_intent
+        && !runtime_config_intent
         && !definition_intent
     {
         return QueryIntent {
@@ -1663,6 +1748,75 @@ fn count_clause_token_matches(
 
 fn contains_path_fragment(path: &str, fragments: &[&str]) -> bool {
     fragments.iter().any(|fragment| path.contains(fragment))
+}
+
+fn count_runtime_config_path_hits(lower_path: &str) -> usize {
+    let mut hits = 0usize;
+    for fragment in [
+        "config",
+        "settings",
+        "runtime",
+        "dotenv",
+        ".env",
+        "environment",
+        "/env",
+        "env/",
+    ] {
+        if lower_path.contains(fragment) {
+            hits = hits.saturating_add(1);
+        }
+    }
+    hits
+}
+
+fn count_runtime_config_text_hits(lower_text: &str) -> usize {
+    let mut hits = 0usize;
+    for needle in [
+        "process.env",
+        "import.meta.env",
+        "std::env",
+        "env::var",
+        "getenv(",
+        "os.environ",
+        "dotenv",
+        "environment variable",
+        "env var",
+        "load_or_default",
+        "schema",
+        "validate",
+        "validation",
+        "zod",
+        "arktype",
+    ] {
+        if lower_text.contains(needle) {
+            hits = hits.saturating_add(1);
+        }
+    }
+    hits
+}
+
+fn is_build_only_config_path(lower_path: &str) -> bool {
+    contains_path_fragment(
+        lower_path,
+        &[
+            "gradle.properties",
+            "build.gradle",
+            "build.gradle.kts",
+            "webpack.config",
+            "rspack.config",
+            "vite.config",
+            "rollup.config",
+            "babel.config",
+            "tsconfig",
+            "cargo.toml",
+            "cargo.lock",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            ".github/workflows/",
+        ],
+    )
 }
 
 fn is_test_like_path(path: &str) -> bool {
@@ -2030,6 +2184,7 @@ fn augment_path_tokens_for_intent(
     let lower = query.to_ascii_lowercase();
     match intent.kind {
         QueryIntentKind::PathLookup
+        | QueryIntentKind::RuntimeConfig
         | QueryIntentKind::CodeNavigation
         | QueryIntentKind::SymbolDefinition
         | QueryIntentKind::TestLookup
@@ -2239,6 +2394,25 @@ fn augment_path_tokens_for_intent(
                         "playwright",
                         "mock",
                         "fixture",
+                    ],
+                );
+            }
+            if matches!(intent.kind, QueryIntentKind::RuntimeConfig) {
+                add_path_tokens(
+                    path_tokens,
+                    &[
+                        "config",
+                        "configs",
+                        "configuration",
+                        "settings",
+                        "runtime",
+                        "env",
+                        "environment",
+                        "dotenv",
+                        ".env",
+                        "schema",
+                        "validate",
+                        "validation",
                     ],
                 );
             }
@@ -2554,6 +2728,16 @@ mod tests {
         let intent = analyze_query_intent("Find tests for LoginWithPasskey");
         assert!(matches!(intent.kind, QueryIntentKind::TestLookup));
         assert!(intent.code_related);
+    }
+
+    #[test]
+    fn detects_runtime_config_prompt() {
+        let intent = analyze_query_intent(
+            "Name up to 5 exact file paths where runtime configuration or environment variables are loaded/validated.",
+        );
+        assert!(matches!(intent.kind, QueryIntentKind::RuntimeConfig));
+        assert!(intent.code_related);
+        assert!(!intent.allow_docs);
     }
 
     #[test]
@@ -2923,6 +3107,13 @@ export default function devicerowcell() {
     }
 
     #[test]
+    fn build_only_config_paths_are_detected() {
+        assert!(is_build_only_config_path("build.gradle.kts"));
+        assert!(is_build_only_config_path("web/webpack.config.ts"));
+        assert!(!is_build_only_config_path("src/config/runtime.ts"));
+    }
+
+    #[test]
     fn localization_asset_generation_prompt_is_code_related() {
         let intent = analyze_query_intent("How is localization asset generation wired?");
         assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
@@ -2940,7 +3131,7 @@ export default function devicerowcell() {
             channel_scores: QueryChannelScores::default(),
             text: "export const app = true;".to_string(),
         }];
-        let context = build_context(&snippets, 4_000);
+        let context = build_context(&snippets, 4_000, false);
         assert!(context.contains("[budi deterministic context]"));
         assert!(context.contains("snippets:"));
         assert!(!context.contains("branch:"));
