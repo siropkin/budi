@@ -47,6 +47,7 @@ const BENCH_QUERY_TIMEOUT_SECS: u64 = 30;
 const EVAL_QUERY_TIMEOUT_SECS: u64 = 45;
 const DOCTOR_QUERY_TIMEOUT_SECS: u64 = 8;
 const HOOK_QUERY_TIMEOUT_SECS: u64 = 12;
+const HOOK_QUERY_RETRY_TIMEOUT_SECS: u64 = 45;
 const STATUS_TIMEOUT_SECS: u64 = 120;
 const UPDATE_TIMEOUT_SECS: u64 = 180;
 const INDEX_TIMEOUT_SECS: u64 = 21_600;
@@ -1779,39 +1780,34 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
     let mut diagnostics = QueryDiagnostics::default();
     let mut total_candidates = 0usize;
     let mut snippets_count = 0usize;
-    let (context, success, reason, error_detail) = match query_daemon_with_timeout(
-        &repo_root,
-        &config,
-        &sanitized_prompt,
-        Some(&cwd),
-        HOOK_QUERY_TIMEOUT_SECS,
-    ) {
-        Ok(response) => {
-            total_candidates = response.total_candidates;
-            snippets_count = response.snippets.len();
-            diagnostics = response.diagnostics;
-            let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
-            if let Some(skip_reason) = skip_reason {
-                (
-                    String::new(),
-                    true,
-                    format_skip_hook_reason(&skip_reason),
-                    String::new(),
-                )
-            } else {
-                (
-                    response.context,
-                    true,
-                    HOOK_REASON_OK.to_string(),
-                    String::new(),
-                )
+    let (context, success, reason, error_detail) =
+        match query_daemon_for_hook_context(&repo_root, &config, &sanitized_prompt, Some(&cwd)) {
+            Ok(response) => {
+                total_candidates = response.total_candidates;
+                snippets_count = response.snippets.len();
+                diagnostics = response.diagnostics;
+                let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
+                if let Some(skip_reason) = skip_reason {
+                    (
+                        String::new(),
+                        true,
+                        format_skip_hook_reason(&skip_reason),
+                        String::new(),
+                    )
+                } else {
+                    (
+                        response.context,
+                        true,
+                        HOOK_REASON_OK.to_string(),
+                        String::new(),
+                    )
+                }
             }
-        }
-        Err(err) => {
-            let reason = classify_query_error(&err).as_str().to_string();
-            (String::new(), false, reason, err.to_string())
-        }
-    };
+            Err(err) => {
+                let reason = classify_query_error(&err).as_str().to_string();
+                (String::new(), false, reason, err.to_string())
+            }
+        };
     log_hook_event(&repo_root, &config, || {
         let mut payload = json!({
             "event":"UserPromptSubmit",
@@ -1857,6 +1853,32 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
         payload
     });
     emit_hook_response(UserPromptSubmitOutput::allow_with_context(context))
+}
+
+fn query_daemon_for_hook_context(
+    repo_root: &Path,
+    config: &BudiConfig,
+    prompt: &str,
+    cwd: Option<&Path>,
+) -> Result<QueryResponse> {
+    match query_daemon_with_timeout(repo_root, config, prompt, cwd, HOOK_QUERY_TIMEOUT_SECS) {
+        Ok(response) => Ok(response),
+        Err(initial_err) => {
+            let reason = classify_query_error(&initial_err);
+            if !should_retry_hook_query(reason) {
+                return Err(initial_err);
+            }
+            let _ = ensure_daemon_running(repo_root, config);
+            query_daemon_with_timeout(
+                repo_root,
+                config,
+                prompt,
+                cwd,
+                HOOK_QUERY_RETRY_TIMEOUT_SECS,
+            )
+            .with_context(|| format!("hook-retry-after-{}", reason.as_str()))
+        }
+    }
 }
 
 fn cmd_hook_post_tool_use() -> Result<()> {
@@ -2042,6 +2064,13 @@ fn classify_query_error(err: &anyhow::Error) -> QueryErrorReason {
         return QueryErrorReason::HttpError;
     }
     QueryErrorReason::Error
+}
+
+const fn should_retry_hook_query(reason: QueryErrorReason) -> bool {
+    matches!(
+        reason,
+        QueryErrorReason::Timeout | QueryErrorReason::TransportError
+    )
 }
 
 fn classify_update_error(err: &reqwest::Error) -> UpdateErrorReason {
@@ -2943,5 +2972,13 @@ mod tests {
             "python3 -m http.server 7878",
             7878
         ));
+    }
+
+    #[test]
+    fn hook_query_retry_policy_only_retries_transient_failures() {
+        assert!(should_retry_hook_query(QueryErrorReason::Timeout));
+        assert!(should_retry_hook_query(QueryErrorReason::TransportError));
+        assert!(!should_retry_hook_query(QueryErrorReason::HttpError));
+        assert!(!should_retry_hook_query(QueryErrorReason::Error));
     }
 }

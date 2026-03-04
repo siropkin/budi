@@ -347,6 +347,45 @@ def run_claude_prompt(
     return parsed
 
 
+def collect_hook_trace_for_session(repo_root: Path, session_id: str) -> dict[str, Any]:
+    if not session_id:
+        return {}
+    path = resolve_hook_log_path(repo_root)
+    if not path.exists():
+        return {}
+    input_event = None
+    output_event = None
+    for line in reversed(path.read_text().splitlines()):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("event") != "UserPromptSubmit":
+            continue
+        if obj.get("session_id") != session_id:
+            continue
+        phase = obj.get("phase")
+        if phase == "output" and output_event is None:
+            output_event = obj
+        elif phase == "input" and input_event is None:
+            input_event = obj
+        if input_event and output_event:
+            break
+    return {"input": input_event, "output": output_event}
+
+
+def hook_trace_is_healthy(trace: dict[str, Any]) -> bool:
+    output = trace.get("output") if isinstance(trace, dict) else None
+    if not isinstance(output, dict):
+        return False
+    reason = str(output.get("reason", ""))
+    if output.get("success") is False:
+        return False
+    if reason in {"query_timeout", "query_transport_error", "daemon_unavailable", "query_error"}:
+        return False
+    return True
+
+
 def truncate_text(text: str, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
@@ -660,11 +699,35 @@ def main() -> None:
                 print(f"[ab] prompt {idx}/{len(prompts)}", flush=True)
                 no_budi = run_claude_prompt(repo_root, prompt, disable_hooks=True)
                 with_budi = run_claude_prompt(repo_root, prompt, disable_hooks=False)
+                with_budi_hook_retry = False
+                with_budi_hook = {}
+                with_budi_session_id = str(with_budi.get("session_id", "")) if isinstance(with_budi, dict) else ""
+                if with_budi_session_id:
+                    with_budi_hook = collect_hook_trace_for_session(repo_root, with_budi_session_id)
+                if with_budi.get("ok") and not hook_trace_is_healthy(with_budi_hook):
+                    with_budi_hook_retry = True
+                    with_budi_retry = run_claude_prompt(
+                        repo_root,
+                        prompt,
+                        disable_hooks=False,
+                        timeout_sec=480,
+                    )
+                    retry_session_id = str(with_budi_retry.get("session_id", ""))
+                    retry_hook = (
+                        collect_hook_trace_for_session(repo_root, retry_session_id)
+                        if retry_session_id
+                        else {}
+                    )
+                    if with_budi_retry.get("ok"):
+                        with_budi = with_budi_retry
+                        with_budi_hook = retry_hook
                 rows.append(
                     {
                         "prompt": prompt,
                         "no_budi": no_budi,
                         "with_budi": with_budi,
+                        "with_budi_hook": with_budi_hook,
+                        "with_budi_hook_retry": with_budi_hook_retry,
                         "judge": {"ok": False},
                     }
                 )

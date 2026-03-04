@@ -1,55 +1,80 @@
 # Benchmark Methodology
 
-`budi bench` provides a reproducible local benchmark for query latency and injected-context size.
+This page explains how to benchmark `budi` in a way that is reproducible and transparent for regular Claude Code users.
 
-## Run
+## What we measure
+
+For each prompt, we run two modes:
+
+- `no_budi`: Claude with hooks disabled
+- `with_budi`: Claude with hooks enabled
+
+We compare:
+
+- API duration (`duration_ms`)
+- End-to-end wall duration
+- Total cost (`total_cost_usd`)
+- Judge winner + quality + grounding + actionability
+- Hook injection health (`success`, `reason`, `context_chars`)
+
+## Public benchmark dataset
+
+- Prompt set: `fixtures/benchmarks/public_v2.json`
+- Public benchmark details: `docs/benchmark-details.md`
+- Public benchmark output artifacts:
+  - `tmp/public_bench_react_v2b/ab-results.json`
+  - `tmp/public_bench_flask_v2b/ab-results.json`
+  - `tmp/public_bench_express_v2b/ab-results.json`
+
+## Reproduce exactly
+
+Clone repos:
 
 ```bash
-budi bench --prompt "Fix the auth bug in login flow" --iterations 30
+git clone --depth 1 https://github.com/facebook/react.git ./react
+git clone --depth 1 https://github.com/pallets/flask.git ./flask
+git clone --depth 1 https://github.com/expressjs/express.git ./express
 ```
 
-## Report fields
+Run A/B script on each:
 
-- `latency_ms_p50`: median daemon query latency
-- `latency_ms_p95`: high percentile retrieval latency
-- `avg_context_chars`: average injected context size in characters
-- `avg_context_tokens_estimate`: rough tokens estimate (`chars / 4`)
+```bash
+python3 scripts/ab_benchmark_runner.py \
+  --repo-root "/absolute/path/react" \
+  --prompts-file "./fixtures/benchmarks/public_v2.json" \
+  --out-dir "./tmp/public_bench_react_v2b" \
+  --run-label "public-bench-react-v2b"
 
-## Extended KPI tracking
+python3 scripts/ab_benchmark_runner.py \
+  --repo-root "/absolute/path/flask" \
+  --prompts-file "./fixtures/benchmarks/public_v2.json" \
+  --out-dir "./tmp/public_bench_flask_v2b" \
+  --run-label "public-bench-flask-v2b"
 
-For end-to-end evaluations against native Claude Code behavior:
+python3 scripts/ab_benchmark_runner.py \
+  --repo-root "/absolute/path/express" \
+  --prompts-file "./fixtures/benchmarks/public_v2.json" \
+  --out-dir "./tmp/public_bench_express_v2b" \
+  --run-label "public-bench-express-v2b"
+```
 
-1. Record Time-To-First-Token in Claude Code with and without hook.
-2. Compare token usage via `/cost` before and after.
-3. Measure context hit-rate for files changed within the last 15 minutes.
+Generate the human-readable report with full evidence:
 
-## Retrieval quality regression checks
+```bash
+python3 scripts/generate_public_benchmark_details.py
+```
 
-Use fixture-driven retrieval evaluation to track ranking quality over time:
+## Notes about validity
+
+- A row is considered an injected `with_budi` run when hook output has `success=true` and `reason=ok`.
+- The runner now captures `with_budi_hook` per session and retries one time if hook retrieval fails with transient reasons.
+- Always compare runs with the same prompt-set fingerprint.
+
+## Optional retrieval-only regression checks
+
+Use fixture-driven retrieval eval when you want ranking metrics independent of full model behavior:
 
 ```bash
 budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
 budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid --fail-on-regression --max-regression 0.01
 ```
-
-This reports `hit@k`, `MRR`, and `precision/recall/F1@k` (`k=1,3,5`) from expected-path fixtures, plus per-intent rollups and a persisted JSON artifact under `./.budi/eval/runs/` (or `--out-dir`). When regression gating is enabled, the current artifact is compared against `--baseline` or the latest prior artifact for the same retrieval mode.
-
-## Debug logging during A/B runs
-
-The A/B runner temporarily enables:
-
-- `debug_io = true`
-- `debug_io_full_text = false`
-- `debug_io_max_chars = 1500`
-
-After the run, it restores your previous local config values automatically (`~/.local/share/budi/repos/<repo-id>/config.toml`).
-
-## Smart skip in benchmarks
-
-By default, smart skip remains enabled during benchmark runs:
-
-- `smart_skip_enabled = true`
-- `skip_non_code_prompts = true`
-- `min_confidence_to_inject = 0.45`
-
-For retrieval stress tests where you always want injected context, add `@forcebudi` at the beginning of the benchmark prompt text.
