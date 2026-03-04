@@ -264,14 +264,14 @@ To publish a new prebuilt release:
 
 ```bash
 # 1) Keep plugin + marketplace versions in sync
-./scripts/bump-plugin-version.sh 1.0.12
+./scripts/bump-plugin-version.sh 2.0.0
 
-# 2) Ensure Cargo workspace version is also 1.0.12
+# 2) Ensure Cargo workspace version is also 2.0.0
 #    (release workflow enforces tag == Cargo version)
 
 # 3) Tag and publish
-git tag v1.0.12
-git push origin v1.0.12
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 To publish only the Claude plugin marketplace entry through CI:
