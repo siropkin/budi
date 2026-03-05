@@ -214,9 +214,23 @@ impl DaemonState {
         };
 
         // Step 5: Call graph summary (structural oracle) — prepended to context.
+        // Phase K1: per-intent budget — suppress for breadth intents, boost for flow-trace.
+        let call_graph_budget = match response.detected_intent.as_deref() {
+            Some("flow-trace") => 1200,
+            Some("symbol-definition") | Some("symbol-usage") => 800,
+            Some("architecture")
+            | Some("test-lookup")
+            | Some("runtime-config")
+            | Some("path-lookup") => 0,
+            _ => 600,
+        };
         let runtime_guard = runtime.lock().await;
-        let call_graph = if should_inject {
-            retrieval::build_call_graph_summary(&runtime_guard, &response.snippets, 600)
+        let call_graph = if should_inject && call_graph_budget > 0 {
+            retrieval::build_call_graph_summary(
+                &runtime_guard,
+                &response.snippets,
+                call_graph_budget,
+            )
         } else {
             None
         };
@@ -241,6 +255,13 @@ impl DaemonState {
             if let Some(ref sid) = request.session_id {
                 self.record_session_snippets(sid, &response.snippets);
             }
+            // Phase J: Persist session affinity for next-session context (non-blocking).
+            let paths: Vec<String> =
+                response.snippets.iter().map(|s| s.path.clone()).collect();
+            let repo_root_owned = repo_root.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let _ = update_session_affinity(&repo_root_owned, &paths);
+            });
         }
 
         // Phase I: Per-step timing (populated when debug_io is enabled).
@@ -1308,6 +1329,37 @@ pub fn resolve_repo_root(input_repo_root: Option<String>, cwd: &Path) -> Result<
         return Ok(root);
     }
     Ok(config::find_repo_root(cwd)?.display().to_string())
+}
+
+/// Phase J: Persist recently-injected file paths so the next session can surface them.
+/// Reads `session-affinity.json`, merges new paths with current timestamp, keeps top 50.
+fn update_session_affinity(repo_root: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let affinity_path = config::repo_paths(repo_root)?.data_dir.join("session-affinity.json");
+    let mut map: HashMap<String, u64> = if affinity_path.exists() {
+        let raw = std::fs::read_to_string(&affinity_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    for path in paths {
+        map.insert(path.clone(), now_ms);
+    }
+    if map.len() > 50 {
+        let mut entries: Vec<(String, u64)> = map.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.truncate(50);
+        map = entries.into_iter().collect();
+    }
+    let raw = serde_json::to_string_pretty(&map)?;
+    std::fs::write(&affinity_path, raw)?;
+    Ok(())
 }
 
 fn now_unix_ms() -> u128 {

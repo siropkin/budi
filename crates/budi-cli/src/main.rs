@@ -2148,17 +2148,46 @@ fn cmd_hook_session_start() -> Result<()> {
     let Ok(repo_root) = config::find_repo_root(&cwd) else {
         return Ok(());
     };
+    let mut message = String::new();
     if let Some(map) = budi_core::project_map::read_project_map(&repo_root) {
         // Cap the map at ~3000 chars to stay within Claude's context budget.
         let truncated: String = map.chars().take(3000).collect();
+        message.push_str(&truncated);
+    }
+    // Phase J: append recently-relevant files from prior sessions.
+    let affinity_files = read_session_affinity(&repo_root, 5);
+    if !affinity_files.is_empty() {
+        message.push_str("\n\n## Recently Relevant Files\n(files active in prior sessions, for reference)\n");
+        for path in &affinity_files {
+            message.push_str(&format!("- {}\n", path));
+        }
+    }
+    if !message.is_empty() {
         println!(
             "{}",
             serde_json::to_string(&AsyncSystemMessageOutput {
-                system_message: truncated,
+                system_message: message,
             })?
         );
     }
     Ok(())
+}
+
+/// Phase J: Read session-affinity.json, return top N file paths sorted by recency.
+fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<String> {
+    let Ok(paths) = budi_core::config::repo_paths(repo_root) else {
+        return Vec::new();
+    };
+    let affinity_path = paths.data_dir.join("session-affinity.json");
+    let Ok(raw) = std::fs::read_to_string(&affinity_path) else {
+        return Vec::new();
+    };
+    let map: std::collections::HashMap<String, u64> =
+        serde_json::from_str(&raw).unwrap_or_default();
+    let mut entries: Vec<(String, u64)> = map.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.truncate(top_n);
+    entries.into_iter().map(|(path, _)| path).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

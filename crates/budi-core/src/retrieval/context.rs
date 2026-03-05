@@ -137,6 +137,11 @@ fn extract_proof_lines(text: &str, max_lines: usize) -> Vec<String> {
         "import.meta.env",
         "os.environ",
         "env::var",
+        // Phase K3: call-graph and flow-trace needles
+        "call(",
+        "invoke",
+        "schedule",
+        "commit",
     ];
 
     let mut picked = Vec::new();

@@ -220,7 +220,14 @@ pub fn build_query_response(
 
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
 
-    let target_limit = config.retrieval_limit.max(4);
+    // Phase K2: Per-intent retrieval limit. Honour explicit user config override.
+    let default_limit = intent_retrieval_limit(intent.kind);
+    let target_limit = if config.retrieval_limit != crate::config::DEFAULT_RETRIEVAL_LIMIT {
+        config.retrieval_limit
+    } else {
+        default_limit
+    }
+    .max(4);
     let mut selection = SnippetSelectionState {
         per_file_limit: 2,
         per_bucket_limit: 2,
@@ -475,6 +482,17 @@ pub fn prefetch_neighbors_for_file(
 }
 
 // ── Selection helpers ─────────────────────────────────────────────────────────
+
+/// Phase K2: Per-intent default retrieval limit.
+/// Precision intents (SymbolDefinition, FlowTrace) get fewer, higher-quality results.
+/// Breadth intents (Architecture, TestLookup) get more candidates for coverage.
+fn intent_retrieval_limit(kind: QueryIntentKind) -> usize {
+    match kind {
+        QueryIntentKind::SymbolDefinition | QueryIntentKind::FlowTrace => 5,
+        QueryIntentKind::Architecture | QueryIntentKind::TestLookup => 8,
+        _ => 6,
+    }
+}
 
 fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind) -> f32 {
     let Some(top) = candidates.first() else {
