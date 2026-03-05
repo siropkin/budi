@@ -83,6 +83,8 @@ pub struct RuntimeIndex {
     graph_family_to_tokens: FamilyTokenLookup,
     graph_family_prefix_to_families: FamilyPrefixLookup,
     doc_like_chunk_ids: HashSet<u64>,
+    /// Forward index: chunk ID → resolved callee tokens (symbols this chunk calls)
+    chunk_to_graph_tokens: HashMap<u64, Vec<String>>,
 }
 
 impl RuntimeIndex {
@@ -102,6 +104,7 @@ impl RuntimeIndex {
             graph_family_to_tokens,
             graph_family_prefix_to_families,
             doc_like_chunk_ids,
+            chunk_to_graph_tokens,
         ) = build_retrieval_signal_indexes(repo_root, &state.chunks);
         Ok(Self {
             state,
@@ -116,6 +119,7 @@ impl RuntimeIndex {
             graph_family_to_tokens,
             graph_family_prefix_to_families,
             doc_like_chunk_ids,
+            chunk_to_graph_tokens,
         })
     }
 
@@ -186,6 +190,31 @@ impl RuntimeIndex {
     pub fn all_chunks(&self) -> &[ChunkRecord] {
         &self.state.chunks
     }
+
+    /// Returns chunks that call/reference `symbol`, deduplicated by file path.
+    pub fn callers_of(&self, symbol: &str) -> Vec<&ChunkRecord> {
+        let Some(ids) = self.graph_token_to_chunk_ids.get(symbol) else {
+            return Vec::new();
+        };
+        let mut seen_paths = std::collections::HashSet::new();
+        ids.iter()
+            .filter_map(|id| self.id_to_chunk.get(id))
+            .filter(|chunk| seen_paths.insert(chunk.path.clone()))
+            .collect()
+    }
+
+    /// Returns callee symbol names that `chunk_id` calls.
+    pub fn callees_of(&self, chunk_id: u64) -> Vec<String> {
+        let Some(tokens) = self.chunk_to_graph_tokens.get(&chunk_id) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::HashSet::new();
+        tokens
+            .iter()
+            .filter(|t| seen.insert((*t).clone()))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -203,6 +232,7 @@ type RetrievalSignalIndexes = (
     FamilyTokenLookup,
     FamilyPrefixLookup,
     HashSet<u64>,
+    HashMap<u64, Vec<String>>,
 );
 type FamilyTokenLookup = HashMap<String, Vec<String>>;
 type FamilyPrefixLookup = HashMap<String, Vec<String>>;
@@ -1623,6 +1653,7 @@ fn build_retrieval_signal_indexes(
     let mut symbol_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut path_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut graph_token_to_chunk_ids: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut chunk_to_graph_tokens: HashMap<u64, Vec<String>> = HashMap::new();
     let mut doc_like_chunk_ids: HashSet<u64> = HashSet::new();
     let mut defined_tokens: HashSet<String> = HashSet::new();
     let file_import_aliases = build_file_import_aliases(repo_root, chunks);
@@ -1671,9 +1702,13 @@ fn build_retrieval_signal_indexes(
                 resolve_call_site_candidates(path, call_site, &file_import_aliases);
             if let Some(resolved) = first_defined_candidate(&resolved_candidates, &defined_tokens) {
                 graph_token_to_chunk_ids
-                    .entry(resolved)
+                    .entry(resolved.clone())
                     .or_default()
                     .push(*chunk_id);
+                chunk_to_graph_tokens
+                    .entry(*chunk_id)
+                    .or_default()
+                    .push(resolved);
             }
         }
     }
@@ -1702,6 +1737,8 @@ fn build_retrieval_signal_indexes(
     let (graph_family_to_tokens, graph_family_prefix_to_families) =
         build_family_lookup_indexes(&graph_token_to_chunk_ids);
 
+    dedup_index_values_forward(&mut chunk_to_graph_tokens);
+
     (
         symbol_to_chunk_ids,
         symbol_family_to_tokens,
@@ -1711,6 +1748,7 @@ fn build_retrieval_signal_indexes(
         graph_family_to_tokens,
         graph_family_prefix_to_families,
         doc_like_chunk_ids,
+        chunk_to_graph_tokens,
     )
 }
 
@@ -1752,6 +1790,13 @@ fn dedup_index_values(map: &mut HashMap<String, Vec<u64>>) {
     for ids in map.values_mut() {
         ids.sort_unstable();
         ids.dedup();
+    }
+}
+
+fn dedup_index_values_forward(map: &mut HashMap<u64, Vec<String>>) {
+    for tokens in map.values_mut() {
+        tokens.sort_unstable();
+        tokens.dedup();
     }
 }
 
@@ -3812,6 +3857,7 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
+            _chunk_to_graph,
         ) = build_retrieval_signal_indexes(Path::new("."), &chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
@@ -3849,6 +3895,7 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
+            _chunk_to_graph,
         ) = build_retrieval_signal_indexes(Path::new("."), &chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));
@@ -3898,6 +3945,7 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
+            _chunk_to_graph,
         ) = build_retrieval_signal_indexes(&repo_root, &chunks);
         let _ = fs::remove_dir_all(&repo_root);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
@@ -3946,6 +3994,7 @@ mod tests {
             _graph_family,
             _graph_family_prefix,
             _doc,
+            _chunk_to_graph,
         ) = build_retrieval_signal_indexes(Path::new("."), &chunks);
         let refs = graph.get("process_order").cloned().unwrap_or_default();
         assert!(refs.contains(&2));

@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::config::BudiConfig;
 use crate::index::RuntimeIndex;
-use crate::reason_codes::{SKIP_REASON_NON_CODE_INTENT, format_low_confidence_skip_reason};
+use crate::reason_codes::SKIP_REASON_NON_CODE_INTENT;
 use crate::rpc::{QueryChannelScores, QueryDiagnostics, QueryResponse, QueryResultItem};
 use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
 
@@ -13,6 +13,8 @@ mod context;
 
 const RRF_K: f32 = 60.0;
 const GRAPH_NEIGHBOR_EXPANSION_LIMIT: usize = 2;
+
+// ── RetrievalMode ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetrievalMode {
@@ -49,12 +51,16 @@ pub fn parse_retrieval_mode(raw: Option<&str>) -> RetrievalMode {
     }
 }
 
+// ── Intent ────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueryIntentKind {
     SymbolUsage,
     SymbolDefinition,
     PathLookup,
     RuntimeConfig,
+    FlowTrace,
     Architecture,
     Docs,
     CodeNavigation,
@@ -79,6 +85,8 @@ struct IntentWeights {
     graph: f32,
 }
 
+// ── Channel scoring internals ─────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Copy)]
 enum ChannelKind {
     Lexical,
@@ -100,23 +108,10 @@ struct ScoredChunk {
     id: u64,
     score: f32,
     reasons: Vec<String>,
-    clause_hits: Vec<usize>,
     channel_scores: QueryChannelScores,
 }
 
-#[derive(Debug, Clone, Default)]
-enum QueryClauseKind {
-    Definition,
-    Usage,
-    #[default]
-    Generic,
-}
-
-#[derive(Debug, Clone, Default)]
-struct QueryClause {
-    kind: QueryClauseKind,
-    tokens: Vec<String>,
-}
+// ── build_query_response ──────────────────────────────────────────────────────
 
 pub fn build_query_response(
     runtime: &RuntimeIndex,
@@ -126,26 +121,23 @@ pub fn build_query_response(
     retrieval_mode: RetrievalMode,
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
-    let intent = analyze_query_intent(query);
-    let query_lower = query.to_ascii_lowercase();
-    let i18n_keys = extract_query_i18n_keys(query);
-    let scope_hints = extract_scope_path_hints(query);
-    let clauses = extract_query_clauses(query);
-    let wants_test_artifacts = contains_any(
-        &query_lower,
-        &["test", "tests", "unit", "spec", "mock", "fixture"],
-    );
+    let kind = classify_intent(query);
+    let intent = QueryIntent {
+        kind,
+        code_related: !matches!(kind, QueryIntentKind::NonCode),
+        allow_docs: matches!(
+            kind,
+            QueryIntentKind::Architecture | QueryIntentKind::Docs | QueryIntentKind::TestLookup
+        ),
+        weights: weights_for_intent(kind),
+    };
     let symbol_tokens = extract_query_symbol_tokens(query);
     let mut path_tokens = extract_query_path_tokens(query);
+    let scope_hints = extract_scope_path_hints(query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(query, &intent, &mut path_tokens);
-    let specific_path_tokens = path_tokens
-        .iter()
-        .filter(|token| !is_generic_path_token(token.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let has_specific_path_tokens = !specific_path_tokens.is_empty();
-    let doc_path_hints = extract_explicit_doc_path_hints(query);
+
+    // Run retrieval channels
     let lexical = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Lexical) {
         runtime.search_lexical(query, config.topk_lexical)?
     } else {
@@ -158,14 +150,12 @@ pub fn build_query_response(
     } else {
         Vec::new()
     };
-    let symbol_limit = config.topk_lexical.max(config.retrieval_limit * 2);
-    let path_limit = config.topk_lexical.max(config.retrieval_limit * 2);
-    let graph_limit = config.topk_lexical.max(config.retrieval_limit * 2);
+    let channel_limit = config.topk_lexical.max(config.retrieval_limit * 2);
     let symbol = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Symbol) {
         diversify_channel_by_path(
             runtime,
-            &runtime.search_symbol_tokens(&symbol_tokens, symbol_limit),
-            symbol_limit,
+            &runtime.search_symbol_tokens(&symbol_tokens, channel_limit),
+            channel_limit,
         )
     } else {
         Vec::new()
@@ -173,8 +163,8 @@ pub fn build_query_response(
     let path = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Path) {
         diversify_channel_by_path(
             runtime,
-            &runtime.search_path_tokens(&path_tokens, path_limit),
-            path_limit,
+            &runtime.search_path_tokens(&path_tokens, channel_limit),
+            channel_limit,
         )
     } else {
         Vec::new()
@@ -182,12 +172,13 @@ pub fn build_query_response(
     let graph = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Graph) {
         diversify_channel_by_path(
             runtime,
-            &runtime.search_graph_tokens(&symbol_tokens, graph_limit),
-            graph_limit,
+            &runtime.search_graph_tokens(&symbol_tokens, channel_limit),
+            channel_limit,
         )
     } else {
         Vec::new()
     };
+
     let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
 
     let cwd_rel = cwd
@@ -195,6 +186,7 @@ pub fn build_query_response(
         .map(normalize_path)
         .unwrap_or_default();
 
+    // Minimal per-chunk adjustments: doc penalty + cwd proximity only
     let mut scored = Vec::new();
     for (id, candidate) in fused {
         let Some(chunk) = runtime.chunk(id) else {
@@ -203,221 +195,17 @@ pub fn build_query_response(
         let mut adjusted = candidate.score;
         let mut reasons = candidate.signals;
         let mut channel_scores = candidate.channel_scores;
-        let lower_path = chunk.path.to_ascii_lowercase();
-        let lower_text = chunk.text.to_ascii_lowercase();
+
         if runtime.is_doc_like_chunk(id) && intent.code_related && !intent.allow_docs {
             adjusted -= 0.25;
             push_unique_reason(&mut reasons, "doc-penalty");
         }
-        let path_token_matches = count_path_token_matches(&chunk.path, &path_tokens);
-        let specific_path_matches = count_path_token_matches(&chunk.path, &specific_path_tokens);
-        let scope_matches = if scope_hints.is_empty() {
-            0
-        } else {
-            count_path_token_matches(&chunk.path, &scope_hints)
-        };
-        if path_token_matches > 0 {
-            adjusted += (path_token_matches as f32).min(3.0) * 0.03;
-            push_unique_reason(&mut reasons, "path-token-match");
-        }
-        if has_specific_path_tokens {
-            if specific_path_matches > 0 {
-                adjusted += 0.14 + (specific_path_matches as f32).min(2.0) * 0.02;
-                push_unique_reason(&mut reasons, "specific-path-hit");
-            } else if path_token_matches > 0 {
-                adjusted -= 0.18;
-                push_unique_reason(&mut reasons, "generic-path-only");
-            }
-        }
-        if intent.code_related && is_low_signal_code_path(&lower_path) {
-            adjusted -= 0.28;
-            push_unique_reason(&mut reasons, "analysis-config-penalty");
-        }
-        if matches!(
-            intent.kind,
-            QueryIntentKind::PathLookup
-                | QueryIntentKind::RuntimeConfig
-                | QueryIntentKind::CodeNavigation
-                | QueryIntentKind::TestLookup
-                | QueryIntentKind::SymbolDefinition
-                | QueryIntentKind::Architecture
-        ) {
-            let has_path_channel_signal = reasons.iter().any(|r| r == "path-hit");
-            let has_symbol_signal = reasons.iter().any(|r| r == "symbol-hit");
-            let strong_path_signal = has_symbol_signal
-                || specific_path_matches > 0
-                || (!has_specific_path_tokens
-                    && (path_token_matches > 0 || has_path_channel_signal));
-            if strong_path_signal {
-                adjusted += 0.08;
-                push_unique_reason(&mut reasons, "path-intent-boost");
-            } else {
-                adjusted -= 0.14;
-                push_unique_reason(&mut reasons, "weak-path-signal");
-            }
-        }
-        if matches!(intent.kind, QueryIntentKind::RuntimeConfig) {
-            let runtime_path_hits = count_runtime_config_path_hits(&lower_path);
-            let runtime_text_hits = count_runtime_config_text_hits(&lower_text);
-            if runtime_path_hits > 0 {
-                adjusted += 0.16 + (runtime_path_hits as f32).min(2.0) * 0.03;
-                push_unique_reason(&mut reasons, "runtime-config-path-hit");
-            }
-            if runtime_text_hits > 0 {
-                adjusted += 0.22 + (runtime_text_hits as f32).min(2.0) * 0.04;
-                push_unique_reason(&mut reasons, "runtime-config-code-hit");
-            }
-            if is_build_only_config_path(&lower_path) {
-                adjusted -= if runtime_text_hits > 0 { 0.08 } else { 0.28 };
-                push_unique_reason(&mut reasons, "build-config-penalty");
-            }
-            if runtime_path_hits == 0 && runtime_text_hits == 0 {
-                adjusted -= 0.08;
-                push_unique_reason(&mut reasons, "runtime-config-miss");
-            }
-        }
-        if !scope_hints.is_empty() {
-            if scope_matches > 0 {
-                adjusted += 0.16 + ((scope_matches as f32).min(2.0) * 0.02);
-                push_unique_reason(&mut reasons, "scope-hit");
-            } else {
-                adjusted -= 0.06;
-                push_unique_reason(&mut reasons, "scope-miss");
-            }
-        }
-        if matches!(intent.kind, QueryIntentKind::Docs) {
-            if runtime.is_doc_like_chunk(id) {
-                adjusted += 0.22;
-                push_unique_reason(&mut reasons, "doc-hit");
-            } else {
-                adjusted -= 0.25;
-                push_unique_reason(&mut reasons, "non-doc-penalty");
-            }
-            if lower_path == "readme.md" || lower_path.starts_with("docs/") {
-                adjusted += 0.18;
-                push_unique_reason(&mut reasons, "top-docs-hit");
-            } else if lower_path.ends_with("/readme.md") || lower_path.contains("/docs/") {
-                adjusted += 0.06;
-                push_unique_reason(&mut reasons, "nested-docs-hit");
-            }
-            if is_experimental_path(&lower_path) {
-                adjusted -= 0.24;
-                push_unique_reason(&mut reasons, "experimental-doc-penalty");
-            }
-            if matches_doc_path_hint(&chunk.path, &doc_path_hints) {
-                adjusted += 0.35;
-                push_unique_reason(&mut reasons, "doc-path-hit");
-            }
-        }
-        if matches!(intent.kind, QueryIntentKind::Architecture) {
-            if contains_path_fragment(
-                &lower_path,
-                &[
-                    "/docs/",
-                    "readme",
-                    "architecture",
-                    "routing",
-                    "router",
-                    "bootstrap",
-                ],
-            ) {
-                adjusted += 0.14;
-                push_unique_reason(&mut reasons, "architecture-anchor-hit");
-            } else {
-                adjusted -= 0.04;
-                push_unique_reason(&mut reasons, "architecture-anchor-miss");
-            }
-        }
-        if !i18n_keys.is_empty() {
-            let i18n_key_hits = i18n_keys
-                .iter()
-                .filter(|key| lower_text.contains(key.as_str()))
-                .count();
-            if i18n_key_hits > 0 {
-                adjusted += 0.30 + (i18n_key_hits as f32).min(2.0) * 0.06;
-                push_unique_reason(&mut reasons, "i18n-key-hit");
-            }
-        }
-        if is_test_like_path(&lower_path) {
-            if wants_test_artifacts || matches!(intent.kind, QueryIntentKind::TestLookup) {
-                let test_bonus = if matches!(intent.kind, QueryIntentKind::Docs) {
-                    0.06
-                } else {
-                    0.14
-                };
-                adjusted += test_bonus;
-                push_unique_reason(&mut reasons, "test-intent-hit");
-            } else {
-                adjusted -= 0.18;
-                push_unique_reason(&mut reasons, "test-fixture-penalty");
-            }
-        }
-        if matches!(intent.kind, QueryIntentKind::SymbolUsage) {
-            let has_symbol_signal = reasons.iter().any(|r| r == "symbol-hit");
-            let has_graph_signal = reasons.iter().any(|r| r == "graph-hit");
-            if has_symbol_signal || has_graph_signal {
-                adjusted += if has_graph_signal { 0.30 } else { 0.25 };
-                if has_graph_signal {
-                    push_unique_reason(&mut reasons, "graph-usage-hit");
-                }
-            } else {
-                adjusted -= 0.12;
-            }
-        }
-        let definition_hits = count_symbol_definition_hits(&lower_text, &symbol_tokens);
-        let import_hits = count_symbol_import_hits(&lower_text, &symbol_tokens);
-        let symbol_reference_hits = count_symbol_reference_hits(&lower_text, &symbol_tokens);
-        if matches!(intent.kind, QueryIntentKind::SymbolDefinition) {
-            if definition_hits > 0 {
-                adjusted += 0.20 + (definition_hits as f32).min(2.0) * 0.05;
-                push_unique_reason(&mut reasons, "symbol-definition-hit");
-                if !scope_hints.is_empty() && scope_matches == 0 {
-                    adjusted += 0.06;
-                    push_unique_reason(&mut reasons, "definition-outside-scope");
-                }
-            }
-            if import_hits > 0 {
-                adjusted += 0.14;
-                push_unique_reason(&mut reasons, "symbol-import-hit");
-            }
-            if definition_hits == 0 {
-                adjusted -= 0.28;
-                push_unique_reason(&mut reasons, "symbol-definition-miss");
-            }
-            if !scope_hints.is_empty()
-                && scope_matches > 0
-                && symbol_reference_hits == 0
-                && definition_hits == 0
-            {
-                adjusted -= 0.14;
-                push_unique_reason(&mut reasons, "scope-only-no-symbol");
-            }
-        }
-        let clause_hits = if clauses.is_empty() {
-            Vec::new()
-        } else {
-            clauses
-                .iter()
-                .map(|clause| {
-                    count_clause_token_matches(
-                        &lower_path,
-                        &lower_text,
-                        clause,
-                        definition_hits,
-                        symbol_reference_hits,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let matched_clauses = clause_hits.iter().filter(|hits| **hits > 0).count();
-        if matched_clauses > 0 {
-            adjusted += (matched_clauses as f32).min(3.0) * 0.035;
-            push_unique_reason(&mut reasons, "clause-match");
-        }
+
         if !cwd_rel.is_empty() && chunk.path.starts_with(&cwd_rel) {
             adjusted += 0.08;
             push_unique_reason(&mut reasons, "cwd-proximity");
         }
+
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
         }
@@ -426,98 +214,287 @@ pub fn build_query_response(
             id,
             score: adjusted,
             reasons,
-            clause_hits,
             channel_scores,
         });
     }
 
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let per_file_limit = if matches!(intent.kind, QueryIntentKind::SymbolUsage) {
-        1
-    } else if matches!(intent.kind, QueryIntentKind::TestLookup) {
-        3
-    } else {
-        2
-    };
-    let per_bucket_limit = if matches!(intent.kind, QueryIntentKind::TestLookup) {
-        4
-    } else {
-        2
-    };
+
+    let target_limit = config.retrieval_limit.max(4);
     let mut selection = SnippetSelectionState {
-        per_file_limit,
-        per_bucket_limit,
+        per_file_limit: 2,
+        per_bucket_limit: 2,
         ..SnippetSelectionState::default()
     };
-    let selection_window = config
-        .retrieval_limit
-        .saturating_mul(4)
-        .max(config.retrieval_limit);
-    let ranked_candidates =
-        if clauses.len() > 1 || matches!(intent.kind, QueryIntentKind::SymbolDefinition) {
-            scored
-        } else {
-            scored
-                .into_iter()
-                .take(selection_window)
-                .collect::<Vec<_>>()
-        };
-
-    if clauses.len() > 1 {
-        for clause_idx in 0..clauses.len() {
-            for candidate in &ranked_candidates {
-                if candidate
-                    .clause_hits
-                    .get(clause_idx)
-                    .copied()
-                    .unwrap_or_default()
-                    == 0
-                {
-                    continue;
-                }
-                if try_push_scored_chunk(runtime, candidate, &mut selection) {
-                    break;
-                }
-            }
-            if selection.snippets.len() >= config.retrieval_limit {
-                break;
-            }
-        }
-    }
-
-    for candidate in &ranked_candidates {
-        if selection.snippets.len() >= config.retrieval_limit {
+    let min_score = min_selection_score(&scored, intent.kind);
+    for candidate in &scored {
+        if selection.snippets.len() >= target_limit {
             break;
+        }
+        if candidate.score < min_score && !selection.snippets.is_empty() {
+            continue;
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
-    expand_graph_neighbors(
-        runtime,
-        &mut selection,
-        config
-            .retrieval_limit
-            .saturating_add(GRAPH_NEIGHBOR_EXPANSION_LIMIT),
-        GRAPH_NEIGHBOR_EXPANSION_LIMIT,
-    );
+    if selection.snippets.is_empty() {
+        if let Some(best) = scored.first() {
+            let _ = try_push_scored_chunk(runtime, best, &mut selection);
+        }
+    }
+    if should_expand_graph_neighbors(intent.kind) {
+        expand_graph_neighbors(
+            runtime,
+            &mut selection,
+            target_limit.saturating_add(GRAPH_NEIGHBOR_EXPANSION_LIMIT),
+            GRAPH_NEIGHBOR_EXPANSION_LIMIT,
+        );
+    }
 
-    let diagnostics = build_diagnostics(
-        &intent,
-        &selection.snippets,
-        config.smart_skip_enabled,
-        config.skip_non_code_prompts,
-        config.min_confidence_to_inject,
-    );
-    let context = build_context(
-        &selection.snippets,
-        config.context_char_budget,
-        matches!(intent.kind, QueryIntentKind::RuntimeConfig),
-    );
+    // Diagnostics: SLM overrides recommended_injection + skip_reason in daemon.rs
+    let diagnostics = QueryDiagnostics {
+        intent: intent_name(intent.kind).to_string(),
+        confidence: 0.0,
+        top_score: selection.snippets.first().map(|s| s.score).unwrap_or_default(),
+        margin: 0.0,
+        signals: selection
+            .snippets
+            .first()
+            .map(|s| s.reasons.clone())
+            .unwrap_or_default(),
+        recommended_injection: !selection.snippets.is_empty() && intent.code_related,
+        skip_reason: if !intent.code_related {
+            Some(SKIP_REASON_NON_CODE_INTENT.to_string())
+        } else {
+            None
+        },
+    };
+
+    let context = build_context(&selection.snippets, config.context_char_budget);
     Ok(QueryResponse {
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
         snippets: selection.snippets,
         diagnostics,
+        call_graph_summary: None,
+        detected_intent: Some(intent_name(intent.kind).to_string()),
+        timing_ms: None,
     })
+}
+
+/// Build an injected context string from a list of snippets.
+/// Used by daemon.rs after post-retrieval filtering (session dedup, prefetch).
+pub fn format_context(snippets: &[QueryResultItem], budget: usize) -> String {
+    context::build_context(snippets, budget)
+}
+
+/// Build a compact call graph summary for the top injected snippets.
+/// Returns None if no snippets have symbol hints or callers/callees.
+pub fn build_call_graph_summary(
+    runtime: &RuntimeIndex,
+    snippets: &[QueryResultItem],
+    max_chars: usize,
+) -> Option<String> {
+    let mut entries: Vec<String> = Vec::new();
+
+    for (snippet_idx, snippet) in snippets.iter().enumerate() {
+        if snippet_idx >= 5 {
+            break;
+        }
+
+        // Find the matching chunk to get symbol_hint and chunk_id
+        let chunk = runtime
+            .all_chunks()
+            .iter()
+            .find(|c| c.path == snippet.path && c.start_line == snippet.start_line);
+
+        let symbol = match chunk.and_then(|c| c.symbol_hint.as_deref()) {
+            Some(s) if !s.is_empty() && !is_generic_symbol_hint(s) => s.to_string(),
+            _ => continue,
+        };
+
+        let chunk_id = chunk.map(|c| c.id);
+
+        // callers: chunks that call this symbol
+        let callers = runtime.callers_of(&symbol);
+        let caller_names: Vec<String> = callers
+            .iter()
+            .take(3)
+            .map(|c| {
+                let sym = c
+                    .symbol_hint
+                    .as_deref()
+                    .unwrap_or_else(|| last_path_component(&c.path));
+                truncate_to(sym, 40).to_string()
+            })
+            .collect();
+
+        // callees: symbols this chunk calls
+        let callee_names: Vec<String> = if let Some(id) = chunk_id {
+            runtime
+                .callees_of(id)
+                .into_iter()
+                .take(3)
+                .map(|t| truncate_to(&t, 40).to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if caller_names.is_empty() && callee_names.is_empty() {
+            continue;
+        }
+
+        let file_name = last_path_component(&snippet.path);
+        let mut entry = format!("{}  ({}:{})\n", symbol, file_name, snippet.start_line);
+        if !caller_names.is_empty() {
+            entry.push_str(&format!("  ← called by: {}\n", caller_names.join(", ")));
+        }
+        if !callee_names.is_empty() {
+            entry.push_str(&format!("  → calls: {}\n", callee_names.join(", ")));
+        }
+        entries.push(entry);
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("[structural context]\n");
+    for entry in entries {
+        if out.len() + entry.len() > max_chars {
+            break;
+        }
+        out.push_str(&entry);
+    }
+    Some(out)
+}
+
+fn is_generic_symbol_hint(s: &str) -> bool {
+    // Single-word language keywords that describe structure, not identity
+    matches!(
+        s,
+        "fn"
+            | "pub"
+            | "function"
+            | "def"
+            | "class"
+            | "method"
+            | "func"
+            | "procedure"
+            | "sub"
+            | "lambda"
+            | "arrow"
+            | "block"
+            | "module"
+            | "impl"
+            | "trait"
+            | "struct"
+            | "enum"
+            | "interface"
+            | "type"
+            | "const"
+            | "let"
+            | "var"
+            | "static"
+            | "async"
+            | "export"
+    )
+}
+
+fn last_path_component(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn truncate_to(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
+}
+
+/// Find graph neighbors for a specific file and return (snippets, context_string).
+/// Returns an empty pair if the file has no indexed chunks or no graph neighbors.
+pub fn prefetch_neighbors_for_file(
+    runtime: &RuntimeIndex,
+    file_path: &str,
+    limit: usize,
+    context_budget: usize,
+) -> (Vec<QueryResultItem>, String) {
+    // Collect seed tokens from the file's indexed chunks.
+    let mut seed_tokens = Vec::new();
+    for chunk in runtime.all_chunks() {
+        if chunk.path != file_path {
+            continue;
+        }
+        seed_tokens.extend(extract_query_symbol_tokens(&chunk.text));
+        seed_tokens.extend(graph_neighbor_seed_tokens(&chunk.path, &chunk.text));
+    }
+    seed_tokens.sort();
+    seed_tokens.dedup();
+
+    if seed_tokens.is_empty() {
+        return (Vec::new(), String::new());
+    }
+
+    // Search the graph channel for neighbor chunks.
+    let hit_limit = limit * 6;
+    let neighbor_hits = runtime.search_graph_tokens(&seed_tokens, hit_limit);
+
+    // Keep one top-scoring chunk per neighbor file.
+    let mut seen_paths = HashSet::new();
+    seen_paths.insert(file_path.to_string());
+    let mut snippets = Vec::new();
+    for (id, score) in neighbor_hits {
+        if snippets.len() >= limit {
+            break;
+        }
+        let Some(chunk) = runtime.chunk(id) else {
+            continue;
+        };
+        if !seen_paths.insert(chunk.path.clone()) {
+            continue;
+        }
+        snippets.push(QueryResultItem {
+            path: chunk.path.clone(),
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            score,
+            reasons: vec!["graph-neighbor".to_string()],
+            channel_scores: QueryChannelScores {
+                graph: score,
+                ..Default::default()
+            },
+            text: chunk.text.clone(),
+            slm_relevance_note: None,
+        });
+    }
+
+    let context = context::build_context(&snippets, context_budget);
+    (snippets, context)
+}
+
+// ── Selection helpers ─────────────────────────────────────────────────────────
+
+fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind) -> f32 {
+    let Some(top) = candidates.first() else {
+        return f32::NEG_INFINITY;
+    };
+    let relative = (top.score * 0.40_f32).max(0.05);
+    match intent_kind {
+        QueryIntentKind::FlowTrace => relative.max(0.20),
+        QueryIntentKind::RuntimeConfig => relative.max(0.18),
+        _ => relative,
+    }
+}
+
+fn should_expand_graph_neighbors(intent_kind: QueryIntentKind) -> bool {
+    matches!(
+        intent_kind,
+        QueryIntentKind::SymbolUsage
+            | QueryIntentKind::SymbolDefinition
+            | QueryIntentKind::CodeNavigation
+    )
 }
 
 fn try_push_scored_chunk(
@@ -557,6 +534,7 @@ fn try_push_scored_chunk(
         reasons: candidate.reasons.clone(),
         channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
+        slm_relevance_note: None,
     });
     selection.selected_chunk_ids.push(candidate.id);
     *selection
@@ -587,9 +565,6 @@ fn expand_graph_neighbors(
         .copied()
         .take(3)
         .collect::<Vec<_>>();
-    if seed_ids.is_empty() {
-        return;
-    }
 
     let mut selected_ids = selection
         .selected_chunk_ids
@@ -642,7 +617,6 @@ fn expand_graph_neighbors(
             id: neighbor_id,
             score: neighbor_score,
             reasons: vec!["graph-neighbor".to_string(), "graph-hit".to_string()],
-            clause_hits: Vec::new(),
             channel_scores: QueryChannelScores {
                 graph: neighbor_score.max(0.0),
                 ..QueryChannelScores::default()
@@ -670,6 +644,8 @@ fn graph_neighbor_seed_tokens(path: &str, text: &str) -> Vec<String> {
     out
 }
 
+// ── Channel fusion ────────────────────────────────────────────────────────────
+
 fn fuse_channel_scores(
     lexical: &[(u64, f32)],
     vector: &[(u64, f32)],
@@ -679,24 +655,9 @@ fn fuse_channel_scores(
     intent: &QueryIntent,
 ) -> HashMap<u64, CandidateScore> {
     let mut scores: HashMap<u64, CandidateScore> = HashMap::new();
-    apply_channel_scores(
-        &mut scores,
-        lexical,
-        intent.weights.lexical,
-        ChannelKind::Lexical,
-    );
-    apply_channel_scores(
-        &mut scores,
-        vector,
-        intent.weights.vector,
-        ChannelKind::Vector,
-    );
-    apply_channel_scores(
-        &mut scores,
-        symbol,
-        intent.weights.symbol,
-        ChannelKind::Symbol,
-    );
+    apply_channel_scores(&mut scores, lexical, intent.weights.lexical, ChannelKind::Lexical);
+    apply_channel_scores(&mut scores, vector, intent.weights.vector, ChannelKind::Vector);
+    apply_channel_scores(&mut scores, symbol, intent.weights.symbol, ChannelKind::Symbol);
     apply_channel_scores(&mut scores, path, intent.weights.path, ChannelKind::Path);
     apply_channel_scores(&mut scores, graph, intent.weights.graph, ChannelKind::Graph);
     scores
@@ -792,116 +753,7 @@ fn push_unique_reason(reasons: &mut Vec<String>, reason: &str) {
     reasons.push(reason.to_string());
 }
 
-fn count_path_token_matches(path: &str, path_tokens: &[String]) -> usize {
-    if path_tokens.is_empty() {
-        return 0;
-    }
-    let normalized = path.to_ascii_lowercase();
-    let mut seen = HashSet::new();
-    for token in path_tokens {
-        if token.len() < 3 {
-            continue;
-        }
-        if normalized.contains(token) {
-            seen.insert(token);
-        }
-    }
-    seen.len()
-}
-
-fn build_diagnostics(
-    intent: &QueryIntent,
-    snippets: &[QueryResultItem],
-    smart_skip_enabled: bool,
-    skip_non_code_prompts: bool,
-    min_confidence_to_inject: f32,
-) -> QueryDiagnostics {
-    let top_score = snippets.first().map(|s| s.score).unwrap_or_default();
-    let second_score = snippets.get(1).map(|s| s.score).unwrap_or_default();
-    let margin = (top_score - second_score).max(0.0);
-    let top_signals = snippets
-        .first()
-        .map(|s| s.reasons.clone())
-        .unwrap_or_default();
-    let confidence = estimate_confidence(top_score, margin, snippets.len(), &top_signals, intent);
-
-    let mut recommended_injection = !snippets.is_empty();
-    let mut skip_reason = None;
-    if smart_skip_enabled {
-        if skip_non_code_prompts && !intent.code_related {
-            recommended_injection = false;
-            skip_reason = Some(SKIP_REASON_NON_CODE_INTENT.to_string());
-        } else if confidence < min_confidence_to_inject {
-            recommended_injection = false;
-            skip_reason = Some(format_low_confidence_skip_reason(confidence));
-        }
-    }
-
-    QueryDiagnostics {
-        intent: intent_name(intent.kind).to_string(),
-        confidence,
-        top_score,
-        margin,
-        signals: top_signals,
-        recommended_injection,
-        skip_reason,
-    }
-}
-
-fn estimate_confidence(
-    top_score: f32,
-    margin: f32,
-    snippet_count: usize,
-    top_signals: &[String],
-    intent: &QueryIntent,
-) -> f32 {
-    let mut confidence: f32 = 0.0;
-    if top_score >= 0.45 {
-        confidence += 0.35;
-    } else if top_score >= 0.30 {
-        confidence += 0.20;
-    }
-    if margin >= 0.08 {
-        confidence += 0.20;
-    } else if margin >= 0.03 {
-        confidence += 0.10;
-    }
-    if snippet_count >= 3 {
-        confidence += 0.10;
-    }
-    if top_signals.len() >= 2 {
-        confidence += 0.15;
-    }
-    if intent.code_related {
-        confidence += 0.10;
-    }
-    if matches!(
-        intent.kind,
-        QueryIntentKind::SymbolUsage
-            | QueryIntentKind::SymbolDefinition
-            | QueryIntentKind::PathLookup
-            | QueryIntentKind::RuntimeConfig
-            | QueryIntentKind::TestLookup
-    ) && top_signals.iter().any(|s| {
-        s == "symbol-hit" || s == "path-hit" || s == "path-token-match" || s == "graph-hit"
-    }) {
-        confidence += 0.10;
-    }
-    if matches!(intent.kind, QueryIntentKind::Docs) {
-        if top_signals.iter().any(|s| s == "doc-path-hit") {
-            confidence += 0.25;
-        } else if top_signals.iter().any(|s| s == "doc-hit") {
-            confidence += 0.15;
-        }
-    }
-    if top_signals.iter().any(|s| s == "i18n-key-hit") {
-        confidence += 0.18;
-    }
-    if top_signals.iter().any(|s| s == "weak-path-signal") {
-        confidence -= 0.10;
-    }
-    confidence.clamp(0.0, 1.0)
-}
+// ── Intent classification (for retrieval channel weights) ─────────────────────
 
 fn intent_name(kind: QueryIntentKind) -> &'static str {
     match kind {
@@ -909,6 +761,7 @@ fn intent_name(kind: QueryIntentKind) -> &'static str {
         QueryIntentKind::SymbolDefinition => "symbol-definition",
         QueryIntentKind::PathLookup => "path-lookup",
         QueryIntentKind::RuntimeConfig => "runtime-config",
+        QueryIntentKind::FlowTrace => "flow-trace",
         QueryIntentKind::Architecture => "architecture",
         QueryIntentKind::Docs => "docs",
         QueryIntentKind::CodeNavigation => "code-navigation",
@@ -917,639 +770,123 @@ fn intent_name(kind: QueryIntentKind) -> &'static str {
     }
 }
 
-fn analyze_query_intent(query: &str) -> QueryIntent {
-    let lower = query.to_ascii_lowercase();
-    let has_path_syntax = has_query_path_syntax(query);
-    let symbol_tokens = extract_query_symbol_tokens(query);
-    let has_symbol_tokens = !symbol_tokens.is_empty();
-
-    let docs_intent = contains_any(
+fn classify_intent(prompt: &str) -> QueryIntentKind {
+    let lower = prompt.to_ascii_lowercase();
+    if contains_any(&lower, &["where is", "defined", "definition", "declaration", "declare"]) {
+        return QueryIntentKind::SymbolDefinition;
+    }
+    if contains_any(
         &lower,
         &[
-            "readme",
-            "docs",
-            "documentation",
-            "guide",
-            "design doc",
-            "adr",
-            "spec",
+            "what does",
+            "called by",
+            "call chain",
+            "calls internally",
+            "trace the",
+            "execution order",
         ],
-    );
-    let architecture_intent = contains_any(
+    ) {
+        return QueryIntentKind::FlowTrace;
+    }
+    if contains_any(&lower, &["what calls", "callers of", "who calls", "uses of", "usages of"]) {
+        return QueryIntentKind::SymbolUsage;
+    }
+    if contains_any(
         &lower,
         &[
             "architecture",
-            "high-level",
-            "module",
-            "directory",
+            "layout",
+            "modules",
+            "structure",
             "overview",
+            "entry point",
+            "entrypoint",
+            "directory",
         ],
-    );
-    let test_intent = contains_any(
+    ) {
+        return QueryIntentKind::Architecture;
+    }
+    if contains_any(&lower, &["test", "testing", "coverage", "spec", "unit test"]) {
+        return QueryIntentKind::TestLookup;
+    }
+    if contains_any(
         &lower,
         &[
-            "find test",
-            "find tests",
-            "where are tests",
-            "where is test",
-            "unit test",
-            "unit tests",
-            "spec",
-            "e2e",
-            "integration test",
-            "test coverage",
-            "test case",
-            "test cases",
-        ],
-    );
-    let usage_intent = contains_any(
-        &lower,
-        &[
-            " used",
-            "usage",
-            "references",
-            "called",
-            "callers",
-            "who calls",
-            "where referenced",
-            "used by",
-            "consumed",
-            "consume",
-            "consumers",
-        ],
-    ) && (has_symbol_tokens
-        || contains_any(
-            &lower,
-            &[
-                "component",
-                "function",
-                "hook",
-                "feature flag",
-                "feature flags",
-                "middleware",
-                "route",
-                "routes",
-            ],
-        ));
-    let definition_intent = has_symbol_tokens
-        && contains_any(
-            &lower,
-            &[
-                "define",
-                "defined",
-                "definition",
-                "declared",
-                "declaration",
-                "imported",
-                "imports",
-                "exported",
-            ],
-        );
-    let path_intent = has_path_syntax
-        || contains_any(
-            &lower,
-            &[
-                "where is",
-                "where are",
-                "where do",
-                "defined",
-                "definition",
-                "implemented",
-                "initialize",
-                "initialized",
-                "query param",
-                "query params",
-                "redirect",
-                "parse",
-                "import",
-                "imports",
-            ],
-        )
-        || contains_any_word(
-            &lower,
-            &[
-                "file",
-                "files",
-                "path",
-                "paths",
-                "directory",
-                "route",
-                "routes",
-                "service",
-                "services",
-                "client",
-                "clients",
-                "helper",
-                "helpers",
-                "middleware",
-                "handler",
-                "handlers",
-                "websocket",
-                "socket",
-                "test",
-                "tests",
-                "spec",
-                "e2e",
-                "redirect",
-                "redirects",
-                "import",
-                "imports",
-                "query",
-                "params",
-                "localization",
-                "translation",
-                "translations",
-                "i18n",
-                "intl",
-                "asset",
-                "assets",
-                "script",
-                "scripts",
-                "build",
-                "tooling",
-                "mutation",
-                "mutations",
-            ],
-        );
-    let tooling_intent = contains_any_word(
-        &lower,
-        &[
-            "localization",
-            "translation",
-            "translations",
-            "i18n",
-            "intl",
-            "asset",
-            "assets",
-            "script",
-            "scripts",
-            "build",
-            "tooling",
-            "pipeline",
-            "webpack",
-            "babel",
-        ],
-    ) && contains_any(
-        &lower,
-        &[
-            "wired",
-            "wiring",
-            "generation",
-            "generated",
-            "generate",
-            "script",
-            "scripts",
-            "build",
-            "pipeline",
-        ],
-    );
-    let runtime_config_intent = contains_any(
-        &lower,
-        &[
-            "runtime configuration",
-            "runtime config",
-            "environment variables",
-            "environment variable",
-            "env vars",
-            "env var",
-            "dotenv",
-            "loaded/validated",
-            "load/validate",
-            "loaded and validated",
-            "load and validate",
-        ],
-    ) || (contains_any_word(
-        &lower,
-        &[
-            "runtime",
             "config",
+            "env",
+            "environment variable",
             "configuration",
             "settings",
-            "environment",
-            "env",
-            "dotenv",
+            "build flag",
         ],
-    ) && contains_any(
-        &lower,
-        &[
-            "load",
-            "loads",
-            "loaded",
-            "read",
-            "reads",
-            "parsed",
-            "parse",
-            "validate",
-            "validated",
-            "validation",
-        ],
-    ));
+    ) {
+        return QueryIntentKind::RuntimeConfig;
+    }
+    QueryIntentKind::Architecture
+}
 
-    let code_markers = contains_any_word(
-        &lower,
-        &[
-            "repo",
-            "code",
-            "function",
-            "component",
-            "module",
-            "class",
-            "api",
-            "routing",
-            "auth",
-            "login",
-            "session",
-            "store",
-            "state",
-            "websocket",
-            "socket",
-            "middleware",
-            "handler",
-            "handlers",
-            "reducer",
-            "reducers",
-            "selector",
-            "selectors",
-            "hook",
-            "file",
-            "directory",
-            "path",
-            "test",
-            "tests",
-            "spec",
-            "e2e",
-            "define",
-            "defined",
-            "implemented",
-            "initialized",
-            "redirect",
-            "redirects",
-            "import",
-            "imports",
-            "query",
-            "params",
-            "parse",
-            "localization",
-            "translation",
-            "translations",
-            "i18n",
-            "intl",
-            "asset",
-            "assets",
-            "script",
-            "scripts",
-            "build",
-            "tooling",
-            "pipeline",
-            "mutation",
-            "mutations",
-            "typescript",
-            "javascript",
-            "rust",
-            "python",
-            "go",
-        ],
-    );
-    let non_code_markers = contains_any(
-        &lower,
-        &[
-            "tell me",
-            "what is ",
-            "what's ",
-            "write ",
-            "draft ",
-            "draft email",
-            "write email",
-            "linkedin",
-            "in simple terms",
-            "in general",
-            "write a poem",
-            "tell me a joke",
-            "movie recommendation",
-            "translate this",
-            "weather",
-            "recipe",
-            "small talk",
-        ],
-    );
-    let repo_anchor_markers = has_path_syntax
-        || has_symbol_tokens
-        || contains_any_word(
-            &lower,
-            &[
-                "repo",
-                "codebase",
-                "project",
-                "file",
-                "files",
-                "path",
-                "directory",
-                "module",
-                "component",
-                "function",
-                "hook",
-                "class",
-                "route",
-                "routes",
-                "routing",
-                "auth",
-                "session",
-                "store",
-                "state",
-                "api",
-                "service",
-                "client",
-                "controller",
-                "websocket",
-                "socket",
-                "middleware",
-                "handler",
-                "handlers",
-                "reducer",
-                "selector",
-                "login",
-                "redirect",
-                "redirects",
-                "import",
-                "imports",
-                "query",
-                "params",
-                "parse",
-                "localization",
-                "translation",
-                "translations",
-                "i18n",
-                "intl",
-                "asset",
-                "assets",
-                "script",
-                "scripts",
-                "build",
-                "tooling",
-                "pipeline",
-                "mutation",
-                "mutations",
-                "test",
-                "tests",
-                "spec",
-                "e2e",
-            ],
-        );
-
-    if non_code_markers && !code_markers && !repo_anchor_markers {
-        return QueryIntent {
-            kind: QueryIntentKind::NonCode,
-            code_related: false,
-            allow_docs: true,
-            weights: IntentWeights {
-                lexical: 0.7,
-                vector: 0.5,
-                symbol: 0.2,
-                path: 0.2,
-                graph: 0.1,
-            },
-        };
-    }
-
-    if docs_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::Docs,
-            code_related: true,
-            allow_docs: true,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 0.8,
-                symbol: 0.4,
-                path: 0.8,
-                graph: 0.3,
-            },
-        };
-    }
-
-    if test_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::TestLookup,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.1,
-                vector: 0.6,
-                symbol: 1.0,
-                path: 1.8,
-                graph: 0.9,
-            },
-        };
-    }
-
-    if tooling_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::PathLookup,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.1,
-                vector: 0.5,
-                symbol: 0.8,
-                path: 1.9,
-                graph: 0.8,
-            },
-        };
-    }
-
-    if runtime_config_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::RuntimeConfig,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.2,
-                vector: 0.4,
-                symbol: 1.1,
-                path: 2.2,
-                graph: 0.6,
-            },
-        };
-    }
-
-    if definition_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::SymbolDefinition,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.1,
-                vector: 0.45,
-                symbol: 2.2,
-                path: 1.2,
-                graph: 1.0,
-            },
-        };
-    }
-
-    if usage_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::SymbolUsage,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 0.9,
-                vector: 0.5,
-                symbol: 2.0,
-                path: 1.4,
-                graph: 1.7,
-            },
-        };
-    }
-    if architecture_intent && !definition_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::Architecture,
-            code_related: true,
-            allow_docs: true,
-            weights: IntentWeights {
-                lexical: 1.2,
-                vector: 1.1,
-                symbol: 0.7,
-                path: 0.9,
-                graph: 0.5,
-            },
-        };
-    }
-    if path_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::PathLookup,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 0.45,
-                symbol: 1.0,
-                path: 2.0,
-                graph: 0.7,
-            },
-        };
-    }
-    if architecture_intent {
-        return QueryIntent {
-            kind: QueryIntentKind::Architecture,
-            code_related: true,
-            allow_docs: true,
-            weights: IntentWeights {
-                lexical: 1.2,
-                vector: 1.1,
-                symbol: 0.7,
-                path: 0.9,
-                graph: 0.5,
-            },
-        };
-    }
-    if !code_markers
-        && !has_symbol_tokens
-        && !path_intent
-        && !usage_intent
-        && !test_intent
-        && !tooling_intent
-        && !runtime_config_intent
-        && !definition_intent
-    {
-        return QueryIntent {
-            kind: QueryIntentKind::NonCode,
-            code_related: false,
-            allow_docs: true,
-            weights: IntentWeights {
-                lexical: 0.8,
-                vector: 0.6,
-                symbol: 0.3,
-                path: 0.3,
-                graph: 0.2,
-            },
-        };
-    }
-    QueryIntent {
-        kind: QueryIntentKind::CodeNavigation,
-        code_related: true,
-        allow_docs: false,
-        weights: IntentWeights {
+fn weights_for_intent(kind: QueryIntentKind) -> IntentWeights {
+    match kind {
+        QueryIntentKind::SymbolDefinition => IntentWeights {
+            lexical: 1.5,
+            vector: 1.0,
+            symbol: 2.0,
+            path: 0.5,
+            graph: 1.0,
+        },
+        QueryIntentKind::FlowTrace => IntentWeights {
             lexical: 1.0,
-            vector: 0.9,
-            symbol: 1.1,
+            vector: 1.0,
+            symbol: 1.5,
+            path: 0.5,
+            graph: 2.5,
+        },
+        QueryIntentKind::SymbolUsage => IntentWeights {
+            lexical: 1.0,
+            vector: 1.0,
+            symbol: 2.0,
+            path: 0.5,
+            graph: 2.0,
+        },
+        QueryIntentKind::Architecture => IntentWeights {
+            lexical: 1.0,
+            vector: 2.0,
+            symbol: 1.0,
+            path: 1.5,
+            graph: 0.5,
+        },
+        QueryIntentKind::TestLookup => IntentWeights {
+            lexical: 1.5,
+            vector: 1.5,
+            symbol: 1.0,
             path: 1.0,
-            graph: 0.8,
+            graph: 0.5,
+        },
+        QueryIntentKind::RuntimeConfig => IntentWeights {
+            lexical: 1.5,
+            vector: 1.5,
+            symbol: 1.0,
+            path: 1.5,
+            graph: 0.5,
+        },
+        _ => IntentWeights {
+            lexical: 1.0,
+            vector: 1.0,
+            symbol: 1.0,
+            path: 1.0,
+            graph: 1.0,
         },
     }
 }
+
+
+// ── Query token extraction ────────────────────────────────────────────────────
 
 fn contains_any(input: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|p| input.contains(p))
 }
 
-fn has_query_path_syntax(query: &str) -> bool {
-    if query.contains('/') || query.contains('\\') {
-        return true;
-    }
-    query.split_whitespace().any(|raw| {
-        let token = raw.trim_matches(|c: char| {
-            matches!(
-                c,
-                ',' | ';' | ':' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '?' | '!'
-            )
-        });
-        if token.is_empty() || !token.contains('.') {
-            return false;
-        }
-        let token = token.trim_end_matches('.');
-        if !token.contains('.') {
-            return false;
-        }
-        let parts = token
-            .split('.')
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
-        parts.len() >= 2
-            && parts.iter().any(|part| {
-                part.chars()
-                    .any(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '-')
-            })
-            && parts.iter().all(|part| {
-                part.chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-            })
-    })
-}
 
-fn contains_any_word(input: &str, words: &[&str]) -> bool {
-    input
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .any(|token| words.contains(&token))
-}
-
-fn extract_query_i18n_keys(query: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    let mut seen = HashSet::new();
-    for raw in query.split_whitespace() {
-        let candidate = raw
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '.' | '_' | '-'))
-            .to_ascii_lowercase();
-        if candidate.len() < 8 || !candidate.contains('.') {
-            continue;
-        }
-        let parts = candidate
-            .split('.')
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
-        if parts.len() < 3 {
-            continue;
-        }
-        if parts.iter().all(|part| {
-            part.chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-        }) && seen.insert(candidate.clone())
-        {
-            keys.push(candidate);
-        }
-    }
-    keys
-}
 
 fn extract_scope_path_hints(query: &str) -> Vec<String> {
     let mut hints = Vec::new();
@@ -1656,186 +993,6 @@ fn push_scope_hint(token: &str, out: &mut Vec<String>, seen: &mut HashSet<String
             out.push(piece.to_string());
         }
     }
-}
-
-fn extract_query_clauses(query: &str) -> Vec<QueryClause> {
-    let normalized = query
-        .replace(" AND ", " and ")
-        .replace(" Then ", " and ")
-        .replace(" then ", " and ")
-        .replace(" & ", " and ");
-    let mut clauses = Vec::new();
-    for raw_clause in normalized
-        .split(" and ")
-        .flat_map(|part| part.split(';'))
-        .flat_map(|part| part.split(','))
-    {
-        let clause = raw_clause.trim();
-        if clause.len() < 4 {
-            continue;
-        }
-        let clause_lower = clause.to_ascii_lowercase();
-        let kind = if contains_any(
-            &clause_lower,
-            &["define", "defined", "definition", "declared", "declaration"],
-        ) {
-            QueryClauseKind::Definition
-        } else if contains_any(
-            &clause_lower,
-            &[
-                "used",
-                "usage",
-                "consumed",
-                "consumers",
-                "callers",
-                "called",
-                "imported",
-                "imports",
-                "rendered",
-                "renders",
-            ],
-        ) {
-            QueryClauseKind::Usage
-        } else {
-            QueryClauseKind::Generic
-        };
-        let mut tokens = Vec::new();
-        let mut seen = HashSet::new();
-        for token in extract_query_symbol_tokens(clause)
-            .into_iter()
-            .chain(extract_query_path_tokens(clause).into_iter())
-            .chain(extract_scope_path_hints(clause).into_iter())
-        {
-            if token.len() < 3 || is_query_noise_token(token.as_str()) {
-                continue;
-            }
-            if seen.insert(token.clone()) {
-                tokens.push(token);
-            }
-        }
-        if !tokens.is_empty() {
-            clauses.push(QueryClause { kind, tokens });
-        }
-    }
-    clauses.truncate(4);
-    clauses
-}
-
-fn count_clause_token_matches(
-    path_lower: &str,
-    text_lower: &str,
-    clause: &QueryClause,
-    definition_hits: usize,
-    symbol_reference_hits: usize,
-) -> usize {
-    if matches!(clause.kind, QueryClauseKind::Definition) && definition_hits == 0 {
-        return 0;
-    }
-    if matches!(clause.kind, QueryClauseKind::Usage) && symbol_reference_hits == 0 {
-        return 0;
-    }
-    let mut matched = 0usize;
-    for token in &clause.tokens {
-        if token.len() < 3 {
-            continue;
-        }
-        if path_lower.contains(token) || text_lower.contains(token) {
-            matched += 1;
-        }
-    }
-    matched
-}
-
-fn contains_path_fragment(path: &str, fragments: &[&str]) -> bool {
-    fragments.iter().any(|fragment| path.contains(fragment))
-}
-
-fn count_runtime_config_path_hits(lower_path: &str) -> usize {
-    let mut hits = 0usize;
-    for fragment in [
-        "config",
-        "settings",
-        "runtime",
-        "dotenv",
-        ".env",
-        "environment",
-        "/env",
-        "env/",
-    ] {
-        if lower_path.contains(fragment) {
-            hits = hits.saturating_add(1);
-        }
-    }
-    hits
-}
-
-fn count_runtime_config_text_hits(lower_text: &str) -> usize {
-    let mut hits = 0usize;
-    for needle in [
-        "process.env",
-        "import.meta.env",
-        "std::env",
-        "env::var",
-        "getenv(",
-        "os.environ",
-        "dotenv",
-        "environment variable",
-        "env var",
-        "load_or_default",
-        "schema",
-        "validate",
-        "validation",
-        "zod",
-        "arktype",
-    ] {
-        if lower_text.contains(needle) {
-            hits = hits.saturating_add(1);
-        }
-    }
-    hits
-}
-
-fn is_build_only_config_path(lower_path: &str) -> bool {
-    contains_path_fragment(
-        lower_path,
-        &[
-            "gradle.properties",
-            "build.gradle",
-            "build.gradle.kts",
-            "webpack.config",
-            "rspack.config",
-            "vite.config",
-            "rollup.config",
-            "babel.config",
-            "tsconfig",
-            "cargo.toml",
-            "cargo.lock",
-            "package.json",
-            "package-lock.json",
-            "pnpm-lock.yaml",
-            "yarn.lock",
-            ".github/workflows/",
-        ],
-    )
-}
-
-fn is_test_like_path(path: &str) -> bool {
-    contains_path_fragment(
-        path,
-        &[
-            "/test",
-            "/tests/",
-            ".test.",
-            ".tests.",
-            ".spec.",
-            ".unit.",
-            "mock",
-            "fixture",
-            "/e2e/",
-            "integration",
-            "playwright",
-        ],
-    )
 }
 
 fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
@@ -2158,22 +1315,19 @@ fn is_low_signal_plain_query_token(token: &str) -> bool {
             | "using"
             | "usage"
             | "unit"
+            | "exact"
+            | "file"
+            | "files"
+            | "path"
+            | "paths"
+            | "trace"
+            | "flow"
+            | "entrypoint"
+            | "output"
+            | "outputs"
+            | "function"
+            | "functions"
     )
-}
-
-fn is_generic_path_token(token: &str) -> bool {
-    should_keep_plain_path_token(token) || is_low_signal_plain_query_token(token)
-}
-
-fn is_experimental_path(lower_path: &str) -> bool {
-    lower_path.starts_with("experimental/") || lower_path.contains("/experimental/")
-}
-
-fn is_low_signal_code_path(lower_path: &str) -> bool {
-    lower_path.starts_with(".semgrep/")
-        || lower_path.contains("/.semgrep/")
-        || lower_path.ends_with(".semgrep.yaml")
-        || lower_path.ends_with(".semgrep.yml")
 }
 
 fn augment_path_tokens_for_intent(
@@ -2185,6 +1339,7 @@ fn augment_path_tokens_for_intent(
     match intent.kind {
         QueryIntentKind::PathLookup
         | QueryIntentKind::RuntimeConfig
+        | QueryIntentKind::FlowTrace
         | QueryIntentKind::CodeNavigation
         | QueryIntentKind::SymbolDefinition
         | QueryIntentKind::TestLookup
@@ -2211,242 +1366,32 @@ fn augment_path_tokens_for_intent(
                         "slices",
                         "redux",
                         "zustand",
-                        "bootstrap",
                         "state",
-                        "selector",
-                        "selectors",
-                        "reducer",
-                        "reducers",
-                    ],
-                );
-            }
-            if contains_any(
-                &lower,
-                &[
-                    "route",
-                    "routing",
-                    "router",
-                    "page",
-                    "endpoint",
-                    "endpoints",
-                    "blueprint",
-                ],
-            ) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "route",
-                        "routes",
-                        "router",
-                        "routing",
-                        "pages",
-                        "endpoint",
-                        "endpoints",
-                        "blueprint",
-                    ],
-                );
-            }
-            if contains_any(&lower, &["auth", "session", "login", "token"]) {
-                add_path_tokens(
-                    path_tokens,
-                    &["auth", "session", "sessions", "login", "token", "tokens"],
-                );
-            }
-            if contains_any(
-                &lower,
-                &[
-                    "redirect",
-                    "redirects",
-                    "query param",
-                    "query params",
-                    "import",
-                    "imports",
-                    "parse",
-                    "parsed",
-                ],
-            ) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "redirect",
-                        "redirects",
-                        "route",
-                        "routes",
-                        "query",
-                        "params",
-                        "search",
-                        "path",
-                        "paths",
-                        "import",
-                        "imports",
-                    ],
-                );
-            }
-            if contains_any(&lower, &["websocket", "socket", "ws", "message handler"]) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "websocket",
-                        "socket",
-                        "ws",
-                        "connection",
-                        "connections",
-                        "handler",
-                        "handlers",
-                        "listener",
-                        "listeners",
-                    ],
-                );
-            }
-            if contains_any(&lower, &["feature flag", "feature flags"]) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "feature",
-                        "features",
-                        "flag",
-                        "flags",
-                        "featureflags",
-                        "feature-flags",
-                        "feature_flags",
-                        "usefeatureflag",
-                        "isfeatureenabled",
-                    ],
-                );
-            }
-            if contains_any(
-                &lower,
-                &[
-                    "mutation",
-                    "mutations",
-                    "mutate",
-                    "release plan",
-                    "release plans",
-                    "graphql",
-                ],
-            ) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "mutation",
-                        "mutations",
-                        "mutate",
-                        "graphql",
-                        "hooks",
-                        "hook",
-                        "releaseplan",
-                        "release-plan",
-                        "release_plan",
-                    ],
-                );
-            }
-            if contains_any(
-                &lower,
-                &[
-                    "translation",
-                    "translations",
-                    "locale",
-                    "locales",
-                    "i18n",
-                    "intl",
-                    "message key",
-                    "message keys",
-                ],
-            ) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "locale",
-                        "locales",
-                        "i18n",
-                        "intl",
-                        "message",
-                        "messages",
-                        "translation",
-                        "translations",
-                        "assets",
-                        "json",
-                    ],
-                );
-            }
-            if contains_any(
-                &lower,
-                &[
-                    "test",
-                    "tests",
-                    "spec",
-                    "e2e",
-                    "integration",
-                    "test case",
-                    "test cases",
-                ],
-            ) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "test",
-                        "tests",
-                        "spec",
-                        "specs",
-                        "unit",
-                        "e2e",
-                        "integration",
-                        "playwright",
-                        "mock",
-                        "fixture",
-                    ],
-                );
-            }
-            if matches!(intent.kind, QueryIntentKind::RuntimeConfig) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "config",
-                        "configs",
-                        "configuration",
-                        "settings",
-                        "runtime",
-                        "env",
-                        "environment",
-                        "dotenv",
-                        ".env",
-                        "schema",
-                        "validate",
-                        "validation",
-                    ],
-                );
-            }
-            if matches!(intent.kind, QueryIntentKind::Architecture) {
-                add_path_tokens(
-                    path_tokens,
-                    &[
-                        "docs",
-                        "readme",
-                        "architecture",
-                        "overview",
                         "bootstrap",
-                        "routing",
-                        "router",
-                        "app",
-                        "apps",
-                        "store",
                     ],
                 );
             }
-        }
-        QueryIntentKind::Docs => {
-            add_path_tokens(
-                path_tokens,
-                &[
-                    "docs",
-                    "readme",
-                    "architecture",
-                    "guide",
-                    "adr",
-                    "spec",
-                    "design",
-                ],
-            );
+            if contains_any(&lower, &["route", "router", "routing"]) {
+                add_path_tokens(path_tokens, &["route", "routes", "router", "routing"]);
+            }
+            if contains_any(&lower, &["auth", "login", "session", "token"]) {
+                add_path_tokens(
+                    path_tokens,
+                    &["auth", "login", "session", "token", "tokens"],
+                );
+            }
+            if contains_any(&lower, &["middleware", "handler", "handlers"]) {
+                add_path_tokens(path_tokens, &["middleware", "handler", "handlers"]);
+            }
+            if contains_any(&lower, &["test", "tests", "spec", "specs", "e2e"]) {
+                add_path_tokens(path_tokens, &["test", "tests", "spec", "specs", "e2e"]);
+            }
+            if contains_any(&lower, &["i18n", "intl", "locale", "locales", "translation"]) {
+                add_path_tokens(
+                    path_tokens,
+                    &["i18n", "intl", "locale", "locales", "translation", "translations"],
+                );
+            }
         }
         _ => {}
     }
@@ -2455,7 +1400,7 @@ fn augment_path_tokens_for_intent(
 fn add_path_tokens(path_tokens: &mut Vec<String>, additions: &[&str]) {
     let mut seen: HashSet<String> = path_tokens.iter().cloned().collect();
     for token in additions {
-        let owned = (*token).to_string();
+        let owned = token.to_string();
         if seen.insert(owned.clone()) {
             path_tokens.push(owned);
         }
@@ -2465,752 +1410,15 @@ fn add_path_tokens(path_tokens: &mut Vec<String>, additions: &[&str]) {
 fn add_dynamic_path_tokens(path_tokens: &mut Vec<String>, additions: &[String]) {
     let mut seen: HashSet<String> = path_tokens.iter().cloned().collect();
     for token in additions {
-        if token.is_empty() {
-            continue;
-        }
-        let owned = token.to_ascii_lowercase();
-        if seen.insert(owned.clone()) {
-            path_tokens.push(owned);
+        if token.len() >= 3 && seen.insert(token.clone()) {
+            path_tokens.push(token.clone());
         }
     }
-}
-
-fn count_symbol_definition_hits(chunk_text_lower: &str, symbol_tokens: &[String]) -> usize {
-    symbol_tokens
-        .iter()
-        .filter(|symbol| chunk_contains_symbol_definition(chunk_text_lower, symbol.as_str()))
-        .count()
-}
-
-fn count_symbol_import_hits(chunk_text_lower: &str, symbol_tokens: &[String]) -> usize {
-    symbol_tokens
-        .iter()
-        .filter(|symbol| chunk_contains_symbol_import(chunk_text_lower, symbol.as_str()))
-        .count()
-}
-
-fn count_symbol_reference_hits(chunk_text_lower: &str, symbol_tokens: &[String]) -> usize {
-    symbol_tokens
-        .iter()
-        .filter(|symbol| chunk_contains_symbol_reference(chunk_text_lower, symbol.as_str()))
-        .count()
-}
-
-fn chunk_contains_symbol_definition(chunk_text_lower: &str, symbol: &str) -> bool {
-    if symbol.len() < 3 {
-        return false;
-    }
-    for raw_line in chunk_text_lower.lines() {
-        let line = raw_line.trim_start();
-        if line_starts_with_symbol_binding(line, "const ", symbol)
-            || line_starts_with_symbol_binding(line, "let ", symbol)
-            || line_starts_with_symbol_binding(line, "var ", symbol)
-            || line_starts_with_symbol_binding(line, "function ", symbol)
-            || line_starts_with_symbol_binding(line, "class ", symbol)
-            || line_starts_with_symbol_binding(line, "type ", symbol)
-            || line_starts_with_symbol_binding(line, "interface ", symbol)
-            || line_starts_with_symbol_binding(line, "enum ", symbol)
-            || line_starts_with_symbol_binding(line, "export const ", symbol)
-            || line_starts_with_symbol_binding(line, "export function ", symbol)
-            || line_starts_with_symbol_binding(line, "export default ", symbol)
-            || line_starts_with_symbol_binding(line, "pub fn ", symbol)
-            || line_starts_with_symbol_binding(line, "fn ", symbol)
-            || line_starts_with_symbol_family_binding(line, "const ", symbol)
-            || line_starts_with_symbol_family_binding(line, "let ", symbol)
-            || line_starts_with_symbol_family_binding(line, "var ", symbol)
-            || line_starts_with_symbol_family_binding(line, "function ", symbol)
-            || line_starts_with_symbol_family_binding(line, "class ", symbol)
-            || line_starts_with_symbol_family_binding(line, "type ", symbol)
-            || line_starts_with_symbol_family_binding(line, "interface ", symbol)
-            || line_starts_with_symbol_family_binding(line, "enum ", symbol)
-            || line_starts_with_symbol_family_binding(line, "export const ", symbol)
-            || line_starts_with_symbol_family_binding(line, "export function ", symbol)
-            || line_starts_with_symbol_family_binding(line, "export default ", symbol)
-            || line_starts_with_symbol_family_binding(line, "pub fn ", symbol)
-            || line_starts_with_symbol_family_binding(line, "fn ", symbol)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn chunk_contains_symbol_import(chunk_text_lower: &str, symbol: &str) -> bool {
-    if symbol.len() < 3 {
-        return false;
-    }
-    for raw_line in chunk_text_lower.lines() {
-        let line = raw_line.trim_start();
-        let is_import_like = line.starts_with("import ")
-            || line.starts_with("export {")
-            || line.starts_with("export type {");
-        if !is_import_like {
-            continue;
-        }
-        if contains_identifier_with_boundaries(line, symbol)
-            || contains_symbol_family_token(line, symbol)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn chunk_contains_symbol_reference(chunk_text_lower: &str, symbol: &str) -> bool {
-    contains_identifier_with_boundaries(chunk_text_lower, symbol)
-        || contains_symbol_family_token(chunk_text_lower, symbol)
-}
-
-fn contains_identifier_with_boundaries(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let mut start = 0usize;
-    while start < haystack.len() {
-        let Some(offset) = haystack[start..].find(needle) else {
-            break;
-        };
-        let idx = start + offset;
-        let before_ok = if idx == 0 {
-            true
-        } else {
-            let ch = bytes[idx - 1] as char;
-            !ch.is_ascii_alphanumeric() && ch != '_'
-        };
-        let after_idx = idx + needle.len();
-        let after_ok = if after_idx >= bytes.len() {
-            true
-        } else {
-            let ch = bytes[after_idx] as char;
-            !ch.is_ascii_alphanumeric() && ch != '_'
-        };
-        if before_ok && after_ok {
-            return true;
-        }
-        start = idx + 1;
-    }
-    false
-}
-
-fn contains_symbol_family_token(haystack: &str, symbol: &str) -> bool {
-    if symbol.len() < 7 {
-        return false;
-    }
-    haystack
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|token| !token.is_empty())
-        .any(|token| is_symbol_family_match(token, symbol))
-}
-
-fn line_starts_with_symbol_binding(line: &str, prefix: &str, symbol: &str) -> bool {
-    let Some(rest) = line.strip_prefix(prefix) else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    if !rest.starts_with(symbol) {
-        return false;
-    }
-    let after = rest[symbol.len()..].chars().next();
-    after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
-}
-
-fn line_starts_with_symbol_family_binding(line: &str, prefix: &str, symbol: &str) -> bool {
-    let Some(rest) = line.strip_prefix(prefix) else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    let identifier = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-        .collect::<String>();
-    !identifier.is_empty() && is_symbol_family_match(identifier.as_str(), symbol)
-}
-
-fn is_symbol_family_match(candidate: &str, query_symbol: &str) -> bool {
-    let candidate_norm = normalize_symbol_family(candidate);
-    let query_norm = normalize_symbol_family(query_symbol);
-    if candidate_norm.is_empty() || query_norm.is_empty() {
-        return false;
-    }
-    if candidate_norm == query_norm {
-        return true;
-    }
-    if candidate_norm.len() < 7 || query_norm.len() < 7 {
-        return false;
-    }
-    candidate_norm.starts_with(query_norm.as_str())
-        || query_norm.starts_with(candidate_norm.as_str())
-}
-
-fn normalize_symbol_family(token: &str) -> String {
-    let mut normalized = token.trim_matches('_').to_ascii_lowercase();
-    if normalized.ends_with('s') && normalized.len() > 4 {
-        normalized.pop();
-    }
-    normalized
-}
-
-fn extract_explicit_doc_path_hints(query: &str) -> Vec<String> {
-    let mut hints = Vec::new();
-    let mut seen = HashSet::new();
-    for raw in query.split_whitespace() {
-        let candidate = raw
-            .trim_matches(|c: char| {
-                !c.is_ascii_alphanumeric() && !matches!(c, '/' | '_' | '-' | '.')
-            })
-            .trim_start_matches("./")
-            .to_ascii_lowercase();
-        if candidate.len() < 4 {
-            continue;
-        }
-        let is_doc_path_like = candidate.contains('/')
-            || candidate.ends_with(".md")
-            || candidate.ends_with(".mdx")
-            || candidate.contains("readme");
-        if is_doc_path_like && seen.insert(candidate.clone()) {
-            hints.push(candidate);
-        }
-    }
-    hints
-}
-
-fn matches_doc_path_hint(path: &str, hints: &[String]) -> bool {
-    if hints.is_empty() {
-        return false;
-    }
-    let lower_path = path.to_ascii_lowercase();
-    hints.iter().any(|hint| lower_path.contains(hint))
 }
 
 fn normalize_path(input: &str) -> String {
     input
         .replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_symbol_usage_intent() {
-        let intent = analyze_query_intent("Where is CameraPreviewPanel used?");
-        assert!(matches!(intent.kind, QueryIntentKind::SymbolUsage));
-        assert!(intent.code_related);
-        assert!(!intent.allow_docs);
-    }
-
-    #[test]
-    fn detects_non_code_intent() {
-        let intent = analyze_query_intent("Tell me a joke about cats");
-        assert!(matches!(intent.kind, QueryIntentKind::NonCode));
-        assert!(!intent.code_related);
-    }
-
-    #[test]
-    fn detects_general_non_repo_prompt_as_non_code() {
-        let intent = analyze_query_intent("Write a polite email asking for deadline extension.");
-        assert!(matches!(intent.kind, QueryIntentKind::NonCode));
-        assert!(!intent.code_related);
-    }
-
-    #[test]
-    fn detects_websocket_prompt_as_code_related() {
-        let intent = analyze_query_intent("Where is websocket connection initialized?");
-        assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
-        assert!(intent.code_related);
-    }
-
-    #[test]
-    fn detects_test_lookup_prompt() {
-        let intent = analyze_query_intent("Find tests for LoginWithPasskey");
-        assert!(matches!(intent.kind, QueryIntentKind::TestLookup));
-        assert!(intent.code_related);
-    }
-
-    #[test]
-    fn detects_runtime_config_prompt() {
-        let intent = analyze_query_intent(
-            "Name up to 5 exact file paths where runtime configuration or environment variables are loaded/validated.",
-        );
-        assert!(matches!(intent.kind, QueryIntentKind::RuntimeConfig));
-        assert!(intent.code_related);
-        assert!(!intent.allow_docs);
-    }
-
-    #[test]
-    fn detects_symbol_definition_intent() {
-        let intent =
-            analyze_query_intent("Which file defines DEFAULT_ENTRY_PATH and where is it imported?");
-        assert!(matches!(intent.kind, QueryIntentKind::SymbolDefinition));
-        assert!(intent.code_related);
-    }
-
-    #[test]
-    fn non_code_marker_with_symbol_anchor_stays_code_related() {
-        let intent = analyze_query_intent("What is LoginWithPasskey?");
-        assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
-    }
-
-    #[test]
-    fn redirect_query_param_prompt_is_code_related() {
-        let intent = analyze_query_intent("Where do we parse query params for login redirects?");
-        assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
-        assert!(intent.code_related);
-    }
-
-    #[test]
-    fn extracts_scope_hints_for_in_phrase() {
-        let hints = extract_scope_path_hints("Where is useFeatureToggle consumed in portal-app?");
-        assert!(hints.iter().any(|hint| hint == "portal-app"));
-    }
-
-    #[test]
-    fn extracts_multi_clause_query_tokens() {
-        let clauses = extract_query_clauses(
-            "Where is useFeatureToggle defined and where is it consumed in portal-app?",
-        );
-        assert!(clauses.len() >= 2);
-        assert!(
-            clauses
-                .iter()
-                .any(|clause| clause.tokens.iter().any(|token| token == "portal-app"))
-        );
-    }
-
-    #[test]
-    fn extract_symbol_tokens_for_use_feature_flag_query() {
-        let tokens = extract_query_symbol_tokens(
-            "Where is useFeatureToggle defined and where is it consumed in portal-app?",
-        );
-        assert_eq!(tokens, vec!["usefeaturetoggle".to_string()]);
-    }
-
-    #[test]
-    fn extracts_i18n_key_from_query() {
-        let keys = extract_query_i18n_keys(
-            "Where are translation keys for app.dashboard.ui.SettingsPage?",
-        );
-        assert!(
-            keys.iter()
-                .any(|key| key == "app.dashboard.ui.settingspage")
-        );
-    }
-
-    #[test]
-    fn symbol_definition_detection_uses_identifier_boundaries() {
-        assert!(!chunk_contains_symbol_definition(
-            "const enabled = usefeaturetoggle(featuretogglekey);",
-            "usefeaturetoggle",
-        ));
-        assert!(chunk_contains_symbol_definition(
-            "export const usefeaturetogglessetreleasebatchmutation = () => {};",
-            "usefeaturetoggle",
-        ));
-        assert!(chunk_contains_symbol_definition(
-            "export function usefeaturetoggle(featuretogglekey: string) { return true; }",
-            "usefeaturetoggle",
-        ));
-    }
-
-    #[test]
-    fn symbol_family_match_handles_feature_flag_pluralization() {
-        assert!(is_symbol_family_match(
-            "usefeaturetogglessetreleasebatchmutation",
-            "usefeaturetoggle"
-        ));
-    }
-
-    #[test]
-    fn symbol_definition_does_not_treat_import_usage_as_definition() {
-        let chunk = r#"
-import react from 'react';
-import { featuretogglekeys, usefeaturetoggle } from '@acme/feature-toggles';
-
-export default function devicerowcell() {
-  const isopensearchenabled = usefeaturetoggle(featuretogglekeys.foo);
-  return null;
-}
-"#;
-        assert!(!chunk_contains_symbol_definition(chunk, "usefeaturetoggle"));
-        assert!(chunk_contains_symbol_import(chunk, "usefeaturetoggle"));
-    }
-
-    #[test]
-    fn favors_symbol_channel_for_usage_queries() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::SymbolUsage,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 0.9,
-                vector: 0.5,
-                symbol: 2.0,
-                path: 1.4,
-                graph: 1.7,
-            },
-        };
-        // Candidate 1 wins lexical, candidate 2 wins symbol. Usage intent should favor candidate 2.
-        let lexical = vec![(1, 1.0), (2, 0.3)];
-        let vector = vec![(1, 0.6)];
-        let symbol = vec![(2, 1.5)];
-        let path = vec![(2, 0.9)];
-        let graph = vec![(2, 1.2)];
-        let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
-        let c1 = fused.get(&1).map(|c| c.score).unwrap_or_default();
-        let c2 = fused.get(&2).map(|c| c.score).unwrap_or_default();
-        assert!(
-            c2 > c1,
-            "expected symbol/path-heavy candidate to outrank lexical one"
-        );
-    }
-
-    #[test]
-    fn graph_channel_can_beat_lexical_for_usage_intent() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::SymbolUsage,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 0.9,
-                vector: 0.5,
-                symbol: 2.0,
-                path: 1.4,
-                graph: 1.7,
-            },
-        };
-        let lexical = vec![(1, 1.0)];
-        let vector = Vec::new();
-        let symbol = Vec::new();
-        let path = Vec::new();
-        let graph = vec![(2, 1.3)];
-        let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
-        let lexical_candidate = fused.get(&1).map(|c| c.score).unwrap_or_default();
-        let graph_candidate = fused.get(&2).map(|c| c.score).unwrap_or_default();
-        assert!(graph_candidate > lexical_candidate);
-    }
-
-    #[test]
-    fn channel_score_breakdown_tracks_per_channel_contributions() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::CodeNavigation,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 1.0,
-                symbol: 1.0,
-                path: 1.0,
-                graph: 1.0,
-            },
-        };
-        let fused = fuse_channel_scores(
-            &[(7, 10.0)],
-            &[(7, 0.8)],
-            &[(7, 1.0)],
-            &[(7, 1.0)],
-            &[(7, 1.0)],
-            &intent,
-        );
-        let candidate = fused.get(&7).expect("candidate");
-        assert!(candidate.channel_scores.lexical > 0.0);
-        assert!(candidate.channel_scores.vector > 0.0);
-        assert!(candidate.channel_scores.symbol > 0.0);
-        assert!(candidate.channel_scores.path > 0.0);
-        assert!(candidate.channel_scores.graph > 0.0);
-        assert!(
-            candidate
-                .signals
-                .iter()
-                .any(|signal| signal == "lexical-hit")
-        );
-        assert!(
-            candidate
-                .signals
-                .iter()
-                .any(|signal| signal == "semantic-hit")
-        );
-    }
-
-    #[test]
-    fn diagnostics_signals_use_structured_reason_codes() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::PathLookup,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 1.0,
-                symbol: 1.0,
-                path: 1.0,
-                graph: 0.7,
-            },
-        };
-        let diagnostics = build_diagnostics(
-            &intent,
-            &[QueryResultItem {
-                path: "src/router.ts".to_string(),
-                start_line: 10,
-                end_line: 20,
-                score: 0.7,
-                reasons: vec!["path-hit".to_string(), "scope-hit".to_string()],
-                channel_scores: QueryChannelScores::default(),
-                text: "router.get('/health')".to_string(),
-            }],
-            true,
-            true,
-            0.45,
-        );
-        assert!(
-            diagnostics
-                .signals
-                .iter()
-                .any(|signal| signal == "path-hit")
-        );
-        assert!(diagnostics.recommended_injection);
-    }
-
-    #[test]
-    fn docs_query_allows_docs() {
-        let docs = analyze_query_intent("Show me docs/readme for auth bootstrap");
-        let code = analyze_query_intent("Where is auth bootstrap implemented?");
-        assert!(docs.allow_docs);
-        assert!(!code.allow_docs);
-    }
-
-    #[test]
-    fn path_tokens_keep_plain_route_keywords() {
-        let tokens = extract_query_path_tokens("Where are route definitions for command pages?");
-        assert!(tokens.iter().any(|t| t == "route" || t == "routes"));
-    }
-
-    #[test]
-    fn path_tokens_keep_specific_plain_terms() {
-        let tokens = extract_query_path_tokens("Where are SCIM endpoints defined?");
-        assert!(tokens.iter().any(|t| t == "scim"));
-        assert!(tokens.iter().all(|t| t != "defined"));
-    }
-
-    #[test]
-    fn path_tokens_drop_low_signal_plain_terms() {
-        let tokens = extract_query_path_tokens("Where is request handling implemented?");
-        assert!(tokens.iter().any(|t| t == "request"));
-        assert!(tokens.iter().all(|t| t != "implemented"));
-        assert!(tokens.iter().all(|t| t != "handling"));
-    }
-
-    #[test]
-    fn path_tokens_keep_short_specific_terms() {
-        let tokens = extract_query_path_tokens("Show tests for moq API endpoints.");
-        assert!(tokens.iter().any(|t| t == "moq"));
-        assert!(tokens.iter().all(|t| t != "unit"));
-    }
-
-    #[test]
-    fn path_tokens_generate_compound_tokens_for_hyphenated_query() {
-        let tokens = extract_query_path_tokens("Where are logged-out routes defined?");
-        assert!(tokens.iter().any(|t| t == "loggedout"));
-        assert!(tokens.iter().any(|t| t == "loggedoutroutes"));
-    }
-
-    #[test]
-    fn doc_path_hint_matching_works() {
-        let hints =
-            extract_explicit_doc_path_hints("Summarize src/command/alarms-v3/docs/models.md");
-        assert!(matches_doc_path_hint(
-            "src/command/alarms-v3/docs/models.md",
-            &hints
-        ));
-    }
-
-    #[test]
-    fn docs_signals_raise_confidence() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::Docs,
-            code_related: true,
-            allow_docs: true,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 0.8,
-                symbol: 0.4,
-                path: 0.8,
-                graph: 0.3,
-            },
-        };
-        let confidence = estimate_confidence(
-            0.30,
-            0.01,
-            1,
-            &["lexical-hit".to_string(), "doc-path-hit".to_string()],
-            &intent,
-        );
-        assert!(confidence >= 0.45);
-    }
-
-    #[test]
-    fn path_signals_raise_path_lookup_confidence() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::PathLookup,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 1.0,
-                symbol: 1.0,
-                path: 1.0,
-                graph: 0.7,
-            },
-        };
-        let confidence = estimate_confidence(
-            0.18,
-            0.03,
-            3,
-            &["path-hit".to_string(), "symbol-hit".to_string()],
-            &intent,
-        );
-        assert!(confidence >= 0.45);
-    }
-
-    #[test]
-    fn confidence_below_threshold_recommends_skip() {
-        let intent = QueryIntent {
-            kind: QueryIntentKind::CodeNavigation,
-            code_related: true,
-            allow_docs: false,
-            weights: IntentWeights {
-                lexical: 1.0,
-                vector: 1.0,
-                symbol: 1.0,
-                path: 1.0,
-                graph: 0.8,
-            },
-        };
-        let diagnostics = build_diagnostics(&intent, &[], true, true, 0.45);
-        assert!(!diagnostics.recommended_injection);
-        assert!(diagnostics.skip_reason.is_some());
-    }
-
-    #[test]
-    fn recognizes_experimental_paths() {
-        assert!(is_experimental_path("experimental/notes/readme.md"));
-        assert!(is_experimental_path("foo/experimental/bar/readme.md"));
-        assert!(!is_experimental_path("docs/architecture/readme.md"));
-    }
-
-    #[test]
-    fn recognizes_low_signal_semgrep_paths() {
-        assert!(is_low_signal_code_path(".semgrep/routes.yaml"));
-        assert!(is_low_signal_code_path("vinter/.semgrep/routes.yaml"));
-        assert!(!is_low_signal_code_path("docs/semgrep-guide.md"));
-    }
-
-    #[test]
-    fn build_only_config_paths_are_detected() {
-        assert!(is_build_only_config_path("build.gradle.kts"));
-        assert!(is_build_only_config_path("web/webpack.config.ts"));
-        assert!(!is_build_only_config_path("src/config/runtime.ts"));
-    }
-
-    #[test]
-    fn localization_asset_generation_prompt_is_code_related() {
-        let intent = analyze_query_intent("How is localization asset generation wired?");
-        assert!(!matches!(intent.kind, QueryIntentKind::NonCode));
-        assert!(intent.code_related);
-    }
-
-    #[test]
-    fn build_context_excludes_git_metadata_lines() {
-        let snippets = vec![QueryResultItem {
-            path: "src/app.ts".to_string(),
-            start_line: 10,
-            end_line: 14,
-            score: 0.87,
-            reasons: vec!["symbol-hit".to_string()],
-            channel_scores: QueryChannelScores::default(),
-            text: "export const app = true;".to_string(),
-        }];
-        let context = build_context(&snippets, 4_000, false);
-        assert!(context.contains("[budi deterministic context]"));
-        assert!(context.contains("snippets:"));
-        assert!(!context.contains("branch:"));
-        assert!(!context.contains("recent_commits:"));
-        assert!(!context.contains("dirty_files:"));
-    }
-
-    #[test]
-    fn path_diversity_bucket_uses_first_two_segments() {
-        assert_eq!(path_diversity_bucket("src/routes/home.tsx"), "src/routes");
-        assert_eq!(path_diversity_bucket("README.md"), "readme.md");
-    }
-
-    #[test]
-    fn graph_neighbor_seed_tokens_extract_symbol_like_identifiers() {
-        let tokens = graph_neighbor_seed_tokens(
-            "src/router/controller.ts",
-            "const routeOwnerMap = useRouteOwnerMap(queryContext);",
-        );
-        assert!(tokens.iter().any(|token| token == "routeownermap"));
-        assert!(tokens.iter().any(|token| token == "querycontext"));
-    }
-
-    #[test]
-    fn graph_neighbor_seed_tokens_falls_back_to_path_hints() {
-        let tokens = graph_neighbor_seed_tokens("src/features/auth/owner_map.ts", "let x = 1;");
-        assert!(tokens.iter().any(|token| token == "owner"));
-        assert!(tokens.iter().any(|token| token == "auth"));
-    }
-
-    #[test]
-    fn parse_retrieval_mode_handles_aliases_and_defaults() {
-        assert_eq!(parse_retrieval_mode(Some("hybrid")), RetrievalMode::Hybrid);
-        assert_eq!(
-            parse_retrieval_mode(Some("lexical")),
-            RetrievalMode::Lexical
-        );
-        assert_eq!(parse_retrieval_mode(Some("vector")), RetrievalMode::Vector);
-        assert_eq!(
-            parse_retrieval_mode(Some("symbol_graph")),
-            RetrievalMode::SymbolGraph
-        );
-        assert_eq!(
-            parse_retrieval_mode(Some("symbol-graph")),
-            RetrievalMode::SymbolGraph
-        );
-        assert_eq!(parse_retrieval_mode(Some("unknown")), RetrievalMode::Hybrid);
-        assert_eq!(parse_retrieval_mode(None), RetrievalMode::Hybrid);
-    }
-
-    #[test]
-    fn retrieval_mode_channel_filtering_is_deterministic() {
-        assert!(retrieval_mode_allows_channel(
-            RetrievalMode::Hybrid,
-            ChannelKind::Lexical
-        ));
-        assert!(retrieval_mode_allows_channel(
-            RetrievalMode::Lexical,
-            ChannelKind::Lexical
-        ));
-        assert!(!retrieval_mode_allows_channel(
-            RetrievalMode::Lexical,
-            ChannelKind::Vector
-        ));
-        assert!(retrieval_mode_allows_channel(
-            RetrievalMode::Vector,
-            ChannelKind::Vector
-        ));
-        assert!(!retrieval_mode_allows_channel(
-            RetrievalMode::Vector,
-            ChannelKind::Symbol
-        ));
-        assert!(retrieval_mode_allows_channel(
-            RetrievalMode::SymbolGraph,
-            ChannelKind::Graph
-        ));
-        assert!(!retrieval_mode_allows_channel(
-            RetrievalMode::SymbolGraph,
-            ChannelKind::Vector
-        ));
-    }
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }

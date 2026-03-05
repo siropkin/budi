@@ -25,7 +25,7 @@ pub const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
-pub const DEFAULT_RETRIEVAL_LIMIT: usize = 20;
+pub const DEFAULT_RETRIEVAL_LIMIT: usize = 8;
 pub const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 12_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +49,7 @@ pub struct BudiConfig {
     pub topk_vector: usize,
     pub smart_skip_enabled: bool,
     pub skip_non_code_prompts: bool,
-    pub min_confidence_to_inject: f32,
+    pub min_inject_score: f32,
     pub debug_io: bool,
     pub debug_io_full_text: bool,
     pub debug_io_max_chars: usize,
@@ -76,7 +76,7 @@ impl Default for BudiConfig {
             topk_vector: 20,
             smart_skip_enabled: true,
             skip_non_code_prompts: true,
-            min_confidence_to_inject: 0.45,
+            min_inject_score: 0.05,
             debug_io: false,
             debug_io_full_text: false,
             debug_io_max_chars: 1200,

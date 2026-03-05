@@ -26,6 +26,24 @@ We compare:
   - `tmp/public_bench_flask_v2b/ab-results.json`
   - `tmp/public_bench_express_v2b/ab-results.json`
 
+## Pivot matrix runs
+
+For evidence-first pivot decisions, run the matrix runner with variant-specific config overrides:
+
+```bash
+python3 scripts/pivot_matrix_runner.py \
+  --matrix-file ./fixtures/benchmarks/pivot_matrix_v1.template.json \
+  --prompts-file ./fixtures/benchmarks/public_v2.json \
+  --repeats 3 \
+  --out-dir ./tmp/pivot_matrix_v1_run \
+  --dry-run
+```
+
+The template contains placeholder repo paths, so copy it to a local file and replace paths before running. Then remove `--dry-run` to execute. Full decision framework:
+
+- `docs/adr-evidence-first-pivot.md`
+- `docs/pivot-experiment-matrix.md`
+
 ## Reproduce exactly
 
 Clone repos:

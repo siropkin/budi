@@ -120,6 +120,8 @@ enum HookCommands {
     UserPromptSubmit,
     #[command(hide = true)]
     PostToolUse,
+    #[command(hide = true)]
+    SessionStart,
 }
 
 #[derive(Debug, Subcommand)]
@@ -220,6 +222,8 @@ enum RepoCommands {
         repo_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
         mode: RetrievalModeArg,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -311,11 +315,13 @@ fn main() -> Result<()> {
                 prompt,
                 repo_root,
                 mode,
-            } => cmd_preview(repo_root, &prompt, mode),
+                json,
+            } => cmd_preview(repo_root, &prompt, mode, json),
         },
         Commands::Hook { command } => match command {
             HookCommands::UserPromptSubmit => cmd_hook_user_prompt_submit(),
             HookCommands::PostToolUse => cmd_hook_post_tool_use(),
+            HookCommands::SessionStart => cmd_hook_session_start(),
         },
     }
 }
@@ -338,6 +344,7 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
         config::repo_paths(&repo_root)?.data_dir.display()
     );
     println!("Hooks: {}", repo_root.join(CLAUDE_LOCAL_SETTINGS).display());
+
     println!("Run `budi index --hard` to prewarm the first index.");
     println!("Restart Claude Code or review `/hooks` so updated hook settings are applied.");
     Ok(())
@@ -643,7 +650,7 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str, mode: RetrievalModeArg) -> Result<()> {
+fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str, mode: RetrievalModeArg, json_output: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
@@ -664,6 +671,22 @@ fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str, mode: RetrievalModeArg)
     } else {
         effective_skip_reason.is_none() && response.diagnostics.recommended_injection
     };
+
+    if json_output {
+        let mut out = serde_json::to_value(&response)?;
+        // Patch recommended_injection and skip_reason to reflect effective (post-directive) values
+        if let Some(diag) = out.get_mut("diagnostics") {
+            diag["recommended_injection"] = serde_json::Value::Bool(recommended_injection);
+            if forced_inject {
+                diag["skip_reason"] = serde_json::Value::String("forced_inject".to_string());
+            } else if let Some(reason) = &effective_skip_reason {
+                diag["skip_reason"] = serde_json::Value::String(reason.clone());
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     let skip_reason_display = if forced_inject {
         "forced_inject"
     } else {
@@ -795,6 +818,7 @@ fn cmd_bench(repo_root: Option<PathBuf>, prompt: &str, iterations: usize) -> Res
             &repo_root,
             prompt,
             Some(&repo_root),
+            None,
             None,
         )
         .context("Failed benchmark query iteration")?;
@@ -1170,6 +1194,70 @@ fn format_snippet_channels(item: &QueryResultItem) -> String {
         item.channel_scores.graph,
         item.channel_scores.rerank
     )
+}
+
+fn runtime_guard_is_non_prod_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("test/")
+        || lower.starts_with("tests/")
+        || lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.starts_with("examples/")
+        || lower.contains("/examples/")
+        || lower.starts_with("example/")
+        || lower.contains("/example/")
+        || lower.contains("/fixtures/")
+        || lower.contains("/fixture/")
+}
+
+fn build_runtime_guard_context(snippets: &[QueryResultItem]) -> String {
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for snippet in snippets {
+        let path = snippet.path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if runtime_guard_is_non_prod_path(path) {
+            continue;
+        }
+        // Only include snippets with explicit runtime-config signals.
+        let has_runtime_signal = snippet.reasons.iter().any(|r| {
+            r.starts_with("runtime-")
+                || r.starts_with("symbol-hit")
+                || r.starts_with("path-hit")
+                || r.starts_with("graph-hit")
+                || r.starts_with("lexical-hit")
+        });
+        if !has_runtime_signal {
+            continue;
+        }
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        selected.push(path.to_string());
+        if selected.len() >= 5 {
+            break;
+        }
+    }
+    if selected.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("[budi runtime guard]\n");
+    out.push_str("rules:\n");
+    out.push_str("- Use only the file paths listed below.\n");
+    out.push_str(
+        "- Prefer core source files; do not include tests/examples unless explicitly asked.\n",
+    );
+    out.push_str("- If unsure about function names, return file paths only.\n");
+    out.push_str("verified_runtime_paths:\n");
+    for path in selected {
+        out.push_str("- ");
+        out.push_str(&path);
+        out.push('\n');
+    }
+    out
 }
 
 fn persist_retrieval_eval_report(
@@ -1780,20 +1868,36 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
     let mut diagnostics = QueryDiagnostics::default();
     let mut total_candidates = 0usize;
     let mut snippets_count = 0usize;
+    let mut query_timing: Option<HashMap<String, u64>> = None;
     let (context, success, reason, error_detail) =
-        match query_daemon_for_hook_context(&repo_root, &config, &sanitized_prompt, Some(&cwd)) {
+        match query_daemon_for_hook_context(&repo_root, &config, &sanitized_prompt, Some(&cwd), Some(&session_id)) {
             Ok(response) => {
                 total_candidates = response.total_candidates;
                 snippets_count = response.snippets.len();
+                query_timing = response.timing_ms;
                 diagnostics = response.diagnostics;
                 let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
                 if let Some(skip_reason) = skip_reason {
-                    (
-                        String::new(),
-                        true,
-                        format_skip_hook_reason(&skip_reason),
-                        String::new(),
-                    )
+                    let runtime_guard_context = if diagnostics.intent == "runtime-config" {
+                        build_runtime_guard_context(&response.snippets)
+                    } else {
+                        String::new()
+                    };
+                    if runtime_guard_context.is_empty() {
+                        (
+                            String::new(),
+                            true,
+                            format_skip_hook_reason(&skip_reason),
+                            String::new(),
+                        )
+                    } else {
+                        (
+                            runtime_guard_context,
+                            true,
+                            HOOK_REASON_OK.to_string(),
+                            String::new(),
+                        )
+                    }
                 } else {
                     (
                         response.context,
@@ -1849,6 +1953,12 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 "skip_reason".to_string(),
                 json!(diagnostics.skip_reason.clone()),
             );
+            if let Some(ref timing) = query_timing {
+                obj.insert(
+                    "timing".to_string(),
+                    serde_json::to_value(timing).unwrap_or_default(),
+                );
+            }
         }
         payload
     });
@@ -1860,8 +1970,11 @@ fn query_daemon_for_hook_context(
     config: &BudiConfig,
     prompt: &str,
     cwd: Option<&Path>,
+    session_id: Option<&str>,
 ) -> Result<QueryResponse> {
-    match query_daemon_with_timeout(repo_root, config, prompt, cwd, HOOK_QUERY_TIMEOUT_SECS) {
+    let url = format!("{}/query", config.daemon_base_url());
+    let client = daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_TIMEOUT_SECS));
+    match send_query_request(&client, &url, repo_root, prompt, cwd, None, session_id) {
         Ok(response) => Ok(response),
         Err(initial_err) => {
             let reason = classify_query_error(&initial_err);
@@ -1869,14 +1982,10 @@ fn query_daemon_for_hook_context(
                 return Err(initial_err);
             }
             let _ = ensure_daemon_running(repo_root, config);
-            query_daemon_with_timeout(
-                repo_root,
-                config,
-                prompt,
-                cwd,
-                HOOK_QUERY_RETRY_TIMEOUT_SECS,
-            )
-            .with_context(|| format!("hook-retry-after-{}", reason.as_str()))
+            let retry_client =
+                daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_RETRY_TIMEOUT_SECS));
+            send_query_request(&retry_client, &url, repo_root, prompt, cwd, None, session_id)
+                .with_context(|| format!("hook-retry-after-{}", reason.as_str()))
         }
     }
 }
@@ -1892,9 +2001,13 @@ fn cmd_hook_post_tool_use() -> Result<()> {
     let tool_name = parsed.tool_name.clone();
     let cwd_str = parsed.common.cwd.clone();
     let session_id = parsed.common.session_id.clone();
-    if parsed.tool_name != "Write" && parsed.tool_name != "Edit" {
+
+    let is_write_edit = tool_name == "Write" || tool_name == "Edit";
+    let is_read = tool_name == "Read" || tool_name == "Glob";
+    if !is_write_edit && !is_read {
         return Ok(());
     }
+
     let file_path = parsed
         .tool_input
         .get("file_path")
@@ -1938,6 +2051,35 @@ fn cmd_hook_post_tool_use() -> Result<()> {
         return Ok(());
     }
 
+    if is_read {
+        // PostToolUse/Read: prefetch graph neighbors for the file Claude just read.
+        let client = daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_TIMEOUT_SECS));
+        let url = format!("{}/prefetch-neighbors", config.daemon_base_url());
+        if let Ok(resp) = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "repo_root": repo_root.display().to_string(),
+                "file_path": file_path,
+                "session_id": session_id,
+                "limit": 5,
+            }))
+            .send()
+        {
+            if let Ok(prefetch) = resp.json::<budi_core::rpc::PrefetchResponse>() {
+                if !prefetch.context.is_empty() {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&AsyncSystemMessageOutput {
+                            system_message: prefetch.context,
+                        })?
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Write/Edit: trigger incremental index update.
     let client = daemon_client_with_timeout(Duration::from_secs(UPDATE_TIMEOUT_SECS));
     let url = format!("{}/update", config.daemon_base_url());
     let update_result = client
@@ -1998,6 +2140,24 @@ fn cmd_hook_post_tool_use() -> Result<()> {
             "changed_files": changed_files,
         })
     });
+    Ok(())
+}
+
+fn cmd_hook_session_start() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let Ok(repo_root) = config::find_repo_root(&cwd) else {
+        return Ok(());
+    };
+    if let Some(map) = budi_core::project_map::read_project_map(&repo_root) {
+        // Cap the map at ~3000 chars to stay within Claude's context budget.
+        let truncated: String = map.chars().take(3000).collect();
+        println!(
+            "{}",
+            serde_json::to_string(&AsyncSystemMessageOutput {
+                system_message: truncated,
+            })?
+        );
+    }
     Ok(())
 }
 
@@ -2112,6 +2272,17 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
         settings["hooks"] = json!({});
     }
 
+    settings["hooks"]["SessionStart"] = json!([
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "budi hook session-start"
+          }
+        ]
+      }
+    ]);
+
     settings["hooks"]["UserPromptSubmit"] = json!([
       {
         "hooks": [
@@ -2125,7 +2296,7 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
 
     settings["hooks"]["PostToolUse"] = json!([
       {
-        "matcher": "Write|Edit",
+        "matcher": "Write|Edit|Read|Glob",
         "hooks": [
           {
             "type": "command",
@@ -2532,7 +2703,7 @@ fn query_daemon_with_timeout_mode(
 ) -> Result<QueryResponse> {
     let url = format!("{}/query", config.daemon_base_url());
     let client = daemon_client_with_timeout(Duration::from_secs(timeout_secs));
-    send_query_request(&client, &url, repo_root, prompt, cwd, retrieval_mode)
+    send_query_request(&client, &url, repo_root, prompt, cwd, retrieval_mode, None)
 }
 
 fn send_query_request(
@@ -2542,6 +2713,7 @@ fn send_query_request(
     prompt: &str,
     cwd: Option<&Path>,
     retrieval_mode: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<QueryResponse> {
     let response: QueryResponse = client
         .post(url)
@@ -2550,6 +2722,7 @@ fn send_query_request(
             prompt: prompt.to_string(),
             cwd: cwd.map(|p| p.display().to_string()),
             retrieval_mode: retrieval_mode.map(str::to_string),
+            session_id: session_id.map(str::to_string),
         })
         .send()
         .context("Failed to send query request")?
@@ -2907,6 +3080,86 @@ mod tests {
         assert!(!sanitized.contains("@forcebudi"));
         assert!(!sanitized.contains("@nobudi"));
         assert!(sanitized.contains("map auth flow"));
+    }
+
+    #[test]
+    fn runtime_guard_context_filters_non_prod_and_weak_signals() {
+        let snippets = vec![
+            QueryResultItem {
+                path: "src/flask/config.py".to_string(),
+                start_line: 1,
+                end_line: 20,
+                score: 1.0,
+                reasons: vec!["runtime-env-api-hit".to_string()],
+                channel_scores: budi_core::rpc::QueryChannelScores::default(),
+                text: "from_envvar".to_string(),
+                slm_relevance_note: None,
+            },
+            QueryResultItem {
+                path: "tests/test_config.py".to_string(),
+                start_line: 1,
+                end_line: 20,
+                score: 0.9,
+                reasons: vec!["runtime-config-support-hit".to_string()],
+                channel_scores: budi_core::rpc::QueryChannelScores::default(),
+                text: "test".to_string(),
+                slm_relevance_note: None,
+            },
+            QueryResultItem {
+                path: "examples/tutorial/flaskr/__init__.py".to_string(),
+                start_line: 1,
+                end_line: 20,
+                score: 0.8,
+                reasons: vec!["runtime-config-path-hit".to_string()],
+                channel_scores: budi_core::rpc::QueryChannelScores::default(),
+                text: "example".to_string(),
+                slm_relevance_note: None,
+            },
+            QueryResultItem {
+                path: "src/flask/cli.py".to_string(),
+                start_line: 1,
+                end_line: 20,
+                score: 0.7,
+                reasons: vec!["runtime-config-support-hit".to_string()],
+                channel_scores: budi_core::rpc::QueryChannelScores::default(),
+                text: "load_dotenv".to_string(),
+                slm_relevance_note: None,
+            },
+            QueryResultItem {
+                path: "src/flask/app.py".to_string(),
+                start_line: 1,
+                end_line: 20,
+                score: 0.6,
+                reasons: vec!["semantic-hit".to_string()],
+                channel_scores: budi_core::rpc::QueryChannelScores::default(),
+                text: "app".to_string(),
+                slm_relevance_note: None,
+            },
+        ];
+
+        let context = build_runtime_guard_context(&snippets);
+        assert!(context.contains("[budi runtime guard]"));
+        assert!(context.contains("- src/flask/config.py"));
+        assert!(context.contains("- src/flask/cli.py"));
+        assert!(!context.contains("tests/test_config.py"));
+        assert!(!context.contains("examples/tutorial/flaskr/__init__.py"));
+        assert!(!context.contains("- src/flask/app.py"));
+    }
+
+    #[test]
+    fn runtime_guard_context_empty_without_runtime_signals() {
+        let snippets = vec![QueryResultItem {
+            path: "src/flask/app.py".to_string(),
+            start_line: 1,
+            end_line: 20,
+            score: 1.0,
+            reasons: vec!["semantic-hit".to_string()],
+            channel_scores: budi_core::rpc::QueryChannelScores::default(),
+            text: "app".to_string(),
+            slm_relevance_note: None,
+        }];
+        let context = build_runtime_guard_context(&snippets);
+        assert!(context.is_empty());
     }
 
     #[test]

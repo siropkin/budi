@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 blake3.workspace = true
 chrono.workspace = true
 fastembed.workspace = true

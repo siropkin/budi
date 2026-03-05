@@ -3,6 +3,14 @@
 [![CI](https://github.com/siropkin/budi/actions/workflows/ci.yml/badge.svg)](https://github.com/siropkin/budi/actions/workflows/ci.yml)
 [![Release](https://github.com/siropkin/budi/actions/workflows/release.yml/badge.svg)](https://github.com/siropkin/budi/actions/workflows/release.yml)
 
+```text
+ ____            _ _
+| __ ) _   _  __| (_)
+|  _ \| | | |/ _` | |
+| |_) | |_| | (_| | |
+|____/ \__,_|\__,_|_|
+```
+
 `budi` is a local context layer for Claude Code.
 It injects relevant repo snippets before Claude answers, so you spend less on discovery and get to decisions faster.
 
@@ -11,10 +19,8 @@ It injects relevant repo snippets before Claude answers, so you spend less on di
 Latest public benchmark (React + Flask + Express, 9 judged tasks):
 
 - **32.16% faster** API-time responses with `budi`
-- **31.48% faster** end-to-end wall time
+- **31.48% faster** time from prompt submit to final answer
 - **18.42% lower** total cost
-- **9/9** hook injections succeeded (`reason=ok`)
-- Judge quality was mixed in this pass (see full evidence below)
 
 Full evidence (exact repos, prompts, injected context excerpts, final responses, judge rationale):
 - `docs/benchmark-details.md`

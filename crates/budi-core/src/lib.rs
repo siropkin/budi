@@ -4,6 +4,8 @@ pub mod daemon;
 pub mod hooks;
 pub mod index;
 mod index_scope;
+pub mod pre_filter;
+pub mod project_map;
 pub mod reason_codes;
 pub mod retrieval;
 pub mod rpc;

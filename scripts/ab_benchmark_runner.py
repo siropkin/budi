@@ -35,11 +35,19 @@ class CmdResult:
     duration_ms: float
 
 
+def _claude_env() -> dict:
+    """Return env with CLAUDECODE unset to allow nested claude invocations."""
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    return env
+
+
 def run_cmd(
     args: list[str],
     cwd: Path,
     input_text: str | None = None,
     timeout_sec: int = 300,
+    env: dict | None = None,
 ) -> CmdResult:
     started = time.perf_counter()
     proc = subprocess.run(
@@ -49,6 +57,7 @@ def run_cmd(
         text=True,
         capture_output=True,
         timeout=timeout_sec,
+        env=env,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     return CmdResult(
@@ -176,6 +185,12 @@ def dedupe_prompts(prompts: list[str]) -> list[str]:
     return out
 
 
+def apply_prompt_limit(prompts: list[str], max_prompts: int) -> list[str]:
+    if max_prompts <= 0:
+        return list(prompts)
+    return list(prompts[:max_prompts])
+
+
 def resolve_prompts(
     prompts_file: str,
     inline_prompts: list[str],
@@ -266,26 +281,51 @@ def ensure_budi_ready(repo_root: Path) -> None:
             )
 
 
-def ensure_debug_io_enabled(repo_root: Path) -> str:
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        rendered = ", ".join(_toml_literal(item) for item in value)
+        return f"[{rendered}]"
+    raise TypeError(f"Unsupported override type: {type(value).__name__}")
+
+
+def _apply_toml_pairs(raw: str, pairs: dict[str, Any]) -> str:
+    updated = raw
+    for key, value in pairs.items():
+        pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
+        rendered = _toml_literal(value)
+        if pattern.search(updated):
+            updated = pattern.sub(f"{key} = {rendered}", updated)
+        else:
+            if not updated.endswith("\n"):
+                updated += "\n"
+            updated += f"{key} = {rendered}\n"
+    return updated
+
+
+def ensure_debug_io_enabled(repo_root: Path, variant_overrides: dict[str, Any] | None = None) -> str:
     cfg_path = resolve_budi_config_path(repo_root)
     if not cfg_path.exists():
         raise RuntimeError(f"Missing config file: {cfg_path}")
 
     original_raw = cfg_path.read_text()
-    raw = original_raw
-    pairs = {
-        "debug_io": "true",
-        "debug_io_full_text": "false",
-        "debug_io_max_chars": "1500",
-    }
-    for key, value in pairs.items():
-        pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
-        if pattern.search(raw):
-            raw = pattern.sub(f"{key} = {value}", raw)
-        else:
-            if not raw.endswith("\n"):
-                raw += "\n"
-            raw += f"{key} = {value}\n"
+    raw = _apply_toml_pairs(
+        original_raw,
+        {
+            "debug_io": True,
+            "debug_io_full_text": False,
+            "debug_io_max_chars": 1500,
+        },
+    )
+    if variant_overrides:
+        raw = _apply_toml_pairs(raw, variant_overrides)
     if raw != original_raw:
         cfg_path.write_text(raw)
     # Keep benchmark runs non-disruptive for other terminals. Hooks and daemon
@@ -303,11 +343,44 @@ def restore_debug_io_config(repo_root: Path, original_raw: str) -> None:
         cfg_path.write_text(original_raw)
 
 
+def _load_variant_overrides(
+    variant_overrides_file: str,
+    variant_overrides_json: str,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+
+    if variant_overrides_file:
+        path = Path(variant_overrides_file).expanduser().resolve()
+        if not path.exists():
+            raise SystemExit(f"variant overrides file not found: {path}")
+        try:
+            parsed = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:  # noqa: PERF203
+            raise SystemExit(f"invalid variant overrides JSON in {path}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise SystemExit(f"variant overrides file must contain a JSON object: {path}")
+        merged.update(parsed)
+
+    if variant_overrides_json:
+        try:
+            parsed = json.loads(variant_overrides_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"invalid --variant-overrides-json payload: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise SystemExit("--variant-overrides-json must be a JSON object")
+        merged.update(parsed)
+
+    for key in merged:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            raise SystemExit(f"invalid override key: {key!r}")
+    return merged
+
+
 def run_claude_prompt(
     repo_root: Path,
     prompt: str,
     disable_hooks: bool,
-    timeout_sec: int = 420,
+    timeout_sec: int,
 ) -> dict[str, Any]:
     settings = json.dumps({"disableAllHooks": disable_hooks})
     args = [
@@ -323,7 +396,7 @@ def run_claude_prompt(
         "--settings",
         settings,
     ]
-    cmd = run_cmd(args, cwd=repo_root, input_text=prompt, timeout_sec=timeout_sec)
+    cmd = run_cmd(args, cwd=repo_root, input_text=prompt, timeout_sec=timeout_sec, env=_claude_env())
     if cmd.returncode != 0:
         return {
             "ok": False,
@@ -392,7 +465,13 @@ def truncate_text(text: str, max_chars: int = 4000) -> str:
     return text[:max_chars] + f"\n...[truncated {len(text) - max_chars} chars]"
 
 
-def judge_pair(repo_root: Path, prompt: str, no_budi_result: str, with_budi_result: str) -> dict[str, Any]:
+def judge_pair(
+    repo_root: Path,
+    prompt: str,
+    no_budi_result: str,
+    with_budi_result: str,
+    timeout_sec: int,
+) -> dict[str, Any]:
     schema = {
         "type": "object",
         "properties": {
@@ -455,7 +534,7 @@ def judge_pair(repo_root: Path, prompt: str, no_budi_result: str, with_budi_resu
         "--json-schema",
         json.dumps(schema),
     ]
-    cmd = run_cmd(args, cwd=repo_root, input_text=judge_prompt, timeout_sec=300)
+    cmd = run_cmd(args, cwd=repo_root, input_text=judge_prompt, timeout_sec=timeout_sec, env=_claude_env())
     if cmd.returncode != 0:
         return {
             "ok": False,
@@ -525,6 +604,8 @@ def build_markdown(
     judge_summary: dict[str, Any],
     prompt_set: dict[str, Any],
     run_label: str,
+    variant_id: str,
+    variant_overrides: dict[str, Any],
 ) -> str:
     lines: list[str] = []
     lines.append(f"# A/B Benchmark Report ({repo_root.name})")
@@ -532,6 +613,9 @@ def build_markdown(
     lines.append(f"- Generated at: {datetime.now(timezone.utc).isoformat()}")
     if run_label:
         lines.append(f"- Run label: `{run_label}`")
+    lines.append(f"- Variant: `{variant_id}`")
+    if variant_overrides:
+        lines.append(f"- Variant overrides: `{json.dumps(variant_overrides, sort_keys=True)}`")
     lines.append(f"- Prompt source: `{prompt_set.get('source', 'unknown')}`")
     lines.append(f"- Prompt count: {int(prompt_set.get('count', len(prompts)))}")
     lines.append(f"- Prompt set SHA256: `{prompt_set.get('fingerprint_sha256', '')}`")
@@ -563,6 +647,10 @@ def build_markdown(
     lines.append("| Metric | Value |")
     lines.append("|---|---:|")
     lines.append(f"| Prompts evaluated | {len(prompts)} |")
+    lines.append(f"| Rows judged | {int(judge_summary.get('judged_rows', 0))} |")
+    lines.append(f"| Judge attempts | {int(judge_summary.get('judge_attempted_rows', 0))} |")
+    lines.append(f"| Judge skipped | {bool(judge_summary.get('judge_skipped', False))} |")
+    lines.append(f"| Judge limit | {int(judge_summary.get('judge_limit', 0))} |")
     lines.append(f"| Winner: with_budi | {judge_summary.get('with_budi_wins', 0)} |")
     lines.append(f"| Winner: no_budi | {judge_summary.get('no_budi_wins', 0)} |")
     lines.append(f"| Winner: tie | {judge_summary.get('ties', 0)} |")
@@ -653,11 +741,68 @@ def main() -> None:
         default="",
         help="Optional label stored in output for cross-run/repo comparisons",
     )
+    parser.add_argument(
+        "--variant-id",
+        default="v1_current",
+        help="Variant identifier stored in results metadata",
+    )
+    parser.add_argument(
+        "--variant-overrides-file",
+        default="",
+        help="Optional JSON file with budi config key/value overrides for this run",
+    )
+    parser.add_argument(
+        "--variant-overrides-json",
+        default="",
+        help="Optional inline JSON object with budi config overrides for this run",
+    )
+    parser.add_argument(
+        "--max-prompts",
+        type=int,
+        default=0,
+        help="Run only the first N prompts after prompt resolution (0 = all)",
+    )
+    parser.add_argument(
+        "--skip-judge",
+        action="store_true",
+        help="Skip LLM judge pass (faster, but no quality/grounding metrics)",
+    )
+    parser.add_argument(
+        "--judge-limit",
+        type=int,
+        default=0,
+        help="Judge only first N eligible rows (0 = all)",
+    )
+    parser.add_argument(
+        "--claude-timeout-sec",
+        type=int,
+        default=420,
+        help="Timeout for each no_budi/with_budi Claude run",
+    )
+    parser.add_argument(
+        "--judge-timeout-sec",
+        type=int,
+        default=300,
+        help="Timeout for each judge Claude run",
+    )
+    parser.add_argument(
+        "--disable-with-budi-retry",
+        action="store_true",
+        help="Disable second with_budi attempt when hook trace looks unhealthy",
+    )
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).expanduser().resolve()
     if not repo_root.exists():
         raise SystemExit(f"Repo does not exist: {repo_root}")
+    if args.max_prompts < 0:
+        raise SystemExit("--max-prompts must be >= 0")
+    if args.judge_limit < 0:
+        raise SystemExit("--judge-limit must be >= 0")
+    if args.claude_timeout_sec < 30:
+        raise SystemExit("--claude-timeout-sec must be >= 30")
+    if args.judge_timeout_sec < 30:
+        raise SystemExit("--judge-timeout-sec must be >= 30")
 
     prompts: list[str] = []
     prompt_source = ""
@@ -667,6 +812,7 @@ def main() -> None:
             inline_prompts=args.prompt,
             use_default_prompts=not args.no_default_prompts,
         )
+        prompts = apply_prompt_limit(prompts, args.max_prompts)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else (
@@ -676,6 +822,10 @@ def main() -> None:
 
     rows: list[dict[str, Any]] = []
     source_results_json = ""
+    variant_overrides = _load_variant_overrides(
+        args.variant_overrides_file,
+        args.variant_overrides_json,
+    )
     original_config_raw: str | None = None
     try:
         if args.reuse_results_json:
@@ -689,28 +839,45 @@ def main() -> None:
                 raise SystemExit("reuse results file has no rows")
             rows = loaded_rows
             prompts = [str(r.get("prompt", "")) for r in rows if str(r.get("prompt", "")).strip()]
+            prompts = apply_prompt_limit(prompts, args.max_prompts)
+            if args.max_prompts > 0:
+                rows = rows[: len(prompts)]
             prompt_source = f"reuse:{source_path}"
             print(f"[ab] reusing rows from: {source_path}", flush=True)
         else:
             ensure_budi_ready(repo_root)
-            original_config_raw = ensure_debug_io_enabled(repo_root)
+            original_config_raw = ensure_debug_io_enabled(repo_root, variant_overrides)
 
             for idx, prompt in enumerate(prompts, start=1):
                 print(f"[ab] prompt {idx}/{len(prompts)}", flush=True)
-                no_budi = run_claude_prompt(repo_root, prompt, disable_hooks=True)
-                with_budi = run_claude_prompt(repo_root, prompt, disable_hooks=False)
+                no_budi = run_claude_prompt(
+                    repo_root,
+                    prompt,
+                    disable_hooks=True,
+                    timeout_sec=args.claude_timeout_sec,
+                )
+                with_budi = run_claude_prompt(
+                    repo_root,
+                    prompt,
+                    disable_hooks=False,
+                    timeout_sec=args.claude_timeout_sec,
+                )
                 with_budi_hook_retry = False
                 with_budi_hook = {}
                 with_budi_session_id = str(with_budi.get("session_id", "")) if isinstance(with_budi, dict) else ""
                 if with_budi_session_id:
                     with_budi_hook = collect_hook_trace_for_session(repo_root, with_budi_session_id)
-                if with_budi.get("ok") and not hook_trace_is_healthy(with_budi_hook):
+                if (
+                    not args.disable_with_budi_retry
+                    and with_budi.get("ok")
+                    and not hook_trace_is_healthy(with_budi_hook)
+                ):
                     with_budi_hook_retry = True
                     with_budi_retry = run_claude_prompt(
                         repo_root,
                         prompt,
                         disable_hooks=False,
-                        timeout_sec=480,
+                        timeout_sec=max(args.claude_timeout_sec, 480),
                     )
                     retry_session_id = str(with_budi_retry.get("session_id", ""))
                     retry_hook = (
@@ -744,19 +911,31 @@ def main() -> None:
             flush=True,
         )
 
-        # Always (re)run judge pass so quality metrics reflect latest parser logic.
+        judge_attempts = 0
+        judge_budget = args.judge_limit if args.judge_limit > 0 else None
         for idx, row in enumerate(rows, start=1):
             prompt = str(row.get("prompt", ""))
             no_budi = row.get("no_budi", {})
             with_budi = row.get("with_budi", {})
             judge = {"ok": False}
-            if isinstance(no_budi, dict) and isinstance(with_budi, dict) and no_budi.get("ok") and with_budi.get("ok"):
+            if args.skip_judge:
+                judge = {"ok": False, "error": "judge_skipped"}
+            elif judge_budget is not None and judge_attempts >= judge_budget:
+                judge = {"ok": False, "error": "judge_not_selected"}
+            elif (
+                isinstance(no_budi, dict)
+                and isinstance(with_budi, dict)
+                and no_budi.get("ok")
+                and with_budi.get("ok")
+            ):
                 print(f"[ab] judging {idx}/{len(rows)}", flush=True)
+                judge_attempts += 1
                 judge = judge_pair(
                     repo_root,
                     prompt,
                     str(no_budi.get("result", "")),
                     str(with_budi.get("result", "")),
+                    timeout_sec=args.judge_timeout_sec,
                 )
             row["judge"] = judge
 
@@ -773,6 +952,10 @@ def main() -> None:
             "with_budi_wins": with_budi_wins,
             "no_budi_wins": no_budi_wins,
             "ties": ties,
+            "judged_rows": len(judges),
+            "judge_attempted_rows": judge_attempts,
+            "judge_skipped": bool(args.skip_judge),
+            "judge_limit": args.judge_limit,
             "avg_score_no_budi": statistics.fmean([safe_num(j.get("score_no_budi")) for j in judges])
             if judges
             else 0.0,
@@ -795,6 +978,18 @@ def main() -> None:
             "repo_root": str(repo_root),
             "run_label": args.run_label,
             "source_results_json": source_results_json,
+            "variant": {
+                "id": args.variant_id,
+                "overrides": variant_overrides,
+            },
+            "run_options": {
+                "max_prompts": args.max_prompts,
+                "skip_judge": bool(args.skip_judge),
+                "judge_limit": args.judge_limit,
+                "claude_timeout_sec": args.claude_timeout_sec,
+                "judge_timeout_sec": args.judge_timeout_sec,
+                "disable_with_budi_retry": bool(args.disable_with_budi_retry),
+            },
             "prompt_set": prompt_set,
             "prompts": prompts,
             "rows": rows,
@@ -805,7 +1000,17 @@ def main() -> None:
         json_path = out_dir / "ab-results.json"
         json_path.write_text(json.dumps(results, indent=2))
 
-        md = build_markdown(repo_root, prompts, rows, summary, judge_summary, prompt_set, args.run_label)
+        md = build_markdown(
+            repo_root,
+            prompts,
+            rows,
+            summary,
+            judge_summary,
+            prompt_set,
+            args.run_label,
+            args.variant_id,
+            variant_overrides,
+        )
         md_path = out_dir / "ab-results.md"
         md_path.write_text(md)
 

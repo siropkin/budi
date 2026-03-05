@@ -13,8 +13,8 @@ use budi_core::config::{self, BudiConfig, DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PO
 use budi_core::daemon::DaemonState;
 use budi_core::index;
 use budi_core::rpc::{
-    IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryRequest,
-    QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
+    IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, PrefetchRequest,
+    PrefetchResponse, QueryRequest, QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
 };
 use clap::{Parser, Subcommand};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -150,6 +150,7 @@ async fn main() -> Result<()> {
         .route("/progress", post(progress_repo))
         .route("/update", post(update_repo))
         .route("/status", post(status_repo))
+        .route("/prefetch-neighbors", post(prefetch_neighbors))
         .with_state(app_state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -288,6 +289,27 @@ async fn status_repo(
     response.watch_events_seen = watch_metrics.seen;
     response.watch_events_accepted = watch_metrics.accepted;
     response.watch_events_dropped = watch_metrics.dropped;
+    Ok(Json(response))
+}
+
+async fn prefetch_neighbors(
+    State(state): State<AppState>,
+    Json(request): Json<PrefetchRequest>,
+) -> Result<Json<PrefetchResponse>, (StatusCode, String)> {
+    let config = request_config(&request.repo_root).map_err(internal_error)?;
+    state
+        .autosync
+        .ensure_repo_started(
+            &request.repo_root,
+            state.daemon_state.clone(),
+            config.clone(),
+        )
+        .await;
+    let response = state
+        .daemon_state
+        .prefetch_neighbors(request, &config)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(response))
 }
 

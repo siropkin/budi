@@ -21,22 +21,80 @@ fn looks_like_symbol(line: &str) -> bool {
         || trimmed.starts_with("function ")
 }
 
+/// Language keywords to skip when extracting the symbol name.
+const SYMBOL_KEYWORDS: &[&str] = &[
+    // Rust
+    "pub",
+    "fn",
+    "async",
+    "unsafe",
+    "extern",
+    "const",
+    "static",
+    "mut",
+    "impl",
+    "trait",
+    "struct",
+    "enum",
+    "type",
+    "let",
+    "use",
+    // JS/TS
+    "function",
+    "export",
+    "default",
+    "interface",
+    "class",
+    "var",
+    "let",
+    "const",
+    "abstract",
+    "override",
+    // Python
+    "def",
+    "class",
+    "async",
+    // Java/C#/Go
+    "public",
+    "private",
+    "protected",
+    "static",
+    "final",
+    "abstract",
+    "virtual",
+    "override",
+    "inline",
+    "func",
+];
+
 fn symbol_from_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let mut name = String::new();
+    // Walk word tokens, skip language keywords, return first real identifier
+    let mut token = String::new();
     for ch in trimmed.chars() {
-        if ch.is_alphanumeric() || ch == '_' || ch == ':' || ch == '.' {
-            name.push(ch);
-            continue;
-        }
-        if !name.is_empty() {
-            break;
+        if ch.is_alphanumeric() || ch == '_' {
+            token.push(ch);
+        } else {
+            if !token.is_empty() {
+                let tok = token.drain(..).collect::<String>();
+                if !SYMBOL_KEYWORDS.contains(&tok.as_str()) && tok.len() >= 2 {
+                    return Some(tok);
+                }
+            }
+            // Stop at '(' — don't read into parameter types
+            if ch == '(' {
+                break;
+            }
         }
     }
-    if name.is_empty() { None } else { Some(name) }
+    // Handle token at end of string
+    if !token.is_empty() && !SYMBOL_KEYWORDS.contains(&token.as_str()) && token.len() >= 2 {
+        return Some(token);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy)]

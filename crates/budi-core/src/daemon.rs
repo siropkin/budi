@@ -1,23 +1,35 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
 use crate::index::{self, RuntimeIndex};
+use crate::pre_filter;
+use crate::project_map;
+use crate::reason_codes::SKIP_REASON_NON_CODE_INTENT;
 use crate::retrieval;
 use crate::rpc::{
-    IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryRequest,
-    QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
+    IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, PrefetchRequest,
+    PrefetchResponse, QueryDiagnostics, QueryRequest, QueryResponse, StatusRequest, StatusResponse,
+    UpdateRequest,
 };
+
+const SESSION_TTL_SECS: u64 = 1800;
 
 const PROGRESS_PERSIST_INTERVAL_MS: u128 = 2_000;
 const WRITE_RETRY_ATTEMPTS: usize = 3;
 const WRITE_RETRY_BASE_DELAY_MS: u64 = 75;
 const WRITE_RETRY_MAX_DELAY_MS: u64 = 600;
+
+#[derive(Debug, Default)]
+struct SessionState {
+    injected_keys: HashSet<String>, // "path:start_line" of already-injected snippets
+    last_activity: Option<Instant>,
+}
 
 #[derive(Clone, Default)]
 pub struct DaemonState {
@@ -30,6 +42,7 @@ pub struct DaemonState {
     progress: Arc<StdMutex<HashMap<String, IndexProgressSnapshot>>>,
     update_metrics: Arc<StdMutex<HashMap<String, UpdateRetryMetrics>>>,
     job_counter: Arc<StdMutex<u64>>,
+    sessions: Arc<StdMutex<HashMap<String, SessionState>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -140,20 +153,165 @@ impl DaemonState {
     }
 
     pub async fn query(&self, request: QueryRequest, config: &BudiConfig) -> Result<QueryResponse> {
+        // Step 1: Pre-filter — exit immediately for unambiguous non-code prompts.
+        if pre_filter::is_obviously_non_code(&request.prompt) {
+            return Ok(QueryResponse {
+                total_candidates: 0,
+                context: String::new(),
+                snippets: Vec::new(),
+                call_graph_summary: None,
+                detected_intent: None,
+                timing_ms: None,
+                diagnostics: QueryDiagnostics {
+                    intent: "non-code".to_string(),
+                    confidence: 0.0,
+                    top_score: 0.0,
+                    margin: 0.0,
+                    signals: Vec::new(),
+                    recommended_injection: false,
+                    skip_reason: Some(SKIP_REASON_NON_CODE_INTENT.to_string()),
+                },
+            });
+        }
+
+        // Step 2: Hybrid retrieval with equal channel weights.
+        let t_start = Instant::now();
         let repo_root = Path::new(&request.repo_root);
         let runtime = self.ensure_loaded(repo_root, config).await?;
+        let t_load_ms = t_start.elapsed().as_millis() as u64;
         let query_embedding = index::embed_query(repo_root, &request.prompt)?;
+        let t_embed_ms = t_start.elapsed().as_millis() as u64;
         let runtime_guard = runtime.lock().await;
         let cwd = request.cwd.as_deref().map(Path::new);
         let retrieval_mode = retrieval::parse_retrieval_mode(request.retrieval_mode.as_deref());
-        retrieval::build_query_response(
+        let mut response = retrieval::build_query_response(
             &runtime_guard,
             &request.prompt,
             query_embedding.as_deref(),
             cwd,
             retrieval_mode,
             config,
-        )
+        )?;
+        drop(runtime_guard);
+        let t_retrieval_ms = t_start.elapsed().as_millis() as u64;
+
+        // Step 3: Session deduplication — remove snippets Claude already saw this session.
+        if let Some(ref sid) = request.session_id {
+            self.dedup_session_snippets(sid, &mut response.snippets);
+        }
+        let t_dedup_ms = t_start.elapsed().as_millis() as u64;
+
+        // Step 4: Score-based injection decision.
+        let should_inject = response
+            .snippets
+            .iter()
+            .any(|s| s.score >= config.min_inject_score);
+        response.diagnostics.recommended_injection = should_inject;
+        response.diagnostics.skip_reason = if should_inject {
+            None
+        } else {
+            Some("low-score".to_string())
+        };
+
+        // Step 5: Call graph summary (structural oracle) — prepended to context.
+        let runtime_guard = runtime.lock().await;
+        let call_graph = if should_inject {
+            retrieval::build_call_graph_summary(&runtime_guard, &response.snippets, 600)
+        } else {
+            None
+        };
+        drop(runtime_guard);
+        let t_callgraph_ms = t_start.elapsed().as_millis() as u64;
+
+        // Rebuild context after dedup + prepend call graph summary.
+        let base_context = if request.session_id.is_some() || call_graph.is_some() {
+            retrieval::format_context(&response.snippets, config.context_char_budget)
+        } else {
+            response.context.clone()
+        };
+        response.context = if let Some(ref cg) = call_graph {
+            format!("{}\n{}", cg, base_context)
+        } else {
+            base_context
+        };
+        response.call_graph_summary = call_graph;
+
+        // Record injected snippets in session state.
+        if should_inject {
+            if let Some(ref sid) = request.session_id {
+                self.record_session_snippets(sid, &response.snippets);
+            }
+        }
+
+        // Phase I: Per-step timing (populated when debug_io is enabled).
+        if config.debug_io {
+            let mut timing = HashMap::new();
+            timing.insert("load_ms".to_string(), t_load_ms);
+            timing.insert("embed_ms".to_string(), t_embed_ms.saturating_sub(t_load_ms));
+            timing.insert(
+                "retrieval_ms".to_string(),
+                t_retrieval_ms.saturating_sub(t_embed_ms),
+            );
+            timing.insert(
+                "dedup_ms".to_string(),
+                t_dedup_ms.saturating_sub(t_retrieval_ms),
+            );
+            timing.insert(
+                "callgraph_ms".to_string(),
+                t_callgraph_ms.saturating_sub(t_dedup_ms),
+            );
+            timing.insert("total_ms".to_string(), t_callgraph_ms);
+            response.timing_ms = Some(timing);
+        }
+
+        Ok(response)
+    }
+
+    pub async fn prefetch_neighbors(
+        &self,
+        request: PrefetchRequest,
+        config: &BudiConfig,
+    ) -> Result<PrefetchResponse> {
+        // Skip if this file was already prefetched this session.
+        if self.session_has_path(&request.session_id, &request.file_path) {
+            return Ok(PrefetchResponse {
+                context: String::new(),
+                neighbor_paths: Vec::new(),
+                skipped: true,
+            });
+        }
+
+        let repo_root = Path::new(&request.repo_root);
+        let runtime = self.ensure_loaded(repo_root, config).await?;
+        let runtime_guard = runtime.lock().await;
+
+        // Strip repo_root prefix from file_path to get index-relative path.
+        let file_path_rel = strip_repo_root_prefix(&request.file_path, &request.repo_root);
+
+        let limit = request.limit.unwrap_or(5);
+        let (snippets, context) = retrieval::prefetch_neighbors_for_file(
+            &runtime_guard,
+            &file_path_rel,
+            limit,
+            config.context_char_budget,
+        );
+        drop(runtime_guard);
+
+        let neighbor_paths: Vec<String> = snippets.iter().map(|s| s.path.clone()).collect();
+
+        // Record the source file and injected neighbors in the session.
+        self.record_session_path(&request.session_id, &request.file_path);
+        if !neighbor_paths.is_empty() {
+            for path in &neighbor_paths {
+                self.record_session_path(&request.session_id, path);
+            }
+        }
+
+        Ok(PrefetchResponse {
+            context,
+            neighbor_paths,
+            skipped: false,
+        })
     }
 
     pub async fn index(&self, request: IndexRequest, config: &BudiConfig) -> Result<IndexResponse> {
@@ -506,6 +664,12 @@ impl DaemonState {
                 return;
             }
         };
+
+        // Generate project map while we still own the runtime.
+        if let Err(err) = project_map::write_project_map(&runtime, &repo_root_path) {
+            tracing::warn!("Failed writing project map for {}: {:#}", repo_key, err);
+        }
+
         self.repos
             .write()
             .await
@@ -859,6 +1023,53 @@ impl DaemonState {
         }
     }
 
+    fn sessions_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionState>> {
+        match self.sessions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn dedup_session_snippets(&self, session_id: &str, snippets: &mut Vec<crate::rpc::QueryResultItem>) {
+        let guard = self.sessions_guard();
+        if let Some(session) = guard.get(session_id) {
+            snippets.retain(|s| {
+                let key = format!("{}:{}", s.path, s.start_line);
+                !session.injected_keys.contains(&key)
+            });
+        }
+    }
+
+    fn record_session_snippets(&self, session_id: &str, snippets: &[crate::rpc::QueryResultItem]) {
+        let mut guard = self.sessions_guard();
+        let session = guard.entry(session_id.to_string()).or_default();
+        session.last_activity = Some(Instant::now());
+        for s in snippets {
+            session.injected_keys.insert(format!("{}:{}", s.path, s.start_line));
+        }
+        // Lazy TTL cleanup: remove inactive sessions.
+        guard.retain(|_, v| {
+            v.last_activity
+                .map(|t| t.elapsed().as_secs() < SESSION_TTL_SECS)
+                .unwrap_or(true)
+        });
+    }
+
+    fn session_has_path(&self, session_id: &str, file_path: &str) -> bool {
+        let guard = self.sessions_guard();
+        guard
+            .get(session_id)
+            .map(|s| s.injected_keys.contains(file_path))
+            .unwrap_or(false)
+    }
+
+    fn record_session_path(&self, session_id: &str, path: &str) {
+        let mut guard = self.sessions_guard();
+        let session = guard.entry(session_id.to_string()).or_default();
+        session.last_activity = Some(Instant::now());
+        session.injected_keys.insert(path.to_string());
+    }
+
     async fn queue_update_paths(&self, repo_key: &str, changed_files: &[String]) {
         let mut queue = self.queued_updates.lock().await;
         let entry = queue.entry(repo_key.to_string()).or_default();
@@ -1074,6 +1285,16 @@ fn retry_backoff_delay(attempt: usize) -> Duration {
     Duration::from_millis(delay_ms)
 }
 
+/// Convert an absolute file path to a repo-relative slash path for index lookup.
+fn strip_repo_root_prefix<'a>(file_path: &'a str, repo_root: &str) -> String {
+    let repo_prefix = repo_root.trim_end_matches('/');
+    let stripped = file_path
+        .strip_prefix(repo_prefix)
+        .unwrap_or(file_path)
+        .trim_start_matches('/');
+    stripped.replace('\\', "/")
+}
+
 fn detect_hooks(repo_root: &Path) -> bool {
     let settings_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
     let Ok(raw) = std::fs::read_to_string(settings_path) else {
@@ -1095,3 +1316,4 @@ fn now_unix_ms() -> u128 {
         .map(|d| d.as_millis())
         .unwrap_or(0)
 }
+

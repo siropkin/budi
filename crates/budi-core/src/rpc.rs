@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,6 +10,24 @@ pub struct QueryRequest {
     pub cwd: Option<String>,
     #[serde(default)]
     pub retrieval_mode: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrefetchRequest {
+    pub repo_root: String,
+    pub file_path: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrefetchResponse {
+    pub context: String,
+    pub neighbor_paths: Vec<String>,
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -50,6 +70,8 @@ pub struct QueryResultItem {
     #[serde(default)]
     pub channel_scores: QueryChannelScores,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slm_relevance_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +81,12 @@ pub struct QueryResponse {
     pub snippets: Vec<QueryResultItem>,
     #[serde(default)]
     pub diagnostics: QueryDiagnostics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_graph_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_ms: Option<HashMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
