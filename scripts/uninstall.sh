@@ -9,7 +9,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/uninstall.sh [options]
 
-Remove installed budi binaries.
+Remove installed budi binaries, backup files, and LaunchAgents.
 
 Options:
   --prefix <dir>       Install prefix used during install (default: ~/.local)
@@ -67,7 +67,7 @@ main() {
     fi
   fi
 
-  local bins=(budi budi-daemon)
+  local bins=(budi budi-daemon budi-bench)
   for bin in "${bins[@]}"; do
     local target="$BIN_DIR/$bin"
     if [[ -e "$target" ]]; then
@@ -76,7 +76,26 @@ main() {
     else
       log "Not found (skip): $target"
     fi
+    # Remove any timestamped backup files (e.g. budi.bak.20260302124939)
+    local baks=("$BIN_DIR/$bin".bak.*)
+    for bak in "${baks[@]}"; do
+      [[ -e "$bak" ]] || continue
+      rm -f "$bak"
+      log "Removed $bak"
+    done
   done
+
+  # Remove budi LaunchAgents
+  local launch_agents_dir="$HOME/Library/LaunchAgents"
+  if [[ -d "$launch_agents_dir" ]]; then
+    local plist
+    for plist in "$launch_agents_dir"/com.siropkin.budi.*.plist; do
+      [[ -e "$plist" ]] || continue
+      launchctl unload "$plist" 2>/dev/null || true
+      rm -f "$plist"
+      log "Removed LaunchAgent $plist"
+    done
+  fi
 
   log "Uninstall complete."
 }
