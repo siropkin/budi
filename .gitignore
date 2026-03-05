@@ -17,3 +17,9 @@
 # Bench artifacts
 bench-output/
 tmp/
+ab-bench-*/
+react-eval-out*/
+toolcall-bench-out*/
+
+# Claude project files
+.claude/
