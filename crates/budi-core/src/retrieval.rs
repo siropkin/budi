@@ -518,6 +518,7 @@ fn intent_retrieval_limit(kind: QueryIntentKind) -> usize {
     match kind {
         QueryIntentKind::SymbolDefinition | QueryIntentKind::FlowTrace => 5,
         QueryIntentKind::Architecture | QueryIntentKind::TestLookup => 8,
+        QueryIntentKind::SymbolUsage => 5,
         _ => 6,
     }
 }
@@ -528,10 +529,14 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
     };
     let relative = (top.score * 0.40_f32).max(0.05);
     match intent_kind {
-        QueryIntentKind::FlowTrace => relative.max(0.20),
+        // Raised to 0.25: lexical-only hits from common query words ("return", "call")
+        // at scores 0.23-0.24 add noise for focused call-chain questions.
+        QueryIntentKind::FlowTrace => relative.max(0.25),
         QueryIntentKind::SymbolDefinition => relative.max(0.20),
         QueryIntentKind::TestLookup => relative.max(0.22),
         QueryIntentKind::RuntimeConfig => relative.max(0.18),
+        // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
+        QueryIntentKind::SymbolUsage => relative.max(0.22),
         _ => relative,
     }
 }
