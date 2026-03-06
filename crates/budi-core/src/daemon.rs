@@ -215,8 +215,12 @@ impl DaemonState {
 
         // Step 5: Call graph summary (structural oracle) — prepended to context.
         // Phase K1: per-intent budget — suppress for breadth intents, boost for flow-trace.
+        // Phase L2: FlowTrace budget is gated on top-snippet confidence (≥0.30 → 1200, else 600).
         let call_graph_budget = match response.detected_intent.as_deref() {
-            Some("flow-trace") => 1200,
+            Some("flow-trace") => {
+                let top_score = response.snippets.first().map(|s| s.score).unwrap_or(0.0);
+                if top_score >= 0.30 { 1200 } else { 600 }
+            }
             Some("symbol-definition") | Some("symbol-usage") => 800,
             Some("architecture")
             | Some("test-lookup")
@@ -237,9 +241,15 @@ impl DaemonState {
         drop(runtime_guard);
         let t_callgraph_ms = t_start.elapsed().as_millis() as u64;
 
+        // Phase L1: Deduct call graph from snippet budget so total ≤ context_char_budget.
+        let base_budget = if call_graph.is_some() {
+            config.context_char_budget.saturating_sub(call_graph_budget)
+        } else {
+            config.context_char_budget
+        };
         // Rebuild context after dedup + prepend call graph summary.
         let base_context = if request.session_id.is_some() || call_graph.is_some() {
-            retrieval::format_context(&response.snippets, config.context_char_budget)
+            retrieval::format_context(&response.snippets, base_budget)
         } else {
             response.context.clone()
         };
@@ -255,12 +265,11 @@ impl DaemonState {
             if let Some(ref sid) = request.session_id {
                 self.record_session_snippets(sid, &response.snippets);
             }
-            // Phase J: Persist session affinity for next-session context (non-blocking).
-            let paths: Vec<String> =
-                response.snippets.iter().map(|s| s.path.clone()).collect();
+            // Phase J+M1: Persist session affinity with anchor lines for next-session context.
+            let snippets_owned = response.snippets.clone();
             let repo_root_owned = repo_root.to_path_buf();
             tokio::task::spawn_blocking(move || {
-                let _ = update_session_affinity(&repo_root_owned, &paths);
+                let _ = update_session_affinity(&repo_root_owned, &snippets_owned);
             });
         }
 
@@ -1331,16 +1340,32 @@ pub fn resolve_repo_root(input_repo_root: Option<String>, cwd: &Path) -> Result<
     Ok(config::find_repo_root(cwd)?.display().to_string())
 }
 
-/// Phase J: Persist recently-injected file paths so the next session can surface them.
-/// Reads `session-affinity.json`, merges new paths with current timestamp, keeps top 50.
-fn update_session_affinity(repo_root: &Path, paths: &[String]) -> Result<()> {
-    if paths.is_empty() {
+/// Phase J+M1: Affinity entry — timestamp plus up to 2 anchor lines per file.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct AffinityEntry {
+    ts: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    anchors: Vec<String>,
+}
+
+/// Phase J+M1: Persist recently-injected files with anchor lines so the next session can surface them.
+/// Reads `session-affinity.json`, migrates old flat format if needed, keeps top 50 by recency.
+fn update_session_affinity(repo_root: &Path, snippets: &[crate::rpc::QueryResultItem]) -> Result<()> {
+    if snippets.is_empty() {
         return Ok(());
     }
     let affinity_path = config::repo_paths(repo_root)?.data_dir.join("session-affinity.json");
-    let mut map: HashMap<String, u64> = if affinity_path.exists() {
+    let mut map: HashMap<String, AffinityEntry> = if affinity_path.exists() {
         let raw = std::fs::read_to_string(&affinity_path)?;
-        serde_json::from_str(&raw).unwrap_or_default()
+        serde_json::from_str(&raw).or_else(|_| {
+            // Migrate old format: HashMap<String, u64>
+            let old: HashMap<String, u64> = serde_json::from_str(&raw)?;
+            Ok::<_, serde_json::Error>(
+                old.into_iter()
+                    .map(|(k, ts)| (k, AffinityEntry { ts, anchors: vec![] }))
+                    .collect(),
+            )
+        }).unwrap_or_default()
     } else {
         HashMap::new()
     };
@@ -1348,18 +1373,56 @@ fn update_session_affinity(repo_root: &Path, paths: &[String]) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    for path in paths {
-        map.insert(path.clone(), now_ms);
+    // Group snippets by path and collect up to 2 anchor lines per file.
+    let mut path_anchors: HashMap<String, Vec<String>> = HashMap::new();
+    for snippet in snippets {
+        let anchors = path_anchors.entry(snippet.path.clone()).or_default();
+        if anchors.len() < 2 {
+            if let Some(anchor) = affinity_anchor_line(&snippet.text) {
+                if !anchors.contains(&anchor) {
+                    anchors.push(anchor);
+                }
+            }
+        }
+    }
+    for (path, anchors) in path_anchors {
+        map.insert(path, AffinityEntry { ts: now_ms, anchors });
     }
     if map.len() > 50 {
-        let mut entries: Vec<(String, u64)> = map.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut entries: Vec<(String, AffinityEntry)> = map.into_iter().collect();
+        entries.sort_by(|a, b| b.1.ts.cmp(&a.1.ts));
         entries.truncate(50);
         map = entries.into_iter().collect();
     }
     let raw = serde_json::to_string_pretty(&map)?;
     std::fs::write(&affinity_path, raw)?;
     Ok(())
+}
+
+/// Extract the first non-empty, non-comment line from a snippet as an anchor.
+fn affinity_anchor_line(text: &str) -> Option<String> {
+    for raw_line in text.lines() {
+        let line: String = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("*/")
+        {
+            continue;
+        }
+        let anchor = if trimmed.len() > 80 {
+            format!("{}...", &trimmed[..77])
+        } else {
+            trimmed.to_string()
+        };
+        return Some(anchor);
+    }
+    None
 }
 
 fn now_unix_ms() -> u128 {

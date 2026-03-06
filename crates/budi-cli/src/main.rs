@@ -2154,12 +2154,16 @@ fn cmd_hook_session_start() -> Result<()> {
         let truncated: String = map.chars().take(3000).collect();
         message.push_str(&truncated);
     }
-    // Phase J: append recently-relevant files from prior sessions.
+    // Phase J+M2: append recently-relevant files with anchor lines from prior sessions.
     let affinity_files = read_session_affinity(&repo_root, 5);
     if !affinity_files.is_empty() {
         message.push_str("\n\n## Recently Relevant Files\n(files active in prior sessions, for reference)\n");
-        for path in &affinity_files {
-            message.push_str(&format!("- {}\n", path));
+        for (path, anchors) in &affinity_files {
+            if anchors.is_empty() {
+                message.push_str(&format!("- {}\n", path));
+            } else {
+                message.push_str(&format!("- {} — {}\n", path, anchors.join("; ")));
+            }
         }
     }
     if !message.is_empty() {
@@ -2173,8 +2177,9 @@ fn cmd_hook_session_start() -> Result<()> {
     Ok(())
 }
 
-/// Phase J: Read session-affinity.json, return top N file paths sorted by recency.
-fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<String> {
+/// Phase J+M2: Read session-affinity.json, return top N entries (path, anchors) sorted by recency.
+/// Supports both new format (AffinityEntry with ts+anchors) and old flat format (ts only).
+fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(String, Vec<String>)> {
     let Ok(paths) = budi_core::config::repo_paths(repo_root) else {
         return Vec::new();
     };
@@ -2182,12 +2187,27 @@ fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<Strin
     let Ok(raw) = std::fs::read_to_string(&affinity_path) else {
         return Vec::new();
     };
-    let map: std::collections::HashMap<String, u64> =
-        serde_json::from_str(&raw).unwrap_or_default();
-    let mut entries: Vec<(String, u64)> = map.into_iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    #[derive(serde::Deserialize, Default)]
+    struct Entry {
+        ts: u64,
+        #[serde(default)]
+        anchors: Vec<String>,
+    }
+    // Try new format first; fall back to old flat HashMap<String, u64>.
+    let map: std::collections::HashMap<String, Entry> = serde_json::from_str(&raw)
+        .or_else(|_| {
+            let old: std::collections::HashMap<String, u64> = serde_json::from_str(&raw)?;
+            Ok::<_, serde_json::Error>(
+                old.into_iter()
+                    .map(|(k, ts)| (k, Entry { ts, anchors: vec![] }))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    let mut entries: Vec<(String, Entry)> = map.into_iter().collect();
+    entries.sort_by(|a, b| b.1.ts.cmp(&a.1.ts));
     entries.truncate(top_n);
-    entries.into_iter().map(|(path, _)| path).collect()
+    entries.into_iter().map(|(path, e)| (path, e.anchors)).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

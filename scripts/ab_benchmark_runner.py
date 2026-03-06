@@ -427,7 +427,8 @@ def collect_hook_trace_for_session(repo_root: Path, session_id: str) -> dict[str
     if not path.exists():
         return {}
     input_event = None
-    output_event = None
+    output_event = None  # fallback: any output event
+    ok_output_event = None  # preferred: output event where budi actually injected
     for line in reversed(path.read_text().splitlines()):
         try:
             obj = json.loads(line)
@@ -438,13 +439,18 @@ def collect_hook_trace_for_session(repo_root: Path, session_id: str) -> dict[str
         if obj.get("session_id") != session_id:
             continue
         phase = obj.get("phase")
-        if phase == "output" and output_event is None:
-            output_event = obj
+        if phase == "output":
+            if output_event is None:
+                output_event = obj
+            # Prefer the event where budi injected (reason=="ok"), since each
+            # session may fire the hook multiple times (user prompt + tool calls).
+            if obj.get("reason") == "ok" and ok_output_event is None:
+                ok_output_event = obj
         elif phase == "input" and input_event is None:
             input_event = obj
-        if input_event and output_event:
+        if input_event and output_event and ok_output_event:
             break
-    return {"input": input_event, "output": output_event}
+    return {"input": input_event, "output": ok_output_event or output_event}
 
 
 def hook_trace_is_healthy(trace: dict[str, Any]) -> bool:
@@ -666,18 +672,42 @@ def build_markdown(
     lines.append("## Per-Prompt Outcomes")
     lines.append("")
     lines.append(
-        "| # | Prompt (short) | no_budi cost | with_budi cost | no_budi ms | with_budi ms | Judge winner |"
+        "| # | Prompt | cost nb/wb | Q nb→wb | G nb→wb | intent | top | ctx | winner |"
     )
-    lines.append("|---:|---|---:|---:|---:|---:|---|")
+    lines.append("|---:|---|---:|---:|---:|---|---:|---:|---|")
     for i, row in enumerate(rows, start=1):
-        prompt_short = row["prompt"][:72].replace("\n", " ")
+        prompt_short = row["prompt"][:100].replace("\n", " ")
         a = row["no_budi"]
         b = row["with_budi"]
         judge = row.get("judge", {})
+        hook_out = (row.get("with_budi_hook") or {}).get("output") or {}
+        intent_raw = str(hook_out.get("retrieval_intent", ""))
+        # Abbreviate intent for table compactness
+        intent_abbrev = {
+            "flow-trace": "flow",
+            "symbol-definition": "sym-def",
+            "symbol-usage": "sym-use",
+            "architecture": "arch",
+            "test-lookup": "test",
+            "runtime-config": "rt-cfg",
+            "path-lookup": "path",
+            "non-code": "non-code",
+        }.get(intent_raw, intent_raw or "—")
+        top_score = hook_out.get("retrieval_top_score")
+        ctx_chars = hook_out.get("context_chars")
+        top_str = f"{top_score:.2f}" if isinstance(top_score, (int, float)) else "—"
+        ctx_str = str(ctx_chars) if isinstance(ctx_chars, int) else "—"
+        q_nb = safe_num(judge.get("score_no_budi"))
+        q_wb = safe_num(judge.get("score_with_budi"))
+        g_nb = safe_num(judge.get("grounding_no_budi"))
+        g_wb = safe_num(judge.get("grounding_with_budi"))
+        q_str = f"{q_nb:.0f}→{q_wb:.0f}" if judge.get("ok") else "—"
+        g_str = f"{g_nb:.0f}→{g_wb:.0f}" if judge.get("ok") else "—"
+        cost_nb = safe_num(a.get("total_cost_usd"))
+        cost_wb = safe_num(b.get("total_cost_usd"))
         lines.append(
-            f"| {i} | {prompt_short} | {safe_num(a.get('total_cost_usd')):.5f} | "
-            f"{safe_num(b.get('total_cost_usd')):.5f} | "
-            f"{safe_num(a.get('duration_ms')):.0f} | {safe_num(b.get('duration_ms')):.0f} | "
+            f"| {i} | {prompt_short} | {cost_nb:.4f}/{cost_wb:.4f} | "
+            f"{q_str} | {g_str} | {intent_abbrev} | {top_str} | {ctx_str} | "
             f"{judge.get('winner', 'n/a')} |"
         )
     lines.append("")
