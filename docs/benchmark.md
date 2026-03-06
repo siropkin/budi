@@ -1,6 +1,14 @@
 # Benchmark Methodology
 
-This page explains how to benchmark `budi` in a way that is reproducible and transparent for regular Claude Code users.
+## Latest results
+
+Across 13 runs, 216 judged tasks (React and ripgrep repos):
+
+- **Cost**: 18.7% lower on average
+- **Speed**: 13% faster on average (median API time); up to 30% on some repos
+- **Quality**: budi wins 160/216 judged tasks (~75% win rate)
+
+Full evidence: `docs/benchmark-details.md`
 
 ## What we measure
 
@@ -14,17 +22,42 @@ We compare:
 - API duration (`duration_ms`)
 - End-to-end wall duration
 - Total cost (`total_cost_usd`)
-- Judge winner + quality + grounding + actionability
+- Judge winner + quality + grounding scores
 - Hook injection health (`success`, `reason`, `context_chars`)
 
-## Public benchmark dataset
+## Benchmark datasets
 
-- Prompt set: `fixtures/benchmarks/public_v2.json`
-- Public benchmark details: `docs/benchmark-details.md`
-- Public benchmark output artifacts:
-  - `tmp/public_bench_react_v2b/ab-results.json`
-  - `tmp/public_bench_flask_v2b/ab-results.json`
-  - `tmp/public_bench_express_v2b/ab-results.json`
+Current prompt sets:
+
+- `fixtures/benchmarks/react-structural-v1.prompts.json` — 18 prompts, React source (architecture, symbol lookup, call tracing)
+- `fixtures/benchmarks/ripgrep-v1.prompts.json` — 18 prompts, ripgrep source (same categories)
+
+Results live in root-level `ab-bench-*` directories, one folder per run.
+
+## Reproduce
+
+Clone repos:
+
+```bash
+git clone --depth 1 https://github.com/facebook/react.git ./react
+git clone --depth 1 https://github.com/BurntSushi/ripgrep.git ./ripgrep
+```
+
+Run A/B on each:
+
+```bash
+python3 scripts/ab_benchmark_runner.py \
+  --repo-root "/absolute/path/react" \
+  --prompts-file "./fixtures/benchmarks/react-structural-v1.prompts.json" \
+  --out-dir "./tmp/bench_react" \
+  --run-label "react-v1"
+
+python3 scripts/ab_benchmark_runner.py \
+  --repo-root "/absolute/path/ripgrep" \
+  --prompts-file "./fixtures/benchmarks/ripgrep-v1.prompts.json" \
+  --out-dir "./tmp/bench_ripgrep" \
+  --run-label "ripgrep-v1"
+```
 
 ## Pivot matrix runs
 
@@ -33,64 +66,25 @@ For evidence-first pivot decisions, run the matrix runner with variant-specific 
 ```bash
 python3 scripts/pivot_matrix_runner.py \
   --matrix-file ./fixtures/benchmarks/pivot_matrix_v1.template.json \
-  --prompts-file ./fixtures/benchmarks/public_v2.json \
+  --prompts-file ./fixtures/benchmarks/react-structural-v1.prompts.json \
   --repeats 3 \
   --out-dir ./tmp/pivot_matrix_v1_run \
   --dry-run
 ```
 
-The template contains placeholder repo paths, so copy it to a local file and replace paths before running. Then remove `--dry-run` to execute. Full decision framework:
+Copy the template to a local file and replace repo paths before running. Remove `--dry-run` to execute.
 
-- `docs/adr-evidence-first-pivot.md`
-- `docs/pivot-experiment-matrix.md`
-
-## Reproduce exactly
-
-Clone repos:
-
-```bash
-git clone --depth 1 https://github.com/facebook/react.git ./react
-git clone --depth 1 https://github.com/pallets/flask.git ./flask
-git clone --depth 1 https://github.com/expressjs/express.git ./express
-```
-
-Run A/B script on each:
-
-```bash
-python3 scripts/ab_benchmark_runner.py \
-  --repo-root "/absolute/path/react" \
-  --prompts-file "./fixtures/benchmarks/public_v2.json" \
-  --out-dir "./tmp/public_bench_react_v2b" \
-  --run-label "public-bench-react-v2b"
-
-python3 scripts/ab_benchmark_runner.py \
-  --repo-root "/absolute/path/flask" \
-  --prompts-file "./fixtures/benchmarks/public_v2.json" \
-  --out-dir "./tmp/public_bench_flask_v2b" \
-  --run-label "public-bench-flask-v2b"
-
-python3 scripts/ab_benchmark_runner.py \
-  --repo-root "/absolute/path/express" \
-  --prompts-file "./fixtures/benchmarks/public_v2.json" \
-  --out-dir "./tmp/public_bench_express_v2b" \
-  --run-label "public-bench-express-v2b"
-```
-
-Generate the human-readable report with full evidence:
-
-```bash
-python3 scripts/generate_public_benchmark_details.py
-```
+Full decision framework: `docs/adr-evidence-first-pivot.md`, `docs/pivot-experiment-matrix.md`
 
 ## Notes about validity
 
 - A row is considered an injected `with_budi` run when hook output has `success=true` and `reason=ok`.
-- The runner now captures `with_budi_hook` per session and retries one time if hook retrieval fails with transient reasons.
+- The runner captures `with_budi_hook` per session and retries once if hook retrieval fails with transient reasons.
 - Always compare runs with the same prompt-set fingerprint.
 
-## Optional retrieval-only regression checks
+## Retrieval-only regression checks
 
-Use fixture-driven retrieval eval when you want ranking metrics independent of full model behavior:
+Use fixture-driven retrieval eval for ranking metrics independent of full model behavior:
 
 ```bash
 budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
