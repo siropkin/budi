@@ -825,6 +825,24 @@ fn intent_name(kind: QueryIntentKind) -> &'static str {
 
 fn classify_intent(prompt: &str) -> QueryIntentKind {
     let lower = prompt.to_ascii_lowercase();
+    // V1: SymbolUsage check runs first — "what calls X" is unambiguous and must not be
+    // shadowed by "where is" in "from where is it triggered" (which would give sym-def).
+    if contains_any(
+        &lower,
+        &[
+            "what calls",
+            "callers of",
+            "who calls",
+            "uses of",
+            "usages of",
+            "who constructs",
+            "who creates",
+            "who instantiates",
+            "who builds",
+        ],
+    ) {
+        return QueryIntentKind::SymbolUsage;
+    }
     if contains_any(&lower, &["where is", "defined", "definition", "declaration", "declare"]) {
         return QueryIntentKind::SymbolDefinition;
     }
@@ -846,22 +864,6 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
         ],
     ) {
         return QueryIntentKind::FlowTrace;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "what calls",
-            "callers of",
-            "who calls",
-            "uses of",
-            "usages of",
-            "who constructs",
-            "who creates",
-            "who instantiates",
-            "who builds",
-        ],
-    ) {
-        return QueryIntentKind::SymbolUsage;
     }
     if contains_any(
         &lower,
