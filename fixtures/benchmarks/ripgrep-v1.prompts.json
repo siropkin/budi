@@ -1,0 +1,20 @@
+[
+  "What are the entry points of ripgrep and how are responsibilities split across the crates under crates/?",
+  "Describe the module layout — which crates own which concern in the search pipeline (matching, searching, printing, config)?",
+  "Where is `run` defined and what does it do immediately after parsing CLI arguments?",
+  "Where is `search_path` defined and what does it do with the matcher and writer it receives?",
+  "Where is `search_parallel` defined and how does it distribute work across threads?",
+  "Trace the call chain from `main` to when the first search match is written to stdout.",
+  "Trace what happens when ripgrep reads its config file — from env var lookup to the args being merged with CLI args.",
+  "What is the teardown sequence when a parallel search finishes — what gets joined or dropped and in what order?",
+  "What calls `search_path` and what arguments does each call site pass?",
+  "What calls `search_parallel` and when is it chosen over single-threaded search?",
+  "Who constructs a `Searcher` and how is it configured before the first file is searched?",
+  "How does ripgrep load its config file and which environment variable controls which file is used?",
+  "Which environment variables does ripgrep read at startup and how are they applied to the final args?",
+  "What unit tests cover the config file parsing logic and where do they live in the repo?",
+  "What integration tests cover parallel search correctness and where are they?",
+  "I want to add a --max-depth flag to limit directory traversal depth. What files and functions would I need to modify?",
+  "I want to add a progress indicator showing how many files have been searched so far. Where would I add this and what shared state would I need to track across threads?",
+  "I want to change the config file format from plain-text args to TOML key-value pairs. Walk me through which parts of the codebase would need to change and in what order."
+]

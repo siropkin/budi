@@ -568,6 +568,47 @@ def judge_pair(
     return judged
 
 
+def judge_pair_majority(
+    repo_root: Path,
+    prompt: str,
+    no_budi_result: str,
+    with_budi_result: str,
+    timeout_sec: int,
+    passes: int = 3,
+) -> dict[str, Any]:
+    """Run judge_pair `passes` times, take majority winner, average numeric scores."""
+    results = []
+    for _ in range(passes):
+        r = judge_pair(repo_root, prompt, no_budi_result, with_budi_result, timeout_sec)
+        if r.get("ok"):
+            results.append(r)
+    if not results:
+        return {"ok": False, "error": "all_judge_passes_failed"}
+
+    winner_counts: dict[str, int] = {}
+    for r in results:
+        w = r.get("winner", "tie")
+        winner_counts[w] = winner_counts.get(w, 0) + 1
+    majority_winner = max(winner_counts, key=lambda k: (winner_counts[k], k == "with_budi"))
+
+    score_keys = [
+        "score_no_budi", "score_with_budi",
+        "grounding_no_budi", "grounding_with_budi",
+        "actionability_no_budi", "actionability_with_budi",
+    ]
+    averaged = {k: sum(r.get(k, 0) for r in results) / len(results) for k in score_keys}
+    justifications = " | ".join(r.get("justification", "") for r in results if r.get("justification"))
+
+    return {
+        "ok": True,
+        "winner": majority_winner,
+        "judge_passes": len(results),
+        "winner_counts": winner_counts,
+        "justification": justifications,
+        **averaged,
+    }
+
+
 def safe_num(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -816,6 +857,12 @@ def main() -> None:
         help="Timeout for each judge Claude run",
     )
     parser.add_argument(
+        "--judge-passes",
+        type=int,
+        default=1,
+        help="Number of judge passes per prompt (majority vote, default 1). Use 3 to reduce variance.",
+    )
+    parser.add_argument(
         "--disable-with-budi-retry",
         action="store_true",
         help="Disable second with_budi attempt when hook trace looks unhealthy",
@@ -960,13 +1007,24 @@ def main() -> None:
             ):
                 print(f"[ab] judging {idx}/{len(rows)}", flush=True)
                 judge_attempts += 1
-                judge = judge_pair(
-                    repo_root,
-                    prompt,
-                    str(no_budi.get("result", "")),
-                    str(with_budi.get("result", "")),
-                    timeout_sec=args.judge_timeout_sec,
-                )
+                judge_passes = getattr(args, "judge_passes", 1)
+                if judge_passes > 1:
+                    judge = judge_pair_majority(
+                        repo_root,
+                        prompt,
+                        str(no_budi.get("result", "")),
+                        str(with_budi.get("result", "")),
+                        timeout_sec=args.judge_timeout_sec,
+                        passes=judge_passes,
+                    )
+                else:
+                    judge = judge_pair(
+                        repo_root,
+                        prompt,
+                        str(no_budi.get("result", "")),
+                        str(with_budi.get("result", "")),
+                        timeout_sec=args.judge_timeout_sec,
+                    )
             row["judge"] = judge
 
         summary = {

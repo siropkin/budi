@@ -501,6 +501,7 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
     let relative = (top.score * 0.40_f32).max(0.05);
     match intent_kind {
         QueryIntentKind::FlowTrace => relative.max(0.20),
+        QueryIntentKind::SymbolDefinition => relative.max(0.20),
         QueryIntentKind::RuntimeConfig => relative.max(0.18),
         _ => relative,
     }
@@ -802,11 +803,30 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
             "calls internally",
             "trace the",
             "execution order",
+            "cleanup order",
+            "cleanup sequence",
+            "unmount order",
+            "lifecycle order",
+            "removal order",
+            "what order",
         ],
     ) {
         return QueryIntentKind::FlowTrace;
     }
-    if contains_any(&lower, &["what calls", "callers of", "who calls", "uses of", "usages of"]) {
+    if contains_any(
+        &lower,
+        &[
+            "what calls",
+            "callers of",
+            "who calls",
+            "uses of",
+            "usages of",
+            "who constructs",
+            "who creates",
+            "who instantiates",
+            "who builds",
+        ],
+    ) {
         return QueryIntentKind::SymbolUsage;
     }
     if contains_any(
@@ -830,8 +850,10 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
     if contains_any(
         &lower,
         &[
-            "config",
-            "env",
+            "config file",
+            "load config",
+            "read config",
+            "env var",
             "environment variable",
             "configuration",
             "settings",
