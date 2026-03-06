@@ -878,6 +878,27 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
     ) {
         return QueryIntentKind::Architecture;
     }
+    // Generative test queries ("what tests would you add/write") ask Claude to design new
+    // tests rather than locate existing ones. Route to Architecture so the response is
+    // grounded in codebase structure, not anchored to existing test files via test-path-boost.
+    if contains_any(
+        &lower,
+        &[
+            "would you add",
+            "would you write",
+            "should we add",
+            "should be added",
+            "suggest tests",
+            "suggest test",
+            "design tests",
+            "design test",
+            "test cases to",
+            "tests to add",
+            "tests to write",
+        ],
+    ) {
+        return QueryIntentKind::Architecture;
+    }
     if contains_any(&lower, &["test", "testing", "coverage", "spec", "unit test"]) {
         return QueryIntentKind::TestLookup;
     }
