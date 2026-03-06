@@ -212,6 +212,23 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-boost");
         }
 
+        // S1: SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
+        // query token. This surfaces definition chunks over reference/usage chunks when
+        // the dominant function in a window is precisely what the user asked about.
+        if intent.kind == QueryIntentKind::SymbolDefinition {
+            if let Some(hint) = chunk.symbol_hint.as_deref() {
+                let hint_lower = hint.to_ascii_lowercase();
+                if !hint_lower.is_empty()
+                    && !is_generic_symbol_hint(hint)
+                    && symbol_tokens.iter().any(|t| t == &hint_lower)
+                {
+                    adjusted += 0.30;
+                    push_unique_reason(&mut reasons, "hint-match-boost");
+                }
+            }
+        }
+
+
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
         }

@@ -11,14 +11,28 @@ pub struct Chunk {
 
 fn looks_like_symbol(line: &str) -> bool {
     let trimmed = line.trim_start();
+    // Rust / Python / bare declarations
     trimmed.starts_with("fn ")
         || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("pub async fn ")
+        || trimmed.starts_with("async fn ")
         || trimmed.starts_with("class ")
         || trimmed.starts_with("interface ")
         || trimmed.starts_with("struct ")
         || trimmed.starts_with("enum ")
         || trimmed.starts_with("def ")
+        || trimmed.starts_with("async def ")
+        // JS/TS bare and exported forms
         || trimmed.starts_with("function ")
+        || trimmed.starts_with("async function ")
+        || trimmed.starts_with("export function ")
+        || trimmed.starts_with("export async function ")
+        || trimmed.starts_with("export default function ")
+        || trimmed.starts_with("export class ")
+        || trimmed.starts_with("export interface ")
+        || trimmed.starts_with("export enum ")
+        || trimmed.starts_with("export const ")
+        || trimmed.starts_with("export type ")
 }
 
 /// Language keywords to skip when extracting the symbol name.
@@ -310,9 +324,11 @@ fn append_node_chunks(
         ));
         return;
     }
+    // For AST boundary nodes the first non-blank line IS the declaration,
+    // so skip the looks_like_symbol gate and extract directly.
     let symbol_hint = snippet
         .lines()
-        .find(|line| looks_like_symbol(line))
+        .find(|line| !line.trim().is_empty())
         .and_then(symbol_from_line);
     out.push(Chunk {
         start_line,
@@ -320,6 +336,33 @@ fn append_node_chunks(
         symbol_hint,
         text: snippet,
     });
+}
+
+fn dominant_symbol_hint(lines: &[&str]) -> Option<String> {
+    let mut best_symbol: Option<String> = None;
+    let mut best_span: usize = 0;
+    let mut current_symbol: Option<String> = None;
+    let mut current_start: usize = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if looks_like_symbol(line) {
+            if let Some(sym) = current_symbol.take() {
+                let span = i - current_start;
+                if span > best_span {
+                    best_span = span;
+                    best_symbol = Some(sym);
+                }
+            }
+            current_symbol = symbol_from_line(line);
+            current_start = i;
+        }
+    }
+    if let Some(sym) = current_symbol {
+        let span = lines.len() - current_start;
+        if span > best_span {
+            best_symbol = Some(sym);
+        }
+    }
+    best_symbol
 }
 
 fn line_chunks_from_range(
@@ -338,13 +381,10 @@ fn line_chunks_from_range(
     let mut start = start_idx;
     while start < end_limit {
         let end = (start + lines_per_chunk).min(end_limit);
-        let mut symbol_hint = None;
-        for line in &lines[start..end] {
-            if looks_like_symbol(line) {
-                symbol_hint = symbol_from_line(line);
-                break;
-            }
-        }
+        // Pick the symbol that spans the most lines in this window (dominant function).
+        // This avoids a short function at the start of a window stealing the hint from
+        // a longer function that makes up most of the chunk's content.
+        let symbol_hint = dominant_symbol_hint(&lines[start..end]);
         chunks.push(Chunk {
             start_line: start + 1,
             end_line: end,
@@ -393,6 +433,45 @@ mod tests {
             .join("\n");
         let chunks = chunk_text("README.unknown", &content, 40, 10);
         assert!(chunks.len() > 1);
+    }
+
+    #[test]
+    fn exported_js_function_gets_correct_symbol_hint() {
+        let content = r#"
+export function scheduleUpdateOnFiber(root, fiber, lane) {
+  if (root === null) return;
+  doWork(root);
+}
+
+export function performSyncWorkOnRoot(root) {
+  return root;
+}
+"#;
+        let chunks = chunk_text("ReactFiberWorkLoop.js", content, 80, 20);
+        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
+        assert!(
+            hints.contains(&"scheduleUpdateOnFiber"),
+            "expected scheduleUpdateOnFiber in hints, got: {hints:?}"
+        );
+        assert!(
+            hints.contains(&"performSyncWorkOnRoot"),
+            "expected performSyncWorkOnRoot in hints, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn async_exported_function_gets_symbol_hint() {
+        let content = r#"
+export async function flushPassiveEffects() {
+  return flushPassiveEffectsImpl();
+}
+"#;
+        let chunks = chunk_text("ReactFiberWorkLoop.js", content, 80, 20);
+        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
+        assert!(
+            hints.contains(&"flushPassiveEffects"),
+            "expected flushPassiveEffects in hints, got: {hints:?}"
+        );
     }
 
     #[test]

@@ -1671,7 +1671,10 @@ fn build_retrieval_signal_indexes(
             symbol_to_chunk_ids.entry(token).or_default().push(chunk.id);
         }
         for token in extract_definition_tokens(&chunk.text, chunk.symbol_hint.as_deref()) {
-            defined_tokens.insert(token);
+            defined_tokens.insert(token.clone());
+            // Definition chunks get a double-hit in the symbol map so they rank above
+            // usage/reference chunks on the same token name.
+            symbol_to_chunk_ids.entry(token).or_default().push(chunk.id);
         }
         let mut references = extract_reference_tokens(&chunk.text);
         references.extend(extract_call_tokens(&chunk.text));
