@@ -206,6 +206,12 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "cwd-proximity");
         }
 
+        // R1: TestLookup — boost chunks from test files so they surface above source files
+        if intent.kind == QueryIntentKind::TestLookup && is_test_path(&chunk.path) {
+            adjusted += 0.15;
+            push_unique_reason(&mut reasons, "test-path-boost");
+        }
+
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
         }
@@ -376,6 +382,11 @@ pub fn build_call_graph_summary(
     Some(out)
 }
 
+fn is_test_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/test") || lower.contains("/spec") || lower.starts_with("test") || lower.starts_with("spec")
+}
+
 fn is_generic_symbol_hint(s: &str) -> bool {
     // Single-word language keywords that describe structure, not identity
     matches!(
@@ -502,6 +513,7 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
     match intent_kind {
         QueryIntentKind::FlowTrace => relative.max(0.20),
         QueryIntentKind::SymbolDefinition => relative.max(0.20),
+        QueryIntentKind::TestLookup => relative.max(0.22),
         QueryIntentKind::RuntimeConfig => relative.max(0.18),
         _ => relative,
     }
