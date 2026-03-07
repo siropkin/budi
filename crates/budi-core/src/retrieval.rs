@@ -324,15 +324,18 @@ pub fn build_query_response(
         default_limit
     }
     .max(4);
-    // TestLookup: raise per_bucket_limit to 3 so inline-test-neighbor injections
-    // don't get crowded out by other chunks from the same top-level crate bucket.
-    let per_bucket_limit = if intent.kind == QueryIntentKind::TestLookup {
-        3
+    // TestLookup: reduce per_file_limit to 1 to force diversity across test files.
+    // Without this, high-scoring files (e.g., tests/multiline.rs) grab 2 slots,
+    // crowding out other test files (e.g., tests/feature.rs with parallel tests).
+    // Also raise per_bucket_limit to 3 so inline-test-neighbor injections from the
+    // same top-level crate bucket don't get crowded out.
+    let (per_file_limit, per_bucket_limit) = if intent.kind == QueryIntentKind::TestLookup {
+        (1, 3)
     } else {
-        2
+        (2, 2)
     };
     let mut selection = SnippetSelectionState {
-        per_file_limit: 2,
+        per_file_limit,
         per_bucket_limit,
         ..SnippetSelectionState::default()
     };
