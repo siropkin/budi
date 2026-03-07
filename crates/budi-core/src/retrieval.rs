@@ -253,37 +253,30 @@ pub fn build_query_response(
     }
 
     // Phase AC: Direct symbol-hint injection for SymbolDefinition/SymbolUsage.
-    // Problem: for short symbol names like "run" (all-lowercase), the symbol channel returns
-    // up to `channel_limit` hits ranked by RRF, but "run" appears in many chunks so the
-    // definition chunk may fall outside the limit. Backtick-quoted symbols are exact references.
-    // Fix: for SymbolDef/SymbolUsage, find all chunks whose symbol_hint exactly matches a
-    // backtick-extracted token, and inject them into fused at a baseline score so hint-match-boost
-    // can then push the true definition to the top.
+    // Problem: for pure-lowercase symbol names like "run", the symbol channel can't find the
+    // definition because "run" matches thousands of chunks and the right one falls outside
+    // the topk limit. Backtick-quoted symbols are exact references from the user.
+    // Fix: extract backtick-quoted tokens that are genuinely all-lowercase in the ORIGINAL
+    // query (not camelCase that was normalized), find all chunks with exactly matching
+    // symbol_hints, inject at baseline score so hint-match-boost surfaces the definition.
     if matches!(
         intent.kind,
         QueryIntentKind::SymbolDefinition | QueryIntentKind::SymbolUsage
-    ) && !symbol_tokens.is_empty()
-    {
-        // Only seed for tokens that came from backtick quoting (short, exact references).
-        // We detect this by checking whether the token would have been filtered out by the
-        // normal symbol token extraction heuristics (no underscore, digit, or mixed case).
-        let backtick_only_tokens: Vec<&String> = symbol_tokens
-            .iter()
-            .filter(|t| {
-                let has_underscore = t.contains('_');
-                let has_digit = t.chars().any(|c| c.is_ascii_digit());
-                let has_mixed = has_symbol_case_pattern(t);
-                !has_underscore && !has_digit && !has_mixed
-            })
-            .collect();
-        if !backtick_only_tokens.is_empty() {
+    ) {
+        // Re-extract backtick tokens from the RAW query to check their original case.
+        // A token is "pure lowercase" if it contains no uppercase in the original form.
+        let lowercase_backtick_tokens: Vec<String> = extract_lowercase_backtick_tokens(query);
+        if !lowercase_backtick_tokens.is_empty() {
             const SYMBOL_DEF_SEED_SCORE: f32 = 0.28;
             for chunk in runtime.all_chunks() {
                 let Some(hint) = chunk.symbol_hint.as_deref() else {
                     continue;
                 };
                 let hint_lower = hint.to_ascii_lowercase();
-                if !backtick_only_tokens.iter().any(|t| hint_lower == t.as_str()) {
+                if !lowercase_backtick_tokens
+                    .iter()
+                    .any(|t| hint_lower == t.as_str())
+                {
                     continue;
                 }
                 let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
@@ -605,6 +598,31 @@ fn is_inline_test_chunk(text: &str) -> bool {
         || text.contains("mod tests{")
         || text.contains("describe(")
         || text.contains("describe.each(")
+}
+
+/// Extract backtick-quoted tokens that are genuinely all-lowercase in the original query (Phase AC).
+/// "run" → ["run"]. "scheduleUpdateOnFiber" → [] (has uppercase → excluded).
+/// Used for sym-hint seeding to surface definitions of short lowercase identifiers.
+fn extract_lowercase_backtick_tokens(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            let token: String = chars.by_ref().take_while(|&ch| ch != '`').collect();
+            // Only keep tokens that are purely lowercase alphanumeric (no uppercase, no spaces).
+            if token.len() >= 2
+                && token.len() <= 64
+                && token.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && !token.chars().any(|ch| ch.is_ascii_uppercase())
+            {
+                let normalized = token.to_ascii_lowercase();
+                if !out.contains(&normalized) {
+                    out.push(normalized);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Extract subject tokens from a TestLookup query for path-based seeding (Phase Z3).
