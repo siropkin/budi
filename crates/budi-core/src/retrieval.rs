@@ -253,31 +253,60 @@ pub fn build_query_response(
     }
 
     // Phase AC/AD: Direct symbol-hint injection for SymbolDefinition/SymbolUsage.
-    // Problem: two cases where the definition chunk is invisible to the symbol channel:
+    // Problem: definition chunk is invisible to the symbol channel in two cases:
     //   AC: pure-lowercase symbol names like "run" — `is_symbol_like_token` rejects them,
     //       so they never enter symbol_to_chunk_ids at all.
     //   AD: camelCase names like `scheduleUpdateOnFiber` — they ARE in symbol_to_chunk_ids
     //       but the codebase has so many call-sites that the definition chunk falls outside
-    //       the topk limit, never entering the fused map where hint-match-boost could fire.
-    // Fix: for all symbol_tokens (which already include backtick tokens via the pre-pass),
-    // scan all_chunks for exact symbol_hint matches and inject at baseline score.
-    // `symbol_tokens` is strict (camelCase/underscore/digit or backtick-quoted), so this
-    // doesn't cause false positives from generic words.
-    if matches!(
-        intent.kind,
-        QueryIntentKind::SymbolDefinition | QueryIntentKind::SymbolUsage
-    ) {
-        if !symbol_tokens.is_empty() {
+    //       the topk limit, never entering the fused map where hint-match-boost can fire.
+    //
+    // Different seeds per intent:
+    //   SymbolDefinition: use all symbol_tokens (includes camelCase from plain text + all
+    //     backtick tokens via the pre-pass). Seeding the definition chunk is always correct.
+    //   SymbolUsage: use only lowercase_backtick_tokens (Phase AC behaviour). For sym-use
+    //     queries the symbol channel already finds callers well for camelCase identifiers.
+    //     Seeding the definition chunk for sym-use just adds noise (e.g. P16 beginWork ctx
+    //     jumped 787→1331 when sym-use also used all symbol_tokens).
+    if intent.kind == QueryIntentKind::SymbolDefinition && !symbol_tokens.is_empty() {
+        const SYMBOL_DEF_SEED_SCORE: f32 = 0.28;
+        for chunk in runtime.all_chunks() {
+            let Some(hint) = chunk.symbol_hint.as_deref() else {
+                continue;
+            };
+            let hint_lower = hint.to_ascii_lowercase();
+            if is_generic_symbol_hint(hint) {
+                continue;
+            }
+            if !symbol_tokens.iter().any(|t| hint_lower == t.as_str()) {
+                continue;
+            }
+            let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
+            if SYMBOL_DEF_SEED_SCORE > existing {
+                fused.insert(
+                    chunk.id,
+                    CandidateScore {
+                        score: SYMBOL_DEF_SEED_SCORE,
+                        signals: vec!["sym-hint-seed".to_string()],
+                        channel_scores: QueryChannelScores::default(),
+                    },
+                );
+            }
+        }
+    }
+    // Phase AC (preserved for SymbolUsage): only seed for pure-lowercase backtick tokens.
+    if intent.kind == QueryIntentKind::SymbolUsage {
+        let lowercase_backtick_tokens = extract_lowercase_backtick_tokens(query);
+        if !lowercase_backtick_tokens.is_empty() {
             const SYMBOL_DEF_SEED_SCORE: f32 = 0.28;
             for chunk in runtime.all_chunks() {
                 let Some(hint) = chunk.symbol_hint.as_deref() else {
                     continue;
                 };
                 let hint_lower = hint.to_ascii_lowercase();
-                if is_generic_symbol_hint(hint) {
-                    continue;
-                }
-                if !symbol_tokens.iter().any(|t| hint_lower == t.as_str()) {
+                if !lowercase_backtick_tokens
+                    .iter()
+                    .any(|t| hint_lower == t.as_str())
+                {
                     continue;
                 }
                 let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
