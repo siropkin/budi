@@ -59,23 +59,33 @@ def run_cmd(
     env: dict | None = None,
 ) -> CmdResult:
     started = time.perf_counter()
-    proc = subprocess.run(
-        args,
-        cwd=str(cwd),
-        input=input_text,
-        text=True,
-        capture_output=True,
-        timeout=timeout_sec,
-        env=env,
-    )
-    elapsed_ms = (time.perf_counter() - started) * 1000.0
-    return CmdResult(
-        args=args,
-        returncode=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        duration_ms=elapsed_ms,
-    )
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+            env=env,
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        return CmdResult(
+            args=args,
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            duration_ms=elapsed_ms,
+        )
+    except subprocess.TimeoutExpired:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        return CmdResult(
+            args=args,
+            returncode=-1,
+            stdout="",
+            stderr=f"timed out after {timeout_sec}s",
+            duration_ms=elapsed_ms,
+        )
 
 
 def parse_json_output(raw: str) -> dict[str, Any]:

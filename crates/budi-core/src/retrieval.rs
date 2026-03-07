@@ -252,6 +252,40 @@ pub fn build_query_response(
         }
     }
 
+    // Phase Z3: Path-based inline-test seeding for TestLookup.
+    // Problem: when the query is wordy ("What unit tests cover the config file parsing..."),
+    // the production file (e.g. flags/config.rs) may not appear in topk at all — so Z2
+    // has no seed and never injects its inline test block.
+    // Fix: extract subject tokens (strip test-noise words), find inline test chunks in
+    // files whose paths contain any subject token, inject directly at a baseline score
+    // that clears the TestLookup min_selection_score floor (0.22).
+    if intent.kind == QueryIntentKind::TestLookup {
+        let subject_tokens = test_subject_tokens(query);
+        if !subject_tokens.is_empty() {
+            const INLINE_TEST_SEED_SCORE: f32 = 0.35;
+            for chunk in runtime.all_chunks() {
+                if !is_inline_test_chunk(&chunk.text) {
+                    continue;
+                }
+                let path_lower = chunk.path.to_ascii_lowercase();
+                if !subject_tokens.iter().any(|t| path_lower.contains(t.as_str())) {
+                    continue;
+                }
+                let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
+                if INLINE_TEST_SEED_SCORE > existing {
+                    fused.insert(
+                        chunk.id,
+                        CandidateScore {
+                            score: INLINE_TEST_SEED_SCORE,
+                            signals: vec!["inline-test-subject-seed".to_string()],
+                            channel_scores: QueryChannelScores::default(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     let cwd_rel = cwd
         .and_then(|path| path.to_str())
         .map(normalize_path)
@@ -522,6 +556,27 @@ fn is_inline_test_chunk(text: &str) -> bool {
         || text.contains("mod tests{")
         || text.contains("describe(")
         || text.contains("describe.each(")
+}
+
+/// Extract subject tokens from a TestLookup query for path-based seeding (Phase Z3).
+/// Strips test-noise words ("unit tests cover where live repo...") and common stop words,
+/// keeping content words ≥ 4 chars that describe the feature being tested.
+fn test_subject_tokens(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "what", "which", "where", "when", "who", "how",
+        "unit", "integration", "e2e", "test", "tests", "testing", "spec", "specs",
+        "cover", "covers", "covered", "covering",
+        "live", "lives", "located", "location", "find",
+        "the", "a", "an", "and", "or", "in", "of", "for", "to", "on",
+        "do", "does", "are", "is", "it", "they", "their", "them",
+        "repo", "repository", "codebase", "logic", "code",
+        "file", "files", "directory", "folder",
+    ];
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_ascii_lowercase())
+        .filter(|w| w.len() >= 4 && !STOP.contains(&w.as_str()))
+        .collect()
 }
 
 fn is_generic_symbol_hint(s: &str) -> bool {
