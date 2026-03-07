@@ -252,31 +252,32 @@ pub fn build_query_response(
         }
     }
 
-    // Phase AC: Direct symbol-hint injection for SymbolDefinition/SymbolUsage.
-    // Problem: for pure-lowercase symbol names like "run", the symbol channel can't find the
-    // definition because "run" matches thousands of chunks and the right one falls outside
-    // the topk limit. Backtick-quoted symbols are exact references from the user.
-    // Fix: extract backtick-quoted tokens that are genuinely all-lowercase in the ORIGINAL
-    // query (not camelCase that was normalized), find all chunks with exactly matching
-    // symbol_hints, inject at baseline score so hint-match-boost surfaces the definition.
+    // Phase AC/AD: Direct symbol-hint injection for SymbolDefinition/SymbolUsage.
+    // Problem: two cases where the definition chunk is invisible to the symbol channel:
+    //   AC: pure-lowercase symbol names like "run" — `is_symbol_like_token` rejects them,
+    //       so they never enter symbol_to_chunk_ids at all.
+    //   AD: camelCase names like `scheduleUpdateOnFiber` — they ARE in symbol_to_chunk_ids
+    //       but the codebase has so many call-sites that the definition chunk falls outside
+    //       the topk limit, never entering the fused map where hint-match-boost could fire.
+    // Fix: for all symbol_tokens (which already include backtick tokens via the pre-pass),
+    // scan all_chunks for exact symbol_hint matches and inject at baseline score.
+    // `symbol_tokens` is strict (camelCase/underscore/digit or backtick-quoted), so this
+    // doesn't cause false positives from generic words.
     if matches!(
         intent.kind,
         QueryIntentKind::SymbolDefinition | QueryIntentKind::SymbolUsage
     ) {
-        // Re-extract backtick tokens from the RAW query to check their original case.
-        // A token is "pure lowercase" if it contains no uppercase in the original form.
-        let lowercase_backtick_tokens: Vec<String> = extract_lowercase_backtick_tokens(query);
-        if !lowercase_backtick_tokens.is_empty() {
+        if !symbol_tokens.is_empty() {
             const SYMBOL_DEF_SEED_SCORE: f32 = 0.28;
             for chunk in runtime.all_chunks() {
                 let Some(hint) = chunk.symbol_hint.as_deref() else {
                     continue;
                 };
                 let hint_lower = hint.to_ascii_lowercase();
-                if !lowercase_backtick_tokens
-                    .iter()
-                    .any(|t| hint_lower == t.as_str())
-                {
+                if is_generic_symbol_hint(hint) {
+                    continue;
+                }
+                if !symbol_tokens.iter().any(|t| hint_lower == t.as_str()) {
                     continue;
                 }
                 let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
