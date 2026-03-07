@@ -252,6 +252,55 @@ pub fn build_query_response(
         }
     }
 
+    // Phase AC: Direct symbol-hint injection for SymbolDefinition/SymbolUsage.
+    // Problem: for short symbol names like "run" (all-lowercase), the symbol channel returns
+    // up to `channel_limit` hits ranked by RRF, but "run" appears in many chunks so the
+    // definition chunk may fall outside the limit. Backtick-quoted symbols are exact references.
+    // Fix: for SymbolDef/SymbolUsage, find all chunks whose symbol_hint exactly matches a
+    // backtick-extracted token, and inject them into fused at a baseline score so hint-match-boost
+    // can then push the true definition to the top.
+    if matches!(
+        intent.kind,
+        QueryIntentKind::SymbolDefinition | QueryIntentKind::SymbolUsage
+    ) && !symbol_tokens.is_empty()
+    {
+        // Only seed for tokens that came from backtick quoting (short, exact references).
+        // We detect this by checking whether the token would have been filtered out by the
+        // normal symbol token extraction heuristics (no underscore, digit, or mixed case).
+        let backtick_only_tokens: Vec<&String> = symbol_tokens
+            .iter()
+            .filter(|t| {
+                let has_underscore = t.contains('_');
+                let has_digit = t.chars().any(|c| c.is_ascii_digit());
+                let has_mixed = has_symbol_case_pattern(t);
+                !has_underscore && !has_digit && !has_mixed
+            })
+            .collect();
+        if !backtick_only_tokens.is_empty() {
+            const SYMBOL_DEF_SEED_SCORE: f32 = 0.28;
+            for chunk in runtime.all_chunks() {
+                let Some(hint) = chunk.symbol_hint.as_deref() else {
+                    continue;
+                };
+                let hint_lower = hint.to_ascii_lowercase();
+                if !backtick_only_tokens.iter().any(|t| hint_lower == t.as_str()) {
+                    continue;
+                }
+                let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
+                if SYMBOL_DEF_SEED_SCORE > existing {
+                    fused.insert(
+                        chunk.id,
+                        CandidateScore {
+                            score: SYMBOL_DEF_SEED_SCORE,
+                            signals: vec!["sym-hint-seed".to_string()],
+                            channel_scores: QueryChannelScores::default(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     // Phase Z3: Path-based inline-test seeding for TestLookup.
     // Problem: when the query is wordy ("What unit tests cover the config file parsing..."),
     // the production file (e.g. flags/config.rs) may not appear in topk at all — so Z2
@@ -1286,6 +1335,26 @@ fn push_scope_hint(token: &str, out: &mut Vec<String>, seen: &mut HashSet<String
 fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+
+    // Phase AC: backtick-quoted identifiers are always symbols regardless of case pattern.
+    // Handles queries like "Where is `run` defined?" where "run" is all-lowercase but
+    // the backticks signal an exact identifier reference.
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            let token: String = chars.by_ref().take_while(|&ch| ch != '`').collect();
+            // Strip any path prefix (e.g. `src/foo.rs` → take identifier part after last /)
+            let ident = token
+                .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or(&token);
+            let normalized = ident.to_ascii_lowercase();
+            if normalized.len() >= 2 && normalized.len() <= 64 && seen.insert(normalized.clone()) {
+                out.push(normalized);
+            }
+        }
+    }
+
     for raw in query
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|token| !token.is_empty())
