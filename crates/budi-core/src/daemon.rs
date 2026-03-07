@@ -162,6 +162,7 @@ impl DaemonState {
                 call_graph_summary: None,
                 detected_intent: None,
                 timing_ms: None,
+                snippet_refs: Vec::new(),
                 diagnostics: QueryDiagnostics {
                     intent: "non-code".to_string(),
                     confidence: 0.0,
@@ -200,6 +201,18 @@ impl DaemonState {
             self.dedup_session_snippets(sid, &mut response.snippets);
         }
         let t_dedup_ms = t_start.elapsed().as_millis() as u64;
+
+        // Populate snippet_refs for structured analytics (W1).
+        response.snippet_refs = response
+            .snippets
+            .iter()
+            .map(|s| crate::rpc::SnippetRef {
+                path: s.path.clone(),
+                score: s.score,
+                start_line: s.start_line,
+                end_line: s.end_line,
+            })
+            .collect();
 
         // Step 4: Score-based injection decision.
         let should_inject = response

@@ -122,6 +122,8 @@ enum HookCommands {
     PostToolUse,
     #[command(hide = true)]
     SessionStart,
+    #[command(hide = true)]
+    SessionEnd,
 }
 
 #[derive(Debug, Subcommand)]
@@ -322,6 +324,7 @@ fn main() -> Result<()> {
             HookCommands::UserPromptSubmit => cmd_hook_user_prompt_submit(),
             HookCommands::PostToolUse => cmd_hook_post_tool_use(),
             HookCommands::SessionStart => cmd_hook_session_start(),
+            HookCommands::SessionEnd => cmd_hook_session_end(),
         },
     }
 }
@@ -1869,12 +1872,14 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
     let mut total_candidates = 0usize;
     let mut snippets_count = 0usize;
     let mut query_timing: Option<HashMap<String, u64>> = None;
+    let mut snippet_refs: Vec<budi_core::rpc::SnippetRef> = Vec::new();
     let (context, success, reason, error_detail) =
         match query_daemon_for_hook_context(&repo_root, &config, &sanitized_prompt, Some(&cwd), Some(&session_id)) {
             Ok(response) => {
                 total_candidates = response.total_candidates;
                 snippets_count = response.snippets.len();
                 query_timing = response.timing_ms;
+                snippet_refs = response.snippet_refs;
                 diagnostics = response.diagnostics;
                 let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
                 if let Some(skip_reason) = skip_reason {
@@ -1957,6 +1962,12 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 obj.insert(
                     "timing".to_string(),
                     serde_json::to_value(timing).unwrap_or_default(),
+                );
+            }
+            if !snippet_refs.is_empty() {
+                obj.insert(
+                    "snippet_refs".to_string(),
+                    serde_json::to_value(&snippet_refs).unwrap_or_default(),
                 );
             }
         }
@@ -2177,6 +2188,100 @@ fn cmd_hook_session_start() -> Result<()> {
     Ok(())
 }
 
+fn cmd_hook_session_end() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let Ok(repo_root) = config::find_repo_root(&cwd) else {
+        return Ok(());
+    };
+    let Ok(config) = config::load_or_default(&repo_root) else {
+        return Ok(());
+    };
+    if !config.debug_io {
+        return Ok(());
+    }
+
+    // Read session_id from environment (Claude Code sets CLAUDE_SESSION_ID for Stop hooks).
+    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+
+    let Ok(log_path) = config::hook_log_path(&repo_root) else {
+        return Ok(());
+    };
+    let Ok(raw) = std::fs::read_to_string(&log_path) else {
+        return Ok(());
+    };
+
+    // Collect output events for this session.
+    let mut total_injected = 0u32;
+    let mut total_prompts = 0u32;
+    let mut first_ts: Option<u64> = None;
+    let mut last_ts: Option<u64> = None;
+    let mut file_counts: HashMap<String, u32> = HashMap::new();
+
+    for line in raw.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        // Filter by session_id if available.
+        if let Some(ref sid) = session_id {
+            if val.get("session_id").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+        }
+        if val.get("phase").and_then(Value::as_str) != Some("output") {
+            continue;
+        }
+        if val.get("event").and_then(Value::as_str) != Some("UserPromptSubmit") {
+            continue;
+        }
+        total_prompts += 1;
+        if let Some(ts) = val.get("ts_unix_ms").and_then(Value::as_u64) {
+            if first_ts.is_none() || ts < first_ts.unwrap() {
+                first_ts = Some(ts);
+            }
+            if last_ts.is_none() || ts > last_ts.unwrap() {
+                last_ts = Some(ts);
+            }
+        }
+        if val.get("recommended_injection").and_then(Value::as_bool).unwrap_or(false) {
+            total_injected += 1;
+        }
+        if let Some(refs) = val.get("snippet_refs").and_then(Value::as_array) {
+            for r in refs {
+                if let Some(path) = r.get("path").and_then(Value::as_str) {
+                    *file_counts.entry(path.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    if total_prompts == 0 {
+        return Ok(());
+    }
+
+    let duration_secs = match (first_ts, last_ts) {
+        (Some(a), Some(b)) => (b.saturating_sub(a) / 1000) as u32,
+        _ => 0,
+    };
+
+    let mut top_files: Vec<(String, u32)> = file_counts.into_iter().collect();
+    top_files.sort_by(|a, b| b.1.cmp(&a.1));
+    top_files.truncate(5);
+
+    log_hook_event(&repo_root, &config, || {
+        json!({
+            "event": "SessionEnd",
+            "ts_unix_ms": now_unix_ms(),
+            "session_id": session_id,
+            "duration_secs": duration_secs,
+            "total_prompts": total_prompts,
+            "total_injected": total_injected,
+            "injection_rate": if total_prompts > 0 { total_injected as f32 / total_prompts as f32 } else { 0.0 },
+            "top_files": top_files.iter().map(|(p, n)| json!({"path": p, "count": n})).collect::<Vec<_>>(),
+        })
+    });
+    Ok(())
+}
+
 /// Phase J+M2: Read session-affinity.json, return top N entries (path, anchors) sorted by recency.
 /// Supports both new format (AffinityEntry with ts+anchors) and old flat format (ts only).
 fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(String, Vec<String>)> {
@@ -2352,6 +2457,17 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
             "command": "budi hook post-tool-use",
             "async": true,
             "timeout": 30
+          }
+        ]
+      }
+    ]);
+
+    settings["hooks"]["Stop"] = json!([
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "budi hook session-end"
           }
         ]
       }

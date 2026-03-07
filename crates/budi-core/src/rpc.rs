@@ -75,6 +75,14 @@ pub struct QueryResultItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnippetRef {
+    pub path: String,
+    pub score: f32,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub total_candidates: usize,
     pub context: String,
@@ -87,6 +95,8 @@ pub struct QueryResponse {
     pub detected_intent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing_ms: Option<HashMap<String, u64>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub snippet_refs: Vec<SnippetRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
