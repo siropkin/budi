@@ -516,4 +516,157 @@ public class Demo {
         assert!(chunks.iter().any(|chunk| chunk.text.contains("Alpha")));
         assert!(chunks.iter().any(|chunk| chunk.text.contains("Beta")));
     }
+
+    #[test]
+    fn ast_chunking_splits_rust_functions() {
+        let content = r#"
+pub fn alpha() -> i32 {
+    1
+}
+
+pub fn beta() -> i32 {
+    2
+}
+"#;
+        let chunks = chunk_text("lib.rs", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().any(|c| c.text.contains("fn alpha")));
+        assert!(chunks.iter().any(|c| c.text.contains("fn beta")));
+        // Symbol hints should be extracted for Rust functions
+        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
+        assert!(hints.contains(&"alpha") || hints.contains(&"beta"), "expected Rust symbol hints, got: {hints:?}");
+    }
+
+    #[test]
+    fn ast_chunking_splits_typescript_class() {
+        let content = r#"
+export class Scheduler {
+    schedule(work: () => void): void {
+        work();
+    }
+
+    cancel(id: number): void {
+        return;
+    }
+}
+"#;
+        let chunks = chunk_text("Scheduler.ts", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().any(|c| c.text.contains("Scheduler")), "expected Scheduler class");
+    }
+
+    #[test]
+    fn ast_chunking_splits_go_functions() {
+        let content = r#"
+package main
+
+func Alpha() int {
+    return 1
+}
+
+func Beta() int {
+    return 2
+}
+"#;
+        let chunks = chunk_text("main.go", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().any(|c| c.text.contains("Alpha")));
+        assert!(chunks.iter().any(|c| c.text.contains("Beta")));
+    }
+
+    #[test]
+    fn empty_file_returns_no_chunks() {
+        let chunks = chunk_text("empty.rs", "", 80, 20);
+        assert!(chunks.is_empty(), "empty file should produce no chunks");
+    }
+
+    #[test]
+    fn single_line_file_produces_one_chunk() {
+        let chunks = chunk_text("tiny.rs", "fn main() {}", 80, 20);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("fn main"));
+    }
+
+    #[test]
+    fn dominant_symbol_hint_picks_longest_spanning_symbol() {
+        use super::dominant_symbol_hint;
+        // Build a file with two functions: a short one and a long one.
+        // The long one should win as the dominant hint.
+        let lines_short = vec!["fn short_fn() {".to_string(), "}".to_string()];
+        let mut lines_long = vec!["fn long_fn() {".to_string()];
+        for i in 0..50 {
+            lines_long.push(format!("    let _ = {i};"));
+        }
+        lines_long.push("}".to_string());
+        let all_lines: Vec<&str> = lines_short
+            .iter()
+            .chain(lines_long.iter())
+            .map(|s| s.as_str())
+            .collect();
+        let hint = dominant_symbol_hint(&all_lines);
+        assert_eq!(hint.as_deref(), Some("long_fn"), "expected long_fn to dominate, got: {hint:?}");
+    }
+
+    #[test]
+    fn dominant_symbol_hint_returns_none_for_empty_input() {
+        use super::dominant_symbol_hint;
+        let hint = dominant_symbol_hint(&[]);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn dominant_symbol_hint_returns_none_for_non_symbol_lines() {
+        use super::dominant_symbol_hint;
+        let lines = ["let x = 1;", "let y = 2;", "x + y"];
+        let hint = dominant_symbol_hint(&lines);
+        assert!(hint.is_none(), "got: {hint:?}");
+    }
+
+    #[test]
+    fn line_window_chunking_produces_overlapping_chunks() {
+        // File with exactly 90 lines and chunk_size=80, overlap=20.
+        // stride = 80 - 20 = 60. So we get chunks at 1 and 61.
+        let content = (0..90)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = chunk_text("mystery.unknown", &content, 80, 20);
+        assert!(chunks.len() >= 2, "expected ≥2 chunks for 90-line file");
+        // The second chunk should start before the end of the first
+        if chunks.len() >= 2 {
+            assert!(chunks[1].start_line < chunks[0].end_line, "chunks should overlap");
+        }
+    }
+
+    #[test]
+    fn chunks_have_valid_line_ranges() {
+        let content = r#"
+export function alpha(x: number): number {
+    return x + 1;
+}
+
+export function beta(x: number): number {
+    return x * 2;
+}
+"#;
+        let chunks = chunk_text("math.ts", content, 80, 20);
+        for chunk in &chunks {
+            assert!(chunk.start_line >= 1, "start_line should be ≥1");
+            assert!(chunk.end_line >= chunk.start_line, "end_line should be ≥ start_line");
+        }
+    }
+
+    #[test]
+    fn rust_struct_gets_symbol_hint() {
+        let content = r#"
+pub struct WorkLoop {
+    queue: Vec<Work>,
+    priority: u8,
+}
+"#;
+        let chunks = chunk_text("work_loop.rs", content, 80, 20);
+        assert!(!chunks.is_empty());
+        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
+        assert!(hints.contains(&"WorkLoop"), "expected WorkLoop hint, got: {hints:?}");
+    }
 }

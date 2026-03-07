@@ -402,7 +402,12 @@ pub fn build_call_graph_summary(
 
 fn is_test_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.contains("/test") || lower.contains("/spec") || lower.starts_with("test") || lower.starts_with("spec")
+    lower.contains("/test")
+        || lower.contains("/spec")
+        || lower.contains("__tests__")
+        || lower.contains("__spec__")
+        || lower.starts_with("test")
+        || lower.starts_with("spec")
 }
 
 fn is_generic_symbol_hint(s: &str) -> bool {
@@ -445,7 +450,13 @@ fn truncate_to(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
     } else {
-        &s[..max]
+        // Walk back from `max` to the nearest valid UTF-8 char boundary so we
+        // never panic on multi-byte characters (e.g. Unicode symbol names).
+        let mut cut = max;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        &s[..cut]
     }
 }
 
@@ -1519,4 +1530,433 @@ fn normalize_path(input: &str) -> String {
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify_intent ───────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_symbol_usage_who_calls() {
+        assert_eq!(classify_intent("who calls scheduleUpdateOnFiber"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("what calls processWork"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("callers of performWork"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("uses of commitRoot"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("usages of renderFiber"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("who constructs FiberNode"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("who creates the scheduler"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("who instantiates WorkLoop"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("who builds the context"), QueryIntentKind::SymbolUsage);
+    }
+
+    #[test]
+    fn classify_symbol_definition_where_is() {
+        assert_eq!(classify_intent("where is scheduleUpdateOnFiber defined"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("where is the reconciler"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("definition of commitWork"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("declaration of FiberNode"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("declare the interface"), QueryIntentKind::SymbolDefinition);
+    }
+
+    #[test]
+    fn classify_flow_trace_what_does() {
+        assert_eq!(classify_intent("what does scheduleUpdateOnFiber do"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("called by renderFiber"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("trace the call chain of commitRoot"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("execution order in the scheduler"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("cleanup order for useEffect"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("cleanup sequence when component unmounts"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("unmount order in React"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("lifecycle order for hooks"), QueryIntentKind::FlowTrace);
+        assert_eq!(classify_intent("what order do effects fire"), QueryIntentKind::FlowTrace);
+    }
+
+    #[test]
+    fn classify_architecture() {
+        assert_eq!(classify_intent("what is the architecture of this codebase"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("give me an overview of the project"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("what modules are there"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("show me the structure"), QueryIntentKind::Architecture);
+        // "where is X" routes to SymbolDefinition because "where is" check runs before Architecture
+        assert_eq!(classify_intent("where is the entry point"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("what is the directory layout"), QueryIntentKind::Architecture);
+        // Without "where is", entry point / entrypoint routes correctly to Architecture
+        assert_eq!(classify_intent("explain the entrypoint"), QueryIntentKind::Architecture);
+    }
+
+    #[test]
+    fn classify_generative_test_routes_to_architecture() {
+        assert_eq!(classify_intent("what tests would you add for commitRoot"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("what tests would you write"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("suggest tests for the scheduler"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("design test cases for this"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("tests to add for renderFiber"), QueryIntentKind::Architecture);
+    }
+
+    #[test]
+    fn classify_test_lookup() {
+        assert_eq!(classify_intent("show me the test for commitRoot"), QueryIntentKind::TestLookup);
+        // "where is the unit test" routes to SymbolDefinition because "where is" check runs first
+        assert_eq!(classify_intent("where is the unit test"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("testing the scheduler"), QueryIntentKind::TestLookup);
+        // "what is the spec for X" — "what is" not in the flow-trace keywords, falls through to TestLookup
+        assert_eq!(classify_intent("spec for renderFiber"), QueryIntentKind::TestLookup);
+        assert_eq!(classify_intent("coverage for this file"), QueryIntentKind::TestLookup);
+        assert_eq!(classify_intent("unit test for commitRoot"), QueryIntentKind::TestLookup);
+    }
+
+    #[test]
+    fn classify_runtime_config() {
+        assert_eq!(classify_intent("where is the config file"), QueryIntentKind::SymbolDefinition); // "where is" wins
+        assert_eq!(classify_intent("how to load config"), QueryIntentKind::RuntimeConfig);
+        assert_eq!(classify_intent("read config from disk"), QueryIntentKind::RuntimeConfig);
+        assert_eq!(classify_intent("what env var controls logging"), QueryIntentKind::RuntimeConfig);
+        assert_eq!(classify_intent("environment variable for database"), QueryIntentKind::RuntimeConfig);
+        assert_eq!(classify_intent("what are the settings"), QueryIntentKind::RuntimeConfig);
+        assert_eq!(classify_intent("which build flag enables debug mode"), QueryIntentKind::RuntimeConfig);
+    }
+
+    #[test]
+    fn classify_default_to_architecture() {
+        assert_eq!(classify_intent("how does the reconciler work"), QueryIntentKind::Architecture);
+        assert_eq!(classify_intent("explain the fiber model"), QueryIntentKind::Architecture);
+    }
+
+    #[test]
+    fn classify_case_insensitive() {
+        assert_eq!(classify_intent("WHERE IS scheduleUpdateOnFiber"), QueryIntentKind::SymbolDefinition);
+        assert_eq!(classify_intent("WHAT CALLS commitRoot"), QueryIntentKind::SymbolUsage);
+        assert_eq!(classify_intent("What Does processWork Do"), QueryIntentKind::FlowTrace);
+    }
+
+    // SymbolUsage must beat SymbolDefinition when both keywords appear
+    #[test]
+    fn classify_sym_usage_wins_over_sym_def() {
+        // "who calls" should win over "defined" even if both appear
+        let prompt = "who calls the function defined in reconciler";
+        assert_eq!(classify_intent(prompt), QueryIntentKind::SymbolUsage);
+    }
+
+    // SymbolDefinition must win before FlowTrace when both could match
+    #[test]
+    fn classify_sym_def_wins_over_flow_trace() {
+        // "where is" appears before "what does"
+        assert_eq!(classify_intent("where is what does defined"), QueryIntentKind::SymbolDefinition);
+    }
+
+    // ── min_selection_score ────────────────────────────────────────────────────
+
+    fn make_scored_chunk(id: u64, score: f32) -> ScoredChunk {
+        ScoredChunk {
+            id,
+            score,
+            reasons: vec![],
+            channel_scores: crate::rpc::QueryChannelScores::default(),
+        }
+    }
+
+    #[test]
+    fn min_score_empty_candidates_returns_neg_infinity() {
+        let floor = min_selection_score(&[], QueryIntentKind::Architecture);
+        assert_eq!(floor, f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn min_score_relative_floor_is_40_percent_of_top() {
+        let chunks = vec![make_scored_chunk(1, 0.80), make_scored_chunk(2, 0.20)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
+        // relative = 0.80 * 0.40 = 0.32; no intent-specific minimum
+        assert!((floor - 0.32).abs() < 1e-5, "expected ~0.32, got {floor}");
+    }
+
+    #[test]
+    fn min_score_floor_enforced_for_flow_trace() {
+        // relative = 0.40 * 0.40 = 0.16, but FlowTrace floor is 0.25
+        let chunks = vec![make_scored_chunk(1, 0.40)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::FlowTrace);
+        assert!((floor - 0.25).abs() < 1e-5, "expected 0.25 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_floor_enforced_for_symbol_def() {
+        // relative = 0.40 * 0.40 = 0.16, but SymbolDefinition floor is 0.20
+        let chunks = vec![make_scored_chunk(1, 0.40)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::SymbolDefinition);
+        assert!((floor - 0.20).abs() < 1e-5, "expected 0.20 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_floor_enforced_for_symbol_usage() {
+        let chunks = vec![make_scored_chunk(1, 0.40)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::SymbolUsage);
+        assert!((floor - 0.22).abs() < 1e-5, "expected 0.22 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_floor_enforced_for_test_lookup() {
+        let chunks = vec![make_scored_chunk(1, 0.40)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::TestLookup);
+        assert!((floor - 0.22).abs() < 1e-5, "expected 0.22 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_relative_dominates_when_high() {
+        // top = 0.90, relative = 0.36; FlowTrace floor is 0.25, so relative wins
+        let chunks = vec![make_scored_chunk(1, 0.90)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::FlowTrace);
+        assert!((floor - 0.36).abs() < 1e-5, "expected 0.36 (relative wins), got {floor}");
+    }
+
+    // ── is_test_path ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_test_path_detects_test_dirs() {
+        assert!(is_test_path("src/tests/foo.rs"));
+        assert!(is_test_path("src/test/scheduler.rs"));
+        assert!(is_test_path("__tests__/App.test.tsx"));   // Jest __tests__ directory
+        assert!(is_test_path("src/__tests__/Foo.test.ts")); // nested __tests__
+        assert!(is_test_path("spec/scheduler_spec.rb"));
+        assert!(is_test_path("test_scheduler.py"));        // starts_with("test")
+        assert!(is_test_path("spec_helper.rb"));           // starts_with("spec")
+    }
+
+    #[test]
+    fn is_test_path_rejects_non_test_paths() {
+        assert!(!is_test_path("src/scheduler.rs"));
+        assert!(!is_test_path("crates/budi-core/src/daemon.rs"));
+        assert!(!is_test_path("components/Button.tsx"));
+    }
+
+    #[test]
+    fn is_test_path_permissive_for_test_in_name() {
+        // Files with "test" in the name (via /test substring) are treated as test-related.
+        // This is intentional: utils/testUtils.ts contains /test as a substring.
+        assert!(is_test_path("utils/testUtils.ts"));   // contains /test (in /testUtils)
+        assert!(is_test_path("src/testUtils.ts"));     // contains /test (in /testUtils)
+        // Top-level file starting with "test" is also detected
+        assert!(is_test_path("testUtils.ts"));
+    }
+
+    // ── is_generic_symbol_hint ────────────────────────────────────────────────
+
+    #[test]
+    fn generic_symbol_hint_matches_language_keywords() {
+        for kw in &["fn", "pub", "function", "def", "class", "method", "func",
+                    "procedure", "sub", "lambda", "arrow", "block", "module",
+                    "impl", "trait", "struct", "enum", "interface", "type",
+                    "const", "let", "var", "static", "async", "export"] {
+            assert!(is_generic_symbol_hint(kw), "expected {kw} to be generic");
+        }
+    }
+
+    #[test]
+    fn generic_symbol_hint_allows_real_names() {
+        assert!(!is_generic_symbol_hint("scheduleUpdateOnFiber"));
+        assert!(!is_generic_symbol_hint("commitRoot"));
+        assert!(!is_generic_symbol_hint("renderFiber"));
+        assert!(!is_generic_symbol_hint("WorkLoop"));
+        assert!(!is_generic_symbol_hint("my_function"));
+    }
+
+    // ── intent_retrieval_limit ────────────────────────────────────────────────
+
+    #[test]
+    fn retrieval_limit_precision_intents_are_five() {
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::SymbolDefinition), 5);
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::FlowTrace), 5);
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::SymbolUsage), 5);
+    }
+
+    #[test]
+    fn retrieval_limit_breadth_intents_are_eight() {
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::Architecture), 8);
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::TestLookup), 8);
+    }
+
+    #[test]
+    fn retrieval_limit_others_are_six() {
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::RuntimeConfig), 6);
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::PathLookup), 6);
+    }
+
+    // ── parse_retrieval_mode ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_retrieval_mode_variants() {
+        assert_eq!(parse_retrieval_mode(None), RetrievalMode::Hybrid);
+        assert_eq!(parse_retrieval_mode(Some("")), RetrievalMode::Hybrid);
+        assert_eq!(parse_retrieval_mode(Some("lexical")), RetrievalMode::Lexical);
+        assert_eq!(parse_retrieval_mode(Some("vector")), RetrievalMode::Vector);
+        assert_eq!(parse_retrieval_mode(Some("symbol-graph")), RetrievalMode::SymbolGraph);
+        assert_eq!(parse_retrieval_mode(Some("symbol_graph")), RetrievalMode::SymbolGraph);
+        assert_eq!(parse_retrieval_mode(Some("symbolgraph")), RetrievalMode::SymbolGraph);
+        assert_eq!(parse_retrieval_mode(Some("unknown")), RetrievalMode::Hybrid);
+        // Case insensitive
+        assert_eq!(parse_retrieval_mode(Some("LEXICAL")), RetrievalMode::Lexical);
+        assert_eq!(parse_retrieval_mode(Some("  vector  ")), RetrievalMode::Vector);
+    }
+
+    // ── extract_query_symbol_tokens ───────────────────────────────────────────
+
+    #[test]
+    fn symbol_tokens_extracts_camel_case() {
+        let tokens = extract_query_symbol_tokens("how does scheduleUpdateOnFiber work");
+        assert!(tokens.contains(&"scheduleupdateonfiber".to_string()), "got: {tokens:?}");
+    }
+
+    #[test]
+    fn symbol_tokens_extracts_underscore_names() {
+        let tokens = extract_query_symbol_tokens("what is render_fiber_tree");
+        assert!(tokens.contains(&"render_fiber_tree".to_string()), "got: {tokens:?}");
+    }
+
+    #[test]
+    fn symbol_tokens_filters_plain_lowercase_words() {
+        let tokens = extract_query_symbol_tokens("how does the scheduler work");
+        // Plain lowercase words without underscore/digit/mixed-case should be filtered
+        assert!(!tokens.contains(&"scheduler".to_string()), "got: {tokens:?}");
+        assert!(!tokens.contains(&"how".to_string()), "got: {tokens:?}");
+    }
+
+    #[test]
+    fn symbol_tokens_rejects_short_tokens() {
+        let tokens = extract_query_symbol_tokens("fn do");
+        assert!(tokens.is_empty(), "got: {tokens:?}");
+    }
+
+    #[test]
+    fn symbol_tokens_deduplicates() {
+        let tokens = extract_query_symbol_tokens("commitRoot and commitRoot");
+        let count = tokens.iter().filter(|t| t.as_str() == "commitroot").count();
+        assert_eq!(count, 1, "got: {tokens:?}");
+    }
+
+    // ── normalize_channel_score ────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_channel_score_lexical_clamps_0_to_1() {
+        assert!((normalize_channel_score(0.0, ChannelKind::Lexical) - 0.0).abs() < 1e-6);
+        assert!((normalize_channel_score(25.0, ChannelKind::Lexical) - 1.0).abs() < 1e-6);
+        assert!((normalize_channel_score(12.5, ChannelKind::Lexical) - 0.5).abs() < 1e-6);
+        // Negative input should clamp to 0
+        assert_eq!(normalize_channel_score(-5.0, ChannelKind::Lexical), 0.0);
+        // Over 25 should clamp to 1
+        assert_eq!(normalize_channel_score(100.0, ChannelKind::Lexical), 1.0);
+    }
+
+    #[test]
+    fn normalize_channel_score_vector_clamps_0_to_1() {
+        assert!((normalize_channel_score(0.75, ChannelKind::Vector) - 0.75).abs() < 1e-6);
+        assert_eq!(normalize_channel_score(-0.1, ChannelKind::Vector), 0.0);
+        assert_eq!(normalize_channel_score(1.5, ChannelKind::Vector), 1.0);
+    }
+
+    #[test]
+    fn normalize_channel_score_graph_divides_by_2() {
+        assert!((normalize_channel_score(1.0, ChannelKind::Graph) - 0.5).abs() < 1e-6);
+        assert!((normalize_channel_score(2.0, ChannelKind::Graph) - 1.0).abs() < 1e-6);
+        assert_eq!(normalize_channel_score(0.0, ChannelKind::Symbol), 0.0);
+    }
+
+    // ── truncate_to (UTF-8 safety) ────────────────────────────────────────────
+
+    #[test]
+    fn truncate_to_ascii_unchanged_when_short() {
+        assert_eq!(truncate_to("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_to_ascii_truncated() {
+        assert_eq!(truncate_to("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_to_multibyte_does_not_panic() {
+        // "café" is 5 bytes (é is 2 bytes). Truncating at byte 4 would split é.
+        let s = "café";
+        assert_eq!(s.len(), 5); // c(1) + a(1) + f(1) + é(2)
+        let result = truncate_to(s, 4);
+        // Should back up to byte 3 ("caf") to avoid splitting the 2-byte 'é'
+        assert_eq!(result, "caf");
+    }
+
+    #[test]
+    fn truncate_to_multibyte_longer_string() {
+        let s = "schedüleUpdate";
+        // This shouldn't panic regardless of where we cut
+        let result = truncate_to(s, 8);
+        assert!(s.starts_with(result));
+        assert!(s.is_char_boundary(result.len()));
+    }
+
+    // ── push_unique_reason ────────────────────────────────────────────────────
+
+    #[test]
+    fn push_unique_reason_no_duplicates() {
+        let mut reasons: Vec<String> = vec!["lexical-hit".to_string()];
+        push_unique_reason(&mut reasons, "lexical-hit");
+        assert_eq!(reasons.len(), 1);
+        push_unique_reason(&mut reasons, "semantic-hit");
+        assert_eq!(reasons.len(), 2);
+        push_unique_reason(&mut reasons, "semantic-hit");
+        assert_eq!(reasons.len(), 2);
+    }
+
+    // ── weights_for_intent ────────────────────────────────────────────────────
+
+    #[test]
+    fn weights_are_positive_for_all_intents() {
+        for kind in &[
+            QueryIntentKind::SymbolDefinition,
+            QueryIntentKind::FlowTrace,
+            QueryIntentKind::SymbolUsage,
+            QueryIntentKind::Architecture,
+            QueryIntentKind::TestLookup,
+            QueryIntentKind::RuntimeConfig,
+        ] {
+            let w = weights_for_intent(*kind);
+            assert!(w.lexical > 0.0, "{kind:?} lexical weight must be > 0");
+            assert!(w.vector > 0.0, "{kind:?} vector weight must be > 0");
+            assert!(w.symbol > 0.0, "{kind:?} symbol weight must be > 0");
+        }
+    }
+
+    #[test]
+    fn sym_def_boosts_symbol_channel() {
+        let sym_def = weights_for_intent(QueryIntentKind::SymbolDefinition);
+        let arch = weights_for_intent(QueryIntentKind::Architecture);
+        assert!(sym_def.symbol > arch.symbol, "SymbolDefinition should have higher symbol weight than Architecture");
+    }
+
+    #[test]
+    fn flow_trace_boosts_graph_channel() {
+        let flow = weights_for_intent(QueryIntentKind::FlowTrace);
+        let sym_def = weights_for_intent(QueryIntentKind::SymbolDefinition);
+        assert!(flow.graph > sym_def.graph, "FlowTrace should have higher graph weight than SymbolDefinition");
+    }
+
+    // ── contains_any ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn contains_any_matches_substring() {
+        assert!(contains_any("what calls foo", &["what calls", "callers of"]));
+        assert!(contains_any("callers of bar", &["what calls", "callers of"]));
+        assert!(!contains_any("hello world", &["what calls", "callers of"]));
+    }
+
+    #[test]
+    fn contains_any_empty_patterns_returns_false() {
+        assert!(!contains_any("anything", &[]));
+    }
+
+    // ── normalize_path ────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_path_converts_backslash_and_lowercases() {
+        assert_eq!(normalize_path("src\\Foo\\Bar"), "src/foo/bar");
+        assert_eq!(normalize_path("src/foo/"), "src/foo");
+        assert_eq!(normalize_path("SRC/FOO"), "src/foo");
+    }
 }

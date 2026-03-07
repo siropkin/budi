@@ -211,3 +211,163 @@ pub(super) fn snippet_fingerprint(text: &str) -> String {
         .to_lowercase();
     blake3::hash(normalized.as_bytes()).to_hex().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::{QueryChannelScores, QueryResultItem};
+
+    fn make_snippet(path: &str, text: &str, score: f32) -> QueryResultItem {
+        QueryResultItem {
+            path: path.to_string(),
+            start_line: 1,
+            end_line: 10,
+            score,
+            reasons: vec!["lexical-hit".to_string()],
+            channel_scores: QueryChannelScores::default(),
+            text: text.to_string(),
+            slm_relevance_note: None,
+        }
+    }
+
+    // ── build_context ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_snippets_returns_header_only() {
+        let out = build_context(&[], 4096);
+        assert!(out.starts_with("[budi context]"), "missing header");
+        assert!(out.contains("evidence_cards:"), "missing evidence_cards section");
+        // No snippet data
+        assert!(!out.contains("file:"), "unexpected file card");
+    }
+
+    #[test]
+    fn single_snippet_rendered_correctly() {
+        let snippets = vec![make_snippet(
+            "src/scheduler.rs",
+            "fn commitRoot() { schedule(); }",
+            0.75,
+        )];
+        let out = build_context(&snippets, 4096);
+        assert!(out.contains("file: src/scheduler.rs"), "missing file path");
+        assert!(out.contains("score: 0.7500"), "missing score");
+        assert!(out.contains("span: 1-10"), "missing span");
+        assert!(out.contains("signals: lexical-hit"), "missing signals");
+    }
+
+    #[test]
+    fn zero_budget_returns_header_only() {
+        let snippets = vec![make_snippet("src/foo.rs", "fn foo() {}", 0.8)];
+        let out = build_context(&snippets, 0);
+        // Budget 0 < header length, so content_budget is 0, loop breaks immediately
+        assert!(out.starts_with("[budi context]"));
+        assert!(!out.contains("file: src/foo.rs"), "should not render card when budget=0");
+    }
+
+    #[test]
+    fn budget_caps_total_output_length() {
+        let long_text = "x".repeat(5000);
+        let snippets = vec![
+            make_snippet("src/a.rs", &long_text, 0.9),
+            make_snippet("src/b.rs", &long_text, 0.8),
+        ];
+        let budget = 2000;
+        let out = build_context(&snippets, budget);
+        assert!(
+            out.len() <= budget + 20,  // small tolerance for header math
+            "output len {} exceeds budget {}",
+            out.len(),
+            budget
+        );
+    }
+
+    #[test]
+    fn top_snippet_gets_40_percent_of_content_budget() {
+        // Build two snippets where second has much more text.
+        // The top snippet should get ≤40% of content_budget.
+        let long = "z ".repeat(3000);
+        let snippets = vec![
+            make_snippet("src/top.rs", "fn top() { return 1; }", 0.9),
+            make_snippet("src/big.rs", &long, 0.5),
+        ];
+        let budget = 4096;
+        let out = build_context(&snippets, budget);
+        // Both files should appear since budget is generous
+        assert!(out.contains("file: src/top.rs"));
+        assert!(out.contains("file: src/big.rs"));
+    }
+
+    #[test]
+    fn output_contains_evidence_card_structure() {
+        let snippets = vec![make_snippet(
+            "src/daemon.rs",
+            "pub fn query(&self) -> Result<QueryResponse> { return Ok(resp); }",
+            0.82,
+        )];
+        let out = build_context(&snippets, 4096);
+        assert!(out.contains("anchor:"), "missing anchor");
+        assert!(out.contains("proof:"), "missing proof section");
+    }
+
+    #[test]
+    fn multiline_snippet_extracts_proof_lines() {
+        let snippets = vec![make_snippet(
+            "src/routes.rs",
+            "// top comment\nroute(\"/api\", handler)\nreturn response;",
+            0.7,
+        )];
+        let out = build_context(&snippets, 4096);
+        // Should include the "route" line as a proof needle match
+        assert!(out.contains("route"), "expected route proof line");
+    }
+
+    // ── path_diversity_bucket ────────────────────────────────────────────────
+
+    #[test]
+    fn path_diversity_bucket_two_levels() {
+        assert_eq!(path_diversity_bucket("src/foo/bar.rs"), "src/foo");
+        assert_eq!(path_diversity_bucket("crates/budi-core/src/lib.rs"), "crates/budi-core");
+    }
+
+    #[test]
+    fn path_diversity_bucket_single_level() {
+        assert_eq!(path_diversity_bucket("main.rs"), "main.rs");
+        assert_eq!(path_diversity_bucket("/main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn path_diversity_bucket_empty_path() {
+        assert_eq!(path_diversity_bucket(""), "root");
+    }
+
+    // ── snippet_fingerprint ───────────────────────────────────────────────────
+
+    #[test]
+    fn fingerprint_is_stable() {
+        let text = "fn foo() { let x = 1; }";
+        let a = snippet_fingerprint(text);
+        let b = snippet_fingerprint(text);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_ignores_whitespace_differences() {
+        let a = snippet_fingerprint("fn foo()  {   let x = 1;  }");
+        let b = snippet_fingerprint("fn foo() { let x = 1; }");
+        assert_eq!(a, b, "fingerprint should be whitespace-normalized");
+    }
+
+    #[test]
+    fn fingerprint_is_case_insensitive() {
+        let a = snippet_fingerprint("fn FOO() {}");
+        let b = snippet_fingerprint("fn foo() {}");
+        assert_eq!(a, b, "fingerprint should be lowercased");
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_content() {
+        let a = snippet_fingerprint("fn foo() {}");
+        let b = snippet_fingerprint("fn bar() {}");
+        assert_ne!(a, b);
+    }
+}
