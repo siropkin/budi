@@ -132,20 +132,35 @@ pub fn build_query_response(
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(query, &intent, &mut path_tokens);
 
+    // TestLookup: widen the candidate pool so inline test blocks (which score lower
+    // than production code on the query text) have a chance to enter the fused stage.
+    // This also helps Z2 find production co-location seeds from files like config.rs
+    // whose production chunks rank ~25-30 in normal topk=20 for test queries.
+    let topk_lex = if intent.kind == QueryIntentKind::TestLookup {
+        config.topk_lexical * 2
+    } else {
+        config.topk_lexical
+    };
+    let topk_vec = if intent.kind == QueryIntentKind::TestLookup {
+        config.topk_vector * 2
+    } else {
+        config.topk_vector
+    };
+
     // Run retrieval channels
     let lexical = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Lexical) {
-        runtime.search_lexical(query, config.topk_lexical)?
+        runtime.search_lexical(query, topk_lex)?
     } else {
         Vec::new()
     };
     let vector = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Vector) {
         query_embedding
-            .map(|embedding| runtime.search_vector(embedding, config.topk_vector))
+            .map(|embedding| runtime.search_vector(embedding, topk_vec))
             .unwrap_or_default()
     } else {
         Vec::new()
     };
-    let channel_limit = config.topk_lexical.max(config.retrieval_limit * 2);
+    let channel_limit = topk_lex.max(config.retrieval_limit * 2);
     let symbol = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Symbol) {
         diversify_channel_by_path(
             runtime,
@@ -174,7 +189,67 @@ pub fn build_query_response(
         Vec::new()
     };
 
-    let fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
+    let mut fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
+
+    // Phase Z2: For TestLookup, inject inline-test chunks co-located with top results.
+    // Problem: inline test blocks (e.g., Rust #[cfg(test)]) may not rank in
+    // topk_lexical/topk_vector because their text doesn't contain query words.
+    // Fix: if a production chunk from file F is in top-5 candidates, also inject any
+    // inline test blocks from file F directly into the candidate pool, scored
+    // proportionally to the source file's max fused score (so higher-relevance files
+    // produce higher-scored test neighbors, avoiding ties with less-relevant files).
+    if intent.kind == QueryIntentKind::TestLookup {
+        // Collect per-file max fused score from the top-8 PRODUCTION chunks
+        // (skip test-path chunks — their raw fused scores are low since the +0.15
+        // test-path-boost hasn't been applied yet, which would exclude them from
+        // the window even though they're high in final score).
+        let mut top_pairs: Vec<(u64, f32)> =
+            fused.iter().map(|(id, cs)| (*id, cs.score)).collect();
+        top_pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut top_file_scores: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        let mut production_seen = 0usize;
+        for (id, score) in &top_pairs {
+            if production_seen >= 8 {
+                break;
+            }
+            let Some(chunk) = runtime.chunk(*id) else {
+                continue;
+            };
+            // Skip test-path and already-inline-test chunks as seeds
+            if is_test_path(&chunk.path) || is_inline_test_chunk(&chunk.text) {
+                continue;
+            }
+            production_seen += 1;
+            let entry = top_file_scores.entry(chunk.path.clone()).or_insert(0.0);
+            if *score > *entry {
+                *entry = *score;
+            }
+        }
+        // Inject or boost: inline test chunks from top files. Score is proportional
+        // to the source file's max fused score (0.65×), so files with stronger
+        // evidence inject higher-scoring test neighbors.
+        for chunk in runtime.all_chunks() {
+            let Some(&file_score) = top_file_scores.get(&chunk.path) else {
+                continue;
+            };
+            if !is_inline_test_chunk(&chunk.text) {
+                continue;
+            }
+            let neighbor_score = file_score * 0.65;
+            let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
+            if neighbor_score > existing {
+                fused.insert(
+                    chunk.id,
+                    CandidateScore {
+                        score: neighbor_score,
+                        signals: vec!["inline-test-neighbor".to_string()],
+                        channel_scores: QueryChannelScores::default(),
+                    },
+                );
+            }
+        }
+    }
 
     let cwd_rel = cwd
         .and_then(|path| path.to_str())
@@ -249,9 +324,16 @@ pub fn build_query_response(
         default_limit
     }
     .max(4);
+    // TestLookup: raise per_bucket_limit to 3 so inline-test-neighbor injections
+    // don't get crowded out by other chunks from the same top-level crate bucket.
+    let per_bucket_limit = if intent.kind == QueryIntentKind::TestLookup {
+        3
+    } else {
+        2
+    };
     let mut selection = SnippetSelectionState {
         per_file_limit: 2,
-        per_bucket_limit: 2,
+        per_bucket_limit,
         ..SnippetSelectionState::default()
     };
     let min_score = min_selection_score(&scored, intent.kind);
