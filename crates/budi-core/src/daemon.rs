@@ -254,11 +254,25 @@ impl DaemonState {
         drop(runtime_guard);
         let t_callgraph_ms = t_start.elapsed().as_millis() as u64;
 
-        // Phase L1: Deduct call graph from snippet budget so total ≤ context_char_budget.
+        // Phase Y: Per-intent snippet budget.
+        // Research: context rot begins immediately; every irrelevant token costs attention
+        // bandwidth. Precision intents (sym-def, sym-use) need ≤4k chars of code — injecting
+        // 10k adds noise. Breadth intents (architecture) genuinely benefit from wider coverage.
+        let intent_snippet_budget = match response.detected_intent.as_deref() {
+            Some("symbol-definition") => 3_000,
+            Some("symbol-usage") => 4_000,
+            Some("runtime-config") => 4_000,
+            Some("flow-trace") => 5_500,
+            Some("test-lookup") => 5_000,
+            _ => config.context_char_budget, // architecture + default: full budget
+        }
+        .min(config.context_char_budget);
+
+        // Phase L1: Deduct call graph from snippet budget so total ≤ intent_snippet_budget.
         let base_budget = if call_graph.is_some() {
-            config.context_char_budget.saturating_sub(call_graph_budget)
+            intent_snippet_budget.saturating_sub(call_graph_budget)
         } else {
-            config.context_char_budget
+            intent_snippet_budget
         };
         // Rebuild context after dedup + prepend call graph summary.
         let base_context = if request.session_id.is_some() || call_graph.is_some() {
