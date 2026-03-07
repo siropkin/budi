@@ -71,17 +71,9 @@ pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> Stri
 }
 
 fn render_evidence_card(snippet: &QueryResultItem) -> String {
-    let reasons = if snippet.reasons.is_empty() {
-        "semantic+lexical".to_string()
-    } else {
-        snippet
-            .reasons
-            .iter()
-            .take(6)
-            .map(|reason| reason.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    };
+    // Phase AA: strip score/signals — debugging metadata that adds noise for Claude.
+    // Context Rot research: even harmless distractors degrade attention/focus.
+    // Keep: file, span, anchor (what to look at), proof (why it's relevant).
     let anchor = extract_anchor_line(&snippet.text);
     let proof_lines = extract_proof_lines(&snippet.text, 3);
     let mut out = String::new();
@@ -90,8 +82,6 @@ fn render_evidence_card(snippet: &QueryResultItem) -> String {
         "  span: {}-{}\n",
         snippet.start_line, snippet.end_line
     ));
-    out.push_str(&format!("  score: {:.4}\n", snippet.score));
-    out.push_str(&format!("  signals: {}\n", reasons));
     out.push_str(&format!("  anchor: {}\n", anchor));
     if let Some(note) = &snippet.slm_relevance_note {
         out.push_str(&format!("  relevance: {}\n", note));
@@ -253,9 +243,10 @@ mod tests {
         )];
         let out = build_context(&snippets, 4096);
         assert!(out.contains("file: src/scheduler.rs"), "missing file path");
-        assert!(out.contains("score: 0.7500"), "missing score");
         assert!(out.contains("span: 1-10"), "missing span");
-        assert!(out.contains("signals: lexical-hit"), "missing signals");
+        // Phase AA: score and signals are stripped from emitted context (debugging metadata)
+        assert!(!out.contains("score:"), "score should not be in emitted context");
+        assert!(!out.contains("signals:"), "signals should not be in emitted context");
     }
 
     #[test]
