@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -9,11 +10,19 @@ import re
 import statistics
 import subprocess
 import textwrap
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_print_lock = threading.Lock()
+
+
+def _print(*args, **kwargs) -> None:
+    with _print_lock:
+        print(*args, **kwargs)
 
 
 DEFAULT_PROMPT_SET_NAME = "generic-v1"
@@ -576,12 +585,13 @@ def judge_pair_majority(
     timeout_sec: int,
     passes: int = 3,
 ) -> dict[str, Any]:
-    """Run judge_pair `passes` times, take majority winner, average numeric scores."""
-    results = []
-    for _ in range(passes):
-        r = judge_pair(repo_root, prompt, no_budi_result, with_budi_result, timeout_sec)
-        if r.get("ok"):
-            results.append(r)
+    """Run judge_pair `passes` times in parallel, take majority winner, average numeric scores."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=passes) as executor:
+        futures = [
+            executor.submit(judge_pair, repo_root, prompt, no_budi_result, with_budi_result, timeout_sec)
+            for _ in range(passes)
+        ]
+        results = [f.result() for f in concurrent.futures.as_completed(futures) if f.result().get("ok")]
     if not results:
         return {"ok": False, "error": "all_judge_passes_failed"}
 
@@ -606,6 +616,62 @@ def judge_pair_majority(
         "winner_counts": winner_counts,
         "justification": justifications,
         **averaged,
+    }
+
+
+def run_one_prompt(
+    repo_root: Path,
+    prompt: str,
+    idx: int,
+    total: int,
+    claude_timeout_sec: int,
+    disable_with_budi_retry: bool,
+) -> dict[str, Any]:
+    """Run no_budi and with_budi concurrently for one prompt, return a row dict."""
+    _print(f"[ab] prompt {idx}/{total}", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        no_budi_future = executor.submit(
+            run_claude_prompt, repo_root, prompt, True, claude_timeout_sec
+        )
+        with_budi_future = executor.submit(
+            run_claude_prompt, repo_root, prompt, False, claude_timeout_sec
+        )
+        no_budi = no_budi_future.result()
+        with_budi = with_budi_future.result()
+
+    with_budi_hook_retry = False
+    with_budi_hook: dict[str, Any] = {}
+    with_budi_session_id = str(with_budi.get("session_id", "")) if isinstance(with_budi, dict) else ""
+    if with_budi_session_id:
+        with_budi_hook = collect_hook_trace_for_session(repo_root, with_budi_session_id)
+
+    if (
+        not disable_with_budi_retry
+        and with_budi.get("ok")
+        and not hook_trace_is_healthy(with_budi_hook)
+    ):
+        with_budi_hook_retry = True
+        _print(f"[ab] prompt {idx}/{total} retrying with_budi (unhealthy hook trace)", flush=True)
+        with_budi_retry = run_claude_prompt(
+            repo_root, prompt, False, max(claude_timeout_sec, 480)
+        )
+        retry_session_id = str(with_budi_retry.get("session_id", ""))
+        retry_hook = (
+            collect_hook_trace_for_session(repo_root, retry_session_id)
+            if retry_session_id
+            else {}
+        )
+        if with_budi_retry.get("ok"):
+            with_budi = with_budi_retry
+            with_budi_hook = retry_hook
+
+    return {
+        "prompt": prompt,
+        "no_budi": no_budi,
+        "with_budi": with_budi,
+        "with_budi_hook": with_budi_hook,
+        "with_budi_hook_retry": with_budi_hook_retry,
+        "judge": {"ok": False},
     }
 
 
@@ -863,6 +929,13 @@ def main() -> None:
         help="Number of judge passes per prompt (majority vote, default 1). Use 3 to reduce variance.",
     )
     parser.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="Number of prompts to evaluate concurrently (default: 1). Each prompt already runs "
+             "no_budi and with_budi in parallel, so --parallel 3 runs 6 Claude calls at once.",
+    )
+    parser.add_argument(
         "--disable-with-budi-retry",
         action="store_true",
         help="Disable second with_budi attempt when hook trace looks unhealthy",
@@ -920,61 +993,35 @@ def main() -> None:
             if args.max_prompts > 0:
                 rows = rows[: len(prompts)]
             prompt_source = f"reuse:{source_path}"
-            print(f"[ab] reusing rows from: {source_path}", flush=True)
+            _print(f"[ab] reusing rows from: {source_path}", flush=True)
         else:
             ensure_budi_ready(repo_root)
             original_config_raw = ensure_debug_io_enabled(repo_root, variant_overrides)
 
-            for idx, prompt in enumerate(prompts, start=1):
-                print(f"[ab] prompt {idx}/{len(prompts)}", flush=True)
-                no_budi = run_claude_prompt(
-                    repo_root,
-                    prompt,
-                    disable_hooks=True,
-                    timeout_sec=args.claude_timeout_sec,
-                )
-                with_budi = run_claude_prompt(
-                    repo_root,
-                    prompt,
-                    disable_hooks=False,
-                    timeout_sec=args.claude_timeout_sec,
-                )
-                with_budi_hook_retry = False
-                with_budi_hook = {}
-                with_budi_session_id = str(with_budi.get("session_id", "")) if isinstance(with_budi, dict) else ""
-                if with_budi_session_id:
-                    with_budi_hook = collect_hook_trace_for_session(repo_root, with_budi_session_id)
-                if (
-                    not args.disable_with_budi_retry
-                    and with_budi.get("ok")
-                    and not hook_trace_is_healthy(with_budi_hook)
-                ):
-                    with_budi_hook_retry = True
-                    with_budi_retry = run_claude_prompt(
-                        repo_root,
-                        prompt,
-                        disable_hooks=False,
-                        timeout_sec=max(args.claude_timeout_sec, 480),
-                    )
-                    retry_session_id = str(with_budi_retry.get("session_id", ""))
-                    retry_hook = (
-                        collect_hook_trace_for_session(repo_root, retry_session_id)
-                        if retry_session_id
-                        else {}
-                    )
-                    if with_budi_retry.get("ok"):
-                        with_budi = with_budi_retry
-                        with_budi_hook = retry_hook
-                rows.append(
-                    {
-                        "prompt": prompt,
-                        "no_budi": no_budi,
-                        "with_budi": with_budi,
-                        "with_budi_hook": with_budi_hook,
-                        "with_budi_hook_retry": with_budi_hook_retry,
-                        "judge": {"ok": False},
+            parallel = max(1, args.parallel)
+            if parallel == 1:
+                for idx, prompt in enumerate(prompts, start=1):
+                    rows.append(run_one_prompt(
+                        repo_root, prompt, idx, len(prompts),
+                        args.claude_timeout_sec, args.disable_with_budi_retry,
+                    ))
+            else:
+                _print(f"[ab] running {len(prompts)} prompts with --parallel {parallel}", flush=True)
+                # Submit all prompts; preserve original order in rows
+                ordered: dict[int, dict[str, Any]] = {}
+                with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
+                    future_to_idx = {
+                        executor.submit(
+                            run_one_prompt,
+                            repo_root, prompt, idx, len(prompts),
+                            args.claude_timeout_sec, args.disable_with_budi_retry,
+                        ): idx
+                        for idx, prompt in enumerate(prompts, start=1)
                     }
-                )
+                    for future in concurrent.futures.as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        ordered[idx] = future.result()
+                rows = [ordered[i] for i in range(1, len(prompts) + 1)]
 
         prompt_set = {
             "name": DEFAULT_PROMPT_SET_NAME if prompt_source.startswith("default:") else "custom",
@@ -982,50 +1029,69 @@ def main() -> None:
             "count": len(prompts),
             "fingerprint_sha256": prompt_set_fingerprint(prompts),
         }
-        print(
+        _print(
             f"[ab] prompts={prompt_set['count']} source={prompt_set['source']} "
             f"sha256={prompt_set['fingerprint_sha256'][:12]}",
             flush=True,
         )
 
-        judge_attempts = 0
         judge_budget = args.judge_limit if args.judge_limit > 0 else None
-        for idx, row in enumerate(rows, start=1):
-            prompt = str(row.get("prompt", ""))
+        judge_passes = getattr(args, "judge_passes", 1)
+
+        # Determine which rows are eligible for judging
+        eligible_indices = []
+        for idx, row in enumerate(rows):
             no_budi = row.get("no_budi", {})
             with_budi = row.get("with_budi", {})
-            judge = {"ok": False}
-            if args.skip_judge:
-                judge = {"ok": False, "error": "judge_skipped"}
-            elif judge_budget is not None and judge_attempts >= judge_budget:
-                judge = {"ok": False, "error": "judge_not_selected"}
-            elif (
-                isinstance(no_budi, dict)
+            if (
+                not args.skip_judge
+                and isinstance(no_budi, dict)
                 and isinstance(with_budi, dict)
                 and no_budi.get("ok")
                 and with_budi.get("ok")
             ):
-                print(f"[ab] judging {idx}/{len(rows)}", flush=True)
-                judge_attempts += 1
-                judge_passes = getattr(args, "judge_passes", 1)
-                if judge_passes > 1:
-                    judge = judge_pair_majority(
-                        repo_root,
-                        prompt,
-                        str(no_budi.get("result", "")),
-                        str(with_budi.get("result", "")),
-                        timeout_sec=args.judge_timeout_sec,
-                        passes=judge_passes,
-                    )
-                else:
-                    judge = judge_pair(
-                        repo_root,
-                        prompt,
-                        str(no_budi.get("result", "")),
-                        str(with_budi.get("result", "")),
-                        timeout_sec=args.judge_timeout_sec,
-                    )
-            row["judge"] = judge
+                eligible_indices.append(idx)
+        if judge_budget is not None:
+            eligible_indices = eligible_indices[:judge_budget]
+        judge_attempts = len(eligible_indices)
+
+        def _run_judge(idx: int) -> dict[str, Any]:
+            row = rows[idx]
+            prompt = str(row.get("prompt", ""))
+            no_budi = row.get("no_budi", {})
+            with_budi = row.get("with_budi", {})
+            _print(f"[ab] judging {idx + 1}/{len(rows)}", flush=True)
+            if judge_passes > 1:
+                return judge_pair_majority(
+                    repo_root,
+                    prompt,
+                    str(no_budi.get("result", "")),
+                    str(with_budi.get("result", "")),
+                    timeout_sec=args.judge_timeout_sec,
+                    passes=judge_passes,
+                )
+            return judge_pair(
+                repo_root,
+                prompt,
+                str(no_budi.get("result", "")),
+                str(with_budi.get("result", "")),
+                timeout_sec=args.judge_timeout_sec,
+            )
+
+        # Default non-eligible judge values
+        for row in rows:
+            if args.skip_judge:
+                row["judge"] = {"ok": False, "error": "judge_skipped"}
+            else:
+                row["judge"] = {"ok": False, "error": "judge_not_selected"}
+
+        if eligible_indices:
+            judge_parallel = max(1, args.parallel)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=judge_parallel) as executor:
+                future_to_idx = {executor.submit(_run_judge, idx): idx for idx in eligible_indices}
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    rows[idx]["judge"] = future.result()
 
         summary = {
             "no_budi": aggregate(rows, "no_budi"),
@@ -1102,8 +1168,8 @@ def main() -> None:
         md_path = out_dir / "ab-results.md"
         md_path.write_text(md)
 
-        print(f"[ab] results json: {json_path}")
-        print(f"[ab] results md:   {md_path}")
+        _print(f"[ab] results json: {json_path}")
+        _print(f"[ab] results md:   {md_path}")
     finally:
         if original_config_raw is not None:
             restore_debug_io_config(repo_root, original_config_raw)
