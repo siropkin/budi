@@ -50,3 +50,64 @@
 - HNSW graph is rebuilt in-memory from current chunk set.
 - `/status` and `budi doctor --deep` expose watcher health counters (`watch_events_seen`, `watch_events_accepted`, `watch_events_dropped`).
 - Incremental updates short-circuit no-op batches (unsupported/ignored/unchanged hints) and surface `updates_noop` / `updates_applied` counters.
+
+## Project Map (Phase D)
+
+- After each full index job, `generate_project_map()` writes `.claude/budi-project-map.md` into the repo with a high-level file-tree summary grouped by directory.
+- `budi hook session-start` reads this file and outputs it as an `AsyncSystemMessageOutput`, injecting it into the Claude Code system prompt at session start.
+
+## Call Graph / Structural Oracle (Phase E)
+
+- `RuntimeIndex` maintains `chunk_to_graph_tokens` (forward index: chunk → callee symbol tokens).
+- `callers_of(symbol)` and `callees_of(chunk_id)` navigate the graph bidirectionally.
+- `build_call_graph_summary(runtime, snippets)` generates a `[structural context]` block appended to context when intent warrants it.
+- Call graph budget is gated by intent and top-snippet confidence (see Context Budget below).
+
+## PostToolUse Prefetch (Phase B)
+
+- When Claude reads or globs a file, the `PostToolUse` hook fires immediately.
+- The hook POSTs `/prefetch-neighbors` with the file path, and the daemon returns graph neighbors of that file.
+- Neighbors are delivered as `AsyncSystemMessageOutput` — low latency, zero interference with the main prompt flow.
+
+## Query Intent Routing (Phase H/K)
+
+`classify_intent(prompt)` maps each query to one of 7 intent kinds:
+
+| Intent | Trigger keywords (examples) |
+|--------|----------------------------|
+| `SymbolUsage` | "what calls", "who calls", "where is X used" |
+| `SymbolDefinition` | "where is X defined", "show me the implementation of" |
+| `FlowTrace` | "how does X work", "trace the flow", "what order" |
+| `Architecture` | "explain the architecture", "how is the system structured" |
+| `TestLookup` | "unit test for", "test coverage of" |
+| `RuntimeConfig` | "config file", "env var", "load config" |
+| `NonCode` | everything else (injection skipped) |
+
+`weights_for_intent(kind)` adjusts the 5-channel blend (lexical/vector/symbol/path/graph) per intent. `intent_retrieval_limit(kind)` sets per-intent snippet caps (5–8).
+
+## Context Budget Discipline (Phase L)
+
+- Total injected context is hard-capped at `context_char_budget` (default 12,000 chars).
+- Call graph budget is subtracted from the base budget before snippet context is assembled.
+- Per-intent call graph budgets: FlowTrace → 1200 chars (gated on top-snippet score ≥ 0.30, else 600); SymbolDefinition/SymbolUsage → 800; Architecture/TestLookup/RuntimeConfig → 0 (suppressed).
+- Progressive truncation in `build_context()`: top snippet ≤ 40% of budget, each next ≤ 60% of remaining.
+
+## Score Floors and Boosts (Phases N/P/R/S/T)
+
+- `min_selection_score(candidates, intent)` returns a per-intent floor:
+  - FlowTrace: 0.25, SymbolDefinition: 0.20, SymbolUsage: 0.22, TestLookup: 0.22, RuntimeConfig: 0.18
+- `is_test_path(path)` — detects `/test`, `/spec`, `__tests__/`, `__spec__/` — used for `+0.15` test-path boost on TestLookup queries.
+- **Hint-match boost (S1)**: `+0.30` when intent is SymbolDefinition and the chunk's `symbol_hint` exactly matches a query token, surfacing the definition chunk over reference noise.
+- `dominant_symbol_hint(lines)` — picks the symbol spanning the most lines in a window, preventing short local functions from stealing the hint from the dominant definition.
+- `truncate_to(s, max)` — UTF-8 safe: walks back to the nearest char boundary rather than slicing at a byte offset.
+
+## Cross-Session File Affinity (Phase J/M)
+
+- After each successful injection, `update_session_affinity(repo_root, snippets)` persists injected file paths + anchor lines to `session-affinity.json` (top 50 by recency, stored outside the repo).
+- Format: `HashMap<path, AffinityEntry { ts: u64, anchors: Vec<String> }>`.
+- `budi hook session-start` appends a `## Recently Relevant Files` block (top 5 paths with anchors) to the session-start system message.
+
+## Per-Step Timing (Phase I)
+
+- When `config.debug_io = true`, `QueryResponse.timing_ms` is populated with millisecond durations for each pipeline step: `load`, `embed`, `retrieval`, `dedup`, `callgraph`.
+- The CLI logs timing as a `"timing"` key in `hook-io.jsonl`.

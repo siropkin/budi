@@ -20,7 +20,7 @@ budi finds the most relevant code in your repo and hands it to Claude *before* C
 
 Everything runs locally. Nothing leaves your machine.
 
-**Latest benchmark: 13–30% faster responses, 18% lower cost, budi wins ~75% of quality-judged tasks.**
+**Latest benchmark: 13–30% faster responses, 18% lower cost, budi wins ~83% of quality-judged tasks (React) and ~72% on ripgrep.**
 
 **Install:**
 
@@ -72,9 +72,9 @@ Across 13 runs, 216 judged tasks (React and ripgrep repos):
 
 - **Cost**: 18.7% lower on average
 - **Speed**: 13% faster on average (median API time); up to 30% on some repos
-- **Quality**: budi wins 160/216 judged tasks (~75% win rate)
+- **Quality**: 15/18 wins (83%) on React, 13/18 wins (72%) on ripgrep
 
-The quality picture improved significantly as retrieval got more conservative — earlier runs showed mixed results, newer runs show consistent wins.
+The quality picture improved significantly as retrieval got smarter — intent routing, score floors, and symbol-definition accuracy tuning drove consistent gains over early phases.
 
 - Methodology: `docs/benchmark.md`
 - Full evidence (repos, prompts, injected context, responses, judge rationale): `docs/benchmark-details.md`
@@ -125,6 +125,40 @@ budi repo search "<query>"
 budi repo preview "<prompt>"
 budi doctor --deep
 ```
+
+---
+
+## Hooks
+
+`budi init` installs four Claude Code hooks automatically:
+
+| Hook | Command | What it does |
+|------|---------|--------------|
+| `SessionStart` | `budi hook session-start` | Injects a project map and recently-relevant files into the system prompt |
+| `UserPromptSubmit` | `budi hook user-prompt-submit` | Main retrieval hook — searches local index and injects context before each prompt |
+| `PostToolUse` | `budi hook post-tool-use` | Fires after `Write`, `Edit`, `Read`, `Glob` — prefetches graph neighbors for open files |
+| `Stop` | `budi hook session-end` | Writes a session summary to the hook log |
+
+All hook output uses `additionalContext` (for `UserPromptSubmit`/`SessionStart`) or `AsyncSystemMessageOutput` (for `PostToolUse`). Nothing is sent to any external service.
+
+---
+
+## Configuration
+
+Config lives at `~/.local/share/budi/repos/<repo-id>/config.toml` (created by `budi init`). All fields are optional — defaults work well for most repos.
+
+Key fields:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `retrieval_limit` | 8 | Max snippets per query (per-intent limits of 5–8 apply automatically) |
+| `context_char_budget` | 12000 | Max total characters of injected context |
+| `min_inject_score` | 0.05 | Minimum score to inject any context; raise for less noise |
+| `skip_non_code_prompts` | true | Skip injection for clearly non-code questions |
+| `debug_io` | false | Log all hook I/O to `logs/hook-io.jsonl` |
+| `debug_io_full_text` | false | Include full context text in the log |
+
+See `docs/configuration.md` for all 22 fields with descriptions and defaults.
 
 ---
 

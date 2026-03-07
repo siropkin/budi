@@ -31,52 +31,96 @@ pub const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 12_000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudiConfig {
+    // ── Daemon ────────────────────────────────────────────────────────────────
+
+    /// Host the daemon listens on. Default: "127.0.0.1".
     pub daemon_host: String,
+    /// Port the daemon listens on. Default: 7878.
     pub daemon_port: u16,
+
+    // ── Retrieval ─────────────────────────────────────────────────────────────
+
+    /// Maximum number of code snippets returned per query. Per-intent limits
+    /// (5–8) apply automatically unless this is explicitly set. Default: 8.
     pub retrieval_limit: usize,
+    /// Maximum total characters of injected context per prompt. Default: 12000.
     pub context_char_budget: usize,
-    pub max_file_bytes: usize,
-    pub index_extensions: Vec<String>,
-    pub index_basenames: Vec<String>,
-    pub embedding_batch_size: usize,
-    pub embedding_retry_attempts: usize,
-    pub embedding_retry_backoff_ms: u64,
-    pub max_index_files: usize,
-    pub max_index_chunks: usize,
-    pub chunk_lines: usize,
-    pub chunk_overlap: usize,
-    pub topk_lexical: usize,
-    pub topk_vector: usize,
-    pub smart_skip_enabled: bool,
-    pub skip_non_code_prompts: bool,
+    /// Minimum per-snippet injection score to include any context at all.
+    /// Raise to be more conservative; lower to inject more aggressively. Default: 0.05.
     pub min_inject_score: f32,
+    /// Number of candidate hits fetched from the lexical (BM25) channel. Default: 20.
+    pub topk_lexical: usize,
+    /// Number of candidate hits fetched from the vector (HNSW) channel. Default: 20.
+    pub topk_vector: usize,
+    /// Skip injection when the prompt looks like a non-code question (e.g. "what time is it"). Default: true.
+    pub skip_non_code_prompts: bool,
+    /// When true, apply smart skip heuristics to suppress low-confidence injections. Default: true.
+    pub smart_skip_enabled: bool,
+
+    // ── Indexing ──────────────────────────────────────────────────────────────
+
+    /// File extensions to include in the index (without leading dot). Default: rs, ts, tsx, js, jsx, py, go, …
+    pub index_extensions: Vec<String>,
+    /// Exact filenames (no extension) to include regardless of extension. Default: Dockerfile, Makefile, …
+    pub index_basenames: Vec<String>,
+    /// Maximum file size in bytes to index. Files larger than this are skipped. Default: 1500000.
+    pub max_file_bytes: usize,
+    /// Hard cap on total indexed files per repo. Default: 20000.
+    pub max_index_files: usize,
+    /// Hard cap on total indexed chunks per repo. Default: 250000.
+    pub max_index_chunks: usize,
+    /// Target chunk size in lines (sliding window). Default: 80.
+    pub chunk_lines: usize,
+    /// Overlap in lines between adjacent chunks. Default: 20.
+    pub chunk_overlap: usize,
+
+    // ── Embeddings ────────────────────────────────────────────────────────────
+
+    /// Number of chunks to embed in a single batch call. Default: 96.
+    pub embedding_batch_size: usize,
+    /// How many times to retry a failed embedding batch. Default: 3.
+    pub embedding_retry_attempts: usize,
+    /// Milliseconds to wait between embedding retries (exponential backoff base). Default: 75.
+    pub embedding_retry_backoff_ms: u64,
+
+    // ── Debug / Telemetry ─────────────────────────────────────────────────────
+
+    /// Enable hook I/O telemetry. When true, every hook event (query, prefetch, session-start)
+    /// is logged to `~/.local/share/budi/repos/<id>/logs/hook-io.jsonl`. Default: false.
     pub debug_io: bool,
+    /// Include full injected context text in telemetry log entries. Requires `debug_io = true`. Default: false.
     pub debug_io_full_text: bool,
+    /// Maximum characters of context text to include per telemetry entry. Requires `debug_io_full_text = true`. Default: 1200.
     pub debug_io_max_chars: usize,
 }
 
 impl Default for BudiConfig {
     fn default() -> Self {
         Self {
+            // Daemon
             daemon_host: DEFAULT_DAEMON_HOST.to_string(),
             daemon_port: DEFAULT_DAEMON_PORT,
+            // Retrieval
             retrieval_limit: DEFAULT_RETRIEVAL_LIMIT,
             context_char_budget: DEFAULT_CONTEXT_CHAR_BUDGET,
-            max_file_bytes: 1_500_000,
+            min_inject_score: 0.05,
+            topk_lexical: 20,
+            topk_vector: 20,
+            skip_non_code_prompts: true,
+            smart_skip_enabled: true,
+            // Indexing
             index_extensions: default_index_extensions(),
             index_basenames: default_index_basenames(),
-            embedding_batch_size: 96,
-            embedding_retry_attempts: 3,
-            embedding_retry_backoff_ms: 75,
+            max_file_bytes: 1_500_000,
             max_index_files: 20_000,
             max_index_chunks: 250_000,
             chunk_lines: 80,
             chunk_overlap: 20,
-            topk_lexical: 20,
-            topk_vector: 20,
-            smart_skip_enabled: true,
-            skip_non_code_prompts: true,
-            min_inject_score: 0.05,
+            // Embeddings
+            embedding_batch_size: 96,
+            embedding_retry_attempts: 3,
+            embedding_retry_backoff_ms: 75,
+            // Debug
             debug_io: false,
             debug_io_full_text: false,
             debug_io_max_chars: 1200,

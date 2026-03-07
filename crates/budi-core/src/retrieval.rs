@@ -53,19 +53,14 @@ pub fn parse_retrieval_mode(raw: Option<&str>) -> RetrievalMode {
 
 // ── Intent ────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueryIntentKind {
     SymbolUsage,
     SymbolDefinition,
-    PathLookup,
     RuntimeConfig,
     FlowTrace,
     Architecture,
-    Docs,
-    CodeNavigation,
     TestLookup,
-    NonCode,
 }
 
 #[derive(Debug, Clone)]
@@ -124,10 +119,10 @@ pub fn build_query_response(
     let kind = classify_intent(query);
     let intent = QueryIntent {
         kind,
-        code_related: !matches!(kind, QueryIntentKind::NonCode),
+        code_related: true,
         allow_docs: matches!(
             kind,
-            QueryIntentKind::Architecture | QueryIntentKind::Docs | QueryIntentKind::TestLookup
+            QueryIntentKind::Architecture | QueryIntentKind::TestLookup
         ),
         weights: weights_for_intent(kind),
     };
@@ -556,9 +551,7 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
 fn should_expand_graph_neighbors(intent_kind: QueryIntentKind) -> bool {
     matches!(
         intent_kind,
-        QueryIntentKind::SymbolUsage
-            | QueryIntentKind::SymbolDefinition
-            | QueryIntentKind::CodeNavigation
+        QueryIntentKind::SymbolUsage | QueryIntentKind::SymbolDefinition
     )
 }
 
@@ -824,14 +817,10 @@ fn intent_name(kind: QueryIntentKind) -> &'static str {
     match kind {
         QueryIntentKind::SymbolUsage => "symbol-usage",
         QueryIntentKind::SymbolDefinition => "symbol-definition",
-        QueryIntentKind::PathLookup => "path-lookup",
         QueryIntentKind::RuntimeConfig => "runtime-config",
         QueryIntentKind::FlowTrace => "flow-trace",
         QueryIntentKind::Architecture => "architecture",
-        QueryIntentKind::Docs => "docs",
-        QueryIntentKind::CodeNavigation => "code-navigation",
         QueryIntentKind::TestLookup => "test-lookup",
-        QueryIntentKind::NonCode => "non-code",
     }
 }
 
@@ -977,13 +966,6 @@ fn weights_for_intent(kind: QueryIntentKind) -> IntentWeights {
             symbol: 1.0,
             path: 1.5,
             graph: 0.5,
-        },
-        _ => IntentWeights {
-            lexical: 1.0,
-            vector: 1.0,
-            symbol: 1.0,
-            path: 1.0,
-            graph: 1.0,
         },
     }
 }
@@ -1446,10 +1428,8 @@ fn augment_path_tokens_for_intent(
 ) {
     let lower = query.to_ascii_lowercase();
     match intent.kind {
-        QueryIntentKind::PathLookup
-        | QueryIntentKind::RuntimeConfig
+        QueryIntentKind::RuntimeConfig
         | QueryIntentKind::FlowTrace
-        | QueryIntentKind::CodeNavigation
         | QueryIntentKind::SymbolDefinition
         | QueryIntentKind::TestLookup
         | QueryIntentKind::Architecture => {
@@ -1778,7 +1758,7 @@ mod tests {
     #[test]
     fn retrieval_limit_others_are_six() {
         assert_eq!(intent_retrieval_limit(QueryIntentKind::RuntimeConfig), 6);
-        assert_eq!(intent_retrieval_limit(QueryIntentKind::PathLookup), 6);
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::SymbolUsage), 5);
     }
 
     // ── parse_retrieval_mode ──────────────────────────────────────────────────
