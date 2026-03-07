@@ -32,14 +32,12 @@ pub const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 12_000;
 #[serde(default)]
 pub struct BudiConfig {
     // ── Daemon ────────────────────────────────────────────────────────────────
-
     /// Host the daemon listens on. Default: "127.0.0.1".
     pub daemon_host: String,
     /// Port the daemon listens on. Default: 7878.
     pub daemon_port: u16,
 
     // ── Retrieval ─────────────────────────────────────────────────────────────
-
     /// Maximum number of code snippets returned per query. Per-intent limits
     /// (5–8) apply automatically unless this is explicitly set. Default: 8.
     pub retrieval_limit: usize,
@@ -58,7 +56,6 @@ pub struct BudiConfig {
     pub smart_skip_enabled: bool,
 
     // ── Indexing ──────────────────────────────────────────────────────────────
-
     /// File extensions to include in the index (without leading dot). Default: rs, ts, tsx, js, jsx, py, go, …
     pub index_extensions: Vec<String>,
     /// Exact filenames (no extension) to include regardless of extension. Default: Dockerfile, Makefile, …
@@ -75,7 +72,6 @@ pub struct BudiConfig {
     pub chunk_overlap: usize,
 
     // ── Embeddings ────────────────────────────────────────────────────────────
-
     /// Number of chunks to embed in a single batch call. Default: 96.
     pub embedding_batch_size: usize,
     /// How many times to retry a failed embedding batch. Default: 3.
@@ -84,7 +80,6 @@ pub struct BudiConfig {
     pub embedding_retry_backoff_ms: u64,
 
     // ── Debug / Telemetry ─────────────────────────────────────────────────────
-
     /// Enable hook I/O telemetry. When true, every hook event (query, prefetch, session-start)
     /// is logged to `~/.local/share/budi/repos/<id>/logs/hook-io.jsonl`. Default: false.
     pub debug_io: bool,

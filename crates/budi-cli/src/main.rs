@@ -653,7 +653,12 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_preview(repo_root: Option<PathBuf>, prompt: &str, mode: RetrievalModeArg, json_output: bool) -> Result<()> {
+fn cmd_preview(
+    repo_root: Option<PathBuf>,
+    prompt: &str,
+    mode: RetrievalModeArg,
+    json_output: bool,
+) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     ensure_daemon_running(&repo_root, &config)?;
@@ -1873,50 +1878,55 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
     let mut snippets_count = 0usize;
     let mut query_timing: Option<HashMap<String, u64>> = None;
     let mut snippet_refs: Vec<budi_core::rpc::SnippetRef> = Vec::new();
-    let (context, success, reason, error_detail) =
-        match query_daemon_for_hook_context(&repo_root, &config, &sanitized_prompt, Some(&cwd), Some(&session_id)) {
-            Ok(response) => {
-                total_candidates = response.total_candidates;
-                snippets_count = response.snippets.len();
-                query_timing = response.timing_ms;
-                snippet_refs = response.snippet_refs;
-                diagnostics = response.diagnostics;
-                let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
-                if let Some(skip_reason) = skip_reason {
-                    let runtime_guard_context = if diagnostics.intent == "runtime-config" {
-                        build_runtime_guard_context(&response.snippets)
-                    } else {
-                        String::new()
-                    };
-                    if runtime_guard_context.is_empty() {
-                        (
-                            String::new(),
-                            true,
-                            format_skip_hook_reason(&skip_reason),
-                            String::new(),
-                        )
-                    } else {
-                        (
-                            runtime_guard_context,
-                            true,
-                            HOOK_REASON_OK.to_string(),
-                            String::new(),
-                        )
-                    }
+    let (context, success, reason, error_detail) = match query_daemon_for_hook_context(
+        &repo_root,
+        &config,
+        &sanitized_prompt,
+        Some(&cwd),
+        Some(&session_id),
+    ) {
+        Ok(response) => {
+            total_candidates = response.total_candidates;
+            snippets_count = response.snippets.len();
+            query_timing = response.timing_ms;
+            snippet_refs = response.snippet_refs;
+            diagnostics = response.diagnostics;
+            let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
+            if let Some(skip_reason) = skip_reason {
+                let runtime_guard_context = if diagnostics.intent == "runtime-config" {
+                    build_runtime_guard_context(&response.snippets)
+                } else {
+                    String::new()
+                };
+                if runtime_guard_context.is_empty() {
+                    (
+                        String::new(),
+                        true,
+                        format_skip_hook_reason(&skip_reason),
+                        String::new(),
+                    )
                 } else {
                     (
-                        response.context,
+                        runtime_guard_context,
                         true,
                         HOOK_REASON_OK.to_string(),
                         String::new(),
                     )
                 }
+            } else {
+                (
+                    response.context,
+                    true,
+                    HOOK_REASON_OK.to_string(),
+                    String::new(),
+                )
             }
-            Err(err) => {
-                let reason = classify_query_error(&err).as_str().to_string();
-                (String::new(), false, reason, err.to_string())
-            }
-        };
+        }
+        Err(err) => {
+            let reason = classify_query_error(&err).as_str().to_string();
+            (String::new(), false, reason, err.to_string())
+        }
+    };
     log_hook_event(&repo_root, &config, || {
         let mut payload = json!({
             "event":"UserPromptSubmit",
@@ -1995,8 +2005,16 @@ fn query_daemon_for_hook_context(
             let _ = ensure_daemon_running(repo_root, config);
             let retry_client =
                 daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_RETRY_TIMEOUT_SECS));
-            send_query_request(&retry_client, &url, repo_root, prompt, cwd, None, session_id)
-                .with_context(|| format!("hook-retry-after-{}", reason.as_str()))
+            send_query_request(
+                &retry_client,
+                &url,
+                repo_root,
+                prompt,
+                cwd,
+                None,
+                session_id,
+            )
+            .with_context(|| format!("hook-retry-after-{}", reason.as_str()))
         }
     }
 }
@@ -2168,7 +2186,9 @@ fn cmd_hook_session_start() -> Result<()> {
     // Phase J+M2: append recently-relevant files with anchor lines from prior sessions.
     let affinity_files = read_session_affinity(&repo_root, 5);
     if !affinity_files.is_empty() {
-        message.push_str("\n\n## Recently Relevant Files\n(files active in prior sessions, for reference)\n");
+        message.push_str(
+            "\n\n## Recently Relevant Files\n(files active in prior sessions, for reference)\n",
+        );
         for (path, anchors) in &affinity_files {
             if anchors.is_empty() {
                 message.push_str(&format!("- {}\n", path));
@@ -2242,7 +2262,11 @@ fn cmd_hook_session_end() -> Result<()> {
                 last_ts = Some(ts);
             }
         }
-        if val.get("recommended_injection").and_then(Value::as_bool).unwrap_or(false) {
+        if val
+            .get("recommended_injection")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             total_injected += 1;
         }
         if let Some(refs) = val.get("snippet_refs").and_then(Value::as_array) {
@@ -2304,7 +2328,15 @@ fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(Stri
             let old: std::collections::HashMap<String, u64> = serde_json::from_str(&raw)?;
             Ok::<_, serde_json::Error>(
                 old.into_iter()
-                    .map(|(k, ts)| (k, Entry { ts, anchors: vec![] }))
+                    .map(|(k, ts)| {
+                        (
+                            k,
+                            Entry {
+                                ts,
+                                anchors: vec![],
+                            },
+                        )
+                    })
                     .collect(),
             )
         })
@@ -2312,7 +2344,10 @@ fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(Stri
     let mut entries: Vec<(String, Entry)> = map.into_iter().collect();
     entries.sort_by(|a, b| b.1.ts.cmp(&a.1.ts));
     entries.truncate(top_n);
-    entries.into_iter().map(|(path, e)| (path, e.anchors)).collect()
+    entries
+        .into_iter()
+        .map(|(path, e)| (path, e.anchors))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

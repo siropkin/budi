@@ -236,7 +236,10 @@ mod tests {
     fn empty_snippets_returns_header_only() {
         let out = build_context(&[], 4096);
         assert!(out.starts_with("[budi context]"), "missing header");
-        assert!(out.contains("evidence_cards:"), "missing evidence_cards section");
+        assert!(
+            out.contains("evidence_cards:"),
+            "missing evidence_cards section"
+        );
         // No snippet data
         assert!(!out.contains("file:"), "unexpected file card");
     }
@@ -261,7 +264,10 @@ mod tests {
         let out = build_context(&snippets, 0);
         // Budget 0 < header length, so content_budget is 0, loop breaks immediately
         assert!(out.starts_with("[budi context]"));
-        assert!(!out.contains("file: src/foo.rs"), "should not render card when budget=0");
+        assert!(
+            !out.contains("file: src/foo.rs"),
+            "should not render card when budget=0"
+        );
     }
 
     #[test]
@@ -274,7 +280,7 @@ mod tests {
         let budget = 2000;
         let out = build_context(&snippets, budget);
         assert!(
-            out.len() <= budget + 20,  // small tolerance for header math
+            out.len() <= budget + 20, // small tolerance for header math
             "output len {} exceeds budget {}",
             out.len(),
             budget
@@ -326,7 +332,10 @@ mod tests {
     #[test]
     fn path_diversity_bucket_two_levels() {
         assert_eq!(path_diversity_bucket("src/foo/bar.rs"), "src/foo");
-        assert_eq!(path_diversity_bucket("crates/budi-core/src/lib.rs"), "crates/budi-core");
+        assert_eq!(
+            path_diversity_bucket("crates/budi-core/src/lib.rs"),
+            "crates/budi-core"
+        );
     }
 
     #[test]

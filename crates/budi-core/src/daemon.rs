@@ -1073,7 +1073,11 @@ impl DaemonState {
         }
     }
 
-    fn dedup_session_snippets(&self, session_id: &str, snippets: &mut Vec<crate::rpc::QueryResultItem>) {
+    fn dedup_session_snippets(
+        &self,
+        session_id: &str,
+        snippets: &mut Vec<crate::rpc::QueryResultItem>,
+    ) {
         let guard = self.sessions_guard();
         if let Some(session) = guard.get(session_id) {
             snippets.retain(|s| {
@@ -1088,7 +1092,9 @@ impl DaemonState {
         let session = guard.entry(session_id.to_string()).or_default();
         session.last_activity = Some(Instant::now());
         for s in snippets {
-            session.injected_keys.insert(format!("{}:{}", s.path, s.start_line));
+            session
+                .injected_keys
+                .insert(format!("{}:{}", s.path, s.start_line));
         }
         // Lazy TTL cleanup: remove inactive sessions.
         guard.retain(|_, v| {
@@ -1363,22 +1369,37 @@ struct AffinityEntry {
 
 /// Phase J+M1: Persist recently-injected files with anchor lines so the next session can surface them.
 /// Reads `session-affinity.json`, migrates old flat format if needed, keeps top 50 by recency.
-fn update_session_affinity(repo_root: &Path, snippets: &[crate::rpc::QueryResultItem]) -> Result<()> {
+fn update_session_affinity(
+    repo_root: &Path,
+    snippets: &[crate::rpc::QueryResultItem],
+) -> Result<()> {
     if snippets.is_empty() {
         return Ok(());
     }
-    let affinity_path = config::repo_paths(repo_root)?.data_dir.join("session-affinity.json");
+    let affinity_path = config::repo_paths(repo_root)?
+        .data_dir
+        .join("session-affinity.json");
     let mut map: HashMap<String, AffinityEntry> = if affinity_path.exists() {
         let raw = std::fs::read_to_string(&affinity_path)?;
-        serde_json::from_str(&raw).or_else(|_| {
-            // Migrate old format: HashMap<String, u64>
-            let old: HashMap<String, u64> = serde_json::from_str(&raw)?;
-            Ok::<_, serde_json::Error>(
-                old.into_iter()
-                    .map(|(k, ts)| (k, AffinityEntry { ts, anchors: vec![] }))
-                    .collect(),
-            )
-        }).unwrap_or_default()
+        serde_json::from_str(&raw)
+            .or_else(|_| {
+                // Migrate old format: HashMap<String, u64>
+                let old: HashMap<String, u64> = serde_json::from_str(&raw)?;
+                Ok::<_, serde_json::Error>(
+                    old.into_iter()
+                        .map(|(k, ts)| {
+                            (
+                                k,
+                                AffinityEntry {
+                                    ts,
+                                    anchors: vec![],
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default()
     } else {
         HashMap::new()
     };
@@ -1399,7 +1420,13 @@ fn update_session_affinity(repo_root: &Path, snippets: &[crate::rpc::QueryResult
         }
     }
     for (path, anchors) in path_anchors {
-        map.insert(path, AffinityEntry { ts: now_ms, anchors });
+        map.insert(
+            path,
+            AffinityEntry {
+                ts: now_ms,
+                anchors,
+            },
+        );
     }
     if map.len() > 50 {
         let mut entries: Vec<(String, AffinityEntry)> = map.into_iter().collect();
@@ -1444,4 +1471,3 @@ fn now_unix_ms() -> u128 {
         .map(|d| d.as_millis())
         .unwrap_or(0)
 }
-

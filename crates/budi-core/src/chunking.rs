@@ -448,7 +448,10 @@ export function performSyncWorkOnRoot(root) {
 }
 "#;
         let chunks = chunk_text("ReactFiberWorkLoop.js", content, 80, 20);
-        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
         assert!(
             hints.contains(&"scheduleUpdateOnFiber"),
             "expected scheduleUpdateOnFiber in hints, got: {hints:?}"
@@ -467,7 +470,10 @@ export async function flushPassiveEffects() {
 }
 "#;
         let chunks = chunk_text("ReactFiberWorkLoop.js", content, 80, 20);
-        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
         assert!(
             hints.contains(&"flushPassiveEffects"),
             "expected flushPassiveEffects in hints, got: {hints:?}"
@@ -533,8 +539,14 @@ pub fn beta() -> i32 {
         assert!(chunks.iter().any(|c| c.text.contains("fn alpha")));
         assert!(chunks.iter().any(|c| c.text.contains("fn beta")));
         // Symbol hints should be extracted for Rust functions
-        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
-        assert!(hints.contains(&"alpha") || hints.contains(&"beta"), "expected Rust symbol hints, got: {hints:?}");
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"alpha") || hints.contains(&"beta"),
+            "expected Rust symbol hints, got: {hints:?}"
+        );
     }
 
     #[test]
@@ -552,7 +564,10 @@ export class Scheduler {
 "#;
         let chunks = chunk_text("Scheduler.ts", content, 80, 20);
         assert!(!chunks.is_empty());
-        assert!(chunks.iter().any(|c| c.text.contains("Scheduler")), "expected Scheduler class");
+        assert!(
+            chunks.iter().any(|c| c.text.contains("Scheduler")),
+            "expected Scheduler class"
+        );
     }
 
     #[test]
@@ -604,7 +619,11 @@ func Beta() int {
             .map(|s| s.as_str())
             .collect();
         let hint = dominant_symbol_hint(&all_lines);
-        assert_eq!(hint.as_deref(), Some("long_fn"), "expected long_fn to dominate, got: {hint:?}");
+        assert_eq!(
+            hint.as_deref(),
+            Some("long_fn"),
+            "expected long_fn to dominate, got: {hint:?}"
+        );
     }
 
     #[test]
@@ -634,7 +653,10 @@ func Beta() int {
         assert!(chunks.len() >= 2, "expected ≥2 chunks for 90-line file");
         // The second chunk should start before the end of the first
         if chunks.len() >= 2 {
-            assert!(chunks[1].start_line < chunks[0].end_line, "chunks should overlap");
+            assert!(
+                chunks[1].start_line < chunks[0].end_line,
+                "chunks should overlap"
+            );
         }
     }
 
@@ -652,7 +674,10 @@ export function beta(x: number): number {
         let chunks = chunk_text("math.ts", content, 80, 20);
         for chunk in &chunks {
             assert!(chunk.start_line >= 1, "start_line should be ≥1");
-            assert!(chunk.end_line >= chunk.start_line, "end_line should be ≥ start_line");
+            assert!(
+                chunk.end_line >= chunk.start_line,
+                "end_line should be ≥ start_line"
+            );
         }
     }
 
@@ -666,7 +691,13 @@ pub struct WorkLoop {
 "#;
         let chunks = chunk_text("work_loop.rs", content, 80, 20);
         assert!(!chunks.is_empty());
-        let hints: Vec<_> = chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect();
-        assert!(hints.contains(&"WorkLoop"), "expected WorkLoop hint, got: {hints:?}");
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"WorkLoop"),
+            "expected WorkLoop hint, got: {hints:?}"
+        );
     }
 }

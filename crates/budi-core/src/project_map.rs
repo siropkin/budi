@@ -30,10 +30,7 @@ pub fn generate_project_map(runtime: &RuntimeIndex) -> String {
     entry_points.truncate(MAX_ENTRY_POINTS);
 
     // Top files by chunk count
-    let mut hotspots: Vec<(&str, usize)> = chunks_per_file
-        .iter()
-        .map(|(p, c)| (*p, *c))
-        .collect();
+    let mut hotspots: Vec<(&str, usize)> = chunks_per_file.iter().map(|(p, c)| (*p, *c)).collect();
     hotspots.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     hotspots.truncate(MAX_HOTSPOT_FILES);
 

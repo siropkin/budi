@@ -86,7 +86,9 @@ mod tests {
 
     #[test]
     fn allows_poem_with_anchor() {
-        assert!(!is_obviously_non_code("write a poem about the error handling code"));
+        assert!(!is_obviously_non_code(
+            "write a poem about the error handling code"
+        ));
     }
 
     #[test]
@@ -96,6 +98,8 @@ mod tests {
 
     #[test]
     fn allows_fiber_question() {
-        assert!(!is_obviously_non_code("how does React fiber scheduler work"));
+        assert!(!is_obviously_non_code(
+            "how does React fiber scheduler work"
+        ));
     }
 }
