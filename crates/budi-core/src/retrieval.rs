@@ -201,8 +201,12 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "cwd-proximity");
         }
 
-        // R1: TestLookup — boost chunks from test files so they surface above source files
-        if intent.kind == QueryIntentKind::TestLookup && is_test_path(&chunk.path) {
+        // R1: TestLookup — boost chunks from test files so they surface above source files.
+        // Z1: Also boost inline test blocks (#[test], #[cfg(test)], mod tests, describe/it)
+        // to handle Rust crates and JS/TS files that colocate tests in production files.
+        if intent.kind == QueryIntentKind::TestLookup
+            && (is_test_path(&chunk.path) || is_inline_test_chunk(&chunk.text))
+        {
             adjusted += 0.15;
             push_unique_reason(&mut reasons, "test-path-boost");
         }
@@ -406,6 +410,21 @@ fn is_test_path(path: &str) -> bool {
         || lower.contains("__spec__")
         || lower.starts_with("test")
         || lower.starts_with("spec")
+}
+
+/// True if the chunk text contains an inline test block.
+/// Handles: Rust (#[test], #[cfg(test)], mod tests), JS/TS (describe/it/test blocks).
+fn is_inline_test_chunk(text: &str) -> bool {
+    // Fast byte scan before any per-line work.
+    if !text.contains("test") && !text.contains("describe") && !text.contains("#[") {
+        return false;
+    }
+    text.contains("#[test]")
+        || text.contains("#[cfg(test)]")
+        || text.contains("mod tests {")
+        || text.contains("mod tests{")
+        || text.contains("describe(")
+        || text.contains("describe.each(")
 }
 
 fn is_generic_symbol_hint(s: &str) -> bool {
@@ -1930,6 +1949,32 @@ mod tests {
         assert!(is_test_path("src/testUtils.ts")); // contains /test (in /testUtils)
         // Top-level file starting with "test" is also detected
         assert!(is_test_path("testUtils.ts"));
+    }
+
+    // ── is_inline_test_chunk ─────────────────────────────────────────────────
+
+    #[test]
+    fn inline_test_chunk_detects_rust_test_attr() {
+        assert!(is_inline_test_chunk("#[test]\nfn my_test() {}"));
+        assert!(is_inline_test_chunk(
+            "// some code\n#[cfg(test)]\nmod tests {}"
+        ));
+        assert!(is_inline_test_chunk(
+            "impl Foo {}\nmod tests {\n    use super::*;\n}"
+        ));
+    }
+
+    #[test]
+    fn inline_test_chunk_detects_js_describe() {
+        assert!(is_inline_test_chunk("describe('MyComponent', () => {"));
+        assert!(is_inline_test_chunk("describe.each([[1, 2]])("));
+    }
+
+    #[test]
+    fn inline_test_chunk_rejects_production_code() {
+        assert!(!is_inline_test_chunk("fn process_fiber(fiber: &Fiber) {}"));
+        assert!(!is_inline_test_chunk("export function TestComponent() {}"));
+        assert!(!is_inline_test_chunk("class Config { testMode: bool }"));
     }
 
     // ── is_generic_symbol_hint ────────────────────────────────────────────────
