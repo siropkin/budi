@@ -308,6 +308,7 @@ pub fn build_query_response(
         call_graph_summary: None,
         detected_intent: Some(intent_name(intent.kind).to_string()),
         timing_ms: None,
+        snippet_refs: Vec::new(),
     })
 }
 
