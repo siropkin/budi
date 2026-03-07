@@ -113,6 +113,7 @@ pub fn build_query_response(
     query: &str,
     query_embedding: Option<&[f32]>,
     cwd: Option<&Path>,
+    active_file: Option<&str>, // Phase AB: repo-relative path of last edited file → +0.20 boost
     retrieval_mode: RetrievalMode,
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
@@ -274,6 +275,17 @@ pub fn build_query_response(
         if !cwd_rel.is_empty() && chunk.path.starts_with(&cwd_rel) {
             adjusted += 0.08;
             push_unique_reason(&mut reasons, "cwd-proximity");
+        }
+
+        // Phase AB: boost chunks from the file Claude most recently edited/read.
+        // Iterative edit sessions: the next query is very likely about the same file.
+        // +0.20 is intentionally larger than cwd-proximity (+0.08) to ensure the
+        // active file surfaces above directory-level neighbors.
+        if let Some(af) = active_file {
+            if chunk.path == af {
+                adjusted += 0.20;
+                push_unique_reason(&mut reasons, "active-file-boost");
+            }
         }
 
         // R1: TestLookup — boost chunks from test files so they surface above source files.

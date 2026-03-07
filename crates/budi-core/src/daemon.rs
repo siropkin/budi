@@ -29,6 +29,9 @@ const WRITE_RETRY_MAX_DELAY_MS: u64 = 600;
 struct SessionState {
     injected_keys: HashSet<String>, // "path:start_line" of already-injected snippets
     last_activity: Option<Instant>,
+    /// Phase AB: the repo-relative path of the file Claude most recently edited/read.
+    /// Used to boost chunks from that exact file in the next query.
+    active_file: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -185,11 +188,21 @@ impl DaemonState {
         let runtime_guard = runtime.lock().await;
         let cwd = request.cwd.as_deref().map(Path::new);
         let retrieval_mode = retrieval::parse_retrieval_mode(request.retrieval_mode.as_deref());
+
+        // Phase AB: retrieve the most-recently-edited file from session state
+        // so retrieval can apply a targeted active-file boost.
+        let active_file: Option<String> = request.session_id.as_ref().and_then(|sid| {
+            self.sessions_guard()
+                .get(sid)
+                .and_then(|s| s.active_file.clone())
+        });
+
         let mut response = retrieval::build_query_response(
             &runtime_guard,
             &request.prompt,
             query_embedding.as_deref(),
             cwd,
+            active_file.as_deref(),
             retrieval_mode,
             config,
         )?;
@@ -361,6 +374,15 @@ impl DaemonState {
         if !neighbor_paths.is_empty() {
             for path in &neighbor_paths {
                 self.record_session_path(&request.session_id, path);
+            }
+        }
+
+        // Phase AB: track the most-recently-edited file so the next query can
+        // apply a targeted boost to chunks from that exact file.
+        {
+            let mut sessions = self.sessions_guard();
+            if let Some(state) = sessions.get_mut(&request.session_id) {
+                state.active_file = Some(file_path_rel.to_string());
             }
         }
 
