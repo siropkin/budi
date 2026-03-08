@@ -404,6 +404,20 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-boost");
         }
 
+        // Phase BI: Architecture queries — penalise test-path chunks.
+        // For module-layout, entry-point, and call-chain questions the relevant evidence
+        // is production source code, not test fixtures and test helpers. Test files
+        // (typically in tests/, __tests__, spec/) inflate scores through incidental
+        // mentions of the queried concept ("how is Flask structured?" matches
+        // tests/test_apps fixtures) and crowd out the actual source modules.
+        // A −0.15 penalty mirrors the +0.15 test-path-boost on TestLookup queries,
+        // keeping the scoring symmetric. Combined with the min 0.30 floor below, this
+        // removes test fixture chunks that score 0.41–0.44 for arch queries.
+        if intent.kind == QueryIntentKind::Architecture && is_test_path(&chunk.path) {
+            adjusted -= 0.15;
+            push_unique_reason(&mut reasons, "test-path-penalty");
+        }
+
         // S1: SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
         // query token. This surfaces definition chunks over reference/usage chunks when
         // the dominant function in a window is precisely what the user asked about.
@@ -929,13 +943,17 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         QueryIntentKind::SymbolUsage => relative.max(0.22),
         // Phase AQ: when top score is high (≥0.60, strong signal), raise floor to 0.40
         // to filter weakly-related cards (devtools profiling, tests, server rendering) at 0.30-0.36
-        // that dilute high-confidence architecture answers. Low-confidence arch queries
-        // (top < 0.60, e.g. entry-point surveys) keep the standard relative floor.
+        // that dilute high-confidence architecture answers.
+        // Phase BI: even for low-confidence arch queries (top < 0.60), apply a minimum
+        // floor of 0.30. Combined with the test-path penalty (−0.15), this filters
+        // test fixture chunks that nominally score 0.41–0.44 but land at 0.26–0.29
+        // after the penalty (below 0.30). Without this floor the standard relative floor
+        // can be as low as 0.12 (top=0.30), admitting any chunk above 0.12.
         QueryIntentKind::Architecture => {
             if top.score >= 0.60 {
                 relative.max(0.40)
             } else {
-                relative
+                relative.max(0.30)
             }
         }
         _ => relative,
@@ -2263,11 +2281,14 @@ mod tests {
 
     #[test]
     fn min_score_relative_floor_is_40_percent_of_top() {
-        // Architecture with top < 0.60 uses standard relative floor (no AQ conditional)
+        // Phase BI: Architecture with top < 0.60 uses max(relative, 0.30) floor.
+        // top=0.50: relative = 0.50 * 0.40 = 0.20; BI min floor = 0.30
         let chunks = vec![make_scored_chunk(1, 0.50), make_scored_chunk(2, 0.20)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
-        // relative = 0.50 * 0.40 = 0.20; no intent-specific minimum
-        assert!((floor - 0.20).abs() < 1e-5, "expected ~0.20, got {floor}");
+        assert!(
+            (floor - 0.30).abs() < 1e-5,
+            "expected 0.30 (BI min floor), got {floor}"
+        );
     }
 
     #[test]
@@ -2340,12 +2361,12 @@ mod tests {
     }
 
     #[test]
-    fn min_score_architecture_low_confidence_uses_relative_floor() {
-        // Phase AQ: top < 0.60 → standard relative floor (entry-point survey)
+    fn min_score_architecture_low_confidence_uses_min_0_30_floor() {
+        // Phase BI: top < 0.60 → floor = relative.max(0.30) to filter test fixtures
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
-        // relative = 0.40 * 0.40 = 0.16
-        assert!((floor - 0.16).abs() < 1e-5, "expected 0.16 floor, got {floor}");
+        // relative = 0.40 * 0.40 = 0.16; Phase BI min = 0.30
+        assert!((floor - 0.30).abs() < 1e-5, "expected 0.30 floor, got {floor}");
     }
 
     #[test]
