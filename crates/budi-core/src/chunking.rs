@@ -114,6 +114,10 @@ fn symbol_from_line(line: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy)]
 enum AstLanguageKind {
     JavaScript,
+    // Phase BF: TS grammar used as fallback for Flow-typed .js files (has_error).
+    // Skips lexical_declaration/variable_declaration boundary kinds to avoid
+    // 1-line const/let chunks inside large reconciler functions.
+    JavaScriptTSFallback,
     TypeScript,
     Python,
     Rust,
@@ -188,6 +192,12 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
                 | "class_declaration"
                 | "lexical_declaration"
                 | "variable_declaration"
+        ),
+        // Phase BF: TS-parsed JS files omit lexical/variable declarations to avoid
+        // creating 1-line const/let chunks inside large Flow-typed functions.
+        AstLanguageKind::JavaScriptTSFallback => matches!(
+            kind,
+            "export_statement" | "function_declaration" | "class_declaration"
         ),
         AstLanguageKind::TypeScript => matches!(
             kind,
@@ -314,7 +324,11 @@ fn ast_top_level_chunks(
                             ts_root,
                             content,
                             &lines,
-                            language_kind, // JS boundary kinds (no type_alias/interface proliferation)
+                            // Phase BF: Use JavaScriptTSFallback boundary kinds (no
+                            // lexical_declaration) to avoid 1-line const/let chunks
+                            // inside large Flow-typed functions. Only applies to files
+                            // that failed JS grammar and got TS fallback.
+                            AstLanguageKind::JavaScriptTSFallback,
                             lines_per_chunk,
                             overlap,
                         ));
