@@ -504,11 +504,18 @@ pub fn build_query_response(
             let def_path = def_item.path.clone();
             let def_start = def_item.start_line;
             let def_score = def_item.score;
-            let has_foreign_card2 = selection
-                .snippets
-                .get(1)
-                .map_or(false, |s| s.path != def_path);
+            let card2 = selection.snippets.get(1);
+            let has_foreign_card2 = card2.map_or(false, |s| s.path != def_path);
             if !has_foreign_card2 {
+                return None;
+            }
+            // Phase BH: if card 2 has hint-match-boost, it's an alternative definition
+            // of the same symbol from a different file (e.g. Flask.make_response in app.py
+            // alongside the module-level make_response in helpers.py). Keep it — don't
+            // replace a cross-file definition with a same-file continuation.
+            let card2_is_alt_def = card2
+                .map_or(false, |s| s.reasons.iter().any(|r| r == "hint-match-boost"));
+            if card2_is_alt_def {
                 return None;
             }
             let cont_id = runtime.adjacent_chunk(&def_path, def_start)?;
