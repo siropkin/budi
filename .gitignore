@@ -22,4 +22,5 @@ react-eval-out*/
 toolcall-bench-out*/
 
 # Claude project files
-.claude/
+.claude/*
+!.claude/*.md
