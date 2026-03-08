@@ -389,12 +389,11 @@ pub fn build_query_response(
         // Iterative edit sessions: the next query is very likely about the same file.
         // +0.20 is intentionally larger than cwd-proximity (+0.08) to ensure the
         // active file surfaces above directory-level neighbors.
-        if let Some(af) = active_file {
-            if chunk.path == af {
+        if let Some(af) = active_file
+            && chunk.path == af {
                 adjusted += 0.20;
                 push_unique_reason(&mut reasons, "active-file-boost");
             }
-        }
 
         // R1: TestLookup — boost chunks from test files so they surface above source files.
         // Z1: Also boost inline test blocks (#[test], #[cfg(test)], mod tests, describe/it)
@@ -423,8 +422,8 @@ pub fn build_query_response(
         // S1: SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
         // query token. This surfaces definition chunks over reference/usage chunks when
         // the dominant function in a window is precisely what the user asked about.
-        if intent.kind == QueryIntentKind::SymbolDefinition {
-            if let Some(hint) = chunk.symbol_hint.as_deref() {
+        if intent.kind == QueryIntentKind::SymbolDefinition
+            && let Some(hint) = chunk.symbol_hint.as_deref() {
                 let hint_lower = hint.to_ascii_lowercase();
                 if !hint_lower.is_empty()
                     && !is_generic_symbol_hint(hint)
@@ -434,7 +433,6 @@ pub fn build_query_response(
                     push_unique_reason(&mut reasons, "hint-match-boost");
                 }
             }
-        }
 
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
@@ -460,7 +458,7 @@ pub fn build_query_response(
     let sym_def_seeded = intent.kind == QueryIntentKind::SymbolDefinition
         && scored
             .first()
-            .map_or(false, |c| c.reasons.iter().any(|r| r == "hint-match-boost"));
+            .is_some_and(|c| c.reasons.iter().any(|r| r == "hint-match-boost"));
     let target_limit = if config.retrieval_limit != crate::config::DEFAULT_RETRIEVAL_LIMIT {
         config.retrieval_limit.max(4)
     } else if sym_def_seeded {
@@ -493,11 +491,10 @@ pub fn build_query_response(
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
-    if selection.snippets.is_empty() {
-        if let Some(best) = scored.first() {
+    if selection.snippets.is_empty()
+        && let Some(best) = scored.first() {
             let _ = try_push_scored_chunk(runtime, best, &mut selection);
         }
-    }
     if should_expand_graph_neighbors(intent.kind) && !sym_def_seeded {
         expand_graph_neighbors(
             runtime,
@@ -521,7 +518,7 @@ pub fn build_query_response(
             let def_start = def_item.start_line;
             let def_score = def_item.score;
             let card2 = selection.snippets.get(1);
-            let has_foreign_card2 = card2.map_or(false, |s| s.path != def_path);
+            let has_foreign_card2 = card2.is_some_and(|s| s.path != def_path);
             if !has_foreign_card2 {
                 return None;
             }
@@ -530,7 +527,7 @@ pub fn build_query_response(
             // alongside the module-level make_response in helpers.py). Keep it — don't
             // replace a cross-file definition with a same-file continuation.
             let card2_is_alt_def =
-                card2.map_or(false, |s| s.reasons.iter().any(|r| r == "hint-match-boost"));
+                card2.is_some_and(|s| s.reasons.iter().any(|r| r == "hint-match-boost"));
             if card2_is_alt_def {
                 return None;
             }
@@ -575,7 +572,7 @@ pub fn build_query_response(
             let has_foreign_card2 = selection
                 .snippets
                 .get(1)
-                .map_or(false, |s| s.path != top_path);
+                .is_some_and(|s| s.path != top_path);
             if !has_foreign_card2 {
                 return None;
             }
@@ -1002,7 +999,6 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
                 relative.max(0.30)
             }
         }
-        _ => relative,
     }
 }
 

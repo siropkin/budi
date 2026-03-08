@@ -93,7 +93,7 @@ fn symbol_from_line(line: &str) -> Option<String> {
             token.push(ch);
         } else {
             if !token.is_empty() {
-                let tok = token.drain(..).collect::<String>();
+                let tok = std::mem::take(&mut token);
                 if !SYMBOL_KEYWORDS.contains(&tok.as_str()) && tok.len() >= 2 {
                     return Some(tok);
                 }
@@ -317,8 +317,8 @@ fn ast_top_level_chunks(
     // kinds to avoid chunk explosion from lexical_declaration / type_alias_declaration.
     if root.has_error() && matches!(language_kind, AstLanguageKind::JavaScript) {
         let ts_language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-        if let Ok(()) = parser.set_language(&ts_language) {
-            if let Some(ts_tree) = parser.parse(content, None) {
+        if let Ok(()) = parser.set_language(&ts_language)
+            && let Some(ts_tree) = parser.parse(content, None) {
                 let ts_root = ts_tree.root_node();
                 if !ts_root.has_error() {
                     // TypeScript grammar parsed cleanly — use it with JavaScriptTSFallback
@@ -337,7 +337,6 @@ fn ast_top_level_chunks(
                     ));
                 }
             }
-        }
         return None;
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -712,7 +711,7 @@ func Beta() int {
         use super::dominant_symbol_hint;
         // Build a file with two functions: a short one and a long one.
         // The long one should win as the dominant hint.
-        let lines_short = vec!["fn short_fn() {".to_string(), "}".to_string()];
+        let lines_short = ["fn short_fn() {".to_string(), "}".to_string()];
         let mut lines_long = vec!["fn long_fn() {".to_string()];
         for i in 0..50 {
             lines_long.push(format!("    let _ = {i};"));

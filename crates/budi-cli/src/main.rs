@@ -2093,9 +2093,8 @@ fn cmd_hook_post_tool_use() -> Result<()> {
                 "limit": 5,
             }))
             .send()
-        {
-            if let Ok(prefetch) = resp.json::<budi_core::rpc::PrefetchResponse>() {
-                if !prefetch.context.is_empty() {
+            && let Ok(prefetch) = resp.json::<budi_core::rpc::PrefetchResponse>()
+                && !prefetch.context.is_empty() {
                     println!(
                         "{}",
                         serde_json::to_string(&AsyncSystemMessageOutput {
@@ -2103,8 +2102,6 @@ fn cmd_hook_post_tool_use() -> Result<()> {
                         })?
                     );
                 }
-            }
-        }
         return Ok(());
     }
 
@@ -2242,11 +2239,10 @@ fn cmd_hook_session_end() -> Result<()> {
             continue;
         };
         // Filter by session_id if available.
-        if let Some(ref sid) = session_id {
-            if val.get("session_id").and_then(Value::as_str) != Some(sid.as_str()) {
+        if let Some(ref sid) = session_id
+            && val.get("session_id").and_then(Value::as_str) != Some(sid.as_str()) {
                 continue;
             }
-        }
         if val.get("phase").and_then(Value::as_str) != Some("output") {
             continue;
         }

@@ -1371,7 +1371,7 @@ fn retry_backoff_delay(attempt: usize) -> Duration {
 }
 
 /// Convert an absolute file path to a repo-relative slash path for index lookup.
-fn strip_repo_root_prefix<'a>(file_path: &'a str, repo_root: &str) -> String {
+fn strip_repo_root_prefix(file_path: &str, repo_root: &str) -> String {
     let repo_prefix = repo_root.trim_end_matches('/');
     let stripped = file_path
         .strip_prefix(repo_prefix)
@@ -1447,13 +1447,11 @@ fn update_session_affinity(
     let mut path_anchors: HashMap<String, Vec<String>> = HashMap::new();
     for snippet in snippets {
         let anchors = path_anchors.entry(snippet.path.clone()).or_default();
-        if anchors.len() < 2 {
-            if let Some(anchor) = affinity_anchor_line(&snippet.text) {
-                if !anchors.contains(&anchor) {
+        if anchors.len() < 2
+            && let Some(anchor) = affinity_anchor_line(&snippet.text)
+                && !anchors.contains(&anchor) {
                     anchors.push(anchor);
                 }
-            }
-        }
     }
     for (path, anchors) in path_anchors {
         map.insert(
