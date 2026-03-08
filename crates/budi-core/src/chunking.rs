@@ -434,69 +434,6 @@ fn line_chunks_from_range(
     chunks
 }
 
-/// Phase BD v2: Heuristic fallback chunking that respects function/class definition boundaries
-/// detected via `looks_like_symbol`. Each detected boundary starts a new chunk; sections that
-/// are too long fall back to fixed-stride windowing within that section.
-/// This handles files where tree-sitter fails (e.g. Flow-typed JS, unsupported extensions).
-fn boundary_aware_chunks(content: &str, lines_per_chunk: usize, overlap: usize) -> Vec<Chunk> {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
-        return Vec::new();
-    }
-
-    // Collect 0-based indices of lines that look like function/class definitions.
-    let boundary_starts: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| looks_like_symbol(line))
-        .map(|(i, _)| i)
-        .collect();
-
-    if boundary_starts.is_empty() {
-        return line_chunks_from_range(&lines, 0, lines.len(), lines_per_chunk, overlap);
-    }
-
-    let n = lines.len();
-    let max_section = lines_per_chunk.saturating_mul(2);
-    let mut chunks = Vec::new();
-
-    // Build (start, end) pairs in 0-based exclusive notation.
-    let mut sections: Vec<(usize, usize)> = Vec::new();
-    if boundary_starts[0] > 0 {
-        sections.push((0, boundary_starts[0])); // preamble before first symbol
-    }
-    for i in 0..boundary_starts.len() {
-        let start = boundary_starts[i];
-        let end = if i + 1 < boundary_starts.len() {
-            boundary_starts[i + 1]
-        } else {
-            n
-        };
-        sections.push((start, end));
-    }
-
-    for (start, end) in sections {
-        let span = end - start;
-        if span == 0 {
-            continue;
-        }
-        if span <= max_section {
-            // Fits in a single chunk: use the definition line as symbol hint.
-            let symbol_hint = symbol_from_line(lines[start]);
-            chunks.push(Chunk {
-                start_line: start + 1,
-                end_line: end, // 0-based exclusive == 1-based inclusive of last line
-                symbol_hint,
-                text: lines[start..end].join("\n"),
-            });
-        } else {
-            // Section too large: fall back to fixed-stride within this section.
-            chunks.extend(line_chunks_from_range(&lines, start, end, lines_per_chunk, overlap));
-        }
-    }
-
-    chunks
-}
 
 fn line_window_chunks(content: &str, lines_per_chunk: usize, overlap: usize) -> Vec<Chunk> {
     let lines: Vec<&str> = content.lines().collect();
@@ -515,11 +452,6 @@ pub fn chunk_text(
     if let Some(chunks) = ast_top_level_chunks(file_path, content, lines_per_chunk, overlap)
         && !chunks.is_empty()
     {
-        return chunks;
-    }
-    // Phase BD v2: use boundary-aware heuristic chunking before pure line windowing.
-    let chunks = boundary_aware_chunks(content, lines_per_chunk, overlap);
-    if !chunks.is_empty() {
         return chunks;
     }
     line_window_chunks(content, lines_per_chunk, overlap)
@@ -783,47 +715,6 @@ export function beta(x: number): number {
                 "end_line should be ≥ start_line"
             );
         }
-    }
-
-    #[test]
-    fn boundary_aware_chunking_splits_nested_functions_in_flow_typed_js() {
-        // Simulate ReactChildFiber.js-style: a large outer function (causes tree-sitter error
-        // due to Flow types) with nested inner functions. The file extension uses an unsupported
-        // style so tree-sitter fails and boundary_aware_chunks kicks in.
-        // We use an unknown extension to force the heuristic path.
-        let mut content = "function createChildReconciler(shouldTrackSideEffects: boolean) {\n"
-            .to_string();
-        content.push_str("function deleteRemainingChildren(returnFiber, currentFirstChild) {\n");
-        for i in 0..10 {
-            content.push_str(&format!("  var a{i} = {i};\n"));
-        }
-        content.push_str("  return null;\n}\n");
-        content.push_str("function mapRemainingChildren(currentFirstChild) {\n");
-        for i in 0..10 {
-            content.push_str(&format!("  var b{i} = {i};\n"));
-        }
-        content.push_str("  return new Map();\n}\n");
-        // Pad outer function to exceed max_section = 160 lines
-        for i in 0..140 {
-            content.push_str(&format!("  var x{i} = {i};\n"));
-        }
-        content.push_str("}\n");
-        // Use unknown extension to bypass tree-sitter and exercise boundary_aware_chunks
-        let chunks = chunk_text("ReactChildFiber.unknown", &content, 80, 20);
-        assert!(
-            chunks
-                .iter()
-                .any(|c| c.symbol_hint.as_deref() == Some("deleteRemainingChildren")),
-            "expected deleteRemainingChildren chunk, got: {:?}",
-            chunks.iter().map(|c| &c.symbol_hint).collect::<Vec<_>>()
-        );
-        assert!(
-            chunks
-                .iter()
-                .any(|c| c.symbol_hint.as_deref() == Some("mapRemainingChildren")),
-            "expected mapRemainingChildren chunk, got: {:?}",
-            chunks.iter().map(|c| &c.symbol_hint).collect::<Vec<_>>()
-        );
     }
 
     #[test]
