@@ -1,35 +1,89 @@
-# budi (Buddy)
+# budi
 
 [![CI](https://github.com/siropkin/budi/actions/workflows/ci.yml/badge.svg)](https://github.com/siropkin/budi/actions/workflows/ci.yml)
 [![Release](https://github.com/siropkin/budi/actions/workflows/release.yml/badge.svg)](https://github.com/siropkin/budi/actions/workflows/release.yml)
+[![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-```text
- ____            _ _
-| __ ) _   _  __| (_)
-|  _ \| | | |/ _` | |
-| |_) | |_| | (_| | |
-|____/ \__,_|\__,_|_|
+**The context buster for Claude Code.**
+
+`budi` finds the code Claude is about to look for and injects it before Claude starts searching.
+
+That means faster first useful answers, fewer wasted tool calls, lower token burn, and better grounding on medium and large repos.
+
+Stop paying Claude to rediscover your codebase on every prompt.
+
+- Local-first: your code stays on your machine
+- Fast: retrieval runs in about 10ms
+- Automatic: Claude Code hooks work in the background
+- Practical: skip once with `@nobudi`, force once with `@forcebudi`
+
+## Why it feels better
+
+Without `budi`, Claude often spends its first few turns doing repo discovery: searching for files, opening imports, tracing the obvious path, and only then starting to reason.
+
+With `budi`, the likely files are already in context when Claude sees your prompt.
+
+```mermaid
+flowchart LR
+    A[You ask Claude Code] --> B[budi detects intent]
+    B --> C[budi searches the local index]
+    C --> D[budi injects the best snippets]
+    D --> E[Claude starts with the right code]
 ```
 
-## TL;DR
+## Latest A/B numbers
 
-budi finds the most relevant code in your repo and hands it to Claude *before* Claude starts working. **This makes Claude faster and cheaper** — it spends less time searching, and less of your money doing it.
+Across the latest aggregate benchmark runs:
 
-- Without budi: Claude walks into your office, looks around, opens drawers, reads random files, wastes 3–5 tool calls, then starts helping
-- With budi: a local assistant has already put the right files on Claude's desk before Claude even sat down
+- 13 runs
+- 216 judged tasks
+- 13% faster median API time
+- 18.7% lower average cost
+- 160/216 judged wins (about 75%)
+- Up to 30% faster on some repos
 
-Everything runs locally. Nothing leaves your machine.
+Latest fully public reproducible snapshot across 3 open-source repos and 9 cases:
 
-**Latest benchmark: 13–30% faster responses, 18% lower cost, budi wins ~83% of quality-judged tasks (React) and ~72% on ripgrep.**
+- 32.16% faster API time
+- 31.48% faster end-to-end time
+- 18.42% lower total cost
 
-**Install:**
+```mermaid
+xychart-beta
+    title "Latest public A/B snapshot"
+    x-axis ["API speedup", "Wall speedup", "Cost reduction"]
+    y-axis "Percent" 0 --> 35
+    bar [32.16, 31.48, 18.42]
+```
+
+```mermaid
+pie showData
+    title "Latest aggregate judged outcomes"
+    "budi wins" : 160
+    "other outcomes" : 56
+```
+
+The README keeps benchmark repo names out of the headline copy. Full methodology, prompts, raw evidence, and judge rationale live in `docs/benchmark.md` and `docs/benchmark-details.md`.
+
+## Install in 60 seconds
+
+1. Install the local binary:
+
+```bash
+./scripts/install.sh --from-release
+# or build locally:
+./scripts/install.sh
+```
+
+2. Install the Claude Code plugin:
 
 ```text
 /plugin marketplace add siropkin/budi
 /plugin install budi-hooks@budi-plugins
 ```
 
-**Set up once per repo:**
+3. Enable `budi` in your repo:
 
 ```bash
 cd /path/to/your/repo
@@ -37,146 +91,49 @@ budi init
 budi index --hard --progress
 ```
 
-Then use Claude Code normally. budi runs silently in the background.
+Then use Claude Code normally. `budi` runs silently in the background.
 
----
+## What happens on each prompt
 
-## In plain English
+1. `budi` intercepts your prompt through a Claude Code hook.
+2. It figures out intent: symbol lookup, architecture question, call tracing, config hunt, and more.
+3. It searches a local index using lexical, semantic, symbol, and graph signals.
+4. It injects the best snippets into Claude's context.
+5. Claude starts answering with the likely code already in view.
 
-When you ask Claude Code a question about your codebase, Claude only knows what's currently in its context window. If your codebase is large, most of it is invisible to Claude — so it can miss relevant functions, configs, or patterns that live in other files.
+## Useful commands
 
-Budi runs silently in the background as a local daemon. Before each of your prompts reaches Claude, Budi:
-
-1. **Reads your prompt** — figures out what you're asking about (looking up a function definition? tracing a code flow? finding a config?)
-2. **Searches your indexed codebase** — using a combination of keyword search, semantic (vector) search, symbol lookup, and call graph traversal
-3. **Picks the most relevant code snippets** — ranked and filtered, up to ~12k characters
-4. **Injects them into your prompt** — so Claude sees the right code automatically, without you having to paste it manually
-
-The result: Claude gives better, more grounded answers about your specific codebase — finding the right function, understanding how things connect, and avoiding hallucinations about code it couldn't see.
-
----
-
-## How it works
-
-Every time you submit a prompt in Claude Code:
-
-1. budi intercepts it via a Claude Code hook (`UserPromptSubmit`)
-2. budi searches its local index in ~10ms — no AI model needed
-3. It injects the most relevant code snippets directly into Claude's context
-4. When you edit files, budi silently updates its index in the background
-
-The index is built with `budi index` — like a private Google for your codebase.
-
-### What it looks like in practice
-
-You type:
-
-```
-why is the payment form failing validation?
-```
-
-Before Claude sees that prompt, budi searches your local index in ~10ms and finds `PaymentForm.tsx`, `validateCard.ts`, and the relevant error handler. It prepends those to your prompt automatically.
-
-Claude now has the exact code it needs — upfront, no searching. Instead of spending its first 3 responses opening files, it answers immediately.
-
-Without budi, Claude would grep for "validation", read `PaymentForm.tsx`, notice it imports `validateCard`, read that too, maybe read the error handler — each step a tool call, each tool call burning tokens and time. By the time Claude starts reasoning, it has already spent your money just finding the map.
-
-## Benchmark
-
-Across 13 runs, 216 judged tasks (React and ripgrep repos):
-
-- **Cost**: 18.7% lower on average
-- **Speed**: 13% faster on average (median API time); up to 30% on some repos
-- **Quality**: 15/18 wins (83%) on React, 13/18 wins (72%) on ripgrep
-
-The quality picture improved significantly as retrieval got smarter — intent routing, score floors, and symbol-definition accuracy tuning drove consistent gains over early phases.
-
-- Methodology: `docs/benchmark.md`
-- Full evidence (repos, prompts, injected context, responses, judge rationale): `docs/benchmark-details.md`
-
-
-## Install (full options)
-
-### Claude plugin
-
-```text
-/plugin marketplace add siropkin/budi
-/plugin install budi-hooks@budi-plugins
-```
-
-### Local binary
-
-```bash
-./scripts/install.sh
-budi --version
-```
-
-To remove later:
-
-```bash
-./scripts/uninstall.sh
-```
-
----
-
-## Optional controls
-
-Skip context injection for one prompt:
-```
-@nobudi your prompt here
-```
-
-Force context injection:
-```
-@forcebudi your prompt here
-```
-
-Daily commands:
 ```bash
 budi index
 budi index --hard --progress
 budi repo status
-budi repo search "<query>"
-budi repo preview "<prompt>"
+budi repo search "payment validation"
+budi repo preview "why is the payment form failing validation?"
 budi doctor --deep
 ```
 
----
+## Prompt controls
 
-## Hooks
+Skip context injection for one prompt:
 
-`budi init` installs four Claude Code hooks automatically:
+```text
+@nobudi your prompt here
+```
 
-| Hook | Command | What it does |
-|------|---------|--------------|
-| `SessionStart` | `budi hook session-start` | Injects a project map and recently-relevant files into the system prompt |
-| `UserPromptSubmit` | `budi hook user-prompt-submit` | Main retrieval hook — searches local index and injects context before each prompt |
-| `PostToolUse` | `budi hook post-tool-use` | Fires after `Write`, `Edit`, `Read`, `Glob` — prefetches graph neighbors for open files |
-| `Stop` | `budi hook session-end` | Writes a session summary to the hook log |
+Force context injection for one prompt:
 
-All hook output uses `additionalContext` (for `UserPromptSubmit`/`SessionStart`) or `AsyncSystemMessageOutput` (for `PostToolUse`). Nothing is sent to any external service.
+```text
+@forcebudi your prompt here
+```
 
----
+## Docs
 
-## Configuration
+- Benchmark methodology: `docs/benchmark.md`
+- Public evidence: `docs/benchmark-details.md`
+- Configuration: `docs/configuration.md`
+- Architecture: `docs/architecture.md`
+- Installer details: `docs/installer.md`
 
-Config lives at `~/.local/share/budi/repos/<repo-id>/config.toml` (created by `budi init`). All fields are optional — defaults work well for most repos.
+## Privacy
 
-Key fields:
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `retrieval_limit` | 8 | Max snippets per query (per-intent limits of 5–8 apply automatically) |
-| `context_char_budget` | 12000 | Max total characters of injected context |
-| `min_inject_score` | 0.05 | Minimum score to inject any context; raise for less noise |
-| `skip_non_code_prompts` | true | Skip injection for clearly non-code questions |
-| `debug_io` | false | Log all hook I/O to `logs/hook-io.jsonl` |
-| `debug_io_full_text` | false | Include full context text in the log |
-
-See `docs/configuration.md` for all 22 fields with descriptions and defaults.
-
----
-
-## Architecture
-
-See `docs/architecture.md`.
+Everything runs locally. No cloud index. No repo upload. No external retrieval service needed to do the core job.

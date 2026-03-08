@@ -1,7 +1,7 @@
 {
   "name": "budi-hooks",
   "version": "2.9.0",
-  "description": "Claude Code hooks for automatic budi context injection and index upkeep.",
+  "description": "Claude Code hooks that inject local budi context before Claude starts searching.",
   "author": {
     "name": "Ivan Seredkin",
     "url": "https://github.com/siropkin/budi"
