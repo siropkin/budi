@@ -840,10 +840,11 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
 }
 
 fn should_expand_graph_neighbors(intent_kind: QueryIntentKind) -> bool {
-    matches!(
-        intent_kind,
-        QueryIntentKind::SymbolUsage | QueryIntentKind::SymbolDefinition
-    )
+    // Phase AO: disabled for SymbolUsage — graph expansion adds distant callee/caller
+    // code (e.g. release scripts connected via scheduler imports) that dilutes the
+    // precise call-site evidence collected by the regular sym-use retrieval.
+    // SymbolDefinition graph expansion is gated separately via sym_def_seeded.
+    matches!(intent_kind, QueryIntentKind::SymbolDefinition)
 }
 
 fn try_push_scored_chunk(
