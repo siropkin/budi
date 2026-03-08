@@ -809,7 +809,9 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         // Raised to 0.25: lexical-only hits from common query words ("return", "call")
         // at scores 0.23-0.24 add noise for focused call-chain questions.
         QueryIntentKind::FlowTrace => relative.max(0.25),
-        QueryIntentKind::SymbolDefinition => relative.max(0.20),
+        // Phase AH: raised from 0.20 to 0.30 to exclude lexical noise at 0.26-0.29
+        // that dilutes SymbolDef context when sym-hint-seed already placed the definition at 0.58.
+        QueryIntentKind::SymbolDefinition => relative.max(0.30),
         QueryIntentKind::TestLookup => relative.max(0.22),
         QueryIntentKind::RuntimeConfig => relative.max(0.18),
         // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
@@ -2157,12 +2159,12 @@ mod tests {
 
     #[test]
     fn min_score_floor_enforced_for_symbol_def() {
-        // relative = 0.40 * 0.40 = 0.16, but SymbolDefinition floor is 0.20
+        // relative = 0.40 * 0.40 = 0.16, but SymbolDefinition floor is 0.30 (Phase AH)
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::SymbolDefinition);
         assert!(
-            (floor - 0.20).abs() < 1e-5,
-            "expected 0.20 floor, got {floor}"
+            (floor - 0.30).abs() < 1e-5,
+            "expected 0.30 floor, got {floor}"
         );
     }
 
