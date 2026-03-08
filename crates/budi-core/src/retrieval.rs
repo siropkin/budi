@@ -914,7 +914,14 @@ fn expand_graph_neighbors(
                 continue;
             }
             let seed_priority_bonus = 0.03f32 / ((seed_idx as f32) + 1.0);
-            let candidate_score = raw_score + seed_priority_bonus;
+            // Phase AE: cap raw_score at 0.45 to prevent graph-neighbor inflation.
+            // raw_score from search_graph_tokens can exceed 1.0 (token-weight × rarity
+            // accumulated across multiple matching tokens). Without the cap, graph-neighbor
+            // chunks routinely score > 1.0 and dominate over the definition/usage chunks
+            // that were carefully selected by the main retrieval pipeline.
+            // 0.45 is intentionally below the sym-hint-seed+hint-match-boost floor (0.58)
+            // so that a seeded definition chunk always outranks its graph neighbors.
+            let candidate_score = raw_score.min(0.45) + seed_priority_bonus;
             let entry = neighbor_scores.entry(neighbor_id).or_insert(f32::MIN);
             if candidate_score > *entry {
                 *entry = candidate_score;
