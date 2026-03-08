@@ -245,8 +245,14 @@ mod tests {
         assert!(out.contains("file: src/scheduler.rs"), "missing file path");
         assert!(out.contains("span: 1-10"), "missing span");
         // Phase AA: score and signals are stripped from emitted context (debugging metadata)
-        assert!(!out.contains("score:"), "score should not be in emitted context");
-        assert!(!out.contains("signals:"), "signals should not be in emitted context");
+        assert!(
+            !out.contains("score:"),
+            "score should not be in emitted context"
+        );
+        assert!(
+            !out.contains("signals:"),
+            "signals should not be in emitted context"
+        );
     }
 
     #[test]

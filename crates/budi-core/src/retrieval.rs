@@ -204,8 +204,7 @@ pub fn build_query_response(
         // (skip test-path chunks — their raw fused scores are low since the +0.15
         // test-path-boost hasn't been applied yet, which would exclude them from
         // the window even though they're high in final score).
-        let mut top_pairs: Vec<(u64, f32)> =
-            fused.iter().map(|(id, cs)| (*id, cs.score)).collect();
+        let mut top_pairs: Vec<(u64, f32)> = fused.iter().map(|(id, cs)| (*id, cs.score)).collect();
         top_pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut top_file_scores: std::collections::HashMap<String, f32> =
             std::collections::HashMap::new();
@@ -340,7 +339,10 @@ pub fn build_query_response(
                     continue;
                 }
                 let path_lower = chunk.path.to_ascii_lowercase();
-                if !subject_tokens.iter().any(|t| path_lower.contains(t.as_str())) {
+                if !subject_tokens
+                    .iter()
+                    .any(|t| path_lower.contains(t.as_str()))
+                {
                     continue;
                 }
                 let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
@@ -527,8 +529,8 @@ pub fn build_query_response(
             // of the same symbol from a different file (e.g. Flask.make_response in app.py
             // alongside the module-level make_response in helpers.py). Keep it — don't
             // replace a cross-file definition with a same-file continuation.
-            let card2_is_alt_def = card2
-                .map_or(false, |s| s.reasons.iter().any(|r| r == "hint-match-boost"));
+            let card2_is_alt_def =
+                card2.map_or(false, |s| s.reasons.iter().any(|r| r == "hint-match-boost"));
             if card2_is_alt_def {
                 return None;
             }
@@ -758,7 +760,9 @@ fn extract_lowercase_backtick_tokens(query: &str) -> Vec<String> {
             // Only keep tokens that are purely lowercase alphanumeric (no uppercase, no spaces).
             if token.len() >= 2
                 && token.len() <= 64
-                && token.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
                 && !token.chars().any(|ch| ch.is_ascii_uppercase())
             {
                 let normalized = token.to_ascii_lowercase();
@@ -776,14 +780,56 @@ fn extract_lowercase_backtick_tokens(query: &str) -> Vec<String> {
 /// keeping content words ≥ 4 chars that describe the feature being tested.
 fn test_subject_tokens(query: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "what", "which", "where", "when", "who", "how",
-        "unit", "integration", "e2e", "test", "tests", "testing", "spec", "specs",
-        "cover", "covers", "covered", "covering",
-        "live", "lives", "located", "location", "find",
-        "the", "a", "an", "and", "or", "in", "of", "for", "to", "on",
-        "do", "does", "are", "is", "it", "they", "their", "them",
-        "repo", "repository", "codebase", "logic", "code",
-        "file", "files", "directory", "folder",
+        "what",
+        "which",
+        "where",
+        "when",
+        "who",
+        "how",
+        "unit",
+        "integration",
+        "e2e",
+        "test",
+        "tests",
+        "testing",
+        "spec",
+        "specs",
+        "cover",
+        "covers",
+        "covered",
+        "covering",
+        "live",
+        "lives",
+        "located",
+        "location",
+        "find",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "in",
+        "of",
+        "for",
+        "to",
+        "on",
+        "do",
+        "does",
+        "are",
+        "is",
+        "it",
+        "they",
+        "their",
+        "them",
+        "repo",
+        "repository",
+        "codebase",
+        "logic",
+        "code",
+        "file",
+        "files",
+        "directory",
+        "folder",
     ];
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -2339,7 +2385,10 @@ mod tests {
         let chunks = vec![make_scored_chunk(1, 0.80)];
         let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
         // relative = 0.80 * 0.40 = 0.32; clamped to 0.40
-        assert!((floor - 0.40).abs() < 1e-5, "expected 0.40 floor, got {floor}");
+        assert!(
+            (floor - 0.40).abs() < 1e-5,
+            "expected 0.40 floor, got {floor}"
+        );
     }
 
     #[test]
@@ -2348,7 +2397,10 @@ mod tests {
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
         // relative = 0.40 * 0.40 = 0.16; clamped to 0.18
-        assert!((floor - 0.18).abs() < 1e-5, "expected 0.18 floor, got {floor}");
+        assert!(
+            (floor - 0.18).abs() < 1e-5,
+            "expected 0.18 floor, got {floor}"
+        );
     }
 
     #[test]
@@ -2357,7 +2409,10 @@ mod tests {
         let chunks = vec![make_scored_chunk(1, 0.65)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
         // relative = 0.65 * 0.40 = 0.26; clamped to 0.40
-        assert!((floor - 0.40).abs() < 1e-5, "expected 0.40 floor, got {floor}");
+        assert!(
+            (floor - 0.40).abs() < 1e-5,
+            "expected 0.40 floor, got {floor}"
+        );
     }
 
     #[test]
@@ -2366,7 +2421,10 @@ mod tests {
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
         // relative = 0.40 * 0.40 = 0.16; Phase BI min = 0.30
-        assert!((floor - 0.30).abs() < 1e-5, "expected 0.30 floor, got {floor}");
+        assert!(
+            (floor - 0.30).abs() < 1e-5,
+            "expected 0.30 floor, got {floor}"
+        );
     }
 
     #[test]

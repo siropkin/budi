@@ -279,7 +279,15 @@ fn collect_top_level_chunks(
         if !is_boundary_kind(node.kind(), language_kind) {
             continue;
         }
-        append_node_chunks(&mut chunks, node, content, lines, lines_per_chunk, overlap, language_kind);
+        append_node_chunks(
+            &mut chunks,
+            node,
+            content,
+            lines,
+            lines_per_chunk,
+            overlap,
+            language_kind,
+        );
     }
     chunks.sort_by_key(|chunk| (chunk.start_line, chunk.end_line));
     chunks.dedup_by(|left, right| {
@@ -289,7 +297,6 @@ fn collect_top_level_chunks(
     });
     chunks
 }
-
 
 fn ast_top_level_chunks(
     file_path: &str,
@@ -309,8 +316,7 @@ fn ast_top_level_chunks(
     // (pure JS files parse cleanly and are unaffected). Use JavaScriptTSFallback boundary
     // kinds to avoid chunk explosion from lexical_declaration / type_alias_declaration.
     if root.has_error() && matches!(language_kind, AstLanguageKind::JavaScript) {
-        let ts_language: tree_sitter::Language =
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        let ts_language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
         if let Ok(()) = parser.set_language(&ts_language) {
             if let Some(ts_tree) = parser.parse(content, None) {
                 let ts_root = ts_tree.root_node();
@@ -338,7 +344,14 @@ fn ast_top_level_chunks(
     if lines.is_empty() {
         return None;
     }
-    let chunks = collect_top_level_chunks(root, content, &lines, language_kind, lines_per_chunk, overlap);
+    let chunks = collect_top_level_chunks(
+        root,
+        content,
+        &lines,
+        language_kind,
+        lines_per_chunk,
+        overlap,
+    );
     if chunks.is_empty() {
         return None;
     }
@@ -395,7 +408,15 @@ fn append_node_chunks(
         collect_boundary_descendants(node, language_kind, &mut boundary_children);
         if !boundary_children.is_empty() {
             for child in boundary_children {
-                append_node_chunks(out, child, content, lines, lines_per_chunk, overlap, language_kind);
+                append_node_chunks(
+                    out,
+                    child,
+                    content,
+                    lines,
+                    lines_per_chunk,
+                    overlap,
+                    language_kind,
+                );
             }
             return;
         }
@@ -482,7 +503,6 @@ fn line_chunks_from_range(
     }
     chunks
 }
-
 
 fn line_window_chunks(content: &str, lines_per_chunk: usize, overlap: usize) -> Vec<Chunk> {
     let lines: Vec<&str> = content.lines().collect();
