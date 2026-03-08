@@ -279,16 +279,6 @@ fn collect_top_level_chunks(
         if !is_boundary_kind(node.kind(), language_kind) {
             continue;
         }
-        // Phase BG: For @flow files parsed with TS grammar (which has_error but still
-        // finds top-level structure), skip export_statement nodes that don't wrap a
-        // function or class. This avoids tiny 1-line chunks for `export const FOO = bar`
-        // and `export opaque type T = ...` which are noisy and semantically low-value.
-        if matches!(language_kind, AstLanguageKind::JavaScriptTSFallback)
-            && node.kind() == "export_statement"
-            && !has_function_or_class_child(node)
-        {
-            continue;
-        }
         append_node_chunks(&mut chunks, node, content, lines, lines_per_chunk, overlap, language_kind);
     }
     chunks.sort_by_key(|chunk| (chunk.start_line, chunk.end_line));
@@ -300,20 +290,6 @@ fn collect_top_level_chunks(
     chunks
 }
 
-/// Returns true if `node` has a direct named child of kind `function_declaration` or
-/// `class_declaration`. Used to filter `export_statement` nodes for JavaScriptTSFallback —
-/// keeps `export function foo() {}` but drops `export const FOO = 0` and `export opaque type T`.
-fn has_function_or_class_child(node: Node<'_>) -> bool {
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i as u32) {
-            match child.kind() {
-                "function_declaration" | "class_declaration" => return true,
-                _ => {}
-            }
-        }
-    }
-    false
-}
 
 fn ast_top_level_chunks(
     file_path: &str,
@@ -328,49 +304,35 @@ fn ast_top_level_chunks(
     }
     let tree = parser.parse(content, None)?;
     let root = tree.root_node();
-    // Phase BE+BG: Try TypeScript grammar fallback for .js files that either:
-    //   (BE) have parse errors from Flow/TS type annotations, OR
-    //   (BG) have @flow pragma — Flow-typed files often fail both JS and TS grammars
-    //        (Flow syntax is a superset of JS with unique constructs), but TS grammar
-    //        still recovers more top-level export_statement boundaries (68 vs 35 for
-    //        ReactFiberWorkLoop.js). Use TS grammar for @flow files even when it has
-    //        errors — the partial AST gives clean function chunks vs line windowing.
-    let has_flow_pragma = matches!(language_kind, AstLanguageKind::JavaScript)
-        && content.lines().take(20).any(|l| l.contains("@flow"));
-    if (root.has_error() || has_flow_pragma) && matches!(language_kind, AstLanguageKind::JavaScript) {
+    // Phase BE: if JS grammar reports errors (e.g. Flow/TS type annotations in .js files),
+    // retry with TypeScript grammar. Only files that currently error get different treatment
+    // (pure JS files parse cleanly and are unaffected). Use JavaScriptTSFallback boundary
+    // kinds to avoid chunk explosion from lexical_declaration / type_alias_declaration.
+    if root.has_error() && matches!(language_kind, AstLanguageKind::JavaScript) {
         let ts_language: tree_sitter::Language =
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
         if let Ok(()) = parser.set_language(&ts_language) {
             if let Some(ts_tree) = parser.parse(content, None) {
                 let ts_root = ts_tree.root_node();
-                // For @flow files: use TS grammar even when it has errors — the partial
-                // AST still finds function-level export_statement boundaries better than
-                // JS grammar or line windowing. For non-@flow JS files (BE path),
-                // only accept clean TS parses.
-                if !ts_root.has_error() || has_flow_pragma {
+                if !ts_root.has_error() {
+                    // TypeScript grammar parsed cleanly — use it with JavaScriptTSFallback
+                    // boundary kinds (no lexical_declaration) to avoid tiny const/let chunks.
                     let lines: Vec<&str> = content.lines().collect();
                     if lines.is_empty() {
                         return None;
                     }
-                    let chunks = collect_top_level_chunks(
+                    return Some(collect_top_level_chunks(
                         ts_root,
                         content,
                         &lines,
                         AstLanguageKind::JavaScriptTSFallback,
                         lines_per_chunk,
                         overlap,
-                    );
-                    if !chunks.is_empty() {
-                        return Some(chunks);
-                    }
+                    ));
                 }
             }
         }
-        if root.has_error() {
-            // JS had errors and TS fallback produced no usable chunks → line windowing.
-            return None;
-        }
-        // @flow file but TS produced no chunks → fall through to JS grammar result.
+        return None;
     }
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
@@ -834,33 +796,6 @@ export function beta(x: number): number {
             chunks.iter().any(|c| c.text.contains("innerBeta")),
             "expected chunk with innerBeta, got: {chunks:?}"
         );
-    }
-
-    #[test]
-    fn flow_pragma_triggers_ts_fallback() {
-        // ReactFiberWorkLoop.js has @flow pragma but JS grammar parses without errors.
-        // Phase BG should trigger TS fallback and produce AST-aligned function chunks.
-        let path = "/Users/ivan.seredkin/_projects/react/packages/react-reconciler/src/ReactFiberWorkLoop.js";
-        if !std::path::Path::new(path).exists() {
-            return; // skip if React repo not present
-        }
-        let content = std::fs::read_to_string(path).unwrap();
-        let has_flow = content.lines().take(20).any(|l| l.contains("@flow"));
-        assert!(has_flow, "expected @flow pragma");
-
-        let chunks = chunk_text(path, &content, 80, 20);
-        // Should NOT be line-windowed (stride 60 = lines 1-80, 61-140, 121-200 etc.)
-        let first_starts: Vec<usize> = chunks.iter().take(5).map(|c| c.start_line).collect();
-        assert_ne!(first_starts, vec![1, 61, 121, 181, 241],
-            "still line-windowed! chunks: {:?}", &chunks[..5.min(chunks.len())]);
-
-        // scheduleUpdateOnFiber should have its own chunk starting around line 967
-        let suf_chunk = chunks.iter().find(|c| {
-            c.symbol_hint.as_deref() == Some("scheduleUpdateOnFiber") && c.start_line >= 965
-        });
-        assert!(suf_chunk.is_some(),
-            "scheduleUpdateOnFiber chunk not found; hints: {:?}",
-            chunks.iter().filter_map(|c| c.symbol_hint.as_deref()).collect::<Vec<_>>().into_iter().take(30).collect::<Vec<_>>());
     }
 
     #[test]
