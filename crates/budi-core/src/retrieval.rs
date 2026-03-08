@@ -796,6 +796,8 @@ fn intent_retrieval_limit(kind: QueryIntentKind) -> usize {
         QueryIntentKind::SymbolDefinition | QueryIntentKind::FlowTrace => 5,
         QueryIntentKind::Architecture | QueryIntentKind::TestLookup => 8,
         QueryIntentKind::SymbolUsage => 5,
+        // Phase AI: rt-cfg is a precision intent — fewer, higher-quality cards beat broad coverage
+        QueryIntentKind::RuntimeConfig => 3,
         _ => 6,
     }
 }
@@ -813,7 +815,9 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         // that dilutes SymbolDef context when sym-hint-seed already placed the definition at 0.58.
         QueryIntentKind::SymbolDefinition => relative.max(0.30),
         QueryIntentKind::TestLookup => relative.max(0.22),
-        QueryIntentKind::RuntimeConfig => relative.max(0.18),
+        // Phase AI: raised from 0.18 to 0.40 to filter lexical false-positives (brew formulas,
+        // unrelated flag defs, hyperlink modules) that score 0.33-0.38 on config queries.
+        QueryIntentKind::RuntimeConfig => relative.max(0.40),
         // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
         QueryIntentKind::SymbolUsage => relative.max(0.22),
         _ => relative,
@@ -2316,7 +2320,8 @@ mod tests {
 
     #[test]
     fn retrieval_limit_others_are_six() {
-        assert_eq!(intent_retrieval_limit(QueryIntentKind::RuntimeConfig), 6);
+        // Phase AI: RuntimeConfig lowered to 3 (precision intent)
+        assert_eq!(intent_retrieval_limit(QueryIntentKind::RuntimeConfig), 3);
         assert_eq!(intent_retrieval_limit(QueryIntentKind::SymbolUsage), 5);
     }
 
