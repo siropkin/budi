@@ -2,6 +2,22 @@
 /// no codebase-anchor words.  The bar is intentionally high so legitimate
 /// code questions are never filtered out.
 pub fn is_obviously_non_code(prompt: &str) -> bool {
+    // Phase BL: Claude Code injects structured XML notifications into the
+    // UserPromptSubmit hook (e.g. <task-notification>, <system-reminder>).
+    // These are never user code questions — skip them immediately.
+    let trimmed = prompt.trim_start();
+    let system_xml_tags = [
+        "<task-notification>",
+        "<task-notification\n",
+        "<system-reminder>",
+        "<system-reminder\n",
+        "<function_calls>",
+        "<function_results>",
+    ];
+    if system_xml_tags.iter().any(|tag| trimmed.starts_with(tag)) {
+        return true;
+    }
+
     let lower = prompt.to_lowercase();
 
     // Creative-writing requests are filtered unless the prompt explicitly asks
@@ -100,6 +116,27 @@ mod tests {
     fn allows_fiber_question() {
         assert!(!is_obviously_non_code(
             "how does React fiber scheduler work"
+        ));
+    }
+
+    #[test]
+    fn rejects_task_notification_xml() {
+        assert!(is_obviously_non_code(
+            "<task-notification>\n<task-id>abc123</task-id>\n<output-file>/tmp/abc.output</output-file>\n</task-notification>"
+        ));
+    }
+
+    #[test]
+    fn rejects_system_reminder_xml() {
+        assert!(is_obviously_non_code(
+            "<system-reminder>\nSome system context here.\n</system-reminder>"
+        ));
+    }
+
+    #[test]
+    fn rejects_function_calls_xml() {
+        assert!(is_obviously_non_code(
+            "<function_calls>\n<invoke name=\"Read\">\n</invoke>\n</function_calls>"
         ));
     }
 }
