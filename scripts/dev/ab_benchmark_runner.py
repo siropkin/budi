@@ -1101,7 +1101,10 @@ def main() -> None:
                 future_to_idx = {executor.submit(_run_judge, idx): idx for idx in eligible_indices}
                 for future in concurrent.futures.as_completed(future_to_idx):
                     idx = future_to_idx[future]
-                    rows[idx]["judge"] = future.result()
+                    try:
+                        rows[idx]["judge"] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        rows[idx]["judge"] = {"ok": False, "error": f"judge_thread_exception: {exc}"}
 
         summary = {
             "no_budi": aggregate(rows, "no_budi"),
