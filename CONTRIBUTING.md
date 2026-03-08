@@ -29,13 +29,13 @@ Requires a target repo indexed with budi and `ANTHROPIC_API_KEY` set.
 # React repo (default)
 python3 scripts/dev/ab_benchmark_runner.py \
   --repo /path/to/react \
-  --prompts-file fixtures/benchmarks/react-structural-v1.prompts.json \
+  --prompts-file scripts/dev/benchmarks/react-structural-v1.prompts.json \
   --judge-passes 3
 
 # Cross-repo (ripgrep)
 python3 scripts/dev/ab_benchmark_runner.py \
   --repo /path/to/ripgrep \
-  --prompts-file fixtures/benchmarks/ripgrep-v1.prompts.json \
+  --prompts-file scripts/dev/benchmarks/ripgrep-v1.prompts.json \
   --judge-passes 3
 ```
 

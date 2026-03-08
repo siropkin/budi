@@ -29,8 +29,10 @@ We compare:
 
 Current prompt sets:
 
-- `fixtures/benchmarks/react-structural-v1.prompts.json` — 18 prompts, React source (architecture, symbol lookup, call tracing)
-- `fixtures/benchmarks/ripgrep-v1.prompts.json` — 18 prompts, ripgrep source (same categories)
+- `scripts/dev/benchmarks/react-structural-v1.prompts.json` — 18 prompts, React source (architecture, symbol lookup, call tracing)
+- `scripts/dev/benchmarks/ripgrep-v1.prompts.json` — 18 prompts, ripgrep source (same categories)
+- `scripts/dev/benchmarks/flask-structural-v1.prompts.json` — 18 prompts, Flask source (Python)
+- `scripts/dev/benchmarks/terraform-v1.prompts.json` — 18 prompts, Terraform source (Go)
 
 Results live in root-level `ab-bench-*` directories, one folder per run.
 
@@ -48,13 +50,13 @@ Run A/B on each:
 ```bash
 python3 scripts/ab_benchmark_runner.py \
   --repo-root "/absolute/path/react" \
-  --prompts-file "./fixtures/benchmarks/react-structural-v1.prompts.json" \
+  --prompts-file "./scripts/dev/benchmarks/react-structural-v1.prompts.json" \
   --out-dir "./tmp/bench_react" \
   --run-label "react-v1"
 
 python3 scripts/ab_benchmark_runner.py \
   --repo-root "/absolute/path/ripgrep" \
-  --prompts-file "./fixtures/benchmarks/ripgrep-v1.prompts.json" \
+  --prompts-file "./scripts/dev/benchmarks/ripgrep-v1.prompts.json" \
   --out-dir "./tmp/bench_ripgrep" \
   --run-label "ripgrep-v1"
 ```
@@ -70,6 +72,6 @@ python3 scripts/ab_benchmark_runner.py \
 Use fixture-driven retrieval eval for ranking metrics independent of full model behavior:
 
 ```bash
-budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid
-budi eval retrieval --fixtures ./fixtures/retrieval_eval/golden.example.json --limit 8 --mode hybrid --fail-on-regression --max-regression 0.01
+budi eval retrieval --fixtures ./scripts/dev/retrieval_eval/golden.example.json --limit 8 --mode hybrid
+budi eval retrieval --fixtures ./scripts/dev/retrieval_eval/golden.example.json --limit 8 --mode hybrid --fail-on-regression --max-regression 0.01
 ```
