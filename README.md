@@ -41,6 +41,21 @@ Then use Claude Code normally. budi runs silently in the background.
 
 ---
 
+## In plain English
+
+When you ask Claude Code a question about your codebase, Claude only knows what's currently in its context window. If your codebase is large, most of it is invisible to Claude — so it can miss relevant functions, configs, or patterns that live in other files.
+
+Budi runs silently in the background as a local daemon. Before each of your prompts reaches Claude, Budi:
+
+1. **Reads your prompt** — figures out what you're asking about (looking up a function definition? tracing a code flow? finding a config?)
+2. **Searches your indexed codebase** — using a combination of keyword search, semantic (vector) search, symbol lookup, and call graph traversal
+3. **Picks the most relevant code snippets** — ranked and filtered, up to ~12k characters
+4. **Injects them into your prompt** — so Claude sees the right code automatically, without you having to paste it manually
+
+The result: Claude gives better, more grounded answers about your specific codebase — finding the right function, understanding how things connect, and avoiding hallucinations about code it couldn't see.
+
+---
+
 ## How it works
 
 Every time you submit a prompt in Claude Code:
