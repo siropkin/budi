@@ -250,6 +250,36 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
     }
 }
 
+fn collect_top_level_chunks(
+    root: Node<'_>,
+    content: &str,
+    lines: &[&str],
+    language_kind: AstLanguageKind,
+    lines_per_chunk: usize,
+    overlap: usize,
+) -> Vec<Chunk> {
+    let mut chunks = Vec::new();
+    for idx in 0..root.named_child_count() {
+        let Ok(idx) = u32::try_from(idx) else {
+            continue;
+        };
+        let Some(node) = root.named_child(idx) else {
+            continue;
+        };
+        if !is_boundary_kind(node.kind(), language_kind) {
+            continue;
+        }
+        append_node_chunks(&mut chunks, node, content, lines, lines_per_chunk, overlap, language_kind);
+    }
+    chunks.sort_by_key(|chunk| (chunk.start_line, chunk.end_line));
+    chunks.dedup_by(|left, right| {
+        left.start_line == right.start_line
+            && left.end_line == right.end_line
+            && left.text == right.text
+    });
+    chunks
+}
+
 fn ast_top_level_chunks(
     file_path: &str,
     content: &str,
@@ -263,36 +293,45 @@ fn ast_top_level_chunks(
     }
     let tree = parser.parse(content, None)?;
     let root = tree.root_node();
+    // Phase BE: if JS grammar reports errors (e.g. Flow/TS type annotations in .js files),
+    // retry with TypeScript grammar. Only files that currently error get different treatment
+    // (pure JS files parse cleanly and are unaffected). Use JS boundary-kind rules to avoid
+    // chunk explosion from lexical_declaration / type_alias_declaration.
     if root.has_error() {
+        if matches!(language_kind, AstLanguageKind::JavaScript) {
+            let ts_language: tree_sitter::Language =
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+            if let Ok(()) = parser.set_language(&ts_language) {
+                if let Some(ts_tree) = parser.parse(content, None) {
+                    let ts_root = ts_tree.root_node();
+                    if !ts_root.has_error() {
+                        // TypeScript grammar parsed cleanly — use it with JS boundary rules.
+                        let lines: Vec<&str> = content.lines().collect();
+                        if lines.is_empty() {
+                            return None;
+                        }
+                        return Some(collect_top_level_chunks(
+                            ts_root,
+                            content,
+                            &lines,
+                            language_kind, // JS boundary kinds (no type_alias/interface proliferation)
+                            lines_per_chunk,
+                            overlap,
+                        ));
+                    }
+                }
+            }
+        }
         return None;
     }
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return None;
     }
-
-    let mut chunks = Vec::new();
-    for idx in 0..root.named_child_count() {
-        let Ok(idx) = u32::try_from(idx) else {
-            continue;
-        };
-        let Some(node) = root.named_child(idx) else {
-            continue;
-        };
-        if !is_boundary_kind(node.kind(), language_kind) {
-            continue;
-        }
-        append_node_chunks(&mut chunks, node, content, &lines, lines_per_chunk, overlap, language_kind);
-    }
+    let chunks = collect_top_level_chunks(root, content, &lines, language_kind, lines_per_chunk, overlap);
     if chunks.is_empty() {
         return None;
     }
-    chunks.sort_by_key(|chunk| (chunk.start_line, chunk.end_line));
-    chunks.dedup_by(|left, right| {
-        left.start_line == right.start_line
-            && left.end_line == right.end_line
-            && left.text == right.text
-    });
     Some(chunks)
 }
 
