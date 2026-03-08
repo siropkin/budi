@@ -576,99 +576,6 @@ pub fn build_query_response(
         }
     }
 
-    // Phase BC: FlowTrace callee definition injection.
-    // Queries like "What functions does reconcileChildFibers call and what does each return?"
-    // need callee implementations to answer "what does each return", not just the caller body.
-    // The structural context lists callee tokens but doesn't inject their code.
-    //
-    // Phase AF tried general retrieval (BM25/vector) for callee injection → hurt (8→5 grounding).
-    // This approach uses sym-hint exact matching: find chunks whose dominant_symbol_hint equals
-    // the callee token. Much more targeted — avoids the noise that Phase AF introduced.
-    //
-    // Trigger condition: FlowTrace intent AND query explicitly asks "what does X call"
-    // (detected by " call " + " does " in query, excluding "call chain"/"call stack" patterns
-    // so "trace the call chain from..." doesn't fire — those queries are already winning).
-    // Only fires for P7-like queries; P9/P10/P18 (currently winning) are unaffected.
-    if intent.kind == QueryIntentKind::FlowTrace && is_callee_enumeration_query(query) {
-        if !selection.snippets.is_empty() {
-            let top_score = selection.snippets[0].score;
-            // Collect callee tokens from ALL selected chunks (the query target might be in any card)
-            let mut all_callee_tokens: Vec<String> = Vec::new();
-            for snippet in &selection.snippets {
-                let chunk_id = runtime
-                    .all_chunks()
-                    .iter()
-                    .find(|c| c.path == snippet.path && c.start_line == snippet.start_line)
-                    .map(|c| c.id);
-                if let Some(chunk_id) = chunk_id {
-                    for tok in runtime.callees_of(chunk_id) {
-                        if !all_callee_tokens.contains(&tok) {
-                            all_callee_tokens.push(tok);
-                        }
-                    }
-                }
-            }
-            let primary_path = selection.snippets[0].path.clone();
-            let mut callee_injected = 0usize;
-            const CALLEE_INJECT_LIMIT: usize = 3;
-            for callee_token in all_callee_tokens.iter().take(20) {
-                if callee_injected >= CALLEE_INJECT_LIMIT {
-                    break;
-                }
-                // Skip short/generic tokens (constructors, iterators, common util names)
-                if callee_token.len() < 5 || is_generic_symbol_hint(callee_token) {
-                    continue;
-                }
-                // Find definition chunk via text pattern (case-insensitive).
-                // sym_hint matching is unreliable for short callee functions that are not the
-                // dominant symbol in any 80-line window. Instead, look for a function definition
-                // line: "function name(", "fn name(", or "def name(" (JS/TS, Rust, Python).
-                // Prefer same-file first (React callees typically live in ReactChildFiber.js).
-                let def_patterns: Vec<String> = vec![
-                    format!("function {}(", callee_token),
-                    format!(" fn {}(", callee_token),
-                    format!("def {}(", callee_token),
-                ];
-                let callee_chunk = runtime
-                    .all_chunks()
-                    .iter()
-                    .find(|c| {
-                        if c.path != primary_path {
-                            return false;
-                        }
-                        let text_lower = c.text.to_ascii_lowercase();
-                        def_patterns.iter().any(|p| text_lower.contains(p.as_str()))
-                    })
-                    .or_else(|| {
-                        runtime.all_chunks().iter().find(|c| {
-                            let text_lower = c.text.to_ascii_lowercase();
-                            def_patterns.iter().any(|p| text_lower.contains(p.as_str()))
-                        })
-                    });
-                let Some(callee_chunk) = callee_chunk else {
-                    continue;
-                };
-                // Skip if already in selection
-                if selection.snippets.iter().any(|s| {
-                    s.path == callee_chunk.path && s.start_line == callee_chunk.start_line
-                }) {
-                    continue;
-                }
-                selection.snippets.push(crate::rpc::QueryResultItem {
-                    path: callee_chunk.path.clone(),
-                    start_line: callee_chunk.start_line,
-                    end_line: callee_chunk.end_line,
-                    score: top_score * 0.50,
-                    reasons: vec!["callee-def".to_string()],
-                    channel_scores: QueryChannelScores::default(),
-                    text: callee_chunk.text.clone(),
-                    slm_relevance_note: None,
-                });
-                callee_injected += 1;
-            }
-        }
-    }
-
     // Diagnostics: SLM overrides recommended_injection + skip_reason in daemon.rs
     let diagnostics = QueryDiagnostics {
         intent: intent_name(intent.kind).to_string(),
@@ -862,21 +769,6 @@ fn test_subject_tokens(query: &str) -> Vec<String> {
         .map(|w| w.to_ascii_lowercase())
         .filter(|w| w.len() >= 4 && !STOP.contains(&w.as_str()))
         .collect()
-}
-
-/// True when the FlowTrace query explicitly asks about what a specific function calls/returns
-/// (callee enumeration). Pattern: " call " + " does " in query, without "call chain"/"call
-/// stack" etc. which appear in trace queries that are already winning.
-/// Examples that match: "What functions does reconcileChildFibers call and what does each return?"
-/// Examples that don't match: "Trace the call chain from main", "Trace lifecycle hook order".
-fn is_callee_enumeration_query(query: &str) -> bool {
-    let q = query.to_ascii_lowercase();
-    q.contains(" call ")
-        && q.contains(" does ")
-        && !q.contains("call stack")
-        && !q.contains("call chain")
-        && !q.contains("call site")
-        && !q.contains("call graph")
 }
 
 fn is_generic_symbol_hint(s: &str) -> bool {
