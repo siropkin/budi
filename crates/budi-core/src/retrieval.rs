@@ -531,6 +531,51 @@ pub fn build_query_response(
         }
     }
 
+    // Phase AU: RuntimeConfig continuation chunk.
+    // rt-cfg queries about "how is X loaded" often retrieve the env-var lookup in chunk N
+    // (e.g. config.rs:16-53 for RIPGREP_CONFIG_PATH) but miss the actual parsing/merging
+    // logic in chunk N+1 (config.rs:54-133, parse() + parse_reader()). Meanwhile card 2 is
+    // typically a noisy defs.rs `impl Flag for X` or a Paths struct that scores just below
+    // the top. When top ≥ 0.70 (stronger signal than AM's 0.60 — avoids injecting noise
+    // continuations when top card is a dev-script constant) and card 2 is from a different
+    // file, replace card 2 with the same-file continuation of the top card.
+    let rtcfg_cont_top_score = selection
+        .snippets
+        .first()
+        .map(|s| s.score)
+        .unwrap_or_default();
+    if intent.kind == QueryIntentKind::RuntimeConfig && rtcfg_cont_top_score >= 0.70 {
+        let rtcfg_continuation = selection.snippets.first().and_then(|top_item| {
+            let top_path = top_item.path.clone();
+            let top_start = top_item.start_line;
+            let top_score = top_item.score;
+            let has_foreign_card2 = selection
+                .snippets
+                .get(1)
+                .map_or(false, |s| s.path != top_path);
+            if !has_foreign_card2 {
+                return None;
+            }
+            let cont_id = runtime.adjacent_chunk(&top_path, top_start)?;
+            let cont = runtime.chunk(cont_id)?;
+            Some(crate::rpc::QueryResultItem {
+                path: cont.path.clone(),
+                start_line: cont.start_line,
+                end_line: cont.end_line,
+                score: top_score * 0.60,
+                reasons: vec!["config-continuation".to_string()],
+                channel_scores: QueryChannelScores::default(),
+                text: cont.text.clone(),
+                slm_relevance_note: None,
+            })
+        });
+        if let Some(cont_item) = rtcfg_continuation {
+            // Replace card 2 (noisy foreign card) with the continuation of the config chunk.
+            selection.snippets.truncate(1);
+            selection.snippets.push(cont_item);
+        }
+    }
+
     // Diagnostics: SLM overrides recommended_injection + skip_reason in daemon.rs
     let diagnostics = QueryDiagnostics {
         intent: intent_name(intent.kind).to_string(),
