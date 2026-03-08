@@ -835,6 +835,17 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         }
         // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
         QueryIntentKind::SymbolUsage => relative.max(0.22),
+        // Phase AQ: when top score is high (≥0.60, strong signal), raise floor to 0.40
+        // to filter weakly-related cards (devtools profiling, tests, server rendering) at 0.30-0.36
+        // that dilute high-confidence architecture answers. Low-confidence arch queries
+        // (top < 0.60, e.g. entry-point surveys) keep the standard relative floor.
+        QueryIntentKind::Architecture => {
+            if top.score >= 0.60 {
+                relative.max(0.40)
+            } else {
+                relative
+            }
+        }
         _ => relative,
     }
 }
@@ -2160,10 +2171,11 @@ mod tests {
 
     #[test]
     fn min_score_relative_floor_is_40_percent_of_top() {
-        let chunks = vec![make_scored_chunk(1, 0.80), make_scored_chunk(2, 0.20)];
+        // Architecture with top < 0.60 uses standard relative floor (no AQ conditional)
+        let chunks = vec![make_scored_chunk(1, 0.50), make_scored_chunk(2, 0.20)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
-        // relative = 0.80 * 0.40 = 0.32; no intent-specific minimum
-        assert!((floor - 0.32).abs() < 1e-5, "expected ~0.32, got {floor}");
+        // relative = 0.50 * 0.40 = 0.20; no intent-specific minimum
+        assert!((floor - 0.20).abs() < 1e-5, "expected ~0.20, got {floor}");
     }
 
     #[test]
@@ -2224,6 +2236,24 @@ mod tests {
         let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
         // relative = 0.40 * 0.40 = 0.16; clamped to 0.18
         assert!((floor - 0.18).abs() < 1e-5, "expected 0.18 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_architecture_high_confidence_uses_0_40_floor() {
+        // Phase AQ: top >= 0.60 → floor = relative.max(0.40) to cut devtools/test noise
+        let chunks = vec![make_scored_chunk(1, 0.65)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
+        // relative = 0.65 * 0.40 = 0.26; clamped to 0.40
+        assert!((floor - 0.40).abs() < 1e-5, "expected 0.40 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_architecture_low_confidence_uses_relative_floor() {
+        // Phase AQ: top < 0.60 → standard relative floor (entry-point survey)
+        let chunks = vec![make_scored_chunk(1, 0.40)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
+        // relative = 0.40 * 0.40 = 0.16
+        assert!((floor - 0.16).abs() < 1e-5, "expected 0.16 floor, got {floor}");
     }
 
     #[test]
