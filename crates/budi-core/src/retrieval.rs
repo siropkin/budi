@@ -894,6 +894,16 @@ fn expand_graph_neighbors(
         .take(3)
         .collect::<Vec<_>>();
 
+    // Phase AF: collect top-level path dirs from the TOP seed chunks (by selection order, which
+    // is score order) to filter cross-domain graph-neighbor noise. Using only seed_ids (top 3)
+    // rather than all selected_chunk_ids so that a low-ranked main-retrieval chunk from a
+    // different domain (e.g. scripts/) doesn't pollute the domain anchor.
+    let seed_top_dirs: HashSet<&str> = seed_ids
+        .iter()
+        .filter_map(|id| runtime.chunk(*id))
+        .map(|c| c.path.splitn(2, '/').next().unwrap_or(c.path.as_str()))
+        .collect();
+
     let mut selected_ids = selection
         .selected_chunk_ids
         .iter()
@@ -947,6 +957,16 @@ fn expand_graph_neighbors(
         }
         if selected_ids.contains(&neighbor_id) {
             continue;
+        }
+        // Phase AF: skip neighbor if its top-level dir doesn't match any seed's top-level dir.
+        if !seed_top_dirs.is_empty() {
+            let neighbor_top = runtime
+                .chunk(neighbor_id)
+                .map(|c| c.path.splitn(2, '/').next().unwrap_or(c.path.as_str()))
+                .unwrap_or("");
+            if !seed_top_dirs.contains(neighbor_top) {
+                continue;
+            }
         }
         let candidate = ScoredChunk {
             id: neighbor_id,
