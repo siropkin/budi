@@ -823,7 +823,16 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         // that dilutes SymbolDef context when sym-hint-seed already placed the definition at 0.58.
         QueryIntentKind::SymbolDefinition => relative.max(0.30),
         QueryIntentKind::TestLookup => relative.max(0.22),
-        QueryIntentKind::RuntimeConfig => relative.max(0.18),
+        // Phase AM: when top score is high (≥0.60, strong rt-cfg signal), raise floor to 0.40
+        // to filter noise cards (brew formulas, hyperlink env-var code) at 0.33-0.38.
+        // When top is low (< 0.60, weak signal like React __DEV__ flags), keep floor at 0.18.
+        QueryIntentKind::RuntimeConfig => {
+            if top.score >= 0.60 {
+                relative.max(0.40)
+            } else {
+                relative.max(0.18)
+            }
+        }
         // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
         QueryIntentKind::SymbolUsage => relative.max(0.22),
         _ => relative,
@@ -2196,6 +2205,24 @@ mod tests {
             (floor - 0.22).abs() < 1e-5,
             "expected 0.22 floor, got {floor}"
         );
+    }
+
+    #[test]
+    fn min_score_runtime_config_high_confidence_uses_0_40_floor() {
+        // Phase AM: top >= 0.60 → floor = relative.max(0.40) to cut brew/hyperlink noise
+        let chunks = vec![make_scored_chunk(1, 0.80)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
+        // relative = 0.80 * 0.40 = 0.32; clamped to 0.40
+        assert!((floor - 0.40).abs() < 1e-5, "expected 0.40 floor, got {floor}");
+    }
+
+    #[test]
+    fn min_score_runtime_config_low_confidence_uses_0_18_floor() {
+        // Phase AM: top < 0.60 → keep 0.18 floor (React __DEV__ scenario)
+        let chunks = vec![make_scored_chunk(1, 0.40)];
+        let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
+        // relative = 0.40 * 0.40 = 0.16; clamped to 0.18
+        assert!((floor - 0.18).abs() < 1e-5, "expected 0.18 floor, got {floor}");
     }
 
     #[test]
