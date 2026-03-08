@@ -504,11 +504,17 @@ pub fn build_query_response(
             let def_path = def_item.path.clone();
             let def_start = def_item.start_line;
             let def_score = def_item.score;
-            let has_foreign_card2 = selection
+            // Phase AY: inject continuation whenever card 2 is missing or from a foreign file.
+            // The original AR condition only fired when card 2 existed AND was foreign, so a
+            // single-card result (e.g. P3 scheduleUpdateOnFiber when HNSW returns only the
+            // definition chunk) never got the continuation. Now: if card 2 exists AND is from
+            // the same file, trust it and skip (same-file card is likely already sequential);
+            // otherwise always inject the adjacent continuation.
+            let needs_continuation = selection
                 .snippets
                 .get(1)
-                .map_or(false, |s| s.path != def_path);
-            if !has_foreign_card2 {
+                .map_or(true, |s| s.path != def_path);
+            if !needs_continuation {
                 return None;
             }
             let cont_id = runtime.adjacent_chunk(&def_path, def_start)?;
@@ -525,7 +531,7 @@ pub fn build_query_response(
             })
         });
         if let Some(cont_item) = continuation {
-            // Replace card 2 (foreign call site) with the continuation of the function body.
+            // Replace card 2 (foreign call site or absent) with the continuation of the function.
             selection.snippets.truncate(1);
             selection.snippets.push(cont_item);
         }
