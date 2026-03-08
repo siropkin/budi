@@ -491,6 +491,46 @@ pub fn build_query_response(
         );
     }
 
+    // Phase AR: SymbolDefinition continuation chunk.
+    // When sym_def_seeded (hint-match-boost confirmed the definition was found), the
+    // 80-line definition chunk often doesn't cover the full function body. Look for the
+    // next chunk from the same file (smallest start_line > def.start_line, accounting for
+    // the 20-line overlap where stride=60) and inject it in place of any call-site card
+    // from a different file. This gives Claude the complete function body — including the
+    // key operations that follow the DEV guards — for "what are its first steps" queries
+    // like P3 (scheduleUpdateOnFiber, lines 967-1095, chunk at 961-1040 + 1021-1100).
+    if sym_def_seeded {
+        let continuation = selection.snippets.first().and_then(|def_item| {
+            let def_path = def_item.path.clone();
+            let def_start = def_item.start_line;
+            let def_score = def_item.score;
+            let has_foreign_card2 = selection
+                .snippets
+                .get(1)
+                .map_or(false, |s| s.path != def_path);
+            if !has_foreign_card2 {
+                return None;
+            }
+            let cont_id = runtime.adjacent_chunk(&def_path, def_start)?;
+            let cont = runtime.chunk(cont_id)?;
+            Some(crate::rpc::QueryResultItem {
+                path: cont.path.clone(),
+                start_line: cont.start_line,
+                end_line: cont.end_line,
+                score: def_score * 0.60,
+                reasons: vec!["definition-continuation".to_string()],
+                channel_scores: QueryChannelScores::default(),
+                text: cont.text.clone(),
+                slm_relevance_note: None,
+            })
+        });
+        if let Some(cont_item) = continuation {
+            // Replace card 2 (foreign call site) with the continuation of the function body.
+            selection.snippets.truncate(1);
+            selection.snippets.push(cont_item);
+        }
+    }
+
     // Diagnostics: SLM overrides recommended_injection + skip_reason in daemon.rs
     let diagnostics = QueryDiagnostics {
         intent: intent_name(intent.kind).to_string(),

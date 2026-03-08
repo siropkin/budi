@@ -127,6 +127,18 @@ impl RuntimeIndex {
         self.id_to_chunk.get(&id)
     }
 
+    /// Find the next chunk in the same file after `after_start_line` — the chunk with the
+    /// smallest `start_line > after_start_line`. Used by Phase AR to inject the continuation
+    /// of a long function body. Works correctly with overlapping chunks (overlap=20, stride=60):
+    /// given a chunk at 961-1040, the next chunk starts at 1021 (not 1041).
+    pub fn adjacent_chunk(&self, path: &str, after_start_line: usize) -> Option<u64> {
+        self.id_to_chunk
+            .iter()
+            .filter(|(_, c)| c.path == path && c.start_line > after_start_line)
+            .min_by_key(|(_, c)| c.start_line)
+            .map(|(id, _)| *id)
+    }
+
     pub fn search_lexical(&self, query: &str, limit: usize) -> Result<Vec<(u64, f32)>> {
         self.tantivy.search(query, limit)
     }
