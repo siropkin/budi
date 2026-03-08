@@ -59,23 +59,6 @@ python3 scripts/ab_benchmark_runner.py \
   --run-label "ripgrep-v1"
 ```
 
-## Pivot matrix runs
-
-For evidence-first pivot decisions, run the matrix runner with variant-specific config overrides:
-
-```bash
-python3 scripts/pivot_matrix_runner.py \
-  --matrix-file ./fixtures/benchmarks/pivot_matrix_v1.template.json \
-  --prompts-file ./fixtures/benchmarks/react-structural-v1.prompts.json \
-  --repeats 3 \
-  --out-dir ./tmp/pivot_matrix_v1_run \
-  --dry-run
-```
-
-Copy the template to a local file and replace repo paths before running. Remove `--dry-run` to execute.
-
-Full decision framework: `docs/adr-evidence-first-pivot.md`, `docs/pivot-experiment-matrix.md`
-
 ## Notes about validity
 
 - A row is considered an injected `with_budi` run when hook output has `success=true` and `reason=ok`.

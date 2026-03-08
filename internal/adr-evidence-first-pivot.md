@@ -78,4 +78,3 @@ Across holdout benchmark runs:
 - no regression in deterministic exact-path precision on runtime-config prompts
 
 If gates are not met, escalate to stronger abstain policies and reduce injection surface further.
-
