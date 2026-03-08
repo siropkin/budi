@@ -318,25 +318,26 @@ fn ast_top_level_chunks(
     if root.has_error() && matches!(language_kind, AstLanguageKind::JavaScript) {
         let ts_language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
         if let Ok(()) = parser.set_language(&ts_language)
-            && let Some(ts_tree) = parser.parse(content, None) {
-                let ts_root = ts_tree.root_node();
-                if !ts_root.has_error() {
-                    // TypeScript grammar parsed cleanly — use it with JavaScriptTSFallback
-                    // boundary kinds (no lexical_declaration) to avoid tiny const/let chunks.
-                    let lines: Vec<&str> = content.lines().collect();
-                    if lines.is_empty() {
-                        return None;
-                    }
-                    return Some(collect_top_level_chunks(
-                        ts_root,
-                        content,
-                        &lines,
-                        AstLanguageKind::JavaScriptTSFallback,
-                        lines_per_chunk,
-                        overlap,
-                    ));
+            && let Some(ts_tree) = parser.parse(content, None)
+        {
+            let ts_root = ts_tree.root_node();
+            if !ts_root.has_error() {
+                // TypeScript grammar parsed cleanly — use it with JavaScriptTSFallback
+                // boundary kinds (no lexical_declaration) to avoid tiny const/let chunks.
+                let lines: Vec<&str> = content.lines().collect();
+                if lines.is_empty() {
+                    return None;
                 }
+                return Some(collect_top_level_chunks(
+                    ts_root,
+                    content,
+                    &lines,
+                    AstLanguageKind::JavaScriptTSFallback,
+                    lines_per_chunk,
+                    overlap,
+                ));
             }
+        }
         return None;
     }
     let lines: Vec<&str> = content.lines().collect();

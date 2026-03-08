@@ -1449,9 +1449,10 @@ fn update_session_affinity(
         let anchors = path_anchors.entry(snippet.path.clone()).or_default();
         if anchors.len() < 2
             && let Some(anchor) = affinity_anchor_line(&snippet.text)
-                && !anchors.contains(&anchor) {
-                    anchors.push(anchor);
-                }
+            && !anchors.contains(&anchor)
+        {
+            anchors.push(anchor);
+        }
     }
     for (path, anchors) in path_anchors {
         map.insert(

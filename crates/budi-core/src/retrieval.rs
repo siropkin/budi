@@ -390,10 +390,11 @@ pub fn build_query_response(
         // +0.20 is intentionally larger than cwd-proximity (+0.08) to ensure the
         // active file surfaces above directory-level neighbors.
         if let Some(af) = active_file
-            && chunk.path == af {
-                adjusted += 0.20;
-                push_unique_reason(&mut reasons, "active-file-boost");
-            }
+            && chunk.path == af
+        {
+            adjusted += 0.20;
+            push_unique_reason(&mut reasons, "active-file-boost");
+        }
 
         // R1: TestLookup — boost chunks from test files so they surface above source files.
         // Z1: Also boost inline test blocks (#[test], #[cfg(test)], mod tests, describe/it)
@@ -423,16 +424,17 @@ pub fn build_query_response(
         // query token. This surfaces definition chunks over reference/usage chunks when
         // the dominant function in a window is precisely what the user asked about.
         if intent.kind == QueryIntentKind::SymbolDefinition
-            && let Some(hint) = chunk.symbol_hint.as_deref() {
-                let hint_lower = hint.to_ascii_lowercase();
-                if !hint_lower.is_empty()
-                    && !is_generic_symbol_hint(hint)
-                    && symbol_tokens.iter().any(|t| t == &hint_lower)
-                {
-                    adjusted += 0.30;
-                    push_unique_reason(&mut reasons, "hint-match-boost");
-                }
+            && let Some(hint) = chunk.symbol_hint.as_deref()
+        {
+            let hint_lower = hint.to_ascii_lowercase();
+            if !hint_lower.is_empty()
+                && !is_generic_symbol_hint(hint)
+                && symbol_tokens.iter().any(|t| t == &hint_lower)
+            {
+                adjusted += 0.30;
+                push_unique_reason(&mut reasons, "hint-match-boost");
             }
+        }
 
         if reasons.is_empty() {
             reasons.push("semantic+lexical".to_string());
@@ -492,9 +494,10 @@ pub fn build_query_response(
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
     if selection.snippets.is_empty()
-        && let Some(best) = scored.first() {
-            let _ = try_push_scored_chunk(runtime, best, &mut selection);
-        }
+        && let Some(best) = scored.first()
+    {
+        let _ = try_push_scored_chunk(runtime, best, &mut selection);
+    }
     if should_expand_graph_neighbors(intent.kind) && !sym_def_seeded {
         expand_graph_neighbors(
             runtime,
