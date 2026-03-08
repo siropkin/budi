@@ -436,12 +436,22 @@ pub fn build_query_response(
 
     // Phase K2: Per-intent retrieval limit. Honour explicit user config override.
     let default_limit = intent_retrieval_limit(intent.kind);
+    // Phase AJ: SymbolDefinition with hint-match-boost → definition confirmed found.
+    // Restrict to 2 candidates and skip graph expansion to avoid noise cards from
+    // common query words ("path", "matcher", "writer") crowding out the definition.
+    // The [structural context] block already provides callers/callees compactly.
+    // Use hint-match-boost (stable across seeded and HNSW paths) not sym-hint-seed.
+    let sym_def_seeded = intent.kind == QueryIntentKind::SymbolDefinition
+        && scored
+            .first()
+            .map_or(false, |c| c.reasons.iter().any(|r| r == "hint-match-boost"));
     let target_limit = if config.retrieval_limit != crate::config::DEFAULT_RETRIEVAL_LIMIT {
-        config.retrieval_limit
+        config.retrieval_limit.max(4)
+    } else if sym_def_seeded {
+        2
     } else {
-        default_limit
-    }
-    .max(4);
+        default_limit.max(4)
+    };
     // TestLookup: reduce per_file_limit to 1 to force diversity across test files.
     // Without this, high-scoring files (e.g., tests/multiline.rs) grab 2 slots,
     // crowding out other test files (e.g., tests/feature.rs with parallel tests).
@@ -472,7 +482,7 @@ pub fn build_query_response(
             let _ = try_push_scored_chunk(runtime, best, &mut selection);
         }
     }
-    if should_expand_graph_neighbors(intent.kind) {
+    if should_expand_graph_neighbors(intent.kind) && !sym_def_seeded {
         expand_graph_neighbors(
             runtime,
             &mut selection,
