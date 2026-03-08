@@ -24,3 +24,4 @@ toolcall-bench-out*/
 # Claude project files
 .claude/*
 !.claude/*.md
+.claude/budi-project-map.md
