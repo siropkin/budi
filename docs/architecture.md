@@ -53,7 +53,8 @@
 
 ## Project Map (Phase D)
 
-- After each full index job, `generate_project_map()` writes `.claude/budi-project-map.md` into the repo with a high-level file-tree summary grouped by directory.
+- After each full index job, `generate_project_map()` writes local `.claude/budi-project-map.md` into the repo with a high-level file-tree summary grouped by directory.
+- The project map is generated state, so `.claude/` is treated as local-only rather than tracked documentation.
 - `budi hook session-start` reads this file and outputs it as an `AsyncSystemMessageOutput`, injecting it into the Claude Code system prompt at session start.
 
 ## Call Graph / Structural Oracle (Phase E)
@@ -85,11 +86,27 @@
 
 `weights_for_intent(kind)` adjusts the 5-channel blend (lexical/vector/symbol/path/graph) per intent. `intent_retrieval_limit(kind)` sets per-intent snippet caps (5–8).
 
+## Evidence-First Output
+
+- `build_context()` emits structured `[budi context]` payloads with `rules` plus `evidence_cards`, rather than dumping raw scored snippets into the prompt.
+- Each evidence card contains:
+  - exact `file`
+  - `span`
+  - one `anchor` line
+  - a short `proof` list
+  - optional SLM relevance note
+- Score/debug metadata is stripped before injection so the global model sees only grounded evidence, not ranking internals.
+- Runtime-config queries have an additional guardrail path:
+  - if full context is skipped, `build_runtime_guard_context()` can still emit a narrow `[budi runtime guard]` block
+  - this fallback includes only verified production file paths with runtime-config signals
+  - tests/examples/fixtures are filtered out unless the user explicitly asks for them
+
 ## Context Budget Discipline (Phase L)
 
 - Total injected context is hard-capped at `context_char_budget` (default 12,000 chars).
-- Call graph budget is subtracted from the base budget before snippet context is assembled.
+- Call graph budget is subtracted from the base budget before evidence-card context is assembled.
 - Per-intent call graph budgets: FlowTrace → 1200 chars (gated on top-snippet score ≥ 0.30, else 600); SymbolDefinition/SymbolUsage → 800; Architecture/TestLookup/RuntimeConfig → 0 (suppressed).
+- Per-intent snippet budgets further narrow the payload for precision intents: SymbolDefinition → 3000 chars, SymbolUsage/RuntimeConfig → 4000, FlowTrace → 5500, TestLookup → 5000, Architecture/default → full configured budget.
 - Progressive truncation in `build_context()`: top snippet ≤ 40% of budget, each next ≤ 60% of remaining.
 
 ## Score Floors and Boosts (Phases N/P/R/S/T)

@@ -10,18 +10,21 @@
 
 # Runtime artifacts
 .budi/
-.claude/settings.local.json
 .fastembed_cache/
 .install-test/
 
 # Bench artifacts
 bench-output/
 tmp/
+temp/
+.tmp/
 ab-bench-*/
 react-eval-out*/
 toolcall-bench-out*/
 
-# Claude project files
-.claude/*
-!.claude/*.md
-.claude/budi-project-map.md
+# Local Claude / scratch artifacts
+.claude/
+*.plan.*
+*.scratch.*
+*.tmp
+*.temp
