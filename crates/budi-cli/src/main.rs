@@ -185,16 +185,22 @@ impl RetrievalModeArg {
 
 #[derive(Debug, Subcommand)]
 enum RepoCommands {
+    // Maintenance workflow; keep available but out of daily help.
+    #[command(hide = true)]
     List {
         #[arg(long, default_value_t = false)]
         stale_only: bool,
     },
+    // Maintenance workflow; keep available but out of daily help.
+    #[command(hide = true)]
     Remove {
         #[arg(long)]
         repo_root: PathBuf,
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    // Maintenance workflow; keep available but out of daily help.
+    #[command(hide = true)]
     Wipe {
         #[arg(long, default_value_t = false)]
         confirm: bool,
@@ -205,6 +211,8 @@ enum RepoCommands {
         #[arg(long)]
         repo_root: Option<PathBuf>,
     },
+    // Maintenance/debug workflow; keep available but out of daily help.
+    #[command(hide = true)]
     Stats {
         #[arg(long)]
         repo_root: Option<PathBuf>,
@@ -3486,5 +3494,22 @@ mod tests {
         assert!(lower.contains("repo"));
         assert!(!lower.contains("bench"));
         assert!(!lower.contains("eval"));
+    }
+
+    #[test]
+    fn repo_help_hides_maintenance_commands_from_default_surface() {
+        let mut command = Cli::command();
+        let repo = command
+            .find_subcommand_mut("repo")
+            .expect("repo subcommand should exist");
+        let help = repo.render_help().to_string();
+        let lower = help.to_ascii_lowercase();
+        assert!(lower.contains("status"));
+        assert!(lower.contains("search"));
+        assert!(lower.contains("preview"));
+        assert!(!lower.contains("list"));
+        assert!(!lower.contains("remove"));
+        assert!(!lower.contains("wipe"));
+        assert!(!lower.contains("stats"));
     }
 }
