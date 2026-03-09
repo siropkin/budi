@@ -2,7 +2,7 @@
 /// no codebase-anchor words.  The bar is intentionally high so legitimate
 /// code questions are never filtered out.
 pub fn is_obviously_non_code(prompt: &str) -> bool {
-    // Phase BL: Claude Code injects structured XML notifications into the
+    // Claude Code injects structured XML notifications into the
     // UserPromptSubmit hook (e.g. <task-notification>, <system-reminder>).
     // These are never user code questions — skip them immediately.
     let trimmed = prompt.trim_start();

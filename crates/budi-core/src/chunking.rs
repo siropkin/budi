@@ -132,7 +132,7 @@ fn symbol_from_line(line: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy)]
 enum AstLanguageKind {
     JavaScript,
-    // Phase BF: TS grammar used as fallback for Flow-typed .js files (has_error).
+    // TypeScript grammar fallback for Flow-typed .js files that fail JS parsing.
     // Skips lexical_declaration/variable_declaration boundary kinds to avoid
     // 1-line const/let chunks inside large reconciler functions.
     JavaScriptTSFallback,
@@ -252,7 +252,7 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
                 | "lexical_declaration"
                 | "variable_declaration"
         ),
-        // Phase BF: TS-parsed JS files omit lexical/variable declarations to avoid
+        // TS-parsed JS files omit lexical/variable declarations to avoid
         // creating 1-line const/let chunks inside large Flow-typed functions.
         AstLanguageKind::JavaScriptTSFallback => matches!(
             kind,
@@ -373,7 +373,7 @@ fn ast_top_level_chunks(
     }
     let tree = parser.parse(content, None)?;
     let root = tree.root_node();
-    // Phase BE: if JS grammar reports errors (e.g. Flow/TS type annotations in .js files),
+    // If JS grammar reports errors (e.g. Flow/TS type annotations in .js files),
     // retry with TypeScript grammar. Only files that currently error get different treatment
     // (pure JS files parse cleanly and are unaffected). Use JavaScriptTSFallback boundary
     // kinds to avoid chunk explosion from lexical_declaration / type_alias_declaration.
@@ -422,7 +422,7 @@ fn ast_top_level_chunks(
     Some(chunks)
 }
 
-/// Phase BD: collect all boundary-kind descendant nodes within `node`, stopping at each boundary
+/// Collect all boundary-kind descendant nodes within `node`, stopping at each boundary
 /// (don't recurse into boundary nodes — they'll be chunked independently).
 fn collect_boundary_descendants<'a>(
     node: Node<'a>,
@@ -480,7 +480,7 @@ fn append_node_chunks(
             ));
             return;
         }
-        // Phase BD: try boundary-kind descendants before falling back to fixed stride.
+        // Try boundary-kind descendants before falling back to fixed stride.
         // This handles cases like createChildReconciler (1600+ lines) containing many
         // nested function declarations that each deserve their own chunk.
         let mut boundary_children: Vec<Node<'_>> = Vec::new();
@@ -1035,7 +1035,7 @@ export function beta(x: number): number {
     fn ast_chunking_recurses_into_large_js_function() {
         // Simulate createChildReconciler-style: one large outer function (>160 lines)
         // containing several named inner function declarations.
-        // Phase BD: should produce separate chunks for innerAlpha and innerBeta.
+        // Should produce separate chunks for innerAlpha and innerBeta.
         let mut content = "function outerLarge() {\n".to_string();
         content.push_str("function innerAlpha(a) {\n");
         for i in 0..10 {

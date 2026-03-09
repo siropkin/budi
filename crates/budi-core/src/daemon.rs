@@ -29,7 +29,7 @@ const WRITE_RETRY_MAX_DELAY_MS: u64 = 600;
 struct SessionState {
     injected_keys: HashSet<String>, // "path:start_line" of already-injected snippets
     last_activity: Option<Instant>,
-    /// Phase AB: the repo-relative path of the file Claude most recently edited/read.
+    /// The repo-relative path of the file Claude most recently edited/read.
     /// Used to boost chunks from that exact file in the next query.
     active_file: Option<String>,
 }
@@ -193,7 +193,7 @@ impl DaemonState {
         let cwd = request.cwd.as_deref().map(Path::new);
         let retrieval_mode = retrieval::parse_retrieval_mode(request.retrieval_mode.as_deref());
 
-        // Phase AB: retrieve the most-recently-edited file from session state
+        // Retrieve the most-recently-edited file from session state
         // so retrieval can apply a targeted active-file boost.
         let active_file: Option<String> = request.session_id.as_ref().and_then(|sid| {
             self.sessions_guard()
@@ -219,7 +219,7 @@ impl DaemonState {
         }
         let t_dedup_ms = t_start.elapsed().as_millis() as u64;
 
-        // Populate snippet_refs for structured analytics (W1).
+        // Populate snippet_refs for structured analytics.
         response.snippet_refs = response
             .snippets
             .iter()
@@ -245,8 +245,8 @@ impl DaemonState {
         };
 
         // Step 5: Call graph summary (structural oracle) — prepended to context.
-        // Phase K1: per-intent budget — suppress for breadth intents, boost for flow-trace.
-        // Phase L2: FlowTrace budget is gated on top-snippet confidence (≥0.30 → 1200, else 600).
+        // Use per-intent call-graph budgets: suppress for breadth intents and boost for flow-trace.
+        // FlowTrace budget is gated on top-snippet confidence (≥0.30 → 1200, else 600).
         let call_graph_budget = match response.detected_intent.as_deref() {
             Some("flow-trace") => {
                 let top_score = response.snippets.first().map(|s| s.score).unwrap_or(0.0);
@@ -272,7 +272,7 @@ impl DaemonState {
         drop(runtime_guard);
         let t_callgraph_ms = t_start.elapsed().as_millis() as u64;
 
-        // Phase Y: Per-intent snippet budget.
+        // Per-intent snippet budget.
         // Research: context rot begins immediately; every irrelevant token costs attention
         // bandwidth. Precision intents (sym-def, sym-use) need ≤4k chars of code — injecting
         // 10k adds noise. Breadth intents (architecture) genuinely benefit from wider coverage.
@@ -286,7 +286,7 @@ impl DaemonState {
         }
         .min(config.context_char_budget);
 
-        // Phase L1: Deduct call graph from snippet budget so total ≤ intent_snippet_budget.
+        // Deduct call graph from snippet budget so total ≤ intent_snippet_budget.
         let base_budget = if call_graph.is_some() {
             intent_snippet_budget.saturating_sub(call_graph_budget)
         } else {
@@ -310,7 +310,7 @@ impl DaemonState {
             if let Some(ref sid) = request.session_id {
                 self.record_session_snippets(sid, &response.snippets);
             }
-            // Phase J+M1: Persist session affinity with anchor lines for next-session context.
+            // Persist session affinity with anchor lines for next-session context.
             let snippets_owned = response.snippets.clone();
             let repo_root_owned = repo_root.to_path_buf();
             tokio::task::spawn_blocking(move || {
@@ -318,7 +318,7 @@ impl DaemonState {
             });
         }
 
-        // Phase I: Per-step timing (populated when debug_io is enabled).
+        // Per-step timing (populated when debug_io is enabled).
         if config.debug_io {
             let mut timing = HashMap::new();
             timing.insert("load_ms".to_string(), t_load_ms);
@@ -382,7 +382,7 @@ impl DaemonState {
             }
         }
 
-        // Phase AB: track the most-recently-edited file so the next query can
+        // Track the most-recently-edited file so the next query can
         // apply a targeted boost to chunks from that exact file.
         {
             let mut sessions = self.sessions_guard();
@@ -1400,7 +1400,7 @@ pub fn resolve_repo_root(input_repo_root: Option<String>, cwd: &Path) -> Result<
     Ok(config::find_repo_root(cwd)?.display().to_string())
 }
 
-/// Phase J+M1: Affinity entry — timestamp plus up to 2 anchor lines per file.
+/// Affinity entry — timestamp plus up to 2 anchor lines per file.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct AffinityEntry {
     ts: u64,
@@ -1408,7 +1408,7 @@ struct AffinityEntry {
     anchors: Vec<String>,
 }
 
-/// Phase J+M1: Persist recently-injected files with anchor lines so the next session can surface them.
+/// Persist recently-injected files with anchor lines so the next session can surface them.
 /// Reads `session-affinity.json`, migrates old flat format if needed, keeps top 50 by recency.
 fn update_session_affinity(
     repo_root: &Path,

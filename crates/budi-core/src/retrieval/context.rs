@@ -71,7 +71,7 @@ pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> Stri
 }
 
 fn render_evidence_card(snippet: &QueryResultItem) -> String {
-    // Phase AA: strip score/signals — debugging metadata that adds noise for Claude.
+    // Strip score/signals — debugging metadata that adds noise for Claude.
     // Context Rot research: even harmless distractors degrade attention/focus.
     // Keep: file, span, anchor (what to look at), proof (why it's relevant).
     let anchor = extract_anchor_line(&snippet.text);
@@ -127,7 +127,7 @@ fn extract_proof_lines(text: &str, max_lines: usize) -> Vec<String> {
         "import.meta.env",
         "os.environ",
         "env::var",
-        // Phase K3: call-graph and flow-trace needles
+        // Call-graph and flow-trace needles
         "call(",
         "invoke",
         "schedule",
@@ -245,7 +245,7 @@ mod tests {
         let out = build_context(&snippets, 4096);
         assert!(out.contains("file: src/scheduler.rs"), "missing file path");
         assert!(out.contains("span: 1-10"), "missing span");
-        // Phase AA: score and signals are stripped from emitted context (debugging metadata)
+        // Score and signals are stripped from emitted context (debugging metadata)
         assert!(
             !out.contains("score:"),
             "score should not be in emitted context"

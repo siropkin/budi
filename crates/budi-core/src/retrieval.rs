@@ -127,7 +127,7 @@ pub fn build_query_response(
     query: &str,
     query_embedding: Option<&[f32]>,
     cwd: Option<&Path>,
-    active_file: Option<&str>, // Phase AB: repo-relative path of last edited file → +0.20 boost
+    active_file: Option<&str>, // Repo-relative path of the last edited/read file.
     retrieval_mode: RetrievalMode,
     config: &BudiConfig,
 ) -> Result<QueryResponse> {
@@ -148,8 +148,8 @@ pub fn build_query_response(
     augment_symbol_tokens_for_intent(&retrieval_query, &intent, &mut symbol_tokens);
     let exact_match_symbol_tokens =
         exact_match_symbol_tokens_for_intent(query, &intent, &symbol_tokens);
-    // Phase BZ: FlowTrace anchor — pre-compute camelCase-only tokens for weak definition
-    // seeding. Only camelCase (e.g. `reconcileChildFibers`, `useState`) — not TitleCase
+    // Pre-compute camelCase-only tokens for weak FlowTrace definition anchoring.
+    // Only camelCase (e.g. `reconcileChildFibers`, `useState`) — not TitleCase
     // (e.g. "React", "Component") — to avoid over-boosting common type names.
     let flowtrace_camelcase_tokens: Vec<String> = if intent.kind == QueryIntentKind::FlowTrace {
         extract_flowtrace_camelcase_tokens(query)
@@ -164,7 +164,7 @@ pub fn build_query_response(
 
     // TestLookup: widen the candidate pool so inline test blocks (which score lower
     // than production code on the query text) have a chance to enter the fused stage.
-    // This also helps Z2 find production co-location seeds from files like config.rs
+    // This also helps production co-location seeds from files like config.rs
     // whose production chunks rank ~25-30 in normal topk=20 for test queries.
     let topk_lex = if intent.kind == QueryIntentKind::TestLookup {
         config.topk_lexical * 2
@@ -221,7 +221,7 @@ pub fn build_query_response(
 
     let mut fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
 
-    // Phase Z2: For TestLookup, inject inline-test chunks co-located with top results.
+    // For TestLookup, inject inline-test chunks co-located with top results.
     // Problem: inline test blocks (e.g., Rust #[cfg(test)]) may not rank in
     // topk_lexical/topk_vector because their text doesn't contain query words.
     // Fix: if a production chunk from file F is in top-5 candidates, also inject any
@@ -280,21 +280,20 @@ pub fn build_query_response(
         }
     }
 
-    // Phase AC/AD: Direct symbol-hint injection for SymbolDefinition/SymbolUsage.
+    // Direct symbol-hint seeding for SymbolDefinition/SymbolUsage.
     // Problem: definition chunk is invisible to the symbol channel in two cases:
-    //   AC: pure-lowercase symbol names like "run" — `is_symbol_like_token` rejects them,
-    //       so they never enter symbol_to_chunk_ids at all.
-    //   AD: camelCase names like `scheduleUpdateOnFiber` — they ARE in symbol_to_chunk_ids
-    //       but the codebase has so many call-sites that the definition chunk falls outside
-    //       the topk limit, never entering the fused map where hint-match-boost can fire.
+    //   pure-lowercase symbol names like "run" — `is_symbol_like_token` rejects them,
+    //   so they never enter symbol_to_chunk_ids at all.
+    //   camelCase names like `scheduleUpdateOnFiber` — they ARE in symbol_to_chunk_ids
+    //   but the codebase has so many call-sites that the definition chunk falls outside
+    //   the topk limit, never entering the fused map where hint-match-boost can fire.
     //
     // Different seeds per intent:
     //   SymbolDefinition: use all symbol_tokens (includes camelCase from plain text + all
     //     backtick tokens via the pre-pass). Seeding the definition chunk is always correct.
-    //   SymbolUsage: use only lowercase_backtick_tokens (Phase AC behaviour). For sym-use
-    //     queries the symbol channel already finds callers well for camelCase identifiers.
-    //     Seeding the definition chunk for sym-use just adds noise (e.g. P16 beginWork ctx
-    //     jumped 787→1331 when sym-use also used all symbol_tokens).
+    //   SymbolUsage: use only lowercase_backtick_tokens. For sym-use queries the symbol
+    //     channel already finds callers well for camelCase identifiers, so seeding the
+    //     definition chunk with all symbol tokens just adds noise.
     if intent.kind == QueryIntentKind::SymbolDefinition && !symbol_tokens.is_empty() {
         const SYMBOL_DEF_SEED_SCORE: f32 = 0.28;
         for chunk in runtime.all_chunks() {
@@ -334,7 +333,7 @@ pub fn build_query_response(
             }
         }
     }
-    // Phase AC (preserved for SymbolUsage): only seed for pure-lowercase backtick tokens.
+    // For SymbolUsage, seed only pure-lowercase backtick tokens.
     if intent.kind == QueryIntentKind::SymbolUsage {
         let lowercase_backtick_tokens = extract_lowercase_backtick_tokens(query);
         if !lowercase_backtick_tokens.is_empty() {
@@ -365,10 +364,10 @@ pub fn build_query_response(
         }
     }
 
-    // Phase Z3: Path-based inline-test seeding for TestLookup.
+    // Path-based inline-test seeding for TestLookup.
     // Problem: when the query is wordy ("What unit tests cover the config file parsing..."),
-    // the production file (e.g. flags/config.rs) may not appear in topk at all — so Z2
-    // has no seed and never injects its inline test block.
+    // the production file (e.g. flags/config.rs) may not appear in topk at all — so the
+    // co-located inline-test pass has no seed and never injects its inline test block.
     // Fix: extract subject tokens (strip test-noise words), find inline test chunks in
     // files whose paths contain any subject token, inject directly at a baseline score
     // that clears the TestLookup min_selection_score floor (0.22).
@@ -436,7 +435,7 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, &ecosystem_reason);
         }
 
-        // Phase AB: boost chunks from the file Claude most recently edited/read.
+        // Boost chunks from the file Claude most recently edited/read.
         // Iterative edit sessions: the next query is very likely about the same file.
         // +0.20 is intentionally larger than cwd-proximity (+0.08) to ensure the
         // active file surfaces above directory-level neighbors.
@@ -447,8 +446,8 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "active-file-boost");
         }
 
-        // R1: TestLookup — boost chunks from test files so they surface above source files.
-        // Z1: Also boost inline test blocks (#[test], #[cfg(test)], mod tests, describe/it)
+        // TestLookup: boost chunks from test files so they surface above source files.
+        // Also boost inline test blocks (#[test], #[cfg(test)], mod tests, describe/it)
         // to handle Rust crates and JS/TS files that colocate tests in production files.
         if intent.kind == QueryIntentKind::TestLookup
             && (is_test_path(&chunk.path) || is_inline_test_chunk(&chunk.text))
@@ -457,7 +456,7 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-boost");
         }
 
-        // Phase BI: Architecture queries — penalise test-path chunks.
+        // Architecture queries — penalise test-path chunks.
         // For module-layout, entry-point, and call-chain questions the relevant evidence
         // is production source code, not test fixtures and test helpers. Test files
         // (typically in tests/, __tests__, spec/) inflate scores through incidental
@@ -471,7 +470,7 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
-        // Phase CB: Architecture queries — penalise examples/ paths.
+        // Architecture queries — penalise examples/ paths.
         // Tutorial and example directories (e.g. examples/tutorial/) frequently contain
         // snippets that mention production concepts ("application factory", "register_blueprint")
         // but in a simplified sample context. For arch queries about the real production module
@@ -491,7 +490,7 @@ pub fn build_query_response(
         // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
         // target methods. Use a stronger penalty than Architecture because FlowTrace relies
         // more heavily on graph/symbol signals, which makes test-callers especially sticky.
-        // Phase BY: increased from -0.30 to -0.40. Previously, test utilities with high raw
+        // Use -0.40 instead of -0.30. Previously, test utilities with high raw
         // HNSW scores (e.g. consoleMock.js ~0.59) survived the FlowTrace min-score floor at
         // 0.25 after -0.30 (adjusted=0.29). With -0.40 they fall below 0.25 and are filtered.
         if intent.kind == QueryIntentKind::FlowTrace && is_test_path(&chunk.path) {
@@ -499,7 +498,7 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
-        // S1: SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
+        // SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
         // query token. This surfaces definition chunks over reference/usage chunks when
         // the dominant function in a window is precisely what the user asked about.
         if intent.kind == QueryIntentKind::SymbolDefinition
@@ -513,7 +512,7 @@ pub fn build_query_response(
             }
         }
 
-        // Phase CL: RuntimeConfig — test-path penalty + class-body demotion.
+        // RuntimeConfig — test-path penalty + class-body demotion.
         // "Which environment variables does Flask read at startup?" should return the
         // *functions* that call os.environ / getenv, not class definitions whose name
         // lexically matches "environment" (e.g. `class Environment(BaseEnvironment):` in
@@ -557,7 +556,7 @@ pub fn build_query_response(
             }
         }
 
-        // Phase CA: SymbolUsage — demote definition chunks that happen to rank above callers.
+        // SymbolUsage — demote definition chunks that happen to rank above callers.
         // "What calls evaluateExpr" (SymbolUsage) should surface CALLERS, but the symbol
         // channel can rank the definition/mock implementation highly because it also has
         // `evaluateexpr` in its symbol_tokens. When the dominant symbol_hint of a chunk
@@ -575,11 +574,11 @@ pub fn build_query_response(
             }
         }
 
-        // Phase BZ: FlowTrace — weak definition anchor for camelCase function targets.
+        // FlowTrace — weak definition anchor for camelCase function targets.
         // "What does reconcileChildFibers call / trace through useState" queries name a
         // specific function. Boost its definition chunk (+0.10) to keep it above call-site
-        // chunks that may outscore it in a bad HNSW run (e.g. P07: call-site 0.38 vs
-        // definition 0.32 → without boost, call site wins → Claude gets misleading context).
+        // chunks that may outscore it in a bad HNSW run. Without the boost, the call site
+        // can win and give Claude misleading context.
         // Uses only camelCase tokens (not TitleCase) to avoid boosting generic class names.
         // Weaker than SymbolDefinition (+0.30) so it doesn't fully override flow semantics.
         if !flowtrace_camelcase_tokens.is_empty()
@@ -607,9 +606,9 @@ pub fn build_query_response(
 
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
 
-    // Phase K2: Per-intent retrieval limit. Honour explicit user config override.
+    // Per-intent retrieval limit. Honour explicit user config override.
     let default_limit = intent_retrieval_limit(intent.kind);
-    // Phase AJ: SymbolDefinition with hint-match-boost → definition confirmed found.
+    // SymbolDefinition with hint-match-boost → definition confirmed found.
     // Restrict to 2 candidates and skip graph expansion to avoid noise cards from
     // common query words ("path", "matcher", "writer") crowding out the definition.
     // The [structural context] block already provides callers/callees compactly.
@@ -641,7 +640,7 @@ pub fn build_query_response(
         ..SnippetSelectionState::default()
     };
     let min_score = min_selection_score(&scored, intent.kind);
-    // Phase CI: Generative/design Architecture queries with low top confidence (< 0.55)
+    // Generative/design Architecture queries with low top confidence (< 0.55)
     // inject mediocre production code that anchors Claude to specific implementations,
     // hurting creative design and test-writing responses.
     // "What unit tests would you add?" → injecting random production chunks constrains
@@ -650,9 +649,9 @@ pub fn build_query_response(
     //   relevant snippet (e.g. after_request scaffold) without the full picture misleads
     //   Claude about the scope of the change.
     // Skip injection entirely for these design-intent queries — also bypasses the
-    // empty-selection fallback below. (Phase CK fixed the fallback bypass.)
+    // empty-selection fallback below.
     //
-    // Phase CM: extend skip patterns to cover "I want to add/implement" design queries.
+    // Extend the same rule to cover "I want to add/implement" design queries.
     // These are architecturally equivalent to the test-writing pattern: the user wants
     // Claude to reason freely about design, not anchor to a partial low-quality context.
     let ci_skip = intent.kind == QueryIntentKind::Architecture
@@ -666,7 +665,7 @@ pub fn build_query_response(
                 "tests to add",
                 "tests to write",
                 "suggest tests",
-                // Phase CM: design/implementation queries
+                // Design/implementation queries
                 "i want to add",
                 "i want to implement",
                 "i need to add",
@@ -676,7 +675,7 @@ pub fn build_query_response(
             ],
         );
     let min_score = if ci_skip { 0.55_f32 } else { min_score };
-    // Phase CC: FlowTrace with flowtrace-anchor — tighten the secondary floor.
+    // FlowTrace with flowtrace-anchor — tighten the secondary floor.
     // When the top-ranked chunk already matched a camelCase function name in the query
     // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
     // are often noise from distant call chains (e.g. retryActivityComponentWithoutHydrating
@@ -707,7 +706,7 @@ pub fn build_query_response(
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
-    // Phase CI: when generative-test skip is active, leave selection empty so no
+    // When the low-confidence design skip is active, leave selection empty so no
     // context is injected — do not fall through to the best-effort fallback below.
     if selection.snippets.is_empty()
         && !ci_skip
@@ -734,7 +733,7 @@ pub fn build_query_response(
         );
     }
 
-    // Phase BX: request-to-view flow pack.
+    // Request-to-view flow pack.
     // Generic FlowTrace retrieval often lands on tests or ancillary view classes because the
     // query names an execution path ("incoming HTTP request -> view function") rather than
     // concrete symbols. When the runtime contains a canonical request dispatch chain such as
@@ -742,18 +741,17 @@ pub fn build_query_response(
     // pack built from exact code lines.
     maybe_inject_web_request_flow_chain_card(query, runtime, &mut selection, target_limit);
 
-    // Phase AR: SymbolDefinition continuation chunk.
+    // SymbolDefinition continuation chunk.
     // When sym_def_seeded (hint-match-boost confirmed the definition was found), the
     // 80-line definition chunk often doesn't cover the full function body. Look for the
     // next chunk from the same file (smallest start_line > def.start_line, accounting for
     // the 20-line overlap where stride=60) and inject it in place of any call-site card
     // from a different file. This gives Claude the complete function body — including the
-    // key operations that follow the DEV guards — for "what are its first steps" queries
-    // like P3 (scheduleUpdateOnFiber, lines 967-1095, chunk at 961-1040 + 1021-1100).
+    // key operations that follow the DEV guards — for "what are its first steps" queries.
     if sym_def_seeded {
-        // Phase CJ: track when Phase CH blocks a wrong-symbol continuation so we can
-        // also drop the noisy foreign card 2 (rather than leaving it in place).
-        let mut phase_ch_blocked = false;
+        // Track when a wrong-symbol continuation is blocked so we can also drop
+        // the noisy foreign card 2 instead of leaving it in place.
+        let mut wrong_symbol_continuation_blocked = false;
         let continuation = selection.snippets.first().and_then(|def_item| {
             let def_path = def_item.path.clone();
             let def_start = def_item.start_line;
@@ -763,7 +761,7 @@ pub fn build_query_response(
             if !has_foreign_card2 {
                 return None;
             }
-            // Phase BH: if card 2 has hint-match-boost, it's an alternative definition
+            // If card 2 has hint-match-boost, it's an alternative definition
             // of the same symbol from a different file (e.g. Flask.make_response in app.py
             // alongside the module-level make_response in helpers.py). Keep it — don't
             // replace a cross-file definition with a same-file continuation.
@@ -776,12 +774,12 @@ pub fn build_query_response(
             if card2_is_alt_def && !prefer_wrapper_continuation {
                 return None;
             }
-            // Phase CH: if the continuation chunk's symbol_hint is a DIFFERENT function than
+            // If the continuation chunk's symbol_hint is a DIFFERENT function than
             // the target symbol, the definition body fits entirely in card 1 — skip injection.
             // Only applies to the raw-continuation path (not the wrapper-first-steps path which
             // needs `cont` to synthesize the implementation card regardless of its symbol_hint).
-            // Example: P3 scheduleUpdateOnFiber fits in chunk 961-1040; adjacent 1021-1100
-            // starts scheduleInitialHydrationOnRoot → injecting it caused Q 8→6 regression.
+            // Example: if the adjacent chunk starts a different function, injecting it
+            // pollutes the answer with unrelated implementation details.
             if !card2_is_alt_def && !exact_match_symbol_tokens.is_empty() {
                 if let Some(cont_sym) = cont.symbol_hint.as_deref() {
                     let cont_sym_lower = cont_sym.to_ascii_lowercase();
@@ -789,8 +787,8 @@ pub fn build_query_response(
                         .iter()
                         .any(|t| cont_sym_lower == t.as_str());
                     if !matches_target {
-                        // Phase CJ: signal to remove noisy foreign card 2 as well.
-                        phase_ch_blocked = true;
+                        // Also signal that the noisy foreign card 2 should be removed.
+                        wrong_symbol_continuation_blocked = true;
                         return None;
                     }
                 }
@@ -824,8 +822,8 @@ pub fn build_query_response(
             // Replace card 2 (foreign call site) with the continuation of the function body.
             selection.snippets.truncate(1);
             selection.snippets.push(cont_item);
-        } else if phase_ch_blocked {
-            // Phase CJ: Phase CH blocked a wrong-symbol continuation; the foreign card 2
+        } else if wrong_symbol_continuation_blocked {
+            // The wrong-symbol continuation was blocked; the foreign card 2
             // is also noise (e.g. devtools type definition when querying for a WorkLoop fn).
             // The definition fits entirely in card 1 — serve just that.
             selection.snippets.truncate(1);
@@ -841,7 +839,7 @@ pub fn build_query_response(
         );
     }
 
-    // Phase AU: RuntimeConfig continuation chunk.
+    // RuntimeConfig continuation chunk.
     // rt-cfg queries about "how is X loaded" often retrieve the env-var lookup in chunk N
     // (e.g. config.rs:16-53 for RIPGREP_CONFIG_PATH) but miss the actual parsing/merging
     // logic in chunk N+1 (config.rs:54-133, parse() + parse_reader()). Meanwhile card 2 is
@@ -891,7 +889,7 @@ pub fn build_query_response(
     }
     inject_context_plugins(query, runtime, &mut selection.snippets, target_limit);
 
-    // Phase BU: coverage-style TestLookup queries ("what tests cover X") need a
+    // Coverage-style TestLookup queries ("what tests cover X") need a
     // compact inventory of the dominant test file, not just one tiny test chunk.
     maybe_inject_test_file_inventory_card(query, runtime, &scored, &mut selection, target_limit);
 
@@ -1051,7 +1049,7 @@ pub fn build_call_graph_summary(
         if !caller_names.is_empty() {
             entry.push_str(&format!("  ← called by: {}\n", caller_names.join(", ")));
         }
-        // Phase CD: "refs:" instead of "calls:" — the graph tokens are extracted
+        // Use "refs:" instead of "calls:" — the graph tokens are extracted
         // at chunk level and include calls from nested functions within the chunk,
         // not only direct callees of the primary symbol. Using "refs:" avoids
         // misattributing indirect callees (e.g. reconcileChildFibers chunk includes
@@ -1929,11 +1927,11 @@ fn is_test_path(path: &str) -> bool {
     {
         return true;
     }
-    // Phase CA: test-utility directories (e.g. packages/internal-test-utils/)
+    // Test-utility directories (e.g. packages/internal-test-utils/)
     if lower.contains("-test-") {
         return true;
     }
-    // Phase CA: mock implementation files (e.g. eval_context_mock.go, consoleMock.js,
+    // Mock implementation files (e.g. eval_context_mock.go, consoleMock.js,
     // mock_provider.go). Mock files define test doubles — they are not real callers
     // for SymbolUsage queries and not real production paths for FlowTrace queries.
     let filename = lower.split('/').next_back().unwrap_or("");
@@ -1969,7 +1967,7 @@ fn is_inline_test_chunk(text: &str) -> bool {
         || text.contains("describe.each(")
 }
 
-/// Extract backtick-quoted tokens that are genuinely all-lowercase in the original query (Phase AC).
+/// Extract backtick-quoted tokens that are genuinely all-lowercase in the original query.
 /// "run" → ["run"]. "scheduleUpdateOnFiber" → [] (has uppercase → excluded).
 /// Used for sym-hint seeding to surface definitions of short lowercase identifiers.
 fn extract_lowercase_backtick_tokens(query: &str) -> Vec<String> {
@@ -1996,7 +1994,7 @@ fn extract_lowercase_backtick_tokens(query: &str) -> Vec<String> {
     out
 }
 
-/// Extract subject tokens from a TestLookup query for path-based seeding (Phase Z3).
+/// Extract subject tokens from a TestLookup query for path-based seeding.
 /// Strips test-noise words ("unit tests cover where live repo...") and common stop words,
 /// keeping content words ≥ 4 chars that describe the feature being tested.
 fn test_subject_tokens(query: &str) -> Vec<String> {
@@ -2561,7 +2559,7 @@ pub fn prefetch_neighbors_for_file(
 
 // ── Selection helpers ─────────────────────────────────────────────────────────
 
-/// Phase K2: Per-intent default retrieval limit.
+/// Per-intent default retrieval limit.
 /// Precision intents (SymbolDefinition, FlowTrace) get fewer, higher-quality results.
 /// Breadth intents (Architecture, TestLookup) get more candidates for coverage.
 fn intent_retrieval_limit(kind: QueryIntentKind) -> usize {
@@ -2582,11 +2580,11 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         // Raised to 0.25: lexical-only hits from common query words ("return", "call")
         // at scores 0.23-0.24 add noise for focused call-chain questions.
         QueryIntentKind::FlowTrace => relative.max(0.25),
-        // Phase AH: raised from 0.20 to 0.30 to exclude lexical noise at 0.26-0.29
+        // Raised from 0.20 to 0.30 to exclude lexical noise at 0.26-0.29
         // that dilutes SymbolDef context when sym-hint-seed already placed the definition at 0.58.
         QueryIntentKind::SymbolDefinition => relative.max(0.30),
         QueryIntentKind::TestLookup => relative.max(0.22),
-        // Phase AM: when top score is high (≥0.60, strong rt-cfg signal), raise floor to 0.40
+        // When top score is high (≥0.60, strong rt-cfg signal), raise floor to 0.40
         // to filter noise cards (brew formulas, hyperlink env-var code) at 0.33-0.38.
         // When top is low (< 0.60, weak signal like React __DEV__ flags), keep floor at 0.18.
         QueryIntentKind::RuntimeConfig => {
@@ -2598,10 +2596,10 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         }
         // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
         QueryIntentKind::SymbolUsage => relative.max(0.22),
-        // Phase AQ: when top score is high (≥0.60, strong signal), raise floor to 0.40
+        // When top score is high (≥0.60, strong signal), raise floor to 0.40
         // to filter weakly-related cards (devtools profiling, tests, server rendering) at 0.30-0.36
         // that dilute high-confidence architecture answers.
-        // Phase BI: even for low-confidence arch queries (top < 0.60), apply a minimum
+        // Even for low-confidence arch queries (top < 0.60), apply a minimum
         // floor of 0.30. Combined with the test-path penalty (−0.15), this filters
         // test fixture chunks that nominally score 0.41–0.44 but land at 0.26–0.29
         // after the penalty (below 0.30). Without this floor the standard relative floor
@@ -2617,7 +2615,7 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
 }
 
 fn should_expand_graph_neighbors(intent_kind: QueryIntentKind) -> bool {
-    // Phase AO: disabled for SymbolUsage — graph expansion adds distant callee/caller
+    // Disabled for SymbolUsage — graph expansion adds distant callee/caller
     // code (e.g. release scripts connected via scheduler imports) that dilutes the
     // precise call-site evidence collected by the regular sym-use retrieval.
     // SymbolDefinition graph expansion is gated separately via sym_def_seeded.
@@ -2653,11 +2651,11 @@ fn try_push_scored_chunk(
     if !selection.seen_fingerprints.insert(fingerprint) {
         return false;
     }
-    // Phase BY: skip candidates that overlap with an already-selected snippet from the
+    // Skip candidates that overlap with an already-selected snippet from the
     // same file. Stride=60/overlap=20 chunking can select two adjacent chunks that share
     // 20 lines — injecting both duplicates those lines and can confuse Claude by showing
     // the same code twice in slightly different evidence cards.
-    // Phase CE: Exempt synthetic condenser packs from the overlap check. Packs intentionally
+    // Exempt synthetic condenser packs from the overlap check. Packs intentionally
     // span large regions (e.g. web-request-flow-pack covers lines 966-1616) and should not
     // be removed when a constituent chunk (e.g. wsgi_app at 1566-1616) was selected first
     // with a higher individual score — the pack provides holistic call-chain context that
@@ -2740,7 +2738,7 @@ fn expand_graph_neighbors(
                 continue;
             }
             let seed_priority_bonus = 0.03f32 / ((seed_idx as f32) + 1.0);
-            // Phase AE: cap raw_score at 0.45 to prevent graph-neighbor inflation.
+            // Cap raw_score at 0.45 to prevent graph-neighbor inflation.
             // raw_score from search_graph_tokens can exceed 1.0 (token-weight × rarity
             // accumulated across multiple matching tokens). Without the cap, graph-neighbor
             // chunks routinely score > 1.0 and dominate over the definition/usage chunks
@@ -2944,7 +2942,7 @@ fn intent_name(kind: QueryIntentKind) -> &'static str {
 
 fn classify_intent(prompt: &str) -> QueryIntentKind {
     let lower = prompt.to_ascii_lowercase();
-    // V1: SymbolUsage check runs first — "what calls X" is unambiguous and must not be
+    // SymbolUsage check runs first — "what calls X" is unambiguous and must not be
     // shadowed by "where is" in "from where is it triggered" (which would give sym-def).
     if contains_any(
         &lower,
@@ -3226,7 +3224,7 @@ fn push_scope_hint(token: &str, out: &mut Vec<String>, seen: &mut HashSet<String
     }
 }
 
-/// Phase BZ: extract camelCase identifiers from FlowTrace queries for weak anchor seeding.
+/// Extract camelCase identifiers from FlowTrace queries for weak anchor seeding.
 /// Returns only tokens where the original token has mixed case with uppercase after pos 0
 /// (true camelCase like `reconcileChildFibers`, `useState`, `performSyncWorkOnRoot`).
 /// Excludes TitleCase tokens (like "React", "Component") to avoid over-boosting generic names.
@@ -3272,7 +3270,7 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    // Phase AC: backtick-quoted identifiers are always symbols regardless of case pattern.
+    // Backtick-quoted identifiers are always symbols regardless of case pattern.
     // Handles queries like "Where is `run` defined?" where "run" is all-lowercase but
     // the backticks signal an exact identifier reference.
     let mut chars = query.chars().peekable();
@@ -4058,13 +4056,13 @@ mod tests {
 
     #[test]
     fn min_score_relative_floor_is_40_percent_of_top() {
-        // Phase BI: Architecture with top < 0.60 uses max(relative, 0.30) floor.
-        // top=0.50: relative = 0.50 * 0.40 = 0.20; BI min floor = 0.30
+        // Architecture with top < 0.60 uses max(relative, 0.30) floor.
+        // top=0.50: relative = 0.50 * 0.40 = 0.20; minimum floor = 0.30
         let chunks = vec![make_scored_chunk(1, 0.50), make_scored_chunk(2, 0.20)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
         assert!(
             (floor - 0.30).abs() < 1e-5,
-            "expected 0.30 (BI min floor), got {floor}"
+            "expected 0.30 minimum floor, got {floor}"
         );
     }
 
@@ -4081,7 +4079,7 @@ mod tests {
 
     #[test]
     fn min_score_floor_enforced_for_symbol_def() {
-        // relative = 0.40 * 0.40 = 0.16, but SymbolDefinition floor is 0.30 (Phase AH)
+        // relative = 0.40 * 0.40 = 0.16, but SymbolDefinition floor is 0.30
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::SymbolDefinition);
         assert!(
@@ -4112,7 +4110,7 @@ mod tests {
 
     #[test]
     fn min_score_runtime_config_high_confidence_uses_0_40_floor() {
-        // Phase AM: top >= 0.60 → floor = relative.max(0.40) to cut brew/hyperlink noise
+        // top >= 0.60 → floor = relative.max(0.40) to cut brew/hyperlink noise
         let chunks = vec![make_scored_chunk(1, 0.80)];
         let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
         // relative = 0.80 * 0.40 = 0.32; clamped to 0.40
@@ -4124,7 +4122,7 @@ mod tests {
 
     #[test]
     fn min_score_runtime_config_low_confidence_uses_0_18_floor() {
-        // Phase AM: top < 0.60 → keep 0.18 floor (React __DEV__ scenario)
+        // top < 0.60 → keep 0.18 floor (React __DEV__ scenario)
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
         // relative = 0.40 * 0.40 = 0.16; clamped to 0.18
@@ -4136,7 +4134,7 @@ mod tests {
 
     #[test]
     fn min_score_architecture_high_confidence_uses_0_40_floor() {
-        // Phase AQ: top >= 0.60 → floor = relative.max(0.40) to cut devtools/test noise
+        // top >= 0.60 → floor = relative.max(0.40) to cut devtools/test noise
         let chunks = vec![make_scored_chunk(1, 0.65)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
         // relative = 0.65 * 0.40 = 0.26; clamped to 0.40
@@ -4148,10 +4146,10 @@ mod tests {
 
     #[test]
     fn min_score_architecture_low_confidence_uses_min_0_30_floor() {
-        // Phase BI: top < 0.60 → floor = relative.max(0.30) to filter test fixtures
+        // top < 0.60 → floor = relative.max(0.30) to filter test fixtures
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::Architecture);
-        // relative = 0.40 * 0.40 = 0.16; Phase BI min = 0.30
+        // relative = 0.40 * 0.40 = 0.16; minimum floor = 0.30
         assert!(
             (floor - 0.30).abs() < 1e-5,
             "expected 0.30 floor, got {floor}"
@@ -4189,7 +4187,7 @@ mod tests {
         assert!(!is_test_path("components/Button.tsx"));
     }
 
-    // ── extract_flowtrace_camelcase_tokens (Phase BZ) ───────────────────────
+    // ── extract_flowtrace_camelcase_tokens ───────────────────────────────────
 
     #[test]
     fn flowtrace_camelcase_tokens_extracts_camelcase() {
@@ -4234,7 +4232,7 @@ mod tests {
         assert!(!is_examples_path("tests/test_blueprints.py"));
     }
 
-    // ── overlapping chunk deduplication (Phase BY) ───────────────────────────
+    // ── overlapping chunk deduplication ──────────────────────────────────────
 
     #[test]
     fn overlapping_chunks_skipped_in_selection() {
@@ -4286,14 +4284,14 @@ mod tests {
 
     #[test]
     fn is_test_path_detects_test_utils_dirs() {
-        // Phase CA: test-utility directories like internal-test-utils
+        // Test-utility directories like internal-test-utils
         assert!(is_test_path("packages/internal-test-utils/consoleMock.js"));
         assert!(is_test_path("src/react-test-helpers/setup.ts"));
     }
 
     #[test]
     fn is_test_path_detects_mock_files() {
-        // Phase CA: mock implementation files
+        // Mock implementation files
         assert!(is_test_path("internal/terraform/eval_context_mock.go"));
         assert!(is_test_path("internal/configs/mock_provider.go"));
         assert!(is_test_path("packages/internal-test-utils/consoleMock.js"));

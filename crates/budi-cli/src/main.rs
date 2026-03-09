@@ -2205,7 +2205,7 @@ fn cmd_hook_session_start() -> Result<()> {
         let truncated: String = map.chars().take(3000).collect();
         message.push_str(&truncated);
     }
-    // Phase J+M2: append recently-relevant files with anchor lines from prior sessions.
+    // Append recently-relevant files with anchor lines from prior sessions.
     let affinity_files = read_session_affinity(&repo_root, 5);
     if !affinity_files.is_empty() {
         message.push_str(
@@ -2328,7 +2328,7 @@ fn cmd_hook_session_end() -> Result<()> {
     Ok(())
 }
 
-/// Phase J+M2: Read session-affinity.json, return top N entries (path, anchors) sorted by recency.
+/// Read session-affinity.json and return the top N entries (path, anchors) sorted by recency.
 /// Supports both new format (AffinityEntry with ts+anchors) and old flat format (ts only).
 fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(String, Vec<String>)> {
     let Ok(paths) = budi_core::config::repo_paths(repo_root) else {
