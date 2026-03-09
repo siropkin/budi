@@ -666,7 +666,7 @@ pub fn build_query_response(
         } else {
             min_score
         };
-        if candidate.score < effective_min && !selection.snippets.is_empty() {
+        if candidate.score < effective_min && (ci_skip || !selection.snippets.is_empty()) {
             continue;
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
@@ -4510,6 +4510,48 @@ it("renders", () => {})
         assert_eq!(
             response.snippets.first().map(|s| s.path.as_str()),
             Some("src/flask/sansio/app.py")
+        );
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn architecture_design_query_ci_skip_blocks_low_confidence_first_card() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-retrieval-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![ChunkRecord {
+                id: 1,
+                path: "src/flask/sansio/scaffold.py".to_string(),
+                start_line: 486,
+                end_line: 505,
+                symbol_hint: Some("after_request".to_string()),
+                text: "@setupmethod\ndef after_request(self, f):\n    \"\"\"Register a function to run after each request to this object.\"\"\"\n    self.after_request_funcs.setdefault(None, []).append(f)\n    return f\n".to_string(),
+                embedding: Vec::new(),
+            }],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "I want to add a middleware that logs request timing. What files and functions would I need to modify?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        assert!(
+            response.snippets.is_empty(),
+            "expected ci_skip to block low-confidence first card, got: {:?}",
+            response.snippets
         );
         let _ = fs::remove_dir_all(&repo_root);
     }
