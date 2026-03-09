@@ -1143,16 +1143,52 @@ fn find_symbol_chunk<'a>(
         .find(|chunk| chunk.symbol_hint.as_deref() == Some(symbol))
 }
 
-fn find_chunk_with_needles<'a>(
-    runtime: &'a RuntimeIndex,
-    path: Option<&str>,
-    needles: &[&str],
-) -> Option<&'a ChunkRecord> {
-    runtime
-        .all_chunks()
+fn count_chunk_needle_hits(chunk: &ChunkRecord, needles: &[&str]) -> usize {
+    needles
         .iter()
-        .filter(|chunk| path.is_none_or(|p| chunk.path == p))
-        .find(|chunk| extract_chunk_line_with_needle(chunk, needles).is_some())
+        .filter(|needle| extract_chunk_line_with_needle(chunk, &[*needle]).is_some())
+        .count()
+}
+
+fn find_best_runtime_env_chunk<'a>(
+    runtime: &'a RuntimeIndex,
+    symbol: Option<&str>,
+    needles: &[&str],
+    require_needle_hit: bool,
+) -> Option<&'a ChunkRecord> {
+    let mut best: Option<(&ChunkRecord, i32)> = None;
+    for chunk in runtime.all_chunks() {
+        if is_test_path(&chunk.path) || runtime.is_doc_like_chunk(chunk.id) {
+            continue;
+        }
+        let symbol_match = symbol.is_some_and(|expected| chunk.symbol_hint.as_deref() == Some(expected));
+        let needle_hits = count_chunk_needle_hits(chunk, needles);
+        if (!symbol_match && needle_hits == 0) || (require_needle_hit && needle_hits == 0) {
+            continue;
+        }
+        let mut score = 0i32;
+        if symbol_match {
+            score += 8;
+        }
+        score += (needle_hits as i32) * 3;
+        if chunk.text.contains("os.environ") {
+            score += 1;
+        }
+        if chunk
+            .symbol_hint
+            .as_deref()
+            .is_some_and(|hint| !is_generic_symbol_hint(hint))
+        {
+            score += 1;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_score)| score > *best_score)
+        {
+            best = Some((chunk, score));
+        }
+    }
+    best.map(|(chunk, _)| chunk)
 }
 
 fn build_web_request_flow_chain_card(
@@ -1251,46 +1287,58 @@ fn maybe_inject_runtime_env_var_pack(
         return;
     }
 
-    let Some(debug_chunk) =
-        find_symbol_chunk(runtime, Some("src/flask/helpers.py"), "get_debug_flag")
-            .or_else(|| find_symbol_chunk(runtime, None, "get_debug_flag"))
+    let Some(debug_chunk) = find_best_runtime_env_chunk(
+        runtime,
+        Some("get_debug_flag"),
+        &["FLASK_DEBUG"],
+        false,
+    )
     else {
         return;
     };
-    let Some(load_dotenv_pref_chunk) =
-        find_symbol_chunk(runtime, Some("src/flask/helpers.py"), "get_load_dotenv")
-            .or_else(|| find_symbol_chunk(runtime, None, "get_load_dotenv"))
+    let Some(load_dotenv_pref_chunk) = find_best_runtime_env_chunk(
+        runtime,
+        Some("get_load_dotenv"),
+        &["FLASK_SKIP_DOTENV"],
+        false,
+    )
     else {
         return;
     };
-    let Some(cli_app_chunk) = find_symbol_chunk(runtime, Some("src/flask/cli.py"), "load_app")
-        .or_else(|| find_chunk_with_needles(runtime, Some("src/flask/cli.py"), &["FLASK_APP"]))
+    let Some(cli_app_chunk) = find_best_runtime_env_chunk(
+        runtime,
+        Some("load_app"),
+        &["FLASK_APP", "flask --app", "wsgi.py", "app.py"],
+        true,
+    )
     else {
         return;
     };
-    let Some(app_run_chunk) = find_symbol_chunk(runtime, Some("src/flask/app.py"), "run")
-        .or_else(|| {
-            find_chunk_with_needles(
-                runtime,
-                Some("src/flask/app.py"),
-                &["cli.load_dotenv(", "\"FLASK_DEBUG\" in os.environ"],
-            )
-        })
+    let Some(app_run_chunk) = find_best_runtime_env_chunk(
+        runtime,
+        Some("run"),
+        &[
+            "FLASK_RUN_FROM_CLI",
+            "cli.load_dotenv(",
+            "\"FLASK_DEBUG\" in os.environ",
+        ],
+        true,
+    )
     else {
         return;
     };
-    let from_envvar_chunk = find_symbol_chunk(runtime, Some("src/flask/config.py"), "from_envvar")
-        .or_else(|| find_chunk_with_needles(runtime, Some("src/flask/config.py"), &["from_envvar("]));
-    let from_prefixed_env_chunk =
-        find_symbol_chunk(runtime, Some("src/flask/config.py"), "from_prefixed_env").or_else(
-            || {
-                find_chunk_with_needles(
-                    runtime,
-                    Some("src/flask/config.py"),
-                    &["from_prefixed_env(", "prefix: str = \"FLASK\""],
-                )
-            },
-        );
+    let from_envvar_chunk = find_best_runtime_env_chunk(
+        runtime,
+        Some("from_envvar"),
+        &["os.environ.get(variable_name)", "from_envvar("],
+        false,
+    );
+    let from_prefixed_env_chunk = find_best_runtime_env_chunk(
+        runtime,
+        Some("from_prefixed_env"),
+        &["prefix: str = \"FLASK\"", "key.startswith(prefix)", "from_prefixed_env("],
+        false,
+    );
 
     let score = selection
         .snippets
@@ -4743,7 +4791,7 @@ it("renders", () => {})
     }
 
     #[test]
-    fn runtime_env_queries_inject_startup_env_pack() {
+    fn runtime_env_queries_inject_startup_env_pack_without_exact_repo_paths() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4756,7 +4804,7 @@ it("renders", () => {})
             chunks: vec![
                 ChunkRecord {
                     id: 1,
-                    path: "src/flask/helpers.py".to_string(),
+                    path: "framework/runtime_helpers.py".to_string(),
                     start_line: 28,
                     end_line: 33,
                     symbol_hint: Some("get_debug_flag".to_string()),
@@ -4765,7 +4813,7 @@ it("renders", () => {})
                 },
                 ChunkRecord {
                     id: 2,
-                    path: "src/flask/helpers.py".to_string(),
+                    path: "framework/runtime_helpers.py".to_string(),
                     start_line: 36,
                     end_line: 48,
                     symbol_hint: Some("get_load_dotenv".to_string()),
@@ -4774,7 +4822,7 @@ it("renders", () => {})
                 },
                 ChunkRecord {
                     id: 3,
-                    path: "src/flask/cli.py".to_string(),
+                    path: "bootstrap/app_loader.py".to_string(),
                     start_line: 340,
                     end_line: 369,
                     symbol_hint: Some("load_app".to_string()),
@@ -4783,7 +4831,7 @@ it("renders", () => {})
                 },
                 ChunkRecord {
                     id: 4,
-                    path: "src/flask/app.py".to_string(),
+                    path: "server/runner_entry.py".to_string(),
                     start_line: 697,
                     end_line: 714,
                     symbol_hint: Some("run".to_string()),
@@ -4792,7 +4840,7 @@ it("renders", () => {})
                 },
                 ChunkRecord {
                     id: 5,
-                    path: "src/flask/config.py".to_string(),
+                    path: "settings/env_bridge.py".to_string(),
                     start_line: 102,
                     end_line: 124,
                     symbol_hint: Some("from_envvar".to_string()),
@@ -4801,7 +4849,7 @@ it("renders", () => {})
                 },
                 ChunkRecord {
                     id: 6,
-                    path: "src/flask/config.py".to_string(),
+                    path: "settings/env_bridge.py".to_string(),
                     start_line: 126,
                     end_line: 170,
                     symbol_hint: Some("from_prefixed_env".to_string()),
@@ -4810,7 +4858,7 @@ it("renders", () => {})
                 },
                 ChunkRecord {
                     id: 7,
-                    path: "src/flask/sansio/app.py".to_string(),
+                    path: "models/app_state.py".to_string(),
                     start_line: 546,
                     end_line: 557,
                     symbol_hint: Some("debug".to_string()),
