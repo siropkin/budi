@@ -674,6 +674,23 @@ pub fn build_query_response(
             if card2_is_alt_def && !prefer_wrapper_continuation {
                 return None;
             }
+            // Phase CH: if the continuation chunk's symbol_hint is a DIFFERENT function than
+            // the target symbol, the definition body fits entirely in card 1 — skip injection.
+            // Only applies to the raw-continuation path (not the wrapper-first-steps path which
+            // needs `cont` to synthesize the implementation card regardless of its symbol_hint).
+            // Example: P3 scheduleUpdateOnFiber fits in chunk 961-1040; adjacent 1021-1100
+            // starts scheduleInitialHydrationOnRoot → injecting it caused Q 8→6 regression.
+            if !card2_is_alt_def && !exact_match_symbol_tokens.is_empty() {
+                if let Some(cont_sym) = cont.symbol_hint.as_deref() {
+                    let cont_sym_lower = cont_sym.to_ascii_lowercase();
+                    let matches_target = exact_match_symbol_tokens
+                        .iter()
+                        .any(|t| cont_sym_lower == t.as_str());
+                    if !matches_target {
+                        return None;
+                    }
+                }
+            }
             let cont_score = def_score * if card2_is_alt_def { 0.72 } else { 0.60 };
             if prefer_wrapper_continuation
                 && let Some(card) = build_symbol_definition_first_steps_card(cont, cont_score)
