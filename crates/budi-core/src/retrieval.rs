@@ -580,11 +580,33 @@ pub fn build_query_response(
         ..SnippetSelectionState::default()
     };
     let min_score = min_selection_score(&scored, intent.kind);
+    // Phase CC: FlowTrace with flowtrace-anchor — tighten the secondary floor.
+    // When the top-ranked chunk already matched a camelCase function name in the query
+    // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
+    // are often noise from distant call chains (e.g. retryActivityComponentWithoutHydrating
+    // appearing after reconcileChildFibers). Raise the secondary floor to max(top×0.50, 0.30)
+    // to filter out low-confidence secondaries while keeping the definition as card 1.
+    // The [structural context] block already provides callees compactly via call graph.
+    let flowtrace_anchored = intent.kind == QueryIntentKind::FlowTrace
+        && scored
+            .first()
+            .is_some_and(|c| c.reasons.iter().any(|r| r == "flowtrace-anchor"));
+    let min_score_secondary = if flowtrace_anchored {
+        let top = scored.first().map(|c| c.score).unwrap_or(0.0);
+        (top * 0.50_f32).max(0.30_f32)
+    } else {
+        min_score
+    };
     for candidate in &scored {
         if selection.snippets.len() >= target_limit {
             break;
         }
-        if candidate.score < min_score && !selection.snippets.is_empty() {
+        let effective_min = if flowtrace_anchored && !selection.snippets.is_empty() {
+            min_score_secondary
+        } else {
+            min_score
+        };
+        if candidate.score < effective_min && !selection.snippets.is_empty() {
             continue;
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
