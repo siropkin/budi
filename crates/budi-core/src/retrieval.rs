@@ -496,6 +496,31 @@ pub fn build_query_response(
             }
         }
 
+        // Phase CL: RuntimeConfig — test-path penalty + class-body demotion.
+        // "Which environment variables does Flask read at startup?" should return the
+        // *functions* that call os.environ / getenv, not class definitions whose name
+        // lexically matches "environment" (e.g. `class Environment(BaseEnvironment):` in
+        // Flask/Jinja). Config-reading code lives in production source (not test fixtures)
+        // and in functions/methods (not class definitions).
+        //
+        // (1) Test-path penalty: mirrors Architecture/FlowTrace — config reading code lives
+        //     in production source, not test helpers that happen to mention config keys.
+        // (2) Class-body demotion: PascalCase symbol_hint → class definition, not a config
+        //     reader. A −0.25 penalty ensures that a class chunk (typically 0.50−0.57)
+        //     drops below function chunks (0.35−0.45) that actually call os.environ/getenv.
+        if intent.kind == QueryIntentKind::RuntimeConfig {
+            if is_test_path(&chunk.path) {
+                adjusted -= 0.15;
+                push_unique_reason(&mut reasons, "test-path-penalty");
+            }
+            if let Some(hint) = chunk.symbol_hint.as_deref() {
+                if hint.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                    adjusted -= 0.25;
+                    push_unique_reason(&mut reasons, "rt-cfg-class-demote");
+                }
+            }
+        }
+
         // Phase CA: SymbolUsage — demote definition chunks that happen to rank above callers.
         // "What calls evaluateExpr" (SymbolUsage) should surface CALLERS, but the symbol
         // channel can rank the definition/mock implementation highly because it also has
@@ -580,11 +605,20 @@ pub fn build_query_response(
         ..SnippetSelectionState::default()
     };
     let min_score = min_selection_score(&scored, intent.kind);
-    // Phase CI: Generative test queries ("what unit tests would you add/write") with
-    // low top confidence (< 0.55) inject mediocre production code that anchors Claude
-    // to specific implementations, hurting creative test-design responses.
-    // When top < 0.55 and the Architecture query is design-oriented ("would you add/write"),
-    // skip injection entirely — also bypasses the empty-selection fallback below.
+    // Phase CI: Generative/design Architecture queries with low top confidence (< 0.55)
+    // inject mediocre production code that anchors Claude to specific implementations,
+    // hurting creative design and test-writing responses.
+    // "What unit tests would you add?" → injecting random production chunks constrains
+    //   Claude's test-design creativity.
+    // "I want to add a middleware — what files would I modify?" → injecting a marginally
+    //   relevant snippet (e.g. after_request scaffold) without the full picture misleads
+    //   Claude about the scope of the change.
+    // Skip injection entirely for these design-intent queries — also bypasses the
+    // empty-selection fallback below. (Phase CK fixed the fallback bypass.)
+    //
+    // Phase CM: extend skip patterns to cover "I want to add/implement" design queries.
+    // These are architecturally equivalent to the test-writing pattern: the user wants
+    // Claude to reason freely about design, not anchor to a partial low-quality context.
     let ci_skip = intent.kind == QueryIntentKind::Architecture
         && scored.first().is_some_and(|c| c.score < 0.55)
         && contains_any(
@@ -596,6 +630,13 @@ pub fn build_query_response(
                 "tests to add",
                 "tests to write",
                 "suggest tests",
+                // Phase CM: design/implementation queries
+                "i want to add",
+                "i want to implement",
+                "i need to add",
+                "i need to implement",
+                "want to add",
+                "want to implement",
             ],
         );
     let min_score = if ci_skip { 0.55_f32 } else { min_score };
