@@ -875,6 +875,20 @@ pub fn build_query_response(
             }
             let cont_id = runtime.adjacent_chunk(&top_path, top_start)?;
             let cont = runtime.chunk(cont_id)?;
+            // Guard: skip continuation if it starts a different function than the top
+            // chunk. For example, get_load_dotenv → stream_with_context is a wrong
+            // continuation because they are unrelated functions in the same file.
+            // Look up the top chunk's symbol_hint via its start_line/path.
+            let top_chunk = runtime
+                .all_chunks()
+                .iter()
+                .find(|c| c.path == top_path && c.start_line == top_start);
+            if let Some(top_c) = top_chunk
+                && let (Some(top_sym), Some(cont_sym)) = (&top_c.symbol_hint, &cont.symbol_hint)
+                && top_sym != cont_sym
+            {
+                return None;
+            }
             Some(crate::rpc::QueryResultItem {
                 path: cont.path.clone(),
                 start_line: cont.start_line,
