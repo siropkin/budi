@@ -945,11 +945,7 @@ fn maybe_inject_web_request_flow_chain_card(
     else {
         return;
     };
-    let top_score = selection
-        .snippets
-        .first()
-        .map(|s| s.score)
-        .unwrap_or(0.40);
+    let top_score = selection.snippets.first().map(|s| s.score).unwrap_or(0.40);
     let Some(card) = build_web_request_flow_chain_card(
         wsgi_chunk,
         full_dispatch_chunk,
@@ -1004,11 +1000,18 @@ fn build_web_request_flow_chain_card(
         extract_chunk_line_with_needle(full_dispatch_chunk, &["dispatch_request("])?;
     let (dispatch_line, dispatch_text) = extract_chunk_line_with_needle(
         dispatch_chunk,
-        &["view_functions[", "view_function(", "ensure_sync(self.view_functions["],
+        &[
+            "view_functions[",
+            "view_function(",
+            "ensure_sync(self.view_functions[",
+        ],
     )?;
     let summary = format!(
         "chain: wsgi_app@{} -> full_dispatch_request@{} -> dispatch_request@{} -> view_functions[rule.endpoint]@{}",
-        wsgi_chunk.start_line, full_dispatch_chunk.start_line, dispatch_chunk.start_line, dispatch_line
+        wsgi_chunk.start_line,
+        full_dispatch_chunk.start_line,
+        dispatch_chunk.start_line,
+        dispatch_line
     );
     let text = [
         summary,
@@ -1019,7 +1022,9 @@ fn build_web_request_flow_chain_card(
     .join("\n");
     Some(QueryResultItem {
         path: wsgi_chunk.path.clone(),
-        start_line: dispatch_chunk.start_line.min(full_dispatch_chunk.start_line),
+        start_line: dispatch_chunk
+            .start_line
+            .min(full_dispatch_chunk.start_line),
         end_line: wsgi_chunk.end_line.max(full_dispatch_chunk.end_line),
         score,
         reasons: vec!["web-request-flow-pack".to_string()],
@@ -1163,7 +1168,10 @@ fn choose_symbol_definition_delegate_chunk<'a>(
             if chunk.text.contains("app.blueprints[") {
                 score += 2;
             }
-            if best.as_ref().is_none_or(|(_, best_score)| score > *best_score) {
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_score)| score > *best_score)
+            {
                 best = Some((chunk, score));
             }
         }
@@ -1180,7 +1188,8 @@ fn build_symbol_definition_delegate_card(
     let def_symbol = def_chunk.symbol_hint.as_deref().unwrap_or("definition");
     let alt_symbol = alt_def_chunk.symbol_hint.as_deref().unwrap_or("definition");
     let callee_symbol = callee_chunk.symbol_hint.as_deref().unwrap_or("delegate");
-    let (delegate_line, delegate_text) = extract_chunk_line_with_needle(def_chunk, &[".register("])?;
+    let (delegate_line, delegate_text) =
+        extract_chunk_line_with_needle(def_chunk, &[".register("])?;
     let (nested_line, nested_text) =
         extract_chunk_line_with_needle(alt_def_chunk, &["_blueprints.append("])?;
     let mut lines = vec![
@@ -1323,7 +1332,11 @@ fn extract_symbol_definition_first_steps(text: &str, max_steps: usize) -> Vec<St
     steps
 }
 
-fn augment_symbol_tokens_for_intent(query: &str, intent: &QueryIntent, symbol_tokens: &mut Vec<String>) {
+fn augment_symbol_tokens_for_intent(
+    query: &str,
+    intent: &QueryIntent,
+    symbol_tokens: &mut Vec<String>,
+) {
     if intent.kind != QueryIntentKind::FlowTrace {
         return;
     }
@@ -1624,7 +1637,8 @@ fn build_test_file_inventory_card(
     seed_line: usize,
     score: f32,
 ) -> Option<QueryResultItem> {
-    let mut candidate_entries = extract_test_inventory_entries_from_scored_chunks(runtime, scored, path);
+    let mut candidate_entries =
+        extract_test_inventory_entries_from_scored_chunks(runtime, scored, path);
     let absolute = Path::new(&runtime.state.repo_root).join(path);
     if let Ok(file_text) = fs::read_to_string(absolute) {
         let mut seen_lines = candidate_entries
@@ -1725,12 +1739,18 @@ fn extract_test_inventory_entries(file_text: &str) -> Vec<TestInventoryEntry> {
         if pending_rust_test_attr {
             pending_rust_test_attr = false;
             if let Some(name) = extract_named_test_definition(line) {
-                entries.push(TestInventoryEntry { line_number, label: name });
+                entries.push(TestInventoryEntry {
+                    line_number,
+                    label: name,
+                });
                 continue;
             }
         }
         if let Some(name) = extract_named_test_definition(line) {
-            entries.push(TestInventoryEntry { line_number, label: name });
+            entries.push(TestInventoryEntry {
+                line_number,
+                label: name,
+            });
             continue;
         }
         if line.starts_with("it(") || line.starts_with("test(") {
@@ -1827,7 +1847,8 @@ fn prioritize_test_inventory_entries(
 ) -> Vec<TestInventoryEntry> {
     let subject_tokens = test_subject_tokens(query);
     let lower_query = query.to_ascii_lowercase();
-    let registration_query = lower_query.contains("register") || lower_query.contains("registration");
+    let registration_query =
+        lower_query.contains("register") || lower_query.contains("registration");
     let registration_keywords = [
         "register",
         "registration",
@@ -1856,9 +1877,7 @@ fn prioritize_test_inventory_entries(
                     score += 4;
                 }
             }
-            if registration_query
-                && contains_any(&lower, &registration_keywords)
-            {
+            if registration_query && contains_any(&lower, &registration_keywords) {
                 score += 3;
             }
             if registration_query
@@ -2772,19 +2791,8 @@ fn has_symbol_case_pattern(raw: &str) -> bool {
 
 fn is_titlecase_symbol_candidate(raw: &str) -> bool {
     const STOP: &[&str] = &[
-        "what",
-        "where",
-        "which",
-        "when",
-        "why",
-        "how",
-        "describe",
-        "trace",
-        "show",
-        "list",
-        "explain",
-        "tell",
-        "give",
+        "what", "where", "which", "when", "why", "how", "describe", "trace", "show", "list",
+        "explain", "tell", "give",
     ];
     if raw.len() < 3 || raw.len() > 64 {
         return false;
@@ -3660,8 +3668,7 @@ mod tests {
 
     #[test]
     fn flowtrace_camelcase_tokens_backtick_included() {
-        let tokens =
-            extract_flowtrace_camelcase_tokens("Trace `useState` internal call chain");
+        let tokens = extract_flowtrace_camelcase_tokens("Trace `useState` internal call chain");
         assert!(tokens.contains(&"usestate".to_string()));
     }
 
@@ -3678,8 +3685,8 @@ mod tests {
     fn overlapping_chunks_skipped_in_selection() {
         // Two adjacent stride=60/overlap=20 chunks from the same file share lines 661-680.
         // The second (lower-scored) one should be rejected by try_push_scored_chunk.
-        use context::SnippetSelectionState;
         use crate::rpc::QueryResultItem;
+        use context::SnippetSelectionState;
         let mut selection = SnippetSelectionState::default();
         // Insert the first chunk manually (simulating a successful push)
         selection.snippets.push(QueryResultItem {
@@ -3696,16 +3703,18 @@ mod tests {
         let path = "src/ReactFiberCommitWork.js";
         let start_line: usize = 661;
         let end_line: usize = 740;
-        let overlaps = selection.snippets.iter().any(|s| {
-            s.path == path && s.start_line < end_line && start_line < s.end_line
-        });
+        let overlaps = selection
+            .snippets
+            .iter()
+            .any(|s| s.path == path && s.start_line < end_line && start_line < s.end_line);
         assert!(overlaps, "661-740 should overlap with 601-680");
         // Non-overlapping chunk from same file: 741-820 should not overlap
         let start2: usize = 741;
         let end2: usize = 820;
-        let no_overlap = selection.snippets.iter().any(|s| {
-            s.path == path && s.start_line < end2 && start2 < s.end_line
-        });
+        let no_overlap = selection
+            .snippets
+            .iter()
+            .any(|s| s.path == path && s.start_line < end2 && start2 < s.end_line);
         assert!(!no_overlap, "741-820 should not overlap with 601-680");
     }
 
@@ -3722,9 +3731,7 @@ mod tests {
     #[test]
     fn is_test_path_detects_test_utils_dirs() {
         // Phase CA: test-utility directories like internal-test-utils
-        assert!(is_test_path(
-            "packages/internal-test-utils/consoleMock.js"
-        ));
+        assert!(is_test_path("packages/internal-test-utils/consoleMock.js"));
         assert!(is_test_path("src/react-test-helpers/setup.ts"));
     }
 
@@ -3927,7 +3934,10 @@ it("renders", () => {})
             &entries,
             1083,
         );
-        let labels = ranked.into_iter().map(|entry| entry.label).collect::<Vec<_>>();
+        let labels = ranked
+            .into_iter()
+            .map(|entry| entry.label)
+            .collect::<Vec<_>>();
         assert!(
             !labels
                 .iter()
@@ -3935,9 +3945,21 @@ it("renders", () => {})
             "got: {labels:?}"
         );
         assert!(labels.iter().any(|label| label == "test_self_registration"));
-        assert!(labels.iter().any(|label| label == "test_blueprint_renaming"));
-        assert!(labels.iter().any(|label| label == "test_dotted_name_not_allowed"));
-        assert!(labels.iter().any(|label| label == "test_empty_name_not_allowed"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "test_blueprint_renaming")
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "test_dotted_name_not_allowed")
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "test_empty_name_not_allowed")
+        );
     }
 
     #[test]
@@ -4035,8 +4057,14 @@ it("renders", () => {})
             0.4,
         )
         .expect("expected flow chain card");
-        assert!(card.text.contains("chain: wsgi_app@1566 -> full_dispatch_request@992"));
-        assert!(card.text.contains("wsgi_app@1568: response = self.full_dispatch_request(ctx)"));
+        assert!(
+            card.text
+                .contains("chain: wsgi_app@1566 -> full_dispatch_request@992")
+        );
+        assert!(
+            card.text
+                .contains("wsgi_app@1568: response = self.full_dispatch_request(ctx)")
+        );
         assert!(card.text.contains("dispatch_request@968: return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)"));
         assert_eq!(
             card.slm_relevance_note.as_deref(),

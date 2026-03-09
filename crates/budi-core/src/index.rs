@@ -2884,19 +2884,8 @@ fn is_symbol_like_token(raw: &str) -> bool {
 
 fn is_titlecase_symbol_candidate(raw: &str) -> bool {
     const STOP: &[&str] = &[
-        "what",
-        "where",
-        "which",
-        "when",
-        "why",
-        "how",
-        "describe",
-        "trace",
-        "show",
-        "list",
-        "explain",
-        "tell",
-        "give",
+        "what", "where", "which", "when", "why", "how", "describe", "trace", "show", "list",
+        "explain", "tell", "give",
     ];
     if raw.len() < 3 || raw.len() > 64 {
         return false;

@@ -461,7 +461,10 @@ fn append_node_chunks(
     }
     // For AST boundary nodes the first non-blank line IS the declaration,
     // so skip the looks_like_symbol gate and extract directly.
-    let symbol_hint = snippet.lines().find(|line| looks_like_symbol(line)).and_then(symbol_from_line);
+    let symbol_hint = snippet
+        .lines()
+        .find(|line| looks_like_symbol(line))
+        .and_then(symbol_from_line);
     out.push(Chunk {
         start_line,
         end_line,
