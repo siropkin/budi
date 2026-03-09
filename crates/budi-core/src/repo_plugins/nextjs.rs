@@ -7,49 +7,52 @@ use super::common::{
     contains_any, contains_any_literal, extract_chunk_line_with_needle,
     extract_first_meaningful_line, path_matches_any, push_compact_evidence_line,
 };
-use super::{ContextPackPlugin, RepoPlugin};
+use super::{ChunkMatchContext, ContextPackPlugin, ContextPackRequest, RepoPlugin};
 
-pub(crate) const PLUGIN: RepoPlugin = RepoPlugin {
-    tag: "nextjs",
-    implied_tags: &["react"],
-    match_chunk: matches_nextjs_chunk,
-    match_query: matches_nextjs_query,
-    context_pack: Some(ContextPackPlugin {
-        synthetic_reason: "nextjs-app-router-pack",
-        build_card: build_nextjs_context_pack,
-    }),
-};
+pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::custom(
+    "nextjs",
+    &["react"],
+    matches_nextjs_chunk,
+    matches_nextjs_query,
+)
+.with_context_pack(ContextPackPlugin::new(
+    "nextjs-app-router-pack",
+    build_nextjs_context_pack,
+));
 
-fn matches_nextjs_chunk(lower_path: &str, language: &str, lower_text: &str) -> bool {
-    if language != "javascript" && language != "typescript" {
+fn matches_nextjs_chunk(context: &ChunkMatchContext<'_>) -> bool {
+    if context.language != "javascript" && context.language != "typescript" {
         return false;
     }
-    let next_config = lower_path.ends_with("next.config.js")
-        || lower_path.ends_with("next.config.mjs")
-        || lower_path.ends_with("next.config.cjs")
-        || lower_path.ends_with("next.config.ts");
-    let in_app_dir = lower_path.starts_with("app/") || lower_path.contains("/app/");
+    let next_config = context.lower_path.ends_with("next.config.js")
+        || context.lower_path.ends_with("next.config.mjs")
+        || context.lower_path.ends_with("next.config.cjs")
+        || context.lower_path.ends_with("next.config.ts");
+    let in_app_dir = context.lower_path.starts_with("app/") || context.lower_path.contains("/app/");
     let app_router_file = in_app_dir
-        && (lower_path.ends_with("/page.js")
-            || lower_path.ends_with("/page.jsx")
-            || lower_path.ends_with("/page.ts")
-            || lower_path.ends_with("/page.tsx")
-            || lower_path.ends_with("/layout.js")
-            || lower_path.ends_with("/layout.jsx")
-            || lower_path.ends_with("/layout.ts")
-            || lower_path.ends_with("/layout.tsx")
-            || lower_path.ends_with("/loading.js")
-            || lower_path.ends_with("/loading.tsx")
-            || lower_path.ends_with("/error.js")
-            || lower_path.ends_with("/error.tsx")
-            || lower_path.ends_with("/route.js")
-            || lower_path.ends_with("/route.ts"));
-    let pages_router_file = lower_path.contains("/pages/");
+        && (context.lower_path.ends_with("/page.js")
+            || context.lower_path.ends_with("/page.jsx")
+            || context.lower_path.ends_with("/page.ts")
+            || context.lower_path.ends_with("/page.tsx")
+            || context.lower_path.ends_with("/layout.js")
+            || context.lower_path.ends_with("/layout.jsx")
+            || context.lower_path.ends_with("/layout.ts")
+            || context.lower_path.ends_with("/layout.tsx")
+            || context.lower_path.ends_with("/loading.js")
+            || context.lower_path.ends_with("/loading.tsx")
+            || context.lower_path.ends_with("/error.js")
+            || context.lower_path.ends_with("/error.tsx")
+            || context.lower_path.ends_with("/route.js")
+            || context.lower_path.ends_with("/route.ts"));
+    let pages_router_file = context.lower_path.contains("/pages/");
     next_config
-        || path_matches_any(lower_path, &["next/", "/next/", "nextjs/", "/nextjs/"])
+        || path_matches_any(
+            context.lower_path,
+            &["next/", "/next/", "nextjs/", "/nextjs/"],
+        )
         || app_router_file
         || contains_any_literal(
-            lower_text,
+            context.lower_text,
             &[
                 "from 'next/",
                 "from \"next/",
@@ -69,7 +72,8 @@ fn matches_nextjs_chunk(lower_path: &str, language: &str, lower_text: &str) -> b
                 "next/image",
             ],
         )
-        || (pages_router_file && contains_any_literal(lower_text, &["next/", "getserversideprops"]))
+        || (pages_router_file
+            && contains_any_literal(context.lower_text, &["next/", "getserversideprops"]))
 }
 
 fn matches_nextjs_query(lower: &str) -> bool {
@@ -91,34 +95,36 @@ fn matches_nextjs_query(lower: &str) -> bool {
     )
 }
 
-fn build_nextjs_context_pack(
-    query: &str,
-    runtime: &RuntimeIndex,
-    snippets: &[QueryResultItem],
-) -> Option<QueryResultItem> {
-    if snippets.is_empty() || !is_nextjs_app_router_query(query, snippets) {
+fn build_nextjs_context_pack(request: &ContextPackRequest<'_>) -> Option<QueryResultItem> {
+    if request.snippets.is_empty()
+        || !is_nextjs_app_router_query(request.lower_query, request.snippets)
+    {
         return None;
     }
-    let top_score = snippets
+    let top_score = request
+        .snippets
         .first()
         .map(|snippet| snippet.score)
         .unwrap_or(0.40);
-    build_nextjs_app_router_card(runtime, top_score * 0.96)
+    build_nextjs_app_router_card(request.runtime, top_score * 0.96)
 }
 
-fn is_nextjs_app_router_query(query: &str, snippets: &[QueryResultItem]) -> bool {
-    let lower = query.to_ascii_lowercase();
-    let has_nextjs_signal = matches_nextjs_query(&lower)
+fn is_nextjs_app_router_query(lower_query: &str, snippets: &[QueryResultItem]) -> bool {
+    let has_nextjs_signal = matches_nextjs_query(lower_query)
         || snippets.iter().any(|snippet| {
             let lower_path = snippet.path.to_ascii_lowercase();
             let lower_text = snippet.text.to_ascii_lowercase();
-            matches_nextjs_chunk(&lower_path, &snippet.language, &lower_text)
+            matches_nextjs_chunk(&ChunkMatchContext {
+                lower_path: &lower_path,
+                language: &snippet.language,
+                lower_text: &lower_text,
+            })
         });
     if !has_nextjs_signal {
         return false;
     }
     contains_any(
-        &lower,
+        lower_query,
         &[
             "app router",
             "route boundary",
@@ -132,8 +138,8 @@ fn is_nextjs_app_router_query(query: &str, snippets: &[QueryResultItem]) -> bool
             "nested route",
             "route ownership",
         ],
-    ) || (contains_any(&lower, &["layout", "page"])
-        && contains_any(&lower, &["route", "router", "api", "boundary"]))
+    ) || (contains_any(lower_query, &["layout", "page"])
+        && contains_any(lower_query, &["route", "router", "api", "boundary"]))
 }
 
 fn build_nextjs_app_router_card(runtime: &RuntimeIndex, score: f32) -> Option<QueryResultItem> {

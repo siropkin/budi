@@ -1,116 +1,106 @@
 use std::collections::HashSet;
 
-use crate::index::{ChunkRecord, RuntimeIndex};
+use crate::index::ChunkRecord;
 use crate::rpc::{QueryChannelScores, QueryResultItem};
 
 use super::common::{
-    contains_any, contains_any_literal, extract_chunk_line_with_needle, find_symbolish_chunk,
-    path_matches_any, push_compact_evidence_line,
+    contains_any, extract_chunk_line_with_needle, find_symbolish_chunk, push_compact_evidence_line,
 };
-use super::{ContextPackPlugin, RepoPlugin};
+use super::{ChunkKeywordSignals, ContextPackPlugin, ContextPackRequest, RepoPlugin};
 
-pub(crate) const PLUGIN: RepoPlugin = RepoPlugin {
-    tag: "react",
-    implied_tags: &[],
-    match_chunk: matches_react_chunk,
-    match_query: matches_react_query,
-    context_pack: Some(ContextPackPlugin {
-        synthetic_reason: "react-effect-lifecycle-pack",
-        build_card: build_react_context_pack,
-    }),
-};
+const REACT_QUERY_KEYWORDS: &[&str] = &[
+    "react",
+    "jsx",
+    "tsx",
+    "component",
+    "components",
+    "hook",
+    "hooks",
+    "useeffect",
+    "usestate",
+    "usememo",
+    "usecallback",
+    "useref",
+    "context provider",
+];
 
-fn matches_react_chunk(lower_path: &str, language: &str, lower_text: &str) -> bool {
-    (language == "javascript" || language == "typescript")
-        && (path_matches_any(lower_path, &["react/", "/react/", "react-", "/react-"])
-            || lower_path.ends_with(".jsx")
-            || lower_path.ends_with(".tsx")
-            || contains_any_literal(
-                lower_text,
-                &[
-                    "from 'react'",
-                    "from \"react\"",
-                    "require('react')",
-                    "require(\"react\")",
-                    "react.",
-                    "usestate(",
-                    "useeffect(",
-                    "usememo(",
-                    "usecallback(",
-                    "useref(",
-                    "usecontext(",
-                    "usereducer(",
-                    "createcontext(",
-                    "forwardref(",
-                ],
-            ))
-}
-
-fn matches_react_query(lower: &str) -> bool {
-    contains_any(
-        lower,
+pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::simple(
+    "react",
+    &[],
+    ChunkKeywordSignals::new(
+        &["javascript", "typescript"],
+        &["react/", "/react/", "react-", "/react-"],
+        &[".jsx", ".tsx"],
         &[
-            "react",
-            "jsx",
-            "tsx",
-            "component",
-            "components",
-            "hook",
-            "hooks",
-            "useeffect",
-            "usestate",
-            "usememo",
-            "usecallback",
-            "useref",
-            "context provider",
+            "from 'react'",
+            "from \"react\"",
+            "require('react')",
+            "require(\"react\")",
+            "react.",
+            "usestate(",
+            "useeffect(",
+            "usememo(",
+            "usecallback(",
+            "useref(",
+            "usecontext(",
+            "usereducer(",
+            "createcontext(",
+            "forwardref(",
         ],
-    )
-}
+    ),
+    REACT_QUERY_KEYWORDS,
+)
+.with_context_pack(ContextPackPlugin::new(
+    "react-effect-lifecycle-pack",
+    build_react_context_pack,
+));
 
-fn build_react_context_pack(
-    query: &str,
-    runtime: &RuntimeIndex,
-    snippets: &[QueryResultItem],
-) -> Option<QueryResultItem> {
-    if snippets.is_empty() || !is_react_effect_lifecycle_query(query) {
+fn build_react_context_pack(request: &ContextPackRequest<'_>) -> Option<QueryResultItem> {
+    if request.snippets.is_empty() || !is_react_effect_lifecycle_query(request.lower_query) {
         return None;
     }
     let Some(layout_unmount_chunk) =
-        find_symbolish_chunk(runtime, None, "commitHookLayoutUnmountEffects")
+        find_symbolish_chunk(request.runtime, None, "commitHookLayoutUnmountEffects")
     else {
         return None;
     };
-    let Some(layout_mount_chunk) = find_symbolish_chunk(runtime, None, "commitHookLayoutEffects")
+    let Some(layout_mount_chunk) =
+        find_symbolish_chunk(request.runtime, None, "commitHookLayoutEffects")
     else {
         return None;
     };
-    let Some(flush_layout_chunk) = find_symbolish_chunk(runtime, None, "flushLayoutEffects") else {
+    let Some(flush_layout_chunk) =
+        find_symbolish_chunk(request.runtime, None, "flushLayoutEffects")
+    else {
         return None;
     };
-    let Some(flush_passive_chunk) = find_symbolish_chunk(runtime, None, "flushPassiveEffects")
+    let Some(flush_passive_chunk) =
+        find_symbolish_chunk(request.runtime, None, "flushPassiveEffects")
     else {
         return None;
     };
     let Some(passive_unmount_chunk) =
-        find_symbolish_chunk(runtime, None, "commitPassiveUnmountEffects")
+        find_symbolish_chunk(request.runtime, None, "commitPassiveUnmountEffects")
     else {
         return None;
     };
     let Some(passive_mount_chunk) =
-        find_symbolish_chunk(runtime, None, "commitPassiveMountEffects")
+        find_symbolish_chunk(request.runtime, None, "commitPassiveMountEffects")
     else {
         return None;
     };
-    let Some(hook_mount_chunk) = find_symbolish_chunk(runtime, None, "commitHookEffectListMount")
+    let Some(hook_mount_chunk) =
+        find_symbolish_chunk(request.runtime, None, "commitHookEffectListMount")
     else {
         return None;
     };
     let Some(hook_unmount_chunk) =
-        find_symbolish_chunk(runtime, None, "commitHookEffectListUnmount")
+        find_symbolish_chunk(request.runtime, None, "commitHookEffectListUnmount")
     else {
         return None;
     };
-    let top_score = snippets
+    let top_score = request
+        .snippets
         .first()
         .map(|snippet| snippet.score)
         .unwrap_or(0.40);
@@ -127,11 +117,10 @@ fn build_react_context_pack(
     )
 }
 
-fn is_react_effect_lifecycle_query(query: &str) -> bool {
-    let lower = query.to_ascii_lowercase();
-    matches_react_query(&lower)
+fn is_react_effect_lifecycle_query(lower_query: &str) -> bool {
+    contains_any(lower_query, REACT_QUERY_KEYWORDS)
         && contains_any(
-            &lower,
+            lower_query,
             &[
                 "lifecycle",
                 "mount",
@@ -144,7 +133,10 @@ fn is_react_effect_lifecycle_query(query: &str) -> bool {
                 "uselayouteffect",
             ],
         )
-        && contains_any(&lower, &["component", "hook", "hooks", "effect", "effects"])
+        && contains_any(
+            lower_query,
+            &["component", "hook", "hooks", "effect", "effects"],
+        )
 }
 
 pub(crate) fn build_react_effect_lifecycle_card(
