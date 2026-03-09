@@ -32,6 +32,12 @@ CLAUDE_STATUS_SCHEMA: dict[str, Any] = {
         "benchmark_results_json": {"type": ["string", "null"]},
         "commit_sha": {"type": ["string", "null"]},
         "version_bumped_to": {"type": ["string", "null"]},
+        "did_web_research": {"type": ["boolean", "null"]},
+        "research_summary": {"type": ["string", "null"]},
+        "research_urls": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        },
     },
     "required": ["status", "summary", "next_focus"],
     "additionalProperties": True,
@@ -129,13 +135,38 @@ def extract_results_json_from_log(log_path: Path) -> str | None:
     return matches[-1].strip()
 
 
+def should_require_web_research(cycle_index: int, every_cycles: int) -> bool:
+    if every_cycles <= 0:
+        return False
+    return (cycle_index - 1) % every_cycles == 0
+
+
 def build_agent_prompt(
     workspace_root: Path,
     plan_file: Path,
     overnight_summary: Path,
     cycle_index: int,
     extra_prompt: str,
+    require_web_research: bool,
 ) -> str:
+    research_block = """
+Periodic web research:
+- This cycle MUST include a short web-research sweep before you settle on the next implementation step.
+- Use web search/fetch for recent articles, papers, or high-signal posts from roughly the last 12 months when possible.
+- Target topics that can improve budi directly: context engineering, context rot, code retrieval, repository search, agent latency, prompt/context compression, benchmark methodology, and Claude Code workflows.
+- Keep it lean: usually 2-4 searches and only keep ideas that are concretely actionable for budi.
+- If you do web research, return:
+  - `"did_web_research": true`
+  - `"research_summary": "1-3 sentence summary of the best ideas"`
+  - `"research_urls": ["url1", "url2"]`
+""".strip() if require_web_research else """
+Periodic web research:
+- Web research is optional this cycle, but still do it if you are blocked, low-confidence, or you suspect there may be a better recent idea than the current plan.
+- If you do web research, return:
+  - `"did_web_research": true`
+  - `"research_summary": "1-3 sentence summary of the best ideas"`
+  - `"research_urls": ["url1", "url2"]`
+""".strip()
     return f"""
 You are running an autonomous improvement loop for the repository at `{workspace_root}`.
 
@@ -182,11 +213,13 @@ If you hit a real blocker:
 If you believe the overnight loop should stop cleanly:
 - Return `"status": "finished"`.
 
+{research_block}
+
 Return fields:
 - `status`
 - `summary`
 - `next_focus`
-- optionally `wait_reason`, `wait_pid`, `wait_log_path`, `benchmark_results_json`, `commit_sha`, `version_bumped_to`
+- optionally `wait_reason`, `wait_pid`, `wait_log_path`, `benchmark_results_json`, `commit_sha`, `version_bumped_to`, `did_web_research`, `research_summary`, `research_urls`
 
 Current cycle number: {cycle_index}
 
@@ -201,6 +234,7 @@ def run_claude_cycle(
     cycle_index: int,
     extra_prompt: str,
     timeout_sec: int,
+    web_research_every_cycles: int,
 ) -> ClaudeCycleResult:
     prompt = build_agent_prompt(
         workspace_root=workspace_root,
@@ -208,6 +242,9 @@ def run_claude_cycle(
         overnight_summary=overnight_summary,
         cycle_index=cycle_index,
         extra_prompt=extra_prompt,
+        require_web_research=should_require_web_research(
+            cycle_index, web_research_every_cycles
+        ),
     )
     settings = json.dumps({"disableAllHooks": True})
     args = [
@@ -326,6 +363,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional extra instruction appended to every Claude cycle.",
     )
+    parser.add_argument(
+        "--web-research-every-cycles",
+        type=int,
+        default=3,
+        help="Require a short latest-ideas web research sweep every N Claude cycles (0 = disable).",
+    )
     return parser
 
 
@@ -363,6 +406,7 @@ def main() -> int:
                 cycle_index=cycle,
                 extra_prompt=args.extra_prompt,
                 timeout_sec=args.cycle_timeout_seconds,
+                web_research_every_cycles=args.web_research_every_cycles,
             )
         except Exception as exc:
             append_log(
@@ -375,6 +419,11 @@ def main() -> int:
         status = str(payload.get("status", "")).strip() or "blocked"
         summary = str(payload.get("summary", "")).strip()
         next_focus = str(payload.get("next_focus", "")).strip()
+        did_web_research = bool(payload.get("did_web_research"))
+        research_summary = str(payload.get("research_summary", "")).strip()
+        research_urls = payload.get("research_urls")
+        if not isinstance(research_urls, list):
+            research_urls = []
         append_log(
             summary_file,
             f"- Finished at: `{utc_now()}`\n"
@@ -390,8 +439,19 @@ def main() -> int:
                 f"- Version bumped to: `{payload.get('version_bumped_to')}`\n"
                 if payload.get("version_bumped_to")
                 else ""
+            )
+            + (
+                f"- Web research: `{research_summary}`\n"
+                if did_web_research and research_summary
+                else ""
             ),
         )
+        if did_web_research and research_urls:
+            append_log(
+                summary_file,
+                "- Research URLs:\n"
+                + "".join(f"  - {url}\n" for url in research_urls),
+            )
 
         if status == "wait":
             wait_pid = payload.get("wait_pid")
