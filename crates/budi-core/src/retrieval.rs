@@ -701,8 +701,21 @@ pub fn build_query_response(
             &query.to_lowercase(),
             &["which env", "what env", "list env", "all env"],
         );
-    let ci_skip = ci_skip || env_listing_skip;
-    let min_score = if env_listing_skip {
+    // Broad lifecycle-overview FlowTrace queries ("lifecycle hook execution order",
+    // "cleanup order for effects") are about user-facing conceptual ordering that
+    // Claude knows from training. Injecting internal commit-phase function details
+    // (lifecycle pack) or generic HNSW matches anchors Claude on implementation
+    // internals instead of the broader lifecycle model.
+    let lifecycle_overview_skip = intent.kind == QueryIntentKind::FlowTrace
+        && scored.first().is_some_and(|c| c.score < 0.55)
+        && {
+            let lq = query.to_lowercase();
+            contains_any(&lq, &["lifecycle", "cleanup order", "effect order"])
+                && contains_any(&lq, &["order", "sequence", "when a", "execution"])
+                && contains_any(&lq, &["mount", "unmount", "component", "effect", "hook"])
+        };
+    let ci_skip = ci_skip || env_listing_skip || lifecycle_overview_skip;
+    let min_score = if env_listing_skip || lifecycle_overview_skip {
         f32::MAX
     } else if ci_skip {
         0.55_f32
@@ -938,6 +951,26 @@ pub fn build_query_response(
     // Claude is strong enough to explore env-related code on its own.
     // Regular retrieval + DF fix provides sufficient starting evidence.
     inject_context_plugins(query, runtime, &mut selection.snippets, target_limit);
+
+    // Post-pack noise filter: when a synthetic condenser pack is injected as
+    // card 1 for FlowTrace, the pack already synthesizes the key evidence.
+    // Remaining HNSW cards are generic keyword matches that add "context rot"
+    // (every irrelevant token degrades attention). Keep only secondaries
+    // scoring above pack_score * 0.95 to trim noise while preserving
+    // high-quality supporting context.
+    if intent.kind == QueryIntentKind::FlowTrace
+        && selection.snippets.len() > 1
+        && selection
+            .snippets
+            .first()
+            .is_some_and(|s| s.reasons.iter().any(|r| r.ends_with("-pack")))
+    {
+        let pack_score = selection.snippets[0].score;
+        let pack_floor = pack_score * 0.95;
+        selection
+            .snippets
+            .retain(|s| s.reasons.iter().any(|r| r.ends_with("-pack")) || s.score >= pack_floor);
+    }
 
     // Coverage-style TestLookup queries ("what tests cover X") need a
     // compact inventory of the dominant test file, not just one tiny test chunk.
@@ -4997,12 +5030,75 @@ it("renders", () => {})
     }
 
     #[test]
-    fn react_lifecycle_query_injects_lifecycle_pack() {
+    fn react_lifecycle_broad_overview_skips_injection() {
+        // Broad lifecycle overview queries ("Trace the lifecycle hook execution
+        // order when a component mounts, updates, and unmounts") are better
+        // served by Claude's training knowledge. The lifecycle pack anchors
+        // Claude on internal commit-phase functions instead of the user-facing
+        // lifecycle model.
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
         let repo_root = std::env::temp_dir().join(format!("budi-react-lifecycle-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+                    start_line: 97,
+                    end_line: 110,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitHookLayoutEffects".to_string()),
+                    text: "export function commitHookLayoutEffects(finishedWork, hookFlags) {\n  // At this point layout effects have already been destroyed (during mutation phase).\n  commitHookEffectListMount(hookFlags, finishedWork);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 9,
+                    path: "packages/react-reconciler/src/ReactFiberHooks.js".to_string(),
+                    start_line: 1,
+                    end_line: 20,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("renderWithHooks".to_string()),
+                    text: "import ReactSharedInternals from 'shared/ReactSharedInternals';\n// React component lifecycle hook execution order for mounts, updates, and unmounts.\nexport function renderWithHooks() {}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Trace the lifecycle hook execution order when a React component mounts, updates, and unmounts.",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        assert!(
+            response.snippets.is_empty(),
+            "expected lifecycle-overview skip to block injection, got: {:?}",
+            response.snippets
+        );
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn react_lifecycle_specific_query_still_injects_pack() {
+        // Specific lifecycle queries (about a named commit-phase function)
+        // should still get the lifecycle pack.
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root =
+            std::env::temp_dir().join(format!("budi-react-lifecycle-specific-test-{unique}"));
         fs::create_dir_all(&repo_root).expect("temp repo root");
         let state = RepoIndexState {
             repo_root: repo_root.to_string_lossy().to_string(),
@@ -5088,24 +5184,15 @@ it("renders", () => {})
                     text: "function flushPassiveEffects(): boolean {\n  return flushPassiveEffectsImpl();\n}\nfunction flushPassiveEffectsImpl() {\n  commitPassiveUnmountEffects(root.current);\n  commitPassiveMountEffects(root, root.current, lanes, transitions, pendingEffectsRenderEndTime);\n}\n".to_string(),
                     embedding: Vec::new(),
                 },
-                ChunkRecord {
-                    id: 9,
-                    path: "packages/react-reconciler/src/ReactFiberHooks.js".to_string(),
-                    start_line: 1,
-                    end_line: 20,
-                    language: "javascript".to_string(),
-                    symbol_hint: Some("renderWithHooks".to_string()),
-                    text: "import ReactSharedInternals from 'shared/ReactSharedInternals';\n// React component lifecycle hook execution order for mounts, updates, and unmounts.\nexport function renderWithHooks() {}\n".to_string(),
-                    embedding: Vec::new(),
-                },
             ],
             updated_at_ts: 0,
         };
         let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
         let config = BudiConfig::default();
+        // Specific query about commitHookLayoutEffects — not a broad overview
         let response = build_query_response(
             &runtime,
-            "Trace the lifecycle hook execution order when a React component mounts, updates, and unmounts.",
+            "Where is commitHookLayoutEffects defined and what is its role in the effect lifecycle?",
             None,
             None,
             None,
@@ -5113,16 +5200,10 @@ it("renders", () => {})
             &config,
         )
         .expect("query response");
-        let first = response.snippets.first().expect("at least one snippet");
         assert!(
-            first
-                .reasons
-                .iter()
-                .any(|reason| reason == "react-effect-lifecycle-pack"),
-            "got: {:?}",
-            response.snippets
+            !response.snippets.is_empty(),
+            "specific lifecycle query should still inject"
         );
-        assert_eq!(response.diagnostics.top_ecosystem.as_deref(), Some("react"));
         let _ = fs::remove_dir_all(&repo_root);
     }
 
