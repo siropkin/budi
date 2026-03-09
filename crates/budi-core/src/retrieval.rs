@@ -493,6 +493,17 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "examples-path-penalty");
         }
 
+        // Architecture queries — penalise devtools/internal-tooling paths.
+        // DevTools directories contain debugging, visualization, and internal developer
+        // tooling — not the production architecture the user is asking about. For queries
+        // like "entry points" or "how is the component tree structured", devtools tree-
+        // type definitions are a false positive (HNSW matches "tree" from the query to
+        // "Element type with parentID" in devtools types). Noop renderers are test infra.
+        if intent.kind == QueryIntentKind::Architecture && is_devtools_path(&chunk.path) {
+            adjusted -= 0.30;
+            push_unique_reason(&mut reasons, "devtools-path-penalty");
+        }
+
         // FlowTrace queries are about production execution paths, so tests that merely call
         // into framework entrypoints should not outrank the actual runtime chain. The graph
         // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
@@ -680,9 +691,9 @@ pub fn build_query_response(
                 "i need to implement",
                 "want to add",
                 "want to implement",
-                // Module-layout / directory-structure queries need breadth (Claude
-                // exploring many directories) not 2-3 code snippets that anchor it
-                // to a narrow slice of the project.
+                // Module-layout / directory-structure / entry-point queries need
+                // breadth (Claude exploring many directories) not 2-3 code snippets
+                // that anchor it to a narrow slice of the project.
                 "module layout",
                 "directory structure",
                 "which files own",
@@ -691,6 +702,7 @@ pub fn build_query_response(
                 "codebase structure",
                 "project structure",
                 "folder structure",
+                "entry points",
             ],
         );
     // Broad env-var listing queries ("which env vars", "what env vars") benefit
@@ -1770,6 +1782,17 @@ fn is_test_path(path: &str) -> bool {
         || name_stem.starts_with("mock_")
         || name_stem.starts_with("mock")
             && (filename.ends_with(".go") || filename.ends_with(".ts") || filename.ends_with(".js"))
+}
+
+/// True if the chunk lives under a devtools or internal-tooling directory.
+/// DevTools directories contain debugging, visualization, and profiling tools —
+/// they are internal infrastructure, not the production code architecture.
+fn is_devtools_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("devtools")
+        || lower.contains("noop-renderer")
+        || lower.contains("noop_renderer")
+        || lower.contains("nooprenderer")
 }
 
 /// True if the chunk lives under an examples/ directory.
