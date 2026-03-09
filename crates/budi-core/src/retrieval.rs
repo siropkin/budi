@@ -680,6 +680,17 @@ pub fn build_query_response(
                 "i need to implement",
                 "want to add",
                 "want to implement",
+                // Module-layout / directory-structure queries need breadth (Claude
+                // exploring many directories) not 2-3 code snippets that anchor it
+                // to a narrow slice of the project.
+                "module layout",
+                "directory structure",
+                "which files own",
+                "which directories own",
+                "which dirs own",
+                "codebase structure",
+                "project structure",
+                "folder structure",
             ],
         );
     // Broad env-var listing queries ("which env vars", "what env vars") benefit
@@ -5341,6 +5352,49 @@ it("renders", () => {})
         assert!(
             response.snippets.is_empty(),
             "expected ci_skip to block low-confidence first card, got: {:?}",
+            response.snippets
+        );
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn module_layout_query_ci_skip_blocks_low_confidence_injection() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-retrieval-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![ChunkRecord {
+                id: 1,
+                path: "src/flask/sansio/app.py".to_string(),
+                start_line: 479,
+                end_line: 493,
+                language: "python".to_string(),
+                symbol_hint: Some("Flask".to_string()),
+                text: "class Flask(App):\n    \"\"\"The flask object implements a WSGI application.\"\"\"\n".to_string(),
+                embedding: Vec::new(),
+            }],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Describe the module layout of this codebase — which files own which concerns?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        assert!(
+            response.snippets.is_empty(),
+            "expected module-layout ci_skip to block injection, got: {:?}",
             response.snippets
         );
         let _ = fs::remove_dir_all(&repo_root);
