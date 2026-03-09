@@ -182,6 +182,184 @@ pub fn language_label_for_path(file_path: &str) -> String {
     }
 }
 
+fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
+    if !tags.iter().any(|existing| existing == tag) {
+        tags.push(tag.to_string());
+    }
+}
+
+fn contains_any_literal(input: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| input.contains(needle))
+}
+
+fn is_react_chunk(lower_path: &str, lower_text: &str) -> bool {
+    lower_path.ends_with(".jsx")
+        || lower_path.ends_with(".tsx")
+        || contains_any_literal(
+            lower_text,
+            &[
+                "from 'react'",
+                "from \"react\"",
+                "require('react')",
+                "require(\"react\")",
+                "react.",
+                "usestate(",
+                "useeffect(",
+                "usememo(",
+                "usecallback(",
+                "useref(",
+                "usecontext(",
+                "usereducer(",
+                "createcontext(",
+                "forwardref(",
+            ],
+        )
+}
+
+fn is_nextjs_chunk(lower_path: &str, lower_text: &str) -> bool {
+    let next_config = lower_path.ends_with("next.config.js")
+        || lower_path.ends_with("next.config.mjs")
+        || lower_path.ends_with("next.config.cjs")
+        || lower_path.ends_with("next.config.ts");
+    let app_router_file = lower_path.contains("/app/")
+        && (lower_path.ends_with("/page.js")
+            || lower_path.ends_with("/page.jsx")
+            || lower_path.ends_with("/page.ts")
+            || lower_path.ends_with("/page.tsx")
+            || lower_path.ends_with("/layout.js")
+            || lower_path.ends_with("/layout.jsx")
+            || lower_path.ends_with("/layout.ts")
+            || lower_path.ends_with("/layout.tsx")
+            || lower_path.ends_with("/loading.js")
+            || lower_path.ends_with("/loading.tsx")
+            || lower_path.ends_with("/error.js")
+            || lower_path.ends_with("/error.tsx")
+            || lower_path.ends_with("/route.js")
+            || lower_path.ends_with("/route.ts"));
+    let pages_router_file = lower_path.contains("/pages/");
+    next_config
+        || app_router_file
+        || contains_any_literal(
+            lower_text,
+            &[
+                "from 'next/",
+                "from \"next/",
+                "\"use client\"",
+                "'use client'",
+                "\"use server\"",
+                "'use server'",
+                "getserversideprops",
+                "getstaticprops",
+                "getstaticpaths",
+                "generatemetadata",
+                "generatestaticparams",
+                "next/navigation",
+                "next/link",
+                "next/router",
+                "next/server",
+                "next/image",
+            ],
+        )
+        || (pages_router_file && contains_any_literal(lower_text, &["next/", "getserversideprops"]))
+}
+
+fn is_express_chunk(lower_text: &str) -> bool {
+    contains_any_literal(
+        lower_text,
+        &[
+            "from 'express'",
+            "from \"express\"",
+            "require('express')",
+            "require(\"express\")",
+            "express.router(",
+        ],
+    )
+}
+
+fn is_flask_chunk(lower_path: &str, lower_text: &str) -> bool {
+    lower_path.ends_with("/wsgi.py")
+        || contains_any_literal(
+            lower_text,
+            &[
+                "from flask",
+                "import flask",
+                "flask(__name__",
+                "blueprint(",
+                "@app.route(",
+                "@bp.route(",
+                "@blueprint.route(",
+                "current_app",
+                "wsgi_app(",
+            ],
+        )
+}
+
+fn is_django_chunk(lower_path: &str, lower_text: &str) -> bool {
+    lower_path.ends_with("/manage.py")
+        || lower_path.ends_with("/settings.py")
+        || lower_path.ends_with("/urls.py")
+        || contains_any_literal(
+            lower_text,
+            &[
+                "from django",
+                "import django",
+                "models.model",
+                "urlpatterns",
+                "from django.urls",
+                "from django.db",
+                "from django.http",
+                "from django.shortcuts",
+                "as_view(",
+            ],
+        )
+}
+
+fn is_fastapi_chunk(lower_text: &str) -> bool {
+    contains_any_literal(
+        lower_text,
+        &[
+            "from fastapi",
+            "import fastapi",
+            "fastapi(",
+            "apirouter(",
+            "from starlette",
+        ],
+    )
+}
+
+pub fn ecosystem_tags_for_chunk(file_path: &str, language: &str, text: &str) -> Vec<String> {
+    let lower_path = file_path.to_ascii_lowercase();
+    let lower_text = text.to_ascii_lowercase();
+    let mut tags = Vec::new();
+    match language {
+        "javascript" | "typescript" => {
+            if is_nextjs_chunk(&lower_path, &lower_text) {
+                push_unique_tag(&mut tags, "nextjs");
+                push_unique_tag(&mut tags, "react");
+            }
+            if is_react_chunk(&lower_path, &lower_text) {
+                push_unique_tag(&mut tags, "react");
+            }
+            if is_express_chunk(&lower_text) {
+                push_unique_tag(&mut tags, "express");
+            }
+        }
+        "python" => {
+            if is_fastapi_chunk(&lower_text) {
+                push_unique_tag(&mut tags, "fastapi");
+            }
+            if is_flask_chunk(&lower_path, &lower_text) {
+                push_unique_tag(&mut tags, "flask");
+            }
+            if is_django_chunk(&lower_path, &lower_text) {
+                push_unique_tag(&mut tags, "django");
+            }
+        }
+        _ => {}
+    }
+    tags
+}
+
 fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)> {
     let lower = file_path.to_ascii_lowercase();
     if lower.ends_with(".ts") {
@@ -621,7 +799,7 @@ pub fn chunk_text(
 
 #[cfg(test)]
 mod tests {
-    use super::chunk_text;
+    use super::{chunk_text, ecosystem_tags_for_chunk};
 
     #[test]
     fn falls_back_to_line_windows_for_unknown_extensions() {
@@ -640,6 +818,37 @@ mod tests {
         let chunks = chunk_text("src/app.py", content, 40, 10);
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|chunk| chunk.language == "python"));
+    }
+
+    #[test]
+    fn ecosystem_tags_identify_nextjs_react_chunk() {
+        let tags = ecosystem_tags_for_chunk(
+            "app/dashboard/page.tsx",
+            "typescript",
+            "\"use client\";\nimport { useState } from \"react\";\nexport default function Page() { const [count] = useState(0); return <div>{count}</div>; }",
+        );
+        assert!(tags.iter().any(|tag| tag == "nextjs"), "got: {tags:?}");
+        assert!(tags.iter().any(|tag| tag == "react"), "got: {tags:?}");
+    }
+
+    #[test]
+    fn ecosystem_tags_identify_flask_chunk() {
+        let tags = ecosystem_tags_for_chunk(
+            "src/app.py",
+            "python",
+            "from flask import Flask, Blueprint\napp = Flask(__name__)\n@app.route(\"/\")\ndef index():\n    return \"ok\"\n",
+        );
+        assert!(tags.iter().any(|tag| tag == "flask"), "got: {tags:?}");
+    }
+
+    #[test]
+    fn ecosystem_tags_identify_fastapi_chunk() {
+        let tags = ecosystem_tags_for_chunk(
+            "src/api.py",
+            "python",
+            "from fastapi import FastAPI, APIRouter\napp = FastAPI()\nrouter = APIRouter()\n",
+        );
+        assert!(tags.iter().any(|tag| tag == "fastapi"), "got: {tags:?}");
     }
 
     #[test]

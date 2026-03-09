@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::chunking::language_label_for_path;
+use crate::chunking::{ecosystem_tags_for_chunk, language_label_for_path};
 use crate::config::BudiConfig;
 use crate::index::{ChunkRecord, RuntimeIndex};
 use crate::reason_codes::SKIP_REASON_NON_CODE_INTENT;
@@ -156,6 +156,7 @@ pub fn build_query_response(
     let scope_hints = extract_scope_path_hints(&retrieval_query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(&retrieval_query, &intent, &mut path_tokens);
+    let query_ecosystems = detect_query_ecosystems(query);
 
     // TestLookup: widen the candidate pool so inline test blocks (which score lower
     // than production code on the query text) have a chance to enter the fused stage.
@@ -420,6 +421,15 @@ pub fn build_query_response(
         if !cwd_rel.is_empty() && chunk.path.starts_with(&cwd_rel) {
             adjusted += 0.08;
             push_unique_reason(&mut reasons, "cwd-proximity");
+        }
+
+        if let Some(chunk_ecosystems) = runtime.chunk_ecosystems(id)
+            && let Some(matched_ecosystem) =
+                first_matching_ecosystem(&query_ecosystems, chunk_ecosystems)
+        {
+            adjusted += 0.08;
+            let ecosystem_reason = format!("ecosystem-match:{matched_ecosystem}");
+            push_unique_reason(&mut reasons, &ecosystem_reason);
         }
 
         // Phase AB: boost chunks from the file Claude most recently edited/read.
@@ -897,6 +907,11 @@ pub fn build_query_response(
             .unwrap_or_default(),
         top_language: selection.snippets.first().map(|s| s.language.clone()),
         snippet_languages: selected_snippet_languages(&selection.snippets),
+        top_ecosystem: selection
+            .snippets
+            .first()
+            .and_then(|s| snippet_ecosystems(s).into_iter().next()),
+        snippet_ecosystems: selected_snippet_ecosystems(&selection.snippets),
         recommended_injection: !selection.snippets.is_empty() && intent.code_related,
         skip_reason: if !intent.code_related {
             Some(SKIP_REASON_NON_CODE_INTENT.to_string())
@@ -936,6 +951,115 @@ fn selected_snippet_languages(snippets: &[QueryResultItem]) -> Vec<String> {
         }
     }
     out
+}
+
+fn snippet_ecosystems(snippet: &QueryResultItem) -> Vec<String> {
+    ecosystem_tags_for_chunk(&snippet.path, &snippet.language, &snippet.text)
+}
+
+fn selected_snippet_ecosystems(snippets: &[QueryResultItem]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for snippet in snippets {
+        for ecosystem in snippet_ecosystems(snippet) {
+            if seen.insert(ecosystem.clone()) {
+                out.push(ecosystem);
+            }
+        }
+    }
+    out
+}
+
+fn detect_query_ecosystems(query: &str) -> Vec<String> {
+    let lower = query.to_ascii_lowercase();
+    let mut ecosystems = Vec::new();
+    if contains_any(
+        &lower,
+        &[
+            "next.js",
+            "nextjs",
+            "app router",
+            "server component",
+            "route handler",
+            "page.tsx",
+            "layout.tsx",
+            "use client",
+            "use server",
+            "getserversideprops",
+            "getstaticprops",
+        ],
+    ) {
+        ecosystems.push("nextjs".to_string());
+        ecosystems.push("react".to_string());
+    }
+    if contains_any(
+        &lower,
+        &[
+            "react",
+            "jsx",
+            "tsx",
+            "component",
+            "components",
+            "hook",
+            "hooks",
+            "useeffect",
+            "usestate",
+            "usememo",
+            "usecallback",
+            "useref",
+            "context provider",
+        ],
+    ) {
+        ecosystems.push("react".to_string());
+    }
+    if contains_any(
+        &lower,
+        &[
+            "flask",
+            "blueprint",
+            "jinja",
+            "wsgi_app",
+            "current_app",
+            "app.route",
+        ],
+    ) {
+        ecosystems.push("flask".to_string());
+    }
+    if contains_any(
+        &lower,
+        &[
+            "django",
+            "urlpatterns",
+            "as_view",
+            "manage.py",
+            "settings.py",
+        ],
+    ) {
+        ecosystems.push("django".to_string());
+    }
+    if contains_any(&lower, &["fastapi", "apirouter", "pydantic"]) {
+        ecosystems.push("fastapi".to_string());
+    }
+    if contains_any(&lower, &["express", "express router", "express middleware"]) {
+        ecosystems.push("express".to_string());
+    }
+    ecosystems.sort();
+    ecosystems.dedup();
+    ecosystems
+}
+
+fn first_matching_ecosystem<'a>(
+    query_ecosystems: &'a [String],
+    chunk_ecosystems: &[String],
+) -> Option<&'a str> {
+    query_ecosystems
+        .iter()
+        .find(|ecosystem| {
+            chunk_ecosystems
+                .iter()
+                .any(|candidate| candidate == *ecosystem)
+        })
+        .map(String::as_str)
 }
 
 /// Build a compact call graph summary for the top injected snippets.
@@ -5044,6 +5168,88 @@ it("renders", () => {})
         assert_eq!(
             response.snippets.first().map(|s| s.path.as_str()),
             Some("src/flask/sansio/app.py")
+        );
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn framework_query_detection_matches_react_next_and_flask_terms() {
+        let react = detect_query_ecosystems("Trace the React component mount flow");
+        assert!(react.iter().any(|ecosystem| ecosystem == "react"));
+
+        let next = detect_query_ecosystems("How does page.tsx work in the Next.js app router?");
+        assert!(next.iter().any(|ecosystem| ecosystem == "nextjs"));
+        assert!(next.iter().any(|ecosystem| ecosystem == "react"));
+
+        let flask = detect_query_ecosystems("How does Flask blueprint registration work?");
+        assert!(flask.iter().any(|ecosystem| ecosystem == "flask"));
+    }
+
+    #[test]
+    fn react_queries_surface_ecosystem_diagnostics_and_match_reason() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-react-ecosystem-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "src/components/Dashboard.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 8,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("DashboardComponent".to_string()),
+                    text: "import { useEffect } from \"react\";\nexport function DashboardComponent() {\n    useEffect(() => {\n        console.log(\"mounted\");\n    }, []);\n    return <div>dashboard</div>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 2,
+                    path: "src/server/logger.ts".to_string(),
+                    start_line: 1,
+                    end_line: 4,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("requestLogger".to_string()),
+                    text: "export function requestLogger() {\n    return \"logger\";\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Where is the React component that calls useEffect defined?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        let top = response.snippets.first().expect("top snippet");
+        assert_eq!(top.path, "src/components/Dashboard.tsx");
+        assert!(
+            top.reasons
+                .iter()
+                .any(|reason| reason == "ecosystem-match:react"),
+            "got: {:?}",
+            top.reasons
+        );
+        assert_eq!(response.diagnostics.top_ecosystem.as_deref(), Some("react"));
+        assert!(
+            response
+                .diagnostics
+                .snippet_ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem == "react"),
+            "got: {:?}",
+            response.diagnostics.snippet_ecosystems
         );
         let _ = fs::remove_dir_all(&repo_root);
     }

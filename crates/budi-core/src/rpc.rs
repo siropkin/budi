@@ -118,6 +118,10 @@ pub struct QueryDiagnostics {
     pub top_language: Option<String>,
     #[serde(default)]
     pub snippet_languages: Vec<String>,
+    #[serde(default)]
+    pub top_ecosystem: Option<String>,
+    #[serde(default)]
+    pub snippet_ecosystems: Vec<String>,
     pub recommended_injection: bool,
     pub skip_reason: Option<String>,
 }

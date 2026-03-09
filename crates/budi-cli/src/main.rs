@@ -1833,6 +1833,8 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             signals: vec!["@nobudi".to_string()],
             top_language: None,
             snippet_languages: Vec::new(),
+            top_ecosystem: None,
+            snippet_ecosystems: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(SKIP_REASON_FORCED_SKIP.to_string()),
         };
@@ -1965,6 +1967,14 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             obj.insert(
                 "retrieval_languages".to_string(),
                 json!(diagnostics.snippet_languages.clone()),
+            );
+            obj.insert(
+                "retrieval_top_ecosystem".to_string(),
+                json!(diagnostics.top_ecosystem.clone()),
+            );
+            obj.insert(
+                "retrieval_ecosystems".to_string(),
+                json!(diagnostics.snippet_ecosystems.clone()),
             );
             obj.insert(
                 "retrieval_signals_count".to_string(),
@@ -3221,6 +3231,8 @@ mod tests {
             signals: vec!["semantic-hit".to_string()],
             top_language: None,
             snippet_languages: Vec::new(),
+            top_ecosystem: None,
+            snippet_ecosystems: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
         };
@@ -3247,6 +3259,8 @@ mod tests {
             signals: vec![],
             top_language: None,
             snippet_languages: Vec::new(),
+            top_ecosystem: None,
+            snippet_ecosystems: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(budi_core::reason_codes::SKIP_REASON_LOW_CONFIDENCE.to_string()),
         };
@@ -3273,6 +3287,8 @@ mod tests {
             signals: vec!["path-hit".to_string()],
             top_language: None,
             snippet_languages: Vec::new(),
+            top_ecosystem: None,
+            snippet_ecosystems: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
         };

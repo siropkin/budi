@@ -1010,9 +1010,9 @@ def build_markdown(
     lines.append("## Per-Prompt Outcomes")
     lines.append("")
     lines.append(
-        "| # | Prompt | cost nb/wb | Q nb→wb | G nb→wb | intent | lang | top | ctx | winner |"
+        "| # | Prompt | cost nb/wb | Q nb→wb | G nb→wb | intent | lang | eco | top | ctx | winner |"
     )
-    lines.append("|---:|---|---:|---:|---:|---|---|---:|---:|---|")
+    lines.append("|---:|---|---:|---:|---:|---|---|---|---:|---:|---|")
     for i, row in enumerate(rows, start=1):
         prompt_short = row["prompt"][:100].replace("\n", " ")
         a = row["no_budi"]
@@ -1039,6 +1039,14 @@ def build_markdown(
             lang_str = ",".join(str(item) for item in languages[:3])
         else:
             lang_str = "—"
+        top_ecosystem = hook_out.get("retrieval_top_ecosystem")
+        ecosystems = hook_out.get("retrieval_ecosystems") or []
+        if isinstance(top_ecosystem, str) and top_ecosystem:
+            eco_str = top_ecosystem
+        elif isinstance(ecosystems, list) and ecosystems:
+            eco_str = ",".join(str(item) for item in ecosystems[:3])
+        else:
+            eco_str = "—"
         top_score = hook_out.get("retrieval_top_score")
         ctx_chars = hook_out.get("context_chars")
         top_str = f"{top_score:.2f}" if isinstance(top_score, (int, float)) else "—"
@@ -1053,7 +1061,7 @@ def build_markdown(
         cost_wb = safe_num(b.get("total_cost_usd"))
         lines.append(
             f"| {i} | {prompt_short} | {cost_nb:.4f}/{cost_wb:.4f} | "
-            f"{q_str} | {g_str} | {intent_abbrev} | {lang_str} | {top_str} | {ctx_str} | "
+            f"{q_str} | {g_str} | {intent_abbrev} | {lang_str} | {eco_str} | {top_str} | {ctx_str} | "
             f"{judge.get('winner', 'n/a')} |"
         )
     lines.append("")
