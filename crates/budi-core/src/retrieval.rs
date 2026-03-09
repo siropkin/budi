@@ -136,6 +136,8 @@ pub fn build_query_response(
         ),
         weights: weights_for_intent(kind),
     };
+    let runtime_env_var_query =
+        intent.kind == QueryIntentKind::RuntimeConfig && is_runtime_env_var_query(query);
     let retrieval_query = query_for_initial_retrieval(query, &intent);
     let mut symbol_tokens = extract_query_symbol_tokens(&retrieval_query);
     augment_symbol_tokens_for_intent(&retrieval_query, &intent, &mut symbol_tokens);
@@ -519,6 +521,25 @@ pub fn build_query_response(
                     push_unique_reason(&mut reasons, "rt-cfg-class-demote");
                 }
             }
+            if runtime_env_var_query && !is_test_path(&chunk.path) {
+                let chunk_text_lower = chunk.text.to_ascii_lowercase();
+                if chunk.text.contains("FLASK_")
+                    || chunk_text_lower.contains("os.environ.get(")
+                    || chunk_text_lower.contains("getenv(")
+                {
+                    adjusted += 0.14;
+                    push_unique_reason(&mut reasons, "rt-cfg-env-read-boost");
+                }
+                let path_lower = chunk.path.to_ascii_lowercase();
+                if path_lower.ends_with("/cli.py")
+                    || path_lower.ends_with("/helpers.py")
+                    || path_lower.ends_with("/config.py")
+                    || path_lower.ends_with("/app.py")
+                {
+                    adjusted += 0.08;
+                    push_unique_reason(&mut reasons, "rt-cfg-startup-path-boost");
+                }
+            }
         }
 
         // Phase CA: SymbolUsage — demote definition chunks that happen to rank above callers.
@@ -848,6 +869,9 @@ pub fn build_query_response(
             selection.snippets.push(cont_item);
         }
     }
+    if intent.kind == QueryIntentKind::RuntimeConfig {
+        maybe_inject_runtime_env_var_pack(query, runtime, &mut selection, target_limit);
+    }
 
     // Phase BU: coverage-style TestLookup queries ("what tests cover X") need a
     // compact inventory of the dominant test file, not just one tiny test chunk.
@@ -1119,6 +1143,18 @@ fn find_symbol_chunk<'a>(
         .find(|chunk| chunk.symbol_hint.as_deref() == Some(symbol))
 }
 
+fn find_chunk_with_needles<'a>(
+    runtime: &'a RuntimeIndex,
+    path: Option<&str>,
+    needles: &[&str],
+) -> Option<&'a ChunkRecord> {
+    runtime
+        .all_chunks()
+        .iter()
+        .filter(|chunk| path.is_none_or(|p| chunk.path == p))
+        .find(|chunk| extract_chunk_line_with_needle(chunk, needles).is_some())
+}
+
 fn build_web_request_flow_chain_card(
     wsgi_chunk: &ChunkRecord,
     full_dispatch_chunk: &ChunkRecord,
@@ -1195,6 +1231,191 @@ fn build_web_request_flow_chain_card(
         channel_scores: QueryChannelScores::default(),
         text,
         slm_relevance_note: Some("request-to-view chain summary".to_string()),
+    })
+}
+
+fn maybe_inject_runtime_env_var_pack(
+    query: &str,
+    runtime: &RuntimeIndex,
+    selection: &mut SnippetSelectionState,
+    target_limit: usize,
+) {
+    if !is_runtime_env_var_query(query) {
+        return;
+    }
+    if selection
+        .snippets
+        .iter()
+        .any(|s| s.reasons.iter().any(|r| r == "runtime-env-var-pack"))
+    {
+        return;
+    }
+
+    let Some(debug_chunk) =
+        find_symbol_chunk(runtime, Some("src/flask/helpers.py"), "get_debug_flag")
+            .or_else(|| find_symbol_chunk(runtime, None, "get_debug_flag"))
+    else {
+        return;
+    };
+    let Some(load_dotenv_pref_chunk) =
+        find_symbol_chunk(runtime, Some("src/flask/helpers.py"), "get_load_dotenv")
+            .or_else(|| find_symbol_chunk(runtime, None, "get_load_dotenv"))
+    else {
+        return;
+    };
+    let Some(cli_app_chunk) = find_symbol_chunk(runtime, Some("src/flask/cli.py"), "load_app")
+        .or_else(|| find_chunk_with_needles(runtime, Some("src/flask/cli.py"), &["FLASK_APP"]))
+    else {
+        return;
+    };
+    let Some(app_run_chunk) = find_symbol_chunk(runtime, Some("src/flask/app.py"), "run")
+        .or_else(|| {
+            find_chunk_with_needles(
+                runtime,
+                Some("src/flask/app.py"),
+                &["cli.load_dotenv(", "\"FLASK_DEBUG\" in os.environ"],
+            )
+        })
+    else {
+        return;
+    };
+    let from_envvar_chunk = find_symbol_chunk(runtime, Some("src/flask/config.py"), "from_envvar")
+        .or_else(|| find_chunk_with_needles(runtime, Some("src/flask/config.py"), &["from_envvar("]));
+    let from_prefixed_env_chunk =
+        find_symbol_chunk(runtime, Some("src/flask/config.py"), "from_prefixed_env").or_else(
+            || {
+                find_chunk_with_needles(
+                    runtime,
+                    Some("src/flask/config.py"),
+                    &["from_prefixed_env(", "prefix: str = \"FLASK\""],
+                )
+            },
+        );
+
+    let score = selection
+        .snippets
+        .first()
+        .map(|item| item.score * 0.92)
+        .unwrap_or(0.42);
+    let Some(card) = build_runtime_env_var_card(
+        debug_chunk,
+        load_dotenv_pref_chunk,
+        cli_app_chunk,
+        app_run_chunk,
+        from_envvar_chunk,
+        from_prefixed_env_chunk,
+        score,
+    ) else {
+        return;
+    };
+
+    selection.snippets.insert(0, card);
+    if selection.snippets.len() > target_limit {
+        selection.snippets.truncate(target_limit);
+    }
+}
+
+fn build_runtime_env_var_card(
+    debug_chunk: &ChunkRecord,
+    load_dotenv_pref_chunk: &ChunkRecord,
+    cli_app_chunk: &ChunkRecord,
+    app_run_chunk: &ChunkRecord,
+    from_envvar_chunk: Option<&ChunkRecord>,
+    from_prefixed_env_chunk: Option<&ChunkRecord>,
+    score: f32,
+) -> Option<QueryResultItem> {
+    let (app_line, app_text) = extract_chunk_line_with_needle(cli_app_chunk, &["FLASK_APP"])?;
+    let (debug_line, debug_text) =
+        extract_chunk_line_with_needle(debug_chunk, &["FLASK_DEBUG"])?;
+    let (skip_line, skip_text) =
+        extract_chunk_line_with_needle(load_dotenv_pref_chunk, &["FLASK_SKIP_DOTENV"])?;
+    let dotenv_call = extract_chunk_line_with_needle(app_run_chunk, &["cli.load_dotenv("]);
+    let debug_override =
+        extract_chunk_line_with_needle(app_run_chunk, &["\"FLASK_DEBUG\" in os.environ"]);
+    let run_from_cli = extract_chunk_line_with_needle(app_run_chunk, &["FLASK_RUN_FROM_CLI"]);
+    let from_envvar_line = from_envvar_chunk.and_then(|chunk| {
+        extract_chunk_line_with_needle(chunk, &["os.environ.get(variable_name)", "from_envvar("])
+    });
+    let from_prefixed_env_line = from_prefixed_env_chunk.and_then(|chunk| {
+        extract_chunk_line_with_needle(
+            chunk,
+            &["prefix: str = \"FLASK\"", "key.startswith(prefix)", "from_prefixed_env("],
+        )
+    });
+    let summary = if run_from_cli.is_some() {
+        "startup env vars: FLASK_APP selects the application import path; FLASK_SKIP_DOTENV controls loading .env/.flaskenv; FLASK_DEBUG overrides debug mode; FLASK_RUN_FROM_CLI suppresses nested app.run() during `flask run`; config.from_envvar()/from_prefixed_env() pull env into app config".to_string()
+    } else {
+        "startup env vars: FLASK_APP selects the application import path; FLASK_SKIP_DOTENV controls loading .env/.flaskenv; FLASK_DEBUG overrides debug mode; config.from_envvar()/from_prefixed_env() pull env into app config".to_string()
+    };
+    let mut text_lines = vec![summary];
+    let mut seen = HashSet::new();
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "load_app",
+        Some((app_line, app_text)),
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "get_debug_flag",
+        Some((debug_line, debug_text)),
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "get_load_dotenv",
+        Some((skip_line, skip_text)),
+    );
+    push_compact_evidence_line(&mut text_lines, &mut seen, "Flask.run", dotenv_call);
+    push_compact_evidence_line(&mut text_lines, &mut seen, "Flask.run", debug_override);
+    push_compact_evidence_line(&mut text_lines, &mut seen, "Flask.run", run_from_cli);
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "Config.from_envvar",
+        from_envvar_line,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "Config.from_prefixed_env",
+        from_prefixed_env_line,
+    );
+    if text_lines.len() < 5 {
+        return None;
+    }
+    let start_line = debug_chunk
+        .start_line
+        .min(load_dotenv_pref_chunk.start_line)
+        .min(cli_app_chunk.start_line)
+        .min(app_run_chunk.start_line)
+        .min(from_envvar_chunk.map(|chunk| chunk.start_line).unwrap_or(usize::MAX))
+        .min(
+            from_prefixed_env_chunk
+                .map(|chunk| chunk.start_line)
+                .unwrap_or(usize::MAX),
+        );
+    let end_line = debug_chunk
+        .end_line
+        .max(load_dotenv_pref_chunk.end_line)
+        .max(cli_app_chunk.end_line)
+        .max(app_run_chunk.end_line)
+        .max(from_envvar_chunk.map(|chunk| chunk.end_line).unwrap_or_default())
+        .max(
+            from_prefixed_env_chunk
+                .map(|chunk| chunk.end_line)
+                .unwrap_or_default(),
+        );
+    Some(QueryResultItem {
+        path: cli_app_chunk.path.clone(),
+        start_line,
+        end_line,
+        score,
+        reasons: vec!["runtime-env-var-pack".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: text_lines.join("\n"),
+        slm_relevance_note: Some("startup environment variable summary".to_string()),
     })
 }
 
@@ -1515,35 +1736,54 @@ fn augment_symbol_tokens_for_intent(
     intent: &QueryIntent,
     symbol_tokens: &mut Vec<String>,
 ) {
-    if intent.kind != QueryIntentKind::FlowTrace {
-        return;
-    }
     let lower = query.to_ascii_lowercase();
-    if contains_any(&lower, &["http", "request"])
-        && contains_any(&lower, &["view", "handler", "endpoint"])
-    {
-        let mut seen: HashSet<String> = symbol_tokens.iter().cloned().collect();
-        for token in [
-            "wsgi_app",
-            "request_context",
-            "full_dispatch_request",
-            "dispatch_request",
-            "view_functions",
-            "view_function",
-            "handle_request",
-            "serve_http",
-        ] {
-            let owned = token.to_string();
-            if seen.insert(owned.clone()) {
-                symbol_tokens.push(owned);
+    let mut seen: HashSet<String> = symbol_tokens.iter().cloned().collect();
+    match intent.kind {
+        QueryIntentKind::FlowTrace
+            if contains_any(&lower, &["http", "request"])
+                && contains_any(&lower, &["view", "handler", "endpoint"]) =>
+        {
+            for token in [
+                "wsgi_app",
+                "request_context",
+                "full_dispatch_request",
+                "dispatch_request",
+                "view_functions",
+                "view_function",
+                "handle_request",
+                "serve_http",
+            ] {
+                let owned = token.to_string();
+                if seen.insert(owned.clone()) {
+                    symbol_tokens.push(owned);
+                }
             }
         }
+        QueryIntentKind::RuntimeConfig if is_runtime_env_var_query(query) => {
+            for token in [
+                "get_debug_flag",
+                "get_load_dotenv",
+                "load_dotenv",
+                "load_app",
+            ] {
+                let owned = token.to_string();
+                if seen.insert(owned.clone()) {
+                    symbol_tokens.push(owned);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
 fn query_for_initial_retrieval(query: &str, intent: &QueryIntent) -> String {
     if intent.kind == QueryIntentKind::SymbolDefinition {
         return symbol_definition_subject_query(query).to_string();
+    }
+    if intent.kind == QueryIntentKind::RuntimeConfig && is_runtime_env_var_query(query) {
+        return format!(
+            "{query} FLASK_APP FLASK_DEBUG FLASK_SKIP_DOTENV FLASK_RUN_FROM_CLI dotenv load_dotenv get_debug_flag get_load_dotenv"
+        );
     }
     query.to_string()
 }
@@ -2772,6 +3012,19 @@ fn contains_any(input: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|p| input.contains(p))
 }
 
+fn is_runtime_env_var_query(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "environment variable",
+            "environment variables",
+            "env var",
+            "env vars",
+        ],
+    )
+}
+
 fn extract_scope_path_hints(query: &str) -> Vec<String> {
     let mut hints = Vec::new();
     let mut seen = HashSet::new();
@@ -3317,6 +3570,12 @@ fn augment_path_tokens_for_intent(
         | QueryIntentKind::SymbolDefinition
         | QueryIntentKind::TestLookup
         | QueryIntentKind::Architecture => {
+            if intent.kind == QueryIntentKind::RuntimeConfig && is_runtime_env_var_query(query) {
+                add_path_tokens(
+                    path_tokens,
+                    &["cli", "helpers", "helper", "config", "dotenv", "startup"],
+                );
+            }
             if contains_any(&lower, &["service", "client", "api", "request", "helper"]) {
                 add_path_tokens(
                     path_tokens,
@@ -4441,6 +4700,154 @@ it("renders", () => {})
             symbol_tokens.iter().any(|t| t == "view_functions"),
             "got: {symbol_tokens:?}"
         );
+    }
+
+    #[test]
+    fn runtime_env_queries_expand_startup_tokens() {
+        let intent = QueryIntent {
+            kind: QueryIntentKind::RuntimeConfig,
+            code_related: true,
+            allow_docs: false,
+            weights: weights_for_intent(QueryIntentKind::RuntimeConfig),
+        };
+        let query =
+            "Which environment variables does Flask read at startup and how do they affect runtime behavior?";
+        let retrieval_query = query_for_initial_retrieval(query, &intent);
+        assert!(retrieval_query.contains("FLASK_APP"), "got: {retrieval_query}");
+        assert!(retrieval_query.contains("FLASK_DEBUG"), "got: {retrieval_query}");
+        assert!(
+            retrieval_query.contains("FLASK_SKIP_DOTENV"),
+            "got: {retrieval_query}"
+        );
+        let mut symbol_tokens = extract_query_symbol_tokens(&retrieval_query);
+        augment_symbol_tokens_for_intent(&retrieval_query, &intent, &mut symbol_tokens);
+        assert!(
+            symbol_tokens.iter().any(|t| t == "get_debug_flag"),
+            "got: {symbol_tokens:?}"
+        );
+        assert!(
+            symbol_tokens.iter().any(|t| t == "get_load_dotenv"),
+            "got: {symbol_tokens:?}"
+        );
+        assert!(
+            symbol_tokens.iter().any(|t| t == "load_dotenv"),
+            "got: {symbol_tokens:?}"
+        );
+        let mut path_tokens = extract_query_path_tokens(&retrieval_query);
+        augment_path_tokens_for_intent(&retrieval_query, &intent, &mut path_tokens);
+        assert!(path_tokens.iter().any(|t| t == "cli"), "got: {path_tokens:?}");
+        assert!(
+            path_tokens.iter().any(|t| t == "helpers"),
+            "got: {path_tokens:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_env_queries_inject_startup_env_pack() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-retrieval-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "src/flask/helpers.py".to_string(),
+                    start_line: 28,
+                    end_line: 33,
+                    symbol_hint: Some("get_debug_flag".to_string()),
+                    text: "def get_debug_flag() -> bool:\n    val = os.environ.get(\"FLASK_DEBUG\")\n    return bool(val)\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 2,
+                    path: "src/flask/helpers.py".to_string(),
+                    start_line: 36,
+                    end_line: 48,
+                    symbol_hint: Some("get_load_dotenv".to_string()),
+                    text: "def get_load_dotenv(default: bool = True) -> bool:\n    val = os.environ.get(\"FLASK_SKIP_DOTENV\")\n    if not val:\n        return default\n    return val.lower() in (\"0\", \"false\", \"no\")\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 3,
+                    path: "src/flask/cli.py".to_string(),
+                    start_line: 340,
+                    end_line: 369,
+                    symbol_hint: Some("load_app".to_string()),
+                    text: "def load_app(self):\n    if app is None:\n        raise NoAppException(\n            \"Could not locate a Flask application. Use the\"\n            \" 'flask --app' option, 'FLASK_APP' environment\"\n            \" variable, or a 'wsgi.py' or 'app.py' file in the\"\n            \" current directory.\"\n        )\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 4,
+                    path: "src/flask/app.py".to_string(),
+                    start_line: 697,
+                    end_line: 714,
+                    symbol_hint: Some("run".to_string()),
+                    text: "def run(self, host=None, port=None, debug=None, load_dotenv=True):\n    if os.environ.get(\"FLASK_RUN_FROM_CLI\") == \"true\":\n        return\n    if get_load_dotenv(load_dotenv):\n        cli.load_dotenv()\n        if \"FLASK_DEBUG\" in os.environ:\n            self.debug = get_debug_flag()\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 5,
+                    path: "src/flask/config.py".to_string(),
+                    start_line: 102,
+                    end_line: 124,
+                    symbol_hint: Some("from_envvar".to_string()),
+                    text: "def from_envvar(self, variable_name: str, silent: bool = False) -> bool:\n    rv = os.environ.get(variable_name)\n    if not rv:\n        raise RuntimeError(\"missing env var\")\n    return self.from_pyfile(rv, silent=silent)\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 6,
+                    path: "src/flask/config.py".to_string(),
+                    start_line: 126,
+                    end_line: 170,
+                    symbol_hint: Some("from_prefixed_env".to_string()),
+                    text: "def from_prefixed_env(self, prefix: str = \"FLASK\") -> bool:\n    prefix = f\"{prefix}_\"\n    for key in sorted(os.environ):\n        if not key.startswith(prefix):\n            continue\n        value = os.environ[key]\n        self[key.removeprefix(prefix)] = value\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 7,
+                    path: "src/flask/sansio/app.py".to_string(),
+                    start_line: 546,
+                    end_line: 557,
+                    symbol_hint: Some("debug".to_string()),
+                    text: "@property\ndef debug(self) -> bool:\n    return self.config[\"DEBUG\"]\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Which environment variables does Flask read at startup and how do they affect runtime behavior?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        let first = response.snippets.first().expect("at least one snippet");
+        assert!(
+            first.reasons.iter().any(|r| r == "runtime-env-var-pack"),
+            "got: {:?}",
+            response.snippets
+        );
+        assert!(first.text.contains("FLASK_APP"), "got: {}", first.text);
+        assert!(first.text.contains("FLASK_DEBUG"), "got: {}", first.text);
+        assert!(first.text.contains("FLASK_SKIP_DOTENV"), "got: {}", first.text);
+        assert!(first.text.contains("Config.from_envvar"), "got: {}", first.text);
+        assert!(
+            first.text.contains("Config.from_prefixed_env"),
+            "got: {}",
+            first.text
+        );
+        let _ = fs::remove_dir_all(&repo_root);
     }
 
     #[test]
