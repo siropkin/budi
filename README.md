@@ -44,9 +44,9 @@ Across 4 open-source repos (72 prompts total), judged by an independent LLM:
 ```mermaid
 pie showData
     title "Latest validated outcomes (React + Flask, 36 prompts)"
-    "budi wins" : 10
-    "ties" : 20
-    "budi losses" : 6
+    "budi wins" : 11
+    "ties" : 21
+    "budi losses" : 4
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
