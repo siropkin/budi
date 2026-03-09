@@ -157,6 +157,7 @@ pub fn build_query_response(
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(&retrieval_query, &intent, &mut path_tokens);
     let query_ecosystems = detect_query_ecosystems(query);
+    let react_effect_lifecycle_query = is_react_effect_lifecycle_query(query, &query_ecosystems);
 
     // TestLookup: widen the candidate pool so inline test blocks (which score lower
     // than production code on the query text) have a chance to enter the fused stage.
@@ -885,6 +886,9 @@ pub fn build_query_response(
     if intent.kind == QueryIntentKind::RuntimeConfig {
         maybe_inject_runtime_env_var_pack(query, runtime, &mut selection, target_limit);
     }
+    if react_effect_lifecycle_query {
+        maybe_inject_react_effect_lifecycle_pack(runtime, &mut selection, target_limit);
+    }
 
     // Phase BU: coverage-style TestLookup queries ("what tests cover X") need a
     // compact inventory of the dominant test file, not just one tiny test chunk.
@@ -1221,6 +1225,230 @@ fn build_symbol_definition_first_steps_card(
     })
 }
 
+fn maybe_inject_react_effect_lifecycle_pack(
+    runtime: &RuntimeIndex,
+    selection: &mut SnippetSelectionState,
+    target_limit: usize,
+) {
+    if selection.snippets.is_empty() {
+        return;
+    }
+    let Some(layout_unmount_chunk) =
+        find_symbolish_chunk(runtime, None, "commitHookLayoutUnmountEffects")
+    else {
+        return;
+    };
+    let Some(layout_mount_chunk) = find_symbolish_chunk(runtime, None, "commitHookLayoutEffects")
+    else {
+        return;
+    };
+    let Some(flush_layout_chunk) = find_symbolish_chunk(runtime, None, "flushLayoutEffects") else {
+        return;
+    };
+    let Some(flush_passive_chunk) = find_symbolish_chunk(runtime, None, "flushPassiveEffects")
+    else {
+        return;
+    };
+    let Some(passive_unmount_chunk) =
+        find_symbolish_chunk(runtime, None, "commitPassiveUnmountEffects")
+    else {
+        return;
+    };
+    let Some(passive_mount_chunk) =
+        find_symbolish_chunk(runtime, None, "commitPassiveMountEffects")
+    else {
+        return;
+    };
+    let Some(hook_mount_chunk) = find_symbolish_chunk(runtime, None, "commitHookEffectListMount")
+    else {
+        return;
+    };
+    let Some(hook_unmount_chunk) =
+        find_symbolish_chunk(runtime, None, "commitHookEffectListUnmount")
+    else {
+        return;
+    };
+    let top_score = selection.snippets.first().map(|s| s.score).unwrap_or(0.40);
+    let Some(card) = build_react_effect_lifecycle_card(
+        layout_unmount_chunk,
+        layout_mount_chunk,
+        flush_layout_chunk,
+        flush_passive_chunk,
+        passive_unmount_chunk,
+        passive_mount_chunk,
+        hook_unmount_chunk,
+        hook_mount_chunk,
+        top_score * 0.97,
+    ) else {
+        return;
+    };
+    if selection
+        .snippets
+        .iter()
+        .any(|s| s.reasons.iter().any(|r| r == "react-effect-lifecycle-pack"))
+    {
+        return;
+    }
+    selection.snippets.insert(0, card);
+    if selection.snippets.len() > target_limit {
+        selection.snippets.truncate(target_limit);
+    }
+}
+
+fn is_react_effect_lifecycle_query(query: &str, query_ecosystems: &[String]) -> bool {
+    if !query_ecosystems
+        .iter()
+        .any(|ecosystem| ecosystem == "react")
+    {
+        return false;
+    }
+    let lower = query.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "lifecycle",
+            "mount",
+            "unmount",
+            "cleanup",
+            "effect order",
+            "layout effect",
+            "passive effect",
+            "useeffect",
+            "uselayouteffect",
+        ],
+    ) && contains_any(&lower, &["component", "hook", "hooks", "effect", "effects"])
+}
+
+fn build_react_effect_lifecycle_card(
+    layout_unmount_chunk: &ChunkRecord,
+    layout_mount_chunk: &ChunkRecord,
+    flush_layout_chunk: &ChunkRecord,
+    flush_passive_chunk: &ChunkRecord,
+    passive_unmount_chunk: &ChunkRecord,
+    passive_mount_chunk: &ChunkRecord,
+    hook_unmount_chunk: &ChunkRecord,
+    hook_mount_chunk: &ChunkRecord,
+    score: f32,
+) -> Option<QueryResultItem> {
+    let layout_destroy_comment = extract_chunk_line_with_needle(
+        layout_unmount_chunk,
+        &["Layout effects are destroyed during the mutation phase"],
+    );
+    let layout_phase_line =
+        extract_chunk_line_with_needle(flush_layout_chunk, &["commitLayoutEffects("]);
+    let layout_mount_comment = extract_chunk_line_with_needle(
+        layout_mount_chunk,
+        &["layout effects have already been destroyed"],
+    );
+    let passive_unmount_call = extract_chunk_line_with_needle(
+        flush_passive_chunk,
+        &["commitPassiveUnmountEffects(root.current)"],
+    );
+    let passive_mount_call =
+        extract_chunk_line_with_needle(flush_passive_chunk, &["commitPassiveMountEffects("]);
+    let passive_unmount_delegate = extract_chunk_line_with_needle(
+        passive_unmount_chunk,
+        &["commitPassiveUnmountOnFiber(finishedWork)"],
+    );
+    let passive_mount_delegate =
+        extract_chunk_line_with_needle(passive_mount_chunk, &["commitPassiveMountOnFiber("]);
+    let hook_destroy_line =
+        extract_chunk_line_with_needle(hook_unmount_chunk, &["safelyCallDestroy("]);
+    let hook_create_line = extract_chunk_line_with_needle(hook_mount_chunk, &["destroy = create("])
+        .or_else(|| extract_chunk_line_with_needle(hook_mount_chunk, &["inst.destroy = destroy"]));
+
+    let summary =
+        "order: mutation/layout cleanup -> layout mounts -> passive cleanup -> passive mounts";
+    let mut text_lines = vec![summary.to_string()];
+    let mut seen = HashSet::new();
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "commitHookLayoutUnmountEffects",
+        layout_destroy_comment,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "flushLayoutEffects",
+        layout_phase_line,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "commitHookLayoutEffects",
+        layout_mount_comment,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "commitHookEffectListUnmount",
+        hook_destroy_line,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "flushPassiveEffects",
+        passive_unmount_call,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "commitPassiveUnmountEffects",
+        passive_unmount_delegate,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "flushPassiveEffects",
+        passive_mount_call,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "commitPassiveMountEffects",
+        passive_mount_delegate,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "commitHookEffectListMount",
+        hook_create_line,
+    );
+    if text_lines.len() < 4 {
+        return None;
+    }
+    let start_line = layout_unmount_chunk
+        .start_line
+        .min(layout_mount_chunk.start_line)
+        .min(flush_layout_chunk.start_line)
+        .min(flush_passive_chunk.start_line)
+        .min(passive_unmount_chunk.start_line)
+        .min(passive_mount_chunk.start_line)
+        .min(hook_unmount_chunk.start_line)
+        .min(hook_mount_chunk.start_line);
+    let end_line = layout_unmount_chunk
+        .end_line
+        .max(layout_mount_chunk.end_line)
+        .max(flush_layout_chunk.end_line)
+        .max(flush_passive_chunk.end_line)
+        .max(passive_unmount_chunk.end_line)
+        .max(passive_mount_chunk.end_line)
+        .max(hook_unmount_chunk.end_line)
+        .max(hook_mount_chunk.end_line);
+    Some(QueryResultItem {
+        path: flush_passive_chunk.path.clone(),
+        start_line,
+        end_line,
+        language: flush_passive_chunk.language.clone(),
+        score,
+        reasons: vec!["react-effect-lifecycle-pack".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: text_lines.join("\n"),
+        slm_relevance_note: Some("React effect lifecycle summary".to_string()),
+    })
+}
+
 fn maybe_inject_web_request_flow_chain_card(
     query: &str,
     runtime: &RuntimeIndex,
@@ -1285,6 +1513,53 @@ fn find_symbol_chunk<'a>(
         .iter()
         .filter(|chunk| path.is_none_or(|p| chunk.path == p))
         .find(|chunk| chunk.symbol_hint.as_deref() == Some(symbol))
+}
+
+fn find_symbolish_chunk<'a>(
+    runtime: &'a RuntimeIndex,
+    path: Option<&str>,
+    symbol: &str,
+) -> Option<&'a ChunkRecord> {
+    if let Some(chunk) = find_symbol_chunk(runtime, path, symbol) {
+        return Some(chunk);
+    }
+    let exported = format!("export function {symbol}");
+    let plain = format!("function {symbol}");
+    let async_exported = format!("export async function {symbol}");
+    let async_plain = format!("async function {symbol}");
+    let call_form = format!("{symbol}(");
+    let mut best: Option<(&ChunkRecord, i32)> = None;
+    for chunk in runtime.all_chunks() {
+        if path.is_some_and(|expected| chunk.path != expected) {
+            continue;
+        }
+        let mut score = 0i32;
+        if chunk.text.contains(&exported) {
+            score += 6;
+        }
+        if chunk.text.contains(&async_exported) {
+            score += 6;
+        }
+        if chunk.text.contains(&plain) {
+            score += 5;
+        }
+        if chunk.text.contains(&async_plain) {
+            score += 5;
+        }
+        if chunk.text.contains(&call_form) {
+            score += 2;
+        }
+        if score == 0 {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_score)| score > *best_score)
+        {
+            best = Some((chunk, score));
+        }
+    }
+    best.map(|(chunk, _)| chunk)
 }
 
 fn count_chunk_needle_hits(chunk: &ChunkRecord, needles: &[&str]) -> usize {
@@ -2783,7 +3058,10 @@ fn try_push_scored_chunk(
     let is_synthetic_pack = candidate.reasons.iter().any(|r| {
         matches!(
             r.as_str(),
-            "web-request-flow-pack" | "wrapper-implementation-pack" | "delegated-definition-pack"
+            "web-request-flow-pack"
+                | "wrapper-implementation-pack"
+                | "delegated-definition-pack"
+                | "react-effect-lifecycle-pack"
         )
     });
     let overlaps_existing = !is_synthetic_pack
@@ -5251,6 +5529,251 @@ it("renders", () => {})
             "got: {:?}",
             response.diagnostics.snippet_ecosystems
         );
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn react_effect_lifecycle_card_builds_grounded_order() {
+        let layout_unmount_chunk = ChunkRecord {
+            id: 1,
+            path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+            start_line: 114,
+            end_line: 138,
+            language: "javascript".to_string(),
+            symbol_hint: Some("commitHookLayoutUnmountEffects".to_string()),
+            text: "export function commitHookLayoutUnmountEffects(finishedWork, nearestMountedAncestor, hookFlags) {\n  // Layout effects are destroyed during the mutation phase so that all\n  // destroy functions for all fibers are called before any create functions.\n  commitHookEffectListUnmount(hookFlags, finishedWork, nearestMountedAncestor);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let layout_mount_chunk = ChunkRecord {
+            id: 2,
+            path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+            start_line: 97,
+            end_line: 110,
+            language: "javascript".to_string(),
+            symbol_hint: Some("commitHookLayoutEffects".to_string()),
+            text: "export function commitHookLayoutEffects(finishedWork, hookFlags) {\n  // At this point layout effects have already been destroyed (during mutation phase).\n  commitHookEffectListMount(hookFlags, finishedWork);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let flush_layout_chunk = ChunkRecord {
+            id: 3,
+            path: "packages/react-reconciler/src/ReactFiberWorkLoop.js".to_string(),
+            start_line: 4028,
+            end_line: 4100,
+            language: "javascript".to_string(),
+            symbol_hint: Some("flushLayoutEffects".to_string()),
+            text: "function flushLayoutEffects(): void {\n  // The next phase is the layout phase, where we call effects that read the host tree.\n  commitLayoutEffects(finishedWork, root, lanes);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let flush_passive_chunk = ChunkRecord {
+            id: 4,
+            path: "packages/react-reconciler/src/ReactFiberWorkLoop.js".to_string(),
+            start_line: 4645,
+            end_line: 4749,
+            language: "javascript".to_string(),
+            symbol_hint: Some("flushPassiveEffects".to_string()),
+            text: "function flushPassiveEffects(): boolean {\n  return flushPassiveEffectsImpl();\n}\nfunction flushPassiveEffectsImpl() {\n  commitPassiveUnmountEffects(root.current);\n  commitPassiveMountEffects(root, root.current, lanes, transitions, pendingEffectsRenderEndTime);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let passive_unmount_chunk = ChunkRecord {
+            id: 5,
+            path: "packages/react-reconciler/src/ReactFiberCommitWork.js".to_string(),
+            start_line: 4585,
+            end_line: 4588,
+            language: "javascript".to_string(),
+            symbol_hint: Some("commitPassiveUnmountEffects".to_string()),
+            text: "export function commitPassiveUnmountEffects(finishedWork: Fiber): void {\n  commitPassiveUnmountOnFiber(finishedWork);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let passive_mount_chunk = ChunkRecord {
+            id: 6,
+            path: "packages/react-reconciler/src/ReactFiberCommitWork.js".to_string(),
+            start_line: 3497,
+            end_line: 3512,
+            language: "javascript".to_string(),
+            symbol_hint: Some("commitPassiveMountEffects".to_string()),
+            text: "export function commitPassiveMountEffects(root, finishedWork, committedLanes, committedTransitions, renderEndTime) {\n  commitPassiveMountOnFiber(root, finishedWork, committedLanes, committedTransitions, renderEndTime);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let hook_unmount_chunk = ChunkRecord {
+            id: 7,
+            path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+            start_line: 248,
+            end_line: 300,
+            language: "javascript".to_string(),
+            symbol_hint: Some("commitHookEffectListUnmount".to_string()),
+            text: "export function commitHookEffectListUnmount(flags, finishedWork, nearestMountedAncestor) {\n  const destroy = inst.destroy;\n  safelyCallDestroy(finishedWork, nearestMountedAncestor, destroy);\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let hook_mount_chunk = ChunkRecord {
+            id: 8,
+            path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+            start_line: 141,
+            end_line: 177,
+            language: "javascript".to_string(),
+            symbol_hint: Some("commitHookEffectListMount".to_string()),
+            text: "export function commitHookEffectListMount(flags, finishedWork) {\n  const create = effect.create;\n  destroy = create();\n  inst.destroy = destroy;\n}\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let card = build_react_effect_lifecycle_card(
+            &layout_unmount_chunk,
+            &layout_mount_chunk,
+            &flush_layout_chunk,
+            &flush_passive_chunk,
+            &passive_unmount_chunk,
+            &passive_mount_chunk,
+            &hook_unmount_chunk,
+            &hook_mount_chunk,
+            0.9,
+        )
+        .expect("expected lifecycle card");
+        assert!(
+            card.text.contains("mutation/layout cleanup"),
+            "got: {}",
+            card.text
+        );
+        assert!(
+            card.text.contains("flushPassiveEffects"),
+            "got: {}",
+            card.text
+        );
+        assert!(
+            card.text.contains("commitHookEffectListUnmount"),
+            "got: {}",
+            card.text
+        );
+        assert_eq!(
+            card.slm_relevance_note.as_deref(),
+            Some("React effect lifecycle summary")
+        );
+    }
+
+    #[test]
+    fn react_lifecycle_query_injects_lifecycle_pack() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-react-lifecycle-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+                    start_line: 97,
+                    end_line: 110,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitHookLayoutEffects".to_string()),
+                    text: "export function commitHookLayoutEffects(finishedWork, hookFlags) {\n  // At this point layout effects have already been destroyed (during mutation phase).\n  commitHookEffectListMount(hookFlags, finishedWork);\n}\nexport function commitHookLayoutUnmountEffects(finishedWork, nearestMountedAncestor, hookFlags) {\n  // Layout effects are destroyed during the mutation phase so that all\n  // destroy functions for all fibers are called before any create functions.\n  commitHookEffectListUnmount(hookFlags, finishedWork, nearestMountedAncestor);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 2,
+                    path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+                    start_line: 114,
+                    end_line: 138,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitHookLayoutUnmountEffects".to_string()),
+                    text: "export function commitHookLayoutUnmountEffects(finishedWork, nearestMountedAncestor, hookFlags) {\n  // Layout effects are destroyed during the mutation phase so that all\n  // destroy functions for all fibers are called before any create functions.\n  commitHookEffectListUnmount(hookFlags, finishedWork, nearestMountedAncestor);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 3,
+                    path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+                    start_line: 141,
+                    end_line: 177,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitHookEffectListMount".to_string()),
+                    text: "export function commitHookEffectListMount(flags, finishedWork) {\n  const create = effect.create;\n  destroy = create();\n  inst.destroy = destroy;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 4,
+                    path: "packages/react-reconciler/src/ReactFiberCommitEffects.js".to_string(),
+                    start_line: 248,
+                    end_line: 300,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitHookEffectListUnmount".to_string()),
+                    text: "export function commitHookEffectListUnmount(flags, finishedWork, nearestMountedAncestor) {\n  const destroy = inst.destroy;\n  safelyCallDestroy(finishedWork, nearestMountedAncestor, destroy);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 5,
+                    path: "packages/react-reconciler/src/ReactFiberCommitWork.js".to_string(),
+                    start_line: 3497,
+                    end_line: 3512,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitPassiveMountEffects".to_string()),
+                    text: "export function commitPassiveMountEffects(root, finishedWork, committedLanes, committedTransitions, renderEndTime) {\n  commitPassiveMountOnFiber(root, finishedWork, committedLanes, committedTransitions, renderEndTime);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 6,
+                    path: "packages/react-reconciler/src/ReactFiberCommitWork.js".to_string(),
+                    start_line: 4585,
+                    end_line: 4588,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("commitPassiveUnmountEffects".to_string()),
+                    text: "export function commitPassiveUnmountEffects(finishedWork: Fiber): void {\n  commitPassiveUnmountOnFiber(finishedWork);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 7,
+                    path: "packages/react-reconciler/src/ReactFiberWorkLoop.js".to_string(),
+                    start_line: 4028,
+                    end_line: 4100,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("flushLayoutEffects".to_string()),
+                    text: "function flushLayoutEffects(): void {\n  // The next phase is the layout phase, where we call effects that read the host tree.\n  commitLayoutEffects(finishedWork, root, lanes);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 8,
+                    path: "packages/react-reconciler/src/ReactFiberWorkLoop.js".to_string(),
+                    start_line: 4645,
+                    end_line: 4749,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("flushPassiveEffects".to_string()),
+                    text: "function flushPassiveEffects(): boolean {\n  return flushPassiveEffectsImpl();\n}\nfunction flushPassiveEffectsImpl() {\n  commitPassiveUnmountEffects(root.current);\n  commitPassiveMountEffects(root, root.current, lanes, transitions, pendingEffectsRenderEndTime);\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 9,
+                    path: "packages/react-reconciler/src/ReactFiberHooks.js".to_string(),
+                    start_line: 1,
+                    end_line: 20,
+                    language: "javascript".to_string(),
+                    symbol_hint: Some("renderWithHooks".to_string()),
+                    text: "import ReactSharedInternals from 'shared/ReactSharedInternals';\n// React component lifecycle hook execution order for mounts, updates, and unmounts.\nexport function renderWithHooks() {}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Trace the lifecycle hook execution order when a React component mounts, updates, and unmounts.",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        let first = response.snippets.first().expect("at least one snippet");
+        assert!(
+            first
+                .reasons
+                .iter()
+                .any(|reason| reason == "react-effect-lifecycle-pack"),
+            "got: {:?}",
+            response.snippets
+        );
+        assert_eq!(response.diagnostics.top_ecosystem.as_deref(), Some("react"));
         let _ = fs::remove_dir_all(&repo_root);
     }
 

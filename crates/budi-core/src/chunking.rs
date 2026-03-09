@@ -192,8 +192,15 @@ fn contains_any_literal(input: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| input.contains(needle))
 }
 
+fn path_matches_any(input: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .any(|needle| input.contains(needle) || input.starts_with(needle))
+}
+
 fn is_react_chunk(lower_path: &str, lower_text: &str) -> bool {
-    lower_path.ends_with(".jsx")
+    path_matches_any(lower_path, &["react/", "/react/", "react-", "/react-"])
+        || lower_path.ends_with(".jsx")
         || lower_path.ends_with(".tsx")
         || contains_any_literal(
             lower_text,
@@ -238,6 +245,7 @@ fn is_nextjs_chunk(lower_path: &str, lower_text: &str) -> bool {
             || lower_path.ends_with("/route.ts"));
     let pages_router_file = lower_path.contains("/pages/");
     next_config
+        || path_matches_any(lower_path, &["next/", "/next/", "nextjs/", "/nextjs/"])
         || app_router_file
         || contains_any_literal(
             lower_text,
@@ -277,7 +285,8 @@ fn is_express_chunk(lower_text: &str) -> bool {
 }
 
 fn is_flask_chunk(lower_path: &str, lower_text: &str) -> bool {
-    lower_path.ends_with("/wsgi.py")
+    path_matches_any(lower_path, &["flask/", "/flask/"])
+        || lower_path.ends_with("/wsgi.py")
         || contains_any_literal(
             lower_text,
             &[
@@ -295,7 +304,8 @@ fn is_flask_chunk(lower_path: &str, lower_text: &str) -> bool {
 }
 
 fn is_django_chunk(lower_path: &str, lower_text: &str) -> bool {
-    lower_path.ends_with("/manage.py")
+    path_matches_any(lower_path, &["django/", "/django/"])
+        || lower_path.ends_with("/manage.py")
         || lower_path.ends_with("/settings.py")
         || lower_path.ends_with("/urls.py")
         || contains_any_literal(
@@ -327,6 +337,10 @@ fn is_fastapi_chunk(lower_text: &str) -> bool {
     )
 }
 
+fn is_fastapi_path(lower_path: &str) -> bool {
+    path_matches_any(lower_path, &["fastapi/", "/fastapi/"])
+}
+
 pub fn ecosystem_tags_for_chunk(file_path: &str, language: &str, text: &str) -> Vec<String> {
     let lower_path = file_path.to_ascii_lowercase();
     let lower_text = text.to_ascii_lowercase();
@@ -345,7 +359,7 @@ pub fn ecosystem_tags_for_chunk(file_path: &str, language: &str, text: &str) -> 
             }
         }
         "python" => {
-            if is_fastapi_chunk(&lower_text) {
+            if is_fastapi_path(&lower_path) || is_fastapi_chunk(&lower_text) {
                 push_unique_tag(&mut tags, "fastapi");
             }
             if is_flask_chunk(&lower_path, &lower_text) {
@@ -849,6 +863,16 @@ mod tests {
             "from fastapi import FastAPI, APIRouter\napp = FastAPI()\nrouter = APIRouter()\n",
         );
         assert!(tags.iter().any(|tag| tag == "fastapi"), "got: {tags:?}");
+    }
+
+    #[test]
+    fn ecosystem_tags_identify_react_from_framework_repo_path() {
+        let tags = ecosystem_tags_for_chunk(
+            "packages/react-reconciler/src/ReactFiberHooks.js",
+            "javascript",
+            "export function renderWithHooks() {}",
+        );
+        assert!(tags.iter().any(|tag| tag == "react"), "got: {tags:?}");
     }
 
     #[test]
