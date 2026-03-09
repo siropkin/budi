@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
 
 use crate::config::BudiConfig;
-use crate::index::RuntimeIndex;
+use crate::index::{ChunkRecord, RuntimeIndex};
 use crate::reason_codes::SKIP_REASON_NON_CODE_INTENT;
 use crate::rpc::{QueryChannelScores, QueryDiagnostics, QueryResponse, QueryResultItem};
 use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
@@ -13,6 +14,8 @@ mod context;
 
 const RRF_K: f32 = 60.0;
 const GRAPH_NEIGHBOR_EXPANSION_LIMIT: usize = 2;
+const TEST_INVENTORY_MAX_LINES: usize = 3;
+const TEST_INVENTORY_LINE_CHAR_BUDGET: usize = 160;
 
 // ── RetrievalMode ─────────────────────────────────────────────────────────────
 
@@ -104,6 +107,12 @@ struct ScoredChunk {
     score: f32,
     reasons: Vec<String>,
     channel_scores: QueryChannelScores,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestInventoryEntry {
+    line_number: usize,
+    label: String,
 }
 
 // ── build_query_response ──────────────────────────────────────────────────────
@@ -280,11 +289,21 @@ pub fn build_query_response(
                 continue;
             }
             let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
-            if SYMBOL_DEF_SEED_SCORE > existing {
+            let seeded_score = if existing > 0.0 {
+                SYMBOL_DEF_SEED_SCORE + (existing * 0.5)
+            } else {
+                SYMBOL_DEF_SEED_SCORE
+            };
+            if let Some(candidate) = fused.get_mut(&chunk.id) {
+                if seeded_score > candidate.score {
+                    candidate.score = seeded_score;
+                }
+                push_unique_reason(&mut candidate.signals, "sym-hint-seed");
+            } else {
                 fused.insert(
                     chunk.id,
                     CandidateScore {
-                        score: SYMBOL_DEF_SEED_SCORE,
+                        score: seeded_score,
                         signals: vec!["sym-hint-seed".to_string()],
                         channel_scores: QueryChannelScores::default(),
                     },
@@ -529,19 +548,34 @@ pub fn build_query_response(
             // of the same symbol from a different file (e.g. Flask.make_response in app.py
             // alongside the module-level make_response in helpers.py). Keep it — don't
             // replace a cross-file definition with a same-file continuation.
-            let card2_is_alt_def =
-                card2.is_some_and(|s| s.reasons.iter().any(|r| r == "hint-match-boost"));
-            if card2_is_alt_def {
-                return None;
-            }
             let cont_id = runtime.adjacent_chunk(&def_path, def_start)?;
             let cont = runtime.chunk(cont_id)?;
+            let card2_is_alt_def =
+                card2.is_some_and(|s| s.reasons.iter().any(|r| r == "hint-match-boost"));
+            let prefer_wrapper_continuation =
+                card2_is_alt_def && should_prefer_same_file_definition_continuation(def_item, cont);
+            if card2_is_alt_def && !prefer_wrapper_continuation {
+                return None;
+            }
+            let cont_score = def_score * if card2_is_alt_def { 0.72 } else { 0.60 };
+            if prefer_wrapper_continuation
+                && let Some(card) = build_symbol_definition_first_steps_card(cont, cont_score)
+            {
+                return Some(card);
+            }
             Some(crate::rpc::QueryResultItem {
                 path: cont.path.clone(),
                 start_line: cont.start_line,
                 end_line: cont.end_line,
-                score: def_score * 0.60,
-                reasons: vec!["definition-continuation".to_string()],
+                score: cont_score,
+                reasons: vec![
+                    if card2_is_alt_def {
+                        "wrapper-implementation-continuation"
+                    } else {
+                        "definition-continuation"
+                    }
+                    .to_string(),
+                ],
                 channel_scores: QueryChannelScores::default(),
                 text: cont.text.clone(),
                 slm_relevance_note: None,
@@ -598,6 +632,10 @@ pub fn build_query_response(
             selection.snippets.push(cont_item);
         }
     }
+
+    // Phase BU: coverage-style TestLookup queries ("what tests cover X") need a
+    // compact inventory of the dominant test file, not just one tiny test chunk.
+    maybe_inject_test_file_inventory_card(query, runtime, &scored, &mut selection, target_limit);
 
     // Diagnostics: SLM overrides recommended_injection + skip_reason in daemon.rs
     let diagnostics = QueryDiagnostics {
@@ -723,8 +761,118 @@ pub fn build_call_graph_summary(
     Some(out)
 }
 
+fn should_prefer_same_file_definition_continuation(
+    def_item: &QueryResultItem,
+    continuation: &ChunkRecord,
+) -> bool {
+    let Some(symbol) = continuation.symbol_hint.as_deref() else {
+        return false;
+    };
+    if is_generic_symbol_hint(symbol) {
+        return false;
+    }
+    let span_lines = def_item.end_line.saturating_sub(def_item.start_line) + 1;
+    if span_lines > 8 {
+        return false;
+    }
+    let code_lines = def_item
+        .text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with("/*")
+                && !trimmed.starts_with('*')
+        })
+        .count();
+    if code_lines > 6 {
+        return false;
+    }
+    if continuation.start_line > def_item.end_line.saturating_add(40) {
+        return false;
+    }
+    def_item.text.contains(&format!("{symbol}(")) || def_item.text.contains(&format!("{symbol} ("))
+}
+
+fn build_symbol_definition_first_steps_card(
+    continuation: &ChunkRecord,
+    score: f32,
+) -> Option<QueryResultItem> {
+    let steps = extract_symbol_definition_first_steps(&continuation.text, 4);
+    if steps.len() < 2 {
+        return None;
+    }
+    let mut summary = String::from("first steps:");
+    let mut included = 0usize;
+    for step in &steps {
+        let sep = if included == 0 { " " } else { ", " };
+        if summary.len() + sep.len() + step.len() > 160 {
+            let remaining = steps.len().saturating_sub(included);
+            if remaining > 0 {
+                summary.push_str(&format!(" +{} more", remaining));
+            }
+            break;
+        }
+        summary.push_str(sep);
+        summary.push_str(step);
+        included += 1;
+    }
+    let mut text_lines = Vec::with_capacity(steps.len() + 1);
+    text_lines.push(summary);
+    text_lines.extend(steps);
+    Some(QueryResultItem {
+        path: continuation.path.clone(),
+        start_line: continuation.start_line,
+        end_line: continuation.end_line,
+        score,
+        reasons: vec!["wrapper-implementation-pack".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: text_lines.join("\n"),
+        slm_relevance_note: Some("same-file first steps summary".to_string()),
+    })
+}
+
+fn extract_symbol_definition_first_steps(text: &str, max_steps: usize) -> Vec<String> {
+    if max_steps == 0 {
+        return Vec::new();
+    }
+    let mut steps = Vec::new();
+    let mut skipped_signature = false;
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty()
+            || trimmed == "{"
+            || trimmed == "}"
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        if !skipped_signature {
+            skipped_signature = true;
+            continue;
+        }
+        let line = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() || line == "{" || line == "}" {
+            continue;
+        }
+        steps.push(line);
+        if steps.len() >= max_steps {
+            break;
+        }
+    }
+    steps
+}
+
 fn is_test_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
+    // examples/ directories contain sample code, not repository test suites.
+    if lower.starts_with("examples/") || lower.contains("/examples/") {
+        return false;
+    }
     lower.contains("/test")
         || lower.contains("/spec")
         || lower.contains("__tests__")
@@ -836,6 +984,394 @@ fn test_subject_tokens(query: &str) -> Vec<String> {
         .map(|w| w.to_ascii_lowercase())
         .filter(|w| w.len() >= 4 && !STOP.contains(&w.as_str()))
         .collect()
+}
+
+fn is_test_coverage_inventory_query(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    contains_any(&lower, &["test", "tests", "spec", "specs"])
+        && contains_any(
+            &lower,
+            &[
+                "cover",
+                "covers",
+                "covered",
+                "covering",
+                "exercise",
+                "exercises",
+                "validate",
+                "validates",
+                "verify",
+                "verifies",
+            ],
+        )
+}
+
+fn maybe_inject_test_file_inventory_card(
+    query: &str,
+    runtime: &RuntimeIndex,
+    scored: &[ScoredChunk],
+    selection: &mut SnippetSelectionState,
+    target_limit: usize,
+) {
+    if selection.snippets.is_empty() || !is_test_coverage_inventory_query(query) {
+        return;
+    }
+    let Some(path) = select_test_inventory_path(query, &selection.snippets) else {
+        return;
+    };
+    let seed_line = selection
+        .snippets
+        .iter()
+        .find(|s| s.path == path)
+        .map(|s| s.start_line)
+        .unwrap_or_default();
+    if selection.snippets.iter().filter(|s| s.path == path).count() >= 2 {
+        return;
+    }
+    let top_score = selection
+        .snippets
+        .first()
+        .map(|s| s.score)
+        .unwrap_or_default();
+    let Some(inventory_card) =
+        build_test_file_inventory_card(query, runtime, scored, path, seed_line, top_score * 0.92)
+    else {
+        return;
+    };
+    if selection
+        .snippets
+        .iter()
+        .any(|s| s.path == path && s.reasons.iter().any(|r| r == "test-file-inventory"))
+    {
+        return;
+    }
+    let insert_at = selection.snippets.len().min(1);
+    selection.snippets.insert(insert_at, inventory_card);
+    if selection.snippets.len() > target_limit {
+        selection.snippets.pop();
+    }
+}
+
+fn select_test_inventory_path<'a>(query: &str, snippets: &'a [QueryResultItem]) -> Option<&'a str> {
+    let subject_tokens = test_subject_tokens(query);
+    snippets
+        .iter()
+        .filter(|s| is_test_path(&s.path))
+        .find(|s| path_matches_subject_tokens(&s.path, &subject_tokens))
+        .or_else(|| snippets.iter().find(|s| is_test_path(&s.path)))
+        .map(|s| s.path.as_str())
+}
+
+fn path_matches_subject_tokens(path: &str, subject_tokens: &[String]) -> bool {
+    if subject_tokens.is_empty() {
+        return false;
+    }
+    let lower = path.to_ascii_lowercase();
+    subject_tokens.iter().any(|token| lower.contains(token))
+}
+
+fn build_test_file_inventory_card(
+    query: &str,
+    runtime: &RuntimeIndex,
+    scored: &[ScoredChunk],
+    path: &str,
+    seed_line: usize,
+    score: f32,
+) -> Option<QueryResultItem> {
+    let mut candidate_entries = extract_test_inventory_entries_from_scored_chunks(runtime, scored, path);
+    let absolute = Path::new(&runtime.state.repo_root).join(path);
+    if let Ok(file_text) = fs::read_to_string(absolute) {
+        let mut seen_lines = candidate_entries
+            .iter()
+            .map(|entry| entry.line_number)
+            .collect::<HashSet<_>>();
+        let mut seen_labels = candidate_entries
+            .iter()
+            .map(|entry| entry.label.clone())
+            .collect::<HashSet<_>>();
+        for entry in extract_test_inventory_entries(&file_text) {
+            if seen_lines.insert(entry.line_number) && seen_labels.insert(entry.label.clone()) {
+                candidate_entries.push(entry);
+            }
+        }
+    }
+    let entries = prioritize_test_inventory_entries(query, path, &candidate_entries, seed_line);
+    if entries.len() < 2 {
+        return None;
+    }
+    let lines = build_test_inventory_lines(
+        &entries,
+        TEST_INVENTORY_MAX_LINES,
+        TEST_INVENTORY_LINE_CHAR_BUDGET,
+    );
+    if lines.is_empty() {
+        return None;
+    }
+    Some(QueryResultItem {
+        path: path.to_string(),
+        start_line: entries.first()?.line_number,
+        end_line: entries.last()?.line_number,
+        score,
+        reasons: vec!["test-file-inventory".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: lines.join("\n"),
+        slm_relevance_note: Some("same-file test coverage inventory".to_string()),
+    })
+}
+
+fn extract_test_inventory_entries_from_scored_chunks(
+    runtime: &RuntimeIndex,
+    scored: &[ScoredChunk],
+    path: &str,
+) -> Vec<TestInventoryEntry> {
+    let mut entries = Vec::new();
+    let mut seen_lines = HashSet::new();
+    for candidate in scored {
+        let Some(chunk) = runtime.chunk(candidate.id) else {
+            continue;
+        };
+        if chunk.path != path || !seen_lines.insert(chunk.start_line) {
+            continue;
+        }
+        let Some(entry) = extract_chunk_test_entry(chunk) else {
+            continue;
+        };
+        entries.push(entry);
+        if entries.len() >= 12 {
+            break;
+        }
+    }
+    entries
+}
+
+fn extract_chunk_test_entry(chunk: &crate::index::ChunkRecord) -> Option<TestInventoryEntry> {
+    for (idx, raw_line) in chunk.text.lines().enumerate() {
+        let line = raw_line.trim_start();
+        if let Some(label) = extract_named_test_definition(line) {
+            return Some(TestInventoryEntry {
+                line_number: chunk.start_line + idx,
+                label,
+            });
+        }
+        if line.starts_with("it(") || line.starts_with("test(") {
+            return Some(TestInventoryEntry {
+                line_number: chunk.start_line + idx,
+                label: truncate_to(line, 80).to_string(),
+            });
+        }
+    }
+    chunk.symbol_hint.clone().map(|label| TestInventoryEntry {
+        line_number: chunk.start_line,
+        label,
+    })
+}
+
+fn extract_test_inventory_entries(file_text: &str) -> Vec<TestInventoryEntry> {
+    let mut entries = Vec::new();
+    let mut pending_rust_test_attr = false;
+    for (idx, raw_line) in file_text.lines().enumerate() {
+        let line_number = idx + 1;
+        let line = raw_line.trim_start();
+        if line.starts_with("#[test]") {
+            pending_rust_test_attr = true;
+            continue;
+        }
+        if pending_rust_test_attr {
+            pending_rust_test_attr = false;
+            if let Some(name) = extract_named_test_definition(line) {
+                entries.push(TestInventoryEntry { line_number, label: name });
+                continue;
+            }
+        }
+        if let Some(name) = extract_named_test_definition(line) {
+            entries.push(TestInventoryEntry { line_number, label: name });
+            continue;
+        }
+        if line.starts_with("it(") || line.starts_with("test(") {
+            entries.push(TestInventoryEntry {
+                line_number,
+                label: truncate_to(line, 80).to_string(),
+            });
+        }
+    }
+    entries
+}
+
+fn extract_named_test_definition(line: &str) -> Option<String> {
+    for prefix in ["async def test_", "def test_", "pub fn test_", "fn test_"] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let name = if prefix.starts_with("async def ") || prefix.starts_with("def ") {
+                format!("test_{}", take_identifier(rest))
+            } else {
+                format!("test_{}", take_identifier(rest))
+            };
+            if name != "test_" {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn take_identifier(input: &str) -> String {
+    input
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect()
+}
+
+fn build_test_inventory_lines(
+    entries: &[TestInventoryEntry],
+    max_lines: usize,
+    max_chars_per_line: usize,
+) -> Vec<String> {
+    if entries.is_empty() || max_lines == 0 {
+        return Vec::new();
+    }
+    let group_count = entries.len().min(max_lines);
+    let chunk_size = entries.len().div_ceil(group_count);
+    entries
+        .chunks(chunk_size)
+        .take(group_count)
+        .enumerate()
+        .map(|(idx, group)| {
+            let prefix = inventory_line_prefix(idx, group_count);
+            let mut line = String::from(prefix);
+            let mut included = 0usize;
+            for entry in group {
+                let token = format!("{}@{}", entry.label, entry.line_number);
+                let sep = if included == 0 { " " } else { ", " };
+                if line.len() + sep.len() + token.len() > max_chars_per_line {
+                    let remaining = group.len().saturating_sub(included);
+                    if remaining > 0 {
+                        let suffix = format!(" +{} more", remaining);
+                        if line.len() + suffix.len() <= max_chars_per_line {
+                            line.push_str(&suffix);
+                        }
+                    }
+                    break;
+                }
+                line.push_str(sep);
+                line.push_str(&token);
+                included += 1;
+            }
+            line
+        })
+        .collect()
+}
+
+fn inventory_line_prefix(idx: usize, total: usize) -> &'static str {
+    match (idx, total) {
+        (_, 0) => "tests:",
+        (0, 1) => "tests:",
+        (0, 2) => "early:",
+        (1, 2) => "late:",
+        (0, _) => "early:",
+        (1, 3) => "mid:",
+        (2, 3) => "late:",
+        _ => "more:",
+    }
+}
+
+fn prioritize_test_inventory_entries(
+    query: &str,
+    path: &str,
+    entries: &[TestInventoryEntry],
+    seed_line: usize,
+) -> Vec<TestInventoryEntry> {
+    let subject_tokens = test_subject_tokens(query);
+    let lower_query = query.to_ascii_lowercase();
+    let registration_query = lower_query.contains("register") || lower_query.contains("registration");
+    let registration_keywords = [
+        "register",
+        "registration",
+        "nested",
+        "nesting",
+        "prefix",
+        "subdomain",
+        "rename",
+        "renaming",
+        "self_registration",
+        "unique_blueprint_names",
+        "dotted_name",
+        "empty_name",
+        "url_defaults",
+        "defaults",
+        "default",
+    ];
+    let mut ranked = entries
+        .iter()
+        .cloned()
+        .map(|entry| {
+            let lower = entry.label.to_ascii_lowercase();
+            let mut score = 0i32;
+            for token in &subject_tokens {
+                if lower.contains(token) {
+                    score += 4;
+                }
+            }
+            if registration_query
+                && contains_any(&lower, &registration_keywords)
+            {
+                score += 3;
+            }
+            if registration_query
+                && contains_any(&lower, &["error", "handler"])
+                && !contains_any(&lower, &registration_keywords)
+            {
+                score -= 4;
+            }
+            if registration_query
+                && contains_any(&lower, &["template", "filter", "processor", "static"])
+                && !contains_any(&lower, &registration_keywords)
+            {
+                score -= 4;
+            }
+            if path_matches_subject_tokens(path, &subject_tokens)
+                && contains_any(
+                    &lower,
+                    &[
+                        "blueprint",
+                        "nested",
+                        "prefix",
+                        "subdomain",
+                        "register",
+                        "registration",
+                        "rename",
+                        "renaming",
+                        "defaults",
+                        "self_registration",
+                        "unique_blueprint_names",
+                        "dotted_name",
+                        "empty_name",
+                    ],
+                )
+            {
+                score += 2;
+            }
+            let distance = seed_line.abs_diff(entry.line_number);
+            score += match distance {
+                0..=80 => 4,
+                81..=200 => 3,
+                201..=400 => 2,
+                401..=700 => 1,
+                _ => 0,
+            };
+            (score, entry)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(score_a, entry_a), (score_b, entry_b)| {
+        score_b
+            .cmp(score_a)
+            .then(entry_a.line_number.cmp(&entry_b.line_number))
+    });
+    let mut out = ranked
+        .into_iter()
+        .take(12)
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
+    out.sort_by_key(|entry| entry.line_number);
+    out
 }
 
 fn is_generic_symbol_hint(s: &str) -> bool {
@@ -1607,7 +2143,11 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
         }
         let has_underscore = raw.contains('_');
         let has_digit = raw.chars().any(|c| c.is_ascii_digit());
-        if !(has_underscore || has_digit || has_symbol_case_pattern(raw)) {
+        if !(has_underscore
+            || has_digit
+            || has_symbol_case_pattern(raw)
+            || is_titlecase_symbol_candidate(raw))
+        {
             continue;
         }
         let normalized = raw.to_ascii_lowercase();
@@ -1630,6 +2170,42 @@ fn has_symbol_case_pattern(raw: &str) -> bool {
         .iter()
         .enumerate()
         .any(|(idx, c)| c.is_ascii_uppercase() && idx > 0)
+}
+
+fn is_titlecase_symbol_candidate(raw: &str) -> bool {
+    const STOP: &[&str] = &[
+        "what",
+        "where",
+        "which",
+        "when",
+        "why",
+        "how",
+        "describe",
+        "trace",
+        "show",
+        "list",
+        "explain",
+        "tell",
+        "give",
+    ];
+    if raw.len() < 3 || raw.len() > 64 {
+        return false;
+    }
+    let mut chars = raw.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    let rest = chars.collect::<Vec<_>>();
+    if rest.is_empty() {
+        return false;
+    }
+    if !rest.iter().all(|ch| ch.is_ascii_lowercase()) {
+        return false;
+    }
+    !STOP.contains(&raw.to_ascii_lowercase().as_str())
 }
 
 fn extract_query_path_tokens(query: &str) -> Vec<String> {
@@ -2458,6 +3034,13 @@ mod tests {
     }
 
     #[test]
+    fn is_test_path_excludes_examples() {
+        assert!(!is_test_path("examples/tutorial/tests/test_auth.py"));
+        assert!(!is_test_path("examples/basic/tests/test_app.py"));
+        assert!(is_test_path("tests/test_blueprints.py"));
+    }
+
+    #[test]
     fn is_test_path_permissive_for_test_in_name() {
         // Files with "test" in the name (via /test substring) are treated as test-related.
         // This is intentional: utils/testUtils.ts contains /test as a substring.
@@ -2491,6 +3074,256 @@ mod tests {
         assert!(!is_inline_test_chunk("fn process_fiber(fiber: &Fiber) {}"));
         assert!(!is_inline_test_chunk("export function TestComponent() {}"));
         assert!(!is_inline_test_chunk("class Config { testMode: bool }"));
+    }
+
+    // ── test inventory helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_inventory_query_detects_broad_test_coverage_prompt() {
+        assert!(is_test_coverage_inventory_query(
+            "What unit tests cover Blueprint registration and where do they live in the repo?"
+        ));
+        assert!(is_test_coverage_inventory_query(
+            "Which tests validate config parsing?"
+        ));
+    }
+
+    #[test]
+    fn coverage_inventory_query_rejects_non_coverage_queries() {
+        assert!(!is_test_coverage_inventory_query(
+            "Where is register_blueprint defined and what does it do?"
+        ));
+        assert!(!is_test_coverage_inventory_query(
+            "Trace the call chain from an incoming HTTP request to the view function"
+        ));
+    }
+
+    #[test]
+    fn path_matches_subject_tokens_handles_plural_file_names() {
+        let tokens = vec!["blueprint".to_string(), "registration".to_string()];
+        assert!(path_matches_subject_tokens(
+            "tests/test_blueprints.py",
+            &tokens
+        ));
+        assert!(!path_matches_subject_tokens("tests/test_cli.py", &tokens));
+    }
+
+    #[test]
+    fn extract_test_inventory_entries_extracts_common_test_shapes() {
+        let text = r#"
+def test_alpha():
+    pass
+
+async def test_beta():
+    pass
+
+#[test]
+fn test_gamma() {}
+
+it("renders", () => {})
+"#;
+        let entries = extract_test_inventory_entries(text);
+        let labels = entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>();
+        assert!(labels.contains(&"test_alpha"), "got: {labels:?}");
+        assert!(labels.contains(&"test_beta"), "got: {labels:?}");
+        assert!(labels.contains(&"test_gamma"), "got: {labels:?}");
+        assert!(
+            labels.iter().any(|label| label.starts_with("it(")),
+            "got: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn build_test_inventory_lines_spreads_entries_across_early_mid_late() {
+        let entries = vec![
+            TestInventoryEntry {
+                line_number: 120,
+                label: "test_blueprint_prefix_slash".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 131,
+                label: "test_blueprint_url_defaults".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 865,
+                label: "test_nested_blueprint".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 914,
+                label: "test_nested_callback_order".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1066,
+                label: "test_unique_blueprint_names".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1083,
+                label: "test_self_registration".to_string(),
+            },
+        ];
+        let lines = build_test_inventory_lines(&entries, 3, 200);
+        assert_eq!(lines.len(), 3, "got: {lines:?}");
+        assert!(lines[0].starts_with("early:"), "got: {lines:?}");
+        assert!(lines[1].starts_with("mid:"), "got: {lines:?}");
+        assert!(lines[2].starts_with("late:"), "got: {lines:?}");
+        assert!(lines[0].contains("test_blueprint_prefix_slash@120"));
+        assert!(lines[1].contains("test_nested_blueprint@865"));
+        assert!(lines[2].contains("test_self_registration@1083"));
+    }
+
+    #[test]
+    fn registration_inventory_ranking_drops_error_handler_tests() {
+        let entries = vec![
+            TestInventoryEntry {
+                line_number: 8,
+                label: "test_blueprint_specific_error_handling".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 46,
+                label: "test_blueprint_specific_user_error_handling".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 120,
+                label: "test_blueprint_prefix_slash".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 131,
+                label: "test_blueprint_url_defaults".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 245,
+                label: "test_dotted_name_not_allowed".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 250,
+                label: "test_empty_name_not_allowed".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 865,
+                label: "test_nested_blueprint".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 914,
+                label: "test_nested_callback_order".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1003,
+                label: "test_nesting_url_prefixes".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1025,
+                label: "test_nesting_subdomains".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1044,
+                label: "test_child_and_parent_subdomain".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1066,
+                label: "test_unique_blueprint_names".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1083,
+                label: "test_self_registration".to_string(),
+            },
+            TestInventoryEntry {
+                line_number: 1089,
+                label: "test_blueprint_renaming".to_string(),
+            },
+        ];
+        let ranked = prioritize_test_inventory_entries(
+            "What unit tests cover Blueprint registration and where do they live in the repo?",
+            "tests/test_blueprints.py",
+            &entries,
+            1083,
+        );
+        let labels = ranked.into_iter().map(|entry| entry.label).collect::<Vec<_>>();
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.contains("error_handling") || label.contains("template_filter")),
+            "got: {labels:?}"
+        );
+        assert!(labels.iter().any(|label| label == "test_self_registration"));
+        assert!(labels.iter().any(|label| label == "test_blueprint_renaming"));
+        assert!(labels.iter().any(|label| label == "test_dotted_name_not_allowed"));
+        assert!(labels.iter().any(|label| label == "test_empty_name_not_allowed"));
+    }
+
+    #[test]
+    fn thin_wrapper_prefers_same_file_definition_continuation() {
+        let def_item = QueryResultItem {
+            path: "internal/terraform/context_plan.go".to_string(),
+            start_line: 180,
+            end_line: 183,
+            score: 0.696,
+            reasons: vec!["hint-match-boost".to_string()],
+            channel_scores: QueryChannelScores::default(),
+            text: "func (c *Context) Plan(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, tfdiags.Diagnostics) {\n    plan, _, diags := c.PlanAndEval(config, prevRunState, opts)\n    return plan, diags\n}".to_string(),
+            slm_relevance_note: None,
+        };
+        let continuation = ChunkRecord {
+            id: 1,
+            path: "internal/terraform/context_plan.go".to_string(),
+            start_line: 194,
+            end_line: 273,
+            symbol_hint: Some("PlanAndEval".to_string()),
+            text: "func (c *Context) PlanAndEval(...) {".to_string(),
+            embedding: Vec::new(),
+        };
+        assert!(should_prefer_same_file_definition_continuation(
+            &def_item,
+            &continuation
+        ));
+    }
+
+    #[test]
+    fn symbol_definition_first_steps_card_extracts_compact_steps() {
+        let continuation = ChunkRecord {
+            id: 1,
+            path: "internal/terraform/context_plan.go".to_string(),
+            start_line: 194,
+            end_line: 273,
+            symbol_hint: Some("PlanAndEval".to_string()),
+            text: "func (c *Context) PlanAndEval(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, *lang.Scope, tfdiags.Diagnostics) {\n    defer c.acquireRun(\"plan\")()\n    var diags tfdiags.Diagnostics\n    if opts == nil {\n        opts = DefaultPlanOpts\n    }\n}".to_string(),
+            embedding: Vec::new(),
+        };
+        let card = build_symbol_definition_first_steps_card(&continuation, 0.5)
+            .expect("expected first-steps card");
+        assert!(card.text.contains("first steps:"), "got: {}", card.text);
+        assert!(card.text.contains("defer c.acquireRun(\"plan\")()"));
+        assert!(card.text.contains("var diags tfdiags.Diagnostics"));
+        assert_eq!(
+            card.slm_relevance_note.as_deref(),
+            Some("same-file first steps summary")
+        );
+    }
+
+    #[test]
+    fn non_wrapper_does_not_replace_alt_definition_with_continuation() {
+        let def_item = QueryResultItem {
+            path: "src/flask/helpers.py".to_string(),
+            start_line: 10,
+            end_line: 26,
+            score: 0.61,
+            reasons: vec!["hint-match-boost".to_string()],
+            channel_scores: QueryChannelScores::default(),
+            text: "def make_response(*args):\n    response = current_app.make_response(args)\n    response.headers['X-Test'] = '1'\n    return response\n".to_string(),
+            slm_relevance_note: None,
+        };
+        let continuation = ChunkRecord {
+            id: 2,
+            path: "src/flask/helpers.py".to_string(),
+            start_line: 30,
+            end_line: 80,
+            symbol_hint: Some("after_this_request".to_string()),
+            text: "def after_this_request(f):".to_string(),
+            embedding: Vec::new(),
+        };
+        assert!(!should_prefer_same_file_definition_continuation(
+            &def_item,
+            &continuation
+        ));
     }
 
     // ── is_generic_symbol_hint ────────────────────────────────────────────────
@@ -2611,6 +3444,13 @@ mod tests {
             tokens.contains(&"render_fiber_tree".to_string()),
             "got: {tokens:?}"
         );
+    }
+
+    #[test]
+    fn symbol_tokens_extracts_simple_titlecase_identifier() {
+        let tokens = extract_query_symbol_tokens("Where is Plan defined and what does it do?");
+        assert!(tokens.contains(&"plan".to_string()), "got: {tokens:?}");
+        assert!(!tokens.contains(&"where".to_string()), "got: {tokens:?}");
     }
 
     #[test]

@@ -13,13 +13,19 @@ fn looks_like_symbol(line: &str) -> bool {
     let trimmed = line.trim_start();
     // Rust / Python / bare declarations
     trimmed.starts_with("fn ")
+        || trimmed.starts_with("func ")
         || trimmed.starts_with("pub fn ")
         || trimmed.starts_with("pub async fn ")
         || trimmed.starts_with("async fn ")
+        || trimmed.starts_with("pub struct ")
         || trimmed.starts_with("class ")
         || trimmed.starts_with("interface ")
         || trimmed.starts_with("struct ")
+        || trimmed.starts_with("pub enum ")
         || trimmed.starts_with("enum ")
+        || trimmed.starts_with("pub trait ")
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("pub type ")
         || trimmed.starts_with("def ")
         || trimmed.starts_with("async def ")
         // JS/TS bare and exported forms
@@ -82,9 +88,17 @@ const SYMBOL_KEYWORDS: &[&str] = &[
 ];
 
 fn symbol_from_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
+    let mut trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("func") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix('(')
+            && let Some((_, after_receiver)) = rest.split_once(')')
+        {
+            trimmed = after_receiver.trim_start();
+        }
     }
     // Walk word tokens, skip language keywords, return first real identifier
     let mut token = String::new();
@@ -401,6 +415,19 @@ fn append_node_chunks(
     };
     let span = end_line.saturating_sub(start_line) + 1;
     if span > lines_per_chunk.saturating_mul(2) {
+        if matches!(language_kind, AstLanguageKind::Go) {
+            // Large Go methods often contain many inner var/const declarations. Recursing into
+            // those descendants fragments the method body into tiny chunks and breaks same-file
+            // continuation for wrapper->implementation flows like Context.Plan -> PlanAndEval.
+            out.extend(line_chunks_from_range(
+                lines,
+                start_line.saturating_sub(1),
+                end_line,
+                lines_per_chunk,
+                overlap,
+            ));
+            return;
+        }
         // Phase BD: try boundary-kind descendants before falling back to fixed stride.
         // This handles cases like createChildReconciler (1600+ lines) containing many
         // nested function declarations that each deserve their own chunk.
@@ -431,10 +458,7 @@ fn append_node_chunks(
     }
     // For AST boundary nodes the first non-blank line IS the declaration,
     // so skip the looks_like_symbol gate and extract directly.
-    let symbol_hint = snippet
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .and_then(symbol_from_line);
+    let symbol_hint = snippet.lines().find(|line| looks_like_symbol(line)).and_then(symbol_from_line);
     out.push(Chunk {
         start_line,
         end_line,
@@ -692,6 +716,71 @@ func Beta() int {
         assert!(!chunks.is_empty());
         assert!(chunks.iter().any(|c| c.text.contains("Alpha")));
         assert!(chunks.iter().any(|c| c.text.contains("Beta")));
+    }
+
+    #[test]
+    fn go_receiver_method_gets_symbol_hint() {
+        let content = r#"
+package terraform
+
+// Plan computes the next plan state.
+func (c *Context) Plan(opts *PlanOpts) (*plans.Plan, error) {
+    return nil, nil
+}
+"#;
+        let chunks = chunk_text("context_plan.go", content, 80, 20);
+        assert!(
+            chunks
+                .iter()
+                .filter_map(|c| c.symbol_hint.as_deref())
+                .any(|hint| hint == "Plan"),
+            "expected Plan symbol hint, got: {:?}",
+            chunks
+                .iter()
+                .map(|c| c.symbol_hint.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn large_go_method_prefers_line_chunks_over_var_declarations() {
+        let mut content = r#"
+package terraform
+
+func (c *Context) Plan() {}
+
+// PlanAndEval contains the real planning steps.
+func (c *Context) PlanAndEval() {
+    var diags Diagnostics
+"#
+        .to_string();
+        for idx in 0..180 {
+            content.push_str(&format!("    step_{idx}()\n"));
+        }
+        content.push_str("}\n");
+
+        let chunks = chunk_text("context_plan.go", &content, 80, 20);
+        assert!(
+            chunks
+                .iter()
+                .filter_map(|c| c.symbol_hint.as_deref())
+                .any(|hint| hint == "PlanAndEval"),
+            "expected PlanAndEval chunk, got: {:?}",
+            chunks
+                .iter()
+                .map(|c| (c.start_line, c.end_line, c.symbol_hint.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| c.text.trim() == "var diags Diagnostics"),
+            "expected large Go method to avoid var-declaration micro-chunks, got: {:?}",
+            chunks
+                .iter()
+                .map(|c| c.text.trim().to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

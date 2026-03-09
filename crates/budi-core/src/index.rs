@@ -2048,6 +2048,7 @@ fn extract_definition_tokens(text: &str, symbol_hint: Option<&str>) -> Vec<Strin
 fn looks_like_definition_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower.starts_with("fn ")
+        || lower.starts_with("func ")
         || lower.starts_with("pub fn ")
         || lower.starts_with("async fn ")
         || lower.starts_with("pub async fn ")
@@ -2079,6 +2080,7 @@ fn extract_definition_name(line: &str) -> Option<String> {
     }
     for keyword in [
         "fn ",
+        "func ",
         "def ",
         "class ",
         "interface ",
@@ -2092,6 +2094,11 @@ fn extract_definition_name(line: &str) -> Option<String> {
         if normalized.starts_with(keyword) {
             normalized = normalized[keyword.len()..].trim_start();
             break;
+        }
+    }
+    if let Some(rest) = normalized.strip_prefix('(') {
+        if let Some((_, after_receiver)) = rest.split_once(')') {
+            normalized = after_receiver.trim_start();
         }
     }
     let candidate = normalized
@@ -2849,7 +2856,11 @@ fn is_symbol_like_token(raw: &str) -> bool {
     }
     let has_underscore = raw.contains('_');
     let has_digit = raw.chars().any(|c| c.is_ascii_digit());
-    if !(has_underscore || has_digit || has_symbol_case_pattern(raw)) {
+    if !(has_underscore
+        || has_digit
+        || has_symbol_case_pattern(raw)
+        || is_titlecase_symbol_candidate(raw))
+    {
         return false;
     }
     let lower = raw.to_ascii_lowercase();
@@ -2869,6 +2880,42 @@ fn is_symbol_like_token(raw: &str) -> bool {
             | "enum"
             | "value"
     )
+}
+
+fn is_titlecase_symbol_candidate(raw: &str) -> bool {
+    const STOP: &[&str] = &[
+        "what",
+        "where",
+        "which",
+        "when",
+        "why",
+        "how",
+        "describe",
+        "trace",
+        "show",
+        "list",
+        "explain",
+        "tell",
+        "give",
+    ];
+    if raw.len() < 3 || raw.len() > 64 {
+        return false;
+    }
+    let mut chars = raw.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    let rest = chars.collect::<Vec<_>>();
+    if rest.is_empty() {
+        return false;
+    }
+    if !rest.iter().all(|ch| ch.is_ascii_lowercase()) {
+        return false;
+    }
+    !STOP.contains(&raw.to_ascii_lowercase().as_str())
 }
 
 fn has_symbol_case_pattern(raw: &str) -> bool {
@@ -3717,6 +3764,21 @@ mod tests {
             score_from_token_map_with_family_lookup(&token_map, None, None, &query, 10, true);
         assert!(ranked.iter().any(|(id, _)| *id == 1));
         assert!(ranked.iter().any(|(id, _)| *id == 2));
+    }
+
+    #[test]
+    fn extract_symbol_tokens_keeps_simple_titlecase_symbols() {
+        let tokens = extract_symbol_tokens("type Plan struct {}\n");
+        assert!(tokens.contains(&"plan".to_string()), "got: {tokens:?}");
+        assert!(!tokens.contains(&"type".to_string()), "got: {tokens:?}");
+    }
+
+    #[test]
+    fn extract_definition_name_handles_go_func_lines() {
+        assert_eq!(
+            extract_definition_name("func (c *Context) Plan() (*plans.Plan, error) {"),
+            Some("Plan".to_string())
+        );
     }
 
     #[test]

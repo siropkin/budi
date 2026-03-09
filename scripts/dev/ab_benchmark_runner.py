@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 _print_lock = threading.Lock()
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEV_BIN_DIR = REPO_ROOT / "target" / "debug"
 
 
 def _print(*args, **kwargs) -> None:
@@ -45,9 +47,17 @@ class CmdResult:
 
 
 def _claude_env() -> dict:
-    """Return env with CLAUDECODE unset to allow nested claude invocations."""
+    """Return env for nested Claude runs, preferring this repo's debug budi binaries."""
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
+    if DEV_BIN_DIR.exists():
+        current_path = env.get("PATH", "")
+        env["PATH"] = (
+            f"{DEV_BIN_DIR}{os.pathsep}{current_path}" if current_path else str(DEV_BIN_DIR)
+        )
+    dev_daemon = DEV_BIN_DIR / "budi-daemon"
+    if dev_daemon.exists():
+        env["BUDI_DAEMON_BIN"] = str(dev_daemon)
     return env
 
 
@@ -284,16 +294,79 @@ def resolve_hook_log_path(repo_root: Path) -> Path:
     return budi_repo_paths(repo_root)["hook_log"]
 
 
+def resolve_claude_settings_path(repo_root: Path) -> Path:
+    return repo_root / ".claude" / "settings.local.json"
+
+
+def pin_repo_hooks_to_dev_budi(repo_root: Path) -> str | None:
+    settings_path = resolve_claude_settings_path(repo_root)
+    dev_budi = DEV_BIN_DIR / "budi"
+    if not settings_path.exists() or not dev_budi.exists():
+        return None
+    original_raw = settings_path.read_text()
+    try:
+        parsed = json.loads(original_raw)
+    except json.JSONDecodeError:
+        return None
+
+    dev_budi_str = str(dev_budi.resolve())
+    changed = False
+
+    def rewrite(node: Any) -> None:
+        nonlocal changed
+        if isinstance(node, dict):
+            command = node.get("command")
+            if isinstance(command, str):
+                stripped = command.strip()
+                if stripped == "budi" or stripped.startswith("budi "):
+                    node["command"] = f"{dev_budi_str}{stripped[4:]}"
+                    changed = True
+            for value in node.values():
+                rewrite(value)
+        elif isinstance(node, list):
+            for item in node:
+                rewrite(item)
+
+    rewrite(parsed)
+    if changed:
+        settings_path.write_text(json.dumps(parsed, indent=2) + "\n")
+        return original_raw
+    return None
+
+
+def restore_repo_hooks(repo_root: Path, original_raw: str | None) -> None:
+    if original_raw is None:
+        return
+    settings_path = resolve_claude_settings_path(repo_root)
+    if not settings_path.exists():
+        return
+    current_raw = settings_path.read_text()
+    if current_raw != original_raw:
+        settings_path.write_text(original_raw)
+
+
+def restart_budi_daemon(repo_root: Path) -> None:
+    """Force a fresh daemon so local benchmark runs don't reuse a stale binary."""
+    env = _claude_env()
+    run_cmd(["pkill", "-TERM", "-x", "budi-daemon"], cwd=repo_root, timeout_sec=10, env=env)
+    time.sleep(0.4)
+    still_running = run_cmd(["pgrep", "-x", "budi-daemon"], cwd=repo_root, timeout_sec=10, env=env)
+    if still_running.returncode == 0:
+        run_cmd(["pkill", "-KILL", "-x", "budi-daemon"], cwd=repo_root, timeout_sec=10, env=env)
+        time.sleep(0.2)
+
+
 def ensure_budi_ready(repo_root: Path) -> None:
-    r = run_cmd(["budi", "--version"], cwd=repo_root, timeout_sec=30)
+    env = _claude_env()
+    r = run_cmd(["budi", "--version"], cwd=repo_root, timeout_sec=30, env=env)
     if r.returncode != 0:
         raise RuntimeError("budi is not installed or not on PATH")
 
-    run_cmd(["budi", "init"], cwd=repo_root, timeout_sec=120)
-    index = run_cmd(["budi", "index"], cwd=repo_root, timeout_sec=1800)
+    run_cmd(["budi", "init"], cwd=repo_root, timeout_sec=120, env=env)
+    index = run_cmd(["budi", "index"], cwd=repo_root, timeout_sec=1800, env=env)
     if index.returncode != 0:
         # fallback to hard if needed
-        hard = run_cmd(["budi", "index", "--hard"], cwd=repo_root, timeout_sec=1800)
+        hard = run_cmd(["budi", "index", "--hard"], cwd=repo_root, timeout_sec=1800, env=env)
         if hard.returncode != 0:
             raise RuntimeError(
                 f"Failed to index repo:\nindex stderr:\n{index.stderr}\n\nhard stderr:\n{hard.stderr}"
@@ -446,8 +519,7 @@ def collect_hook_trace_for_session(repo_root: Path, session_id: str) -> dict[str
     if not path.exists():
         return {}
     input_event = None
-    output_event = None  # fallback: any output event
-    ok_output_event = None  # preferred: output event where budi actually injected
+    output_events: list[dict[str, Any]] = []
     for line in reversed(path.read_text().splitlines()):
         try:
             obj = json.loads(line)
@@ -459,17 +531,20 @@ def collect_hook_trace_for_session(repo_root: Path, session_id: str) -> dict[str
             continue
         phase = obj.get("phase")
         if phase == "output":
-            if output_event is None:
-                output_event = obj
-            # Prefer the event where budi injected (reason=="ok"), since each
-            # session may fire the hook multiple times (user prompt + tool calls).
-            if obj.get("reason") == "ok" and ok_output_event is None:
-                ok_output_event = obj
+            output_events.append(obj)
         elif phase == "input" and input_event is None:
             input_event = obj
-        if input_event and output_event and ok_output_event:
-            break
-    return {"input": input_event, "output": ok_output_event or output_event}
+
+    def output_rank(obj: dict[str, Any]) -> tuple[int, int, int, int]:
+        return (
+            1 if obj.get("reason") == "ok" else 0,
+            int(obj.get("snippets_count") or 0),
+            int(obj.get("context_chars") or 0),
+            int(obj.get("ts_unix_ms") or 0),
+        )
+
+    best_output = max(output_events, key=output_rank, default=None)
+    return {"input": input_event, "output": best_output}
 
 
 def hook_trace_is_healthy(trace: dict[str, Any]) -> bool:
@@ -987,6 +1062,7 @@ def main() -> None:
         args.variant_overrides_json,
     )
     original_config_raw: str | None = None
+    original_hook_settings_raw: str | None = None
     try:
         if args.reuse_results_json:
             source_path = Path(args.reuse_results_json).expanduser().resolve()
@@ -1005,6 +1081,8 @@ def main() -> None:
             prompt_source = f"reuse:{source_path}"
             _print(f"[ab] reusing rows from: {source_path}", flush=True)
         else:
+            original_hook_settings_raw = pin_repo_hooks_to_dev_budi(repo_root)
+            restart_budi_daemon(repo_root)
             ensure_budi_ready(repo_root)
             original_config_raw = ensure_debug_io_enabled(repo_root, variant_overrides)
 
@@ -1186,6 +1264,7 @@ def main() -> None:
     finally:
         if original_config_raw is not None:
             restore_debug_io_config(repo_root, original_config_raw)
+        restore_repo_hooks(repo_root, original_hook_settings_raw)
 
 
 if __name__ == "__main__":
