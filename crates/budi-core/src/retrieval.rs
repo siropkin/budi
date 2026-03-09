@@ -867,8 +867,14 @@ pub fn build_call_graph_summary(
         if !caller_names.is_empty() {
             entry.push_str(&format!("  ← called by: {}\n", caller_names.join(", ")));
         }
+        // Phase CD: "refs:" instead of "calls:" — the graph tokens are extracted
+        // at chunk level and include calls from nested functions within the chunk,
+        // not only direct callees of the primary symbol. Using "refs:" avoids
+        // misattributing indirect callees (e.g. reconcileChildFibers chunk includes
+        // deleteRemainingChildren from reconcileChildFibersImpl's body, leading
+        // Claude to incorrectly claim reconcileChildFibers directly calls it).
         if !callee_names.is_empty() {
-            entry.push_str(&format!("  → calls: {}\n", callee_names.join(", ")));
+            entry.push_str(&format!("  → refs: {}\n", callee_names.join(", ")));
         }
         entries.push(entry);
     }
@@ -2185,9 +2191,21 @@ fn try_push_scored_chunk(
     // same file. Stride=60/overlap=20 chunking can select two adjacent chunks that share
     // 20 lines — injecting both duplicates those lines and can confuse Claude by showing
     // the same code twice in slightly different evidence cards.
-    let overlaps_existing = selection.snippets.iter().any(|s| {
-        s.path == chunk.path && s.start_line < chunk.end_line && chunk.start_line < s.end_line
+    // Phase CE: Exempt synthetic condenser packs from the overlap check. Packs intentionally
+    // span large regions (e.g. web-request-flow-pack covers lines 966-1616) and should not
+    // be removed when a constituent chunk (e.g. wsgi_app at 1566-1616) was selected first
+    // with a higher individual score — the pack provides holistic call-chain context that
+    // the constituent chunk alone cannot supply.
+    let is_synthetic_pack = candidate.reasons.iter().any(|r| {
+        matches!(
+            r.as_str(),
+            "web-request-flow-pack" | "wrapper-implementation-pack" | "delegated-definition-pack"
+        )
     });
+    let overlaps_existing = !is_synthetic_pack
+        && selection.snippets.iter().any(|s| {
+            s.path == chunk.path && s.start_line < chunk.end_line && chunk.start_line < s.end_line
+        });
     if overlaps_existing {
         return false;
     }
