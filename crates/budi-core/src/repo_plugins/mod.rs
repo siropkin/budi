@@ -231,11 +231,8 @@ fn chunk_keyword_signals_match(
     signals: ChunkKeywordSignals,
     context: &ChunkMatchContext<'_>,
 ) -> bool {
-    let language_matches = signals.languages.is_empty()
-        || signals
-            .languages
-            .iter()
-            .any(|language| *language == context.language);
+    let language_matches =
+        signals.languages.is_empty() || signals.languages.contains(&context.language);
     if !language_matches {
         return false;
     }

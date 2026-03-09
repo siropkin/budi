@@ -529,11 +529,11 @@ pub fn build_query_response(
                 adjusted -= 0.15;
                 push_unique_reason(&mut reasons, "test-path-penalty");
             }
-            if let Some(hint) = chunk.symbol_hint.as_deref() {
-                if hint.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                    adjusted -= 0.25;
-                    push_unique_reason(&mut reasons, "rt-cfg-class-demote");
-                }
+            if let Some(hint) = chunk.symbol_hint.as_deref()
+                && hint.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                adjusted -= 0.25;
+                push_unique_reason(&mut reasons, "rt-cfg-class-demote");
             }
             if runtime_env_var_query && !is_test_path(&chunk.path) {
                 let chunk_text_lower = chunk.text.to_ascii_lowercase();
@@ -780,17 +780,18 @@ pub fn build_query_response(
             // needs `cont` to synthesize the implementation card regardless of its symbol_hint).
             // Example: if the adjacent chunk starts a different function, injecting it
             // pollutes the answer with unrelated implementation details.
-            if !card2_is_alt_def && !exact_match_symbol_tokens.is_empty() {
-                if let Some(cont_sym) = cont.symbol_hint.as_deref() {
-                    let cont_sym_lower = cont_sym.to_ascii_lowercase();
-                    let matches_target = exact_match_symbol_tokens
-                        .iter()
-                        .any(|t| cont_sym_lower == t.as_str());
-                    if !matches_target {
-                        // Also signal that the noisy foreign card 2 should be removed.
-                        wrong_symbol_continuation_blocked = true;
-                        return None;
-                    }
+            if !card2_is_alt_def
+                && !exact_match_symbol_tokens.is_empty()
+                && let Some(cont_sym) = cont.symbol_hint.as_deref()
+            {
+                let cont_sym_lower = cont_sym.to_ascii_lowercase();
+                let matches_target = exact_match_symbol_tokens
+                    .iter()
+                    .any(|t| cont_sym_lower == t.as_str());
+                if !matches_target {
+                    // Also signal that the noisy foreign card 2 should be removed.
+                    wrong_symbol_continuation_blocked = true;
+                    return None;
                 }
             }
             let cont_score = def_score * if card2_is_alt_def { 0.72 } else { 0.60 };
@@ -1221,7 +1222,7 @@ fn find_best_runtime_env_chunk<'a>(
         let symbol_match =
             symbol.is_some_and(|expected| chunk.symbol_hint.as_deref() == Some(expected));
         let needle_hits = count_chunk_needle_hits(chunk, needles);
-        if (!symbol_match && needle_hits == 0) || (require_needle_hit && needle_hits == 0) {
+        if (require_needle_hit || !symbol_match) && needle_hits == 0 {
             continue;
         }
         let mut score = 0i32;
@@ -5221,14 +5222,16 @@ it("renders", () => {})
             embedding: Vec::new(),
         };
         let card = crate::repo_plugins::react::build_react_effect_lifecycle_card(
-            &layout_unmount_chunk,
-            &layout_mount_chunk,
-            &flush_layout_chunk,
-            &flush_passive_chunk,
-            &passive_unmount_chunk,
-            &passive_mount_chunk,
-            &hook_unmount_chunk,
-            &hook_mount_chunk,
+            [
+                &layout_unmount_chunk,
+                &layout_mount_chunk,
+                &flush_layout_chunk,
+                &flush_passive_chunk,
+                &passive_unmount_chunk,
+                &passive_mount_chunk,
+                &hook_unmount_chunk,
+                &hook_mount_chunk,
+            ],
             0.9,
         )
         .expect("expected lifecycle card");

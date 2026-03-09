@@ -329,6 +329,14 @@ fn collect_top_level_chunks(
     overlap: usize,
 ) -> Vec<Chunk> {
     let mut chunks = Vec::new();
+    let context = NodeChunkingContext {
+        content,
+        lines,
+        chunk_language,
+        lines_per_chunk,
+        overlap,
+        language_kind,
+    };
     for idx in 0..root.named_child_count() {
         let Ok(idx) = u32::try_from(idx) else {
             continue;
@@ -339,16 +347,7 @@ fn collect_top_level_chunks(
         if !is_boundary_kind(node.kind(), language_kind) {
             continue;
         }
-        append_node_chunks(
-            &mut chunks,
-            node,
-            content,
-            lines,
-            chunk_language,
-            lines_per_chunk,
-            overlap,
-            language_kind,
-        );
+        append_node_chunks(&mut chunks, node, &context);
     }
     chunks.sort_by_key(|chunk| (chunk.start_line, chunk.end_line));
     chunks.dedup_by(|left, right| {
@@ -445,38 +444,38 @@ fn collect_boundary_descendants<'a>(
     }
 }
 
-fn append_node_chunks(
-    out: &mut Vec<Chunk>,
-    node: Node<'_>,
-    content: &str,
-    lines: &[&str],
-    chunk_language: &str,
+struct NodeChunkingContext<'a> {
+    content: &'a str,
+    lines: &'a [&'a str],
+    chunk_language: &'a str,
     lines_per_chunk: usize,
     overlap: usize,
     language_kind: AstLanguageKind,
-) {
+}
+
+fn append_node_chunks(out: &mut Vec<Chunk>, node: Node<'_>, context: &NodeChunkingContext<'_>) {
     let start_line = node.start_position().row + 1;
     let end_line = node.end_position().row + 1;
     if start_line == 0 || end_line < start_line {
         return;
     }
-    let snippet = match content.get(node.start_byte()..node.end_byte()) {
+    let snippet = match context.content.get(node.start_byte()..node.end_byte()) {
         Some(value) if !value.trim().is_empty() => value.to_string(),
         _ => return,
     };
     let span = end_line.saturating_sub(start_line) + 1;
-    if span > lines_per_chunk.saturating_mul(2) {
-        if matches!(language_kind, AstLanguageKind::Go) {
+    if span > context.lines_per_chunk.saturating_mul(2) {
+        if matches!(context.language_kind, AstLanguageKind::Go) {
             // Large Go methods often contain many inner var/const declarations. Recursing into
             // those descendants fragments the method body into tiny chunks and breaks same-file
             // continuation for wrapper->implementation flows like Context.Plan -> PlanAndEval.
             out.extend(line_chunks_from_range(
-                lines,
+                context.lines,
                 start_line.saturating_sub(1),
                 end_line,
-                chunk_language,
-                lines_per_chunk,
-                overlap,
+                context.chunk_language,
+                context.lines_per_chunk,
+                context.overlap,
             ));
             return;
         }
@@ -484,29 +483,20 @@ fn append_node_chunks(
         // This handles cases like createChildReconciler (1600+ lines) containing many
         // nested function declarations that each deserve their own chunk.
         let mut boundary_children: Vec<Node<'_>> = Vec::new();
-        collect_boundary_descendants(node, language_kind, &mut boundary_children);
+        collect_boundary_descendants(node, context.language_kind, &mut boundary_children);
         if !boundary_children.is_empty() {
             for child in boundary_children {
-                append_node_chunks(
-                    out,
-                    child,
-                    content,
-                    lines,
-                    chunk_language,
-                    lines_per_chunk,
-                    overlap,
-                    language_kind,
-                );
+                append_node_chunks(out, child, context);
             }
             return;
         }
         out.extend(line_chunks_from_range(
-            lines,
+            context.lines,
             start_line.saturating_sub(1),
             end_line,
-            chunk_language,
-            lines_per_chunk,
-            overlap,
+            context.chunk_language,
+            context.lines_per_chunk,
+            context.overlap,
         ));
         return;
     }
@@ -519,7 +509,7 @@ fn append_node_chunks(
     out.push(Chunk {
         start_line,
         end_line,
-        language: chunk_language.to_string(),
+        language: context.chunk_language.to_string(),
         symbol_hint,
         text: snippet,
     });

@@ -59,60 +59,36 @@ fn build_react_context_pack(request: &ContextPackRequest<'_>) -> Option<QueryRes
     if request.snippets.is_empty() || !is_react_effect_lifecycle_query(request.lower_query) {
         return None;
     }
-    let Some(layout_unmount_chunk) =
-        find_symbolish_chunk(request.runtime, None, "commitHookLayoutUnmountEffects")
-    else {
-        return None;
-    };
-    let Some(layout_mount_chunk) =
-        find_symbolish_chunk(request.runtime, None, "commitHookLayoutEffects")
-    else {
-        return None;
-    };
-    let Some(flush_layout_chunk) =
-        find_symbolish_chunk(request.runtime, None, "flushLayoutEffects")
-    else {
-        return None;
-    };
-    let Some(flush_passive_chunk) =
-        find_symbolish_chunk(request.runtime, None, "flushPassiveEffects")
-    else {
-        return None;
-    };
-    let Some(passive_unmount_chunk) =
-        find_symbolish_chunk(request.runtime, None, "commitPassiveUnmountEffects")
-    else {
-        return None;
-    };
-    let Some(passive_mount_chunk) =
-        find_symbolish_chunk(request.runtime, None, "commitPassiveMountEffects")
-    else {
-        return None;
-    };
-    let Some(hook_mount_chunk) =
-        find_symbolish_chunk(request.runtime, None, "commitHookEffectListMount")
-    else {
-        return None;
-    };
-    let Some(hook_unmount_chunk) =
-        find_symbolish_chunk(request.runtime, None, "commitHookEffectListUnmount")
-    else {
-        return None;
-    };
+    let layout_unmount_chunk =
+        find_symbolish_chunk(request.runtime, None, "commitHookLayoutUnmountEffects")?;
+    let layout_mount_chunk =
+        find_symbolish_chunk(request.runtime, None, "commitHookLayoutEffects")?;
+    let flush_layout_chunk = find_symbolish_chunk(request.runtime, None, "flushLayoutEffects")?;
+    let flush_passive_chunk = find_symbolish_chunk(request.runtime, None, "flushPassiveEffects")?;
+    let passive_unmount_chunk =
+        find_symbolish_chunk(request.runtime, None, "commitPassiveUnmountEffects")?;
+    let passive_mount_chunk =
+        find_symbolish_chunk(request.runtime, None, "commitPassiveMountEffects")?;
+    let hook_mount_chunk =
+        find_symbolish_chunk(request.runtime, None, "commitHookEffectListMount")?;
+    let hook_unmount_chunk =
+        find_symbolish_chunk(request.runtime, None, "commitHookEffectListUnmount")?;
     let top_score = request
         .snippets
         .first()
         .map(|snippet| snippet.score)
         .unwrap_or(0.40);
     build_react_effect_lifecycle_card(
-        layout_unmount_chunk,
-        layout_mount_chunk,
-        flush_layout_chunk,
-        flush_passive_chunk,
-        passive_unmount_chunk,
-        passive_mount_chunk,
-        hook_unmount_chunk,
-        hook_mount_chunk,
+        [
+            layout_unmount_chunk,
+            layout_mount_chunk,
+            flush_layout_chunk,
+            flush_passive_chunk,
+            passive_unmount_chunk,
+            passive_mount_chunk,
+            hook_unmount_chunk,
+            hook_mount_chunk,
+        ],
         top_score * 0.97,
     )
 }
@@ -140,16 +116,19 @@ fn is_react_effect_lifecycle_query(lower_query: &str) -> bool {
 }
 
 pub(crate) fn build_react_effect_lifecycle_card(
-    layout_unmount_chunk: &ChunkRecord,
-    layout_mount_chunk: &ChunkRecord,
-    flush_layout_chunk: &ChunkRecord,
-    flush_passive_chunk: &ChunkRecord,
-    passive_unmount_chunk: &ChunkRecord,
-    passive_mount_chunk: &ChunkRecord,
-    hook_unmount_chunk: &ChunkRecord,
-    hook_mount_chunk: &ChunkRecord,
+    chunks: [&ChunkRecord; 8],
     score: f32,
 ) -> Option<QueryResultItem> {
+    let [
+        layout_unmount_chunk,
+        layout_mount_chunk,
+        flush_layout_chunk,
+        flush_passive_chunk,
+        passive_unmount_chunk,
+        passive_mount_chunk,
+        hook_unmount_chunk,
+        hook_mount_chunk,
+    ] = chunks;
     let layout_destroy_comment = extract_chunk_line_with_needle(
         layout_unmount_chunk,
         &["Layout effects are destroyed during the mutation phase"],
