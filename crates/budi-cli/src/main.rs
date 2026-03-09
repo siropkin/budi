@@ -1831,6 +1831,8 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             top_score: 0.0,
             margin: 0.0,
             signals: vec!["@nobudi".to_string()],
+            top_language: None,
+            snippet_languages: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(SKIP_REASON_FORCED_SKIP.to_string()),
         };
@@ -1956,6 +1958,14 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
                 json!(diagnostics.top_score),
             );
             obj.insert("retrieval_margin".to_string(), json!(diagnostics.margin));
+            obj.insert(
+                "retrieval_top_language".to_string(),
+                json!(diagnostics.top_language.clone()),
+            );
+            obj.insert(
+                "retrieval_languages".to_string(),
+                json!(diagnostics.snippet_languages.clone()),
+            );
             obj.insert(
                 "retrieval_signals_count".to_string(),
                 json!(diagnostics.signals.len()),
@@ -3209,6 +3219,8 @@ mod tests {
             top_score: 0.7,
             margin: 0.3,
             signals: vec!["semantic-hit".to_string()],
+            top_language: None,
+            snippet_languages: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
         };
@@ -3233,6 +3245,8 @@ mod tests {
             top_score: 0.1,
             margin: 0.0,
             signals: vec![],
+            top_language: None,
+            snippet_languages: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(budi_core::reason_codes::SKIP_REASON_LOW_CONFIDENCE.to_string()),
         };
@@ -3257,6 +3271,8 @@ mod tests {
             top_score: 0.8,
             margin: 0.2,
             signals: vec!["path-hit".to_string()],
+            top_language: None,
+            snippet_languages: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
         };
@@ -3287,6 +3303,7 @@ mod tests {
                 path: "src/flask/config.py".to_string(),
                 start_line: 1,
                 end_line: 20,
+                language: "python".to_string(),
                 score: 1.0,
                 reasons: vec!["runtime-env-api-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
@@ -3297,6 +3314,7 @@ mod tests {
                 path: "tests/test_config.py".to_string(),
                 start_line: 1,
                 end_line: 20,
+                language: "python".to_string(),
                 score: 0.9,
                 reasons: vec!["runtime-config-support-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
@@ -3307,6 +3325,7 @@ mod tests {
                 path: "examples/tutorial/flaskr/__init__.py".to_string(),
                 start_line: 1,
                 end_line: 20,
+                language: "python".to_string(),
                 score: 0.8,
                 reasons: vec!["runtime-config-path-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
@@ -3317,6 +3336,7 @@ mod tests {
                 path: "src/flask/cli.py".to_string(),
                 start_line: 1,
                 end_line: 20,
+                language: "python".to_string(),
                 score: 0.7,
                 reasons: vec!["runtime-config-support-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
@@ -3327,6 +3347,7 @@ mod tests {
                 path: "src/flask/app.py".to_string(),
                 start_line: 1,
                 end_line: 20,
+                language: "python".to_string(),
                 score: 0.6,
                 reasons: vec!["semantic-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
@@ -3350,6 +3371,7 @@ mod tests {
             path: "src/flask/app.py".to_string(),
             start_line: 1,
             end_line: 20,
+            language: "python".to_string(),
             score: 1.0,
             reasons: vec!["semantic-hit".to_string()],
             channel_scores: budi_core::rpc::QueryChannelScores::default(),

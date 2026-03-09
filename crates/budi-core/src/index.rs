@@ -20,7 +20,7 @@ use tantivy::schema::{
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term, doc};
 use tracing::{info, warn};
 
-use crate::chunking::chunk_text;
+use crate::chunking::{chunk_text, language_label_for_path};
 use crate::config::{self, BudiConfig};
 use crate::index_scope::{
     build_basename_allowlist, build_extension_allowlist, is_always_skipped_dir_name,
@@ -45,6 +45,7 @@ pub struct ChunkRecord {
     pub path: String,
     pub start_line: usize,
     pub end_line: usize,
+    pub language: String,
     pub symbol_hint: Option<String>,
     pub text: String,
     pub embedding: Vec<f32>,
@@ -273,6 +274,7 @@ struct PendingChunk {
     path: String,
     start_line: usize,
     end_line: usize,
+    language: String,
     symbol_hint: Option<String>,
     text: String,
     embedding_cache_key: String,
@@ -528,6 +530,7 @@ pub fn build_or_update(
                 path: file.path.clone(),
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,
+                language: chunk.language,
                 symbol_hint: chunk.symbol_hint,
                 text: chunk.text,
                 embedding_cache_key,
@@ -633,6 +636,7 @@ pub fn build_or_update(
             path: chunk.path,
             start_line: chunk.start_line,
             end_line: chunk.end_line,
+            language: chunk.language,
             symbol_hint: chunk.symbol_hint,
             text: chunk.text,
             embedding,
@@ -829,7 +833,7 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
 
     let mut chunks = Vec::new();
     let mut chunk_stmt = conn.prepare(
-        "SELECT id, path, start_line, end_line, symbol_hint, text, embedding
+        "SELECT id, path, start_line, end_line, language, symbol_hint, text, embedding
          FROM chunks
          ORDER BY path, start_line, id",
     )?;
@@ -838,8 +842,9 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
         let start_line_i64: i64 = row.get(2)?;
         let end_line_i64: i64 = row.get(3)?;
         let path: String = row.get(1)?;
-        let text: String = row.get(5)?;
-        let embedding_blob: Vec<u8> = row.get(6)?;
+        let language: String = row.get(4)?;
+        let text: String = row.get(6)?;
+        let embedding_blob: Vec<u8> = row.get(7)?;
         let embedding = decode_embedding(&embedding_blob).unwrap_or_else(|| {
             warn!(
                 "Invalid embedding payload for chunk id={} path={}, using lexical-only fallback",
@@ -847,12 +852,18 @@ pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
             );
             Vec::new()
         });
+        let inferred_language = if language.is_empty() || language == "unknown" {
+            language_label_for_path(&path)
+        } else {
+            language
+        };
         Ok(ChunkRecord {
             id: u64::try_from(id_i64).unwrap_or_default(),
             path,
             start_line: usize::try_from(start_line_i64).unwrap_or_default(),
             end_line: usize::try_from(end_line_i64).unwrap_or_default(),
-            symbol_hint: row.get(4)?,
+            language: inferred_language,
+            symbol_hint: row.get(5)?,
             text,
             embedding,
         })
@@ -931,12 +942,13 @@ pub fn save_state(
 
             {
                 let mut chunk_stmt = tx.prepare(
-                    "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "INSERT INTO chunks(id, path, start_line, end_line, language, symbol_hint, text, embedding)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(id) DO UPDATE SET
                        path = excluded.path,
                        start_line = excluded.start_line,
                        end_line = excluded.end_line,
+                       language = excluded.language,
                        symbol_hint = excluded.symbol_hint,
                        text = excluded.text,
                        embedding = excluded.embedding",
@@ -951,6 +963,7 @@ pub fn save_state(
                         &chunk.path,
                         i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
                         i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
+                        &chunk.language,
                         chunk.symbol_hint.as_deref(),
                         &chunk.text,
                         encode_embedding(&chunk.embedding),
@@ -979,8 +992,8 @@ pub fn save_state(
 
         {
             let mut chunk_stmt = tx.prepare(
-                "INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO chunks(id, path, start_line, end_line, language, symbol_hint, text, embedding)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for chunk in &state.chunks {
                 chunk_stmt.execute(params![
@@ -988,6 +1001,7 @@ pub fn save_state(
                     &chunk.path,
                     i64::try_from(chunk.start_line).unwrap_or(i64::MAX),
                     i64::try_from(chunk.end_line).unwrap_or(i64::MAX),
+                    &chunk.language,
                     chunk.symbol_hint.as_deref(),
                     &chunk.text,
                     encode_embedding(&chunk.embedding),
@@ -1040,6 +1054,7 @@ fn ensure_index_db_schema(conn: &Connection) -> Result<()> {
             path TEXT NOT NULL,
             start_line INTEGER NOT NULL,
             end_line INTEGER NOT NULL,
+            language TEXT NOT NULL DEFAULT 'unknown',
             symbol_hint TEXT,
             text TEXT NOT NULL,
             embedding BLOB NOT NULL
@@ -1076,18 +1091,20 @@ fn ensure_index_db_schema(conn: &Connection) -> Result<()> {
                 path TEXT NOT NULL,
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
+                language TEXT NOT NULL DEFAULT 'unknown',
                 symbol_hint TEXT,
                 text TEXT NOT NULL,
                 embedding BLOB NOT NULL
             );
-            INSERT INTO chunks(id, path, start_line, end_line, symbol_hint, text, embedding)
-            SELECT id, path, start_line, end_line, symbol_hint, text, embedding
+            INSERT INTO chunks(id, path, start_line, end_line, language, symbol_hint, text, embedding)
+            SELECT id, path, start_line, end_line, 'unknown', symbol_hint, text, embedding
             FROM chunks_legacy;
             DROP TABLE chunks_legacy;
             CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
             ",
         )?;
     }
+    ensure_chunk_language_column(conn)?;
     ensure_index_progress_columns(conn)?;
     Ok(())
 }
@@ -1105,6 +1122,16 @@ fn ensure_index_progress_columns(conn: &Connection) -> Result<()> {
     if !table_has_column(conn, "index_progress", "terminal_outcome")? {
         conn.execute(
             "ALTER TABLE index_progress ADD COLUMN terminal_outcome TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_chunk_language_column(conn: &Connection) -> Result<()> {
+    if !table_has_column(conn, "chunks", "language")? {
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN language TEXT NOT NULL DEFAULT 'unknown'",
             [],
         )?;
     }
@@ -3895,6 +3922,7 @@ mod tests {
                 path: "src/service.rs".to_string(),
                 start_line: 1,
                 end_line: 3,
+                language: "rust".to_string(),
                 symbol_hint: Some("process_order".to_string()),
                 text: "pub fn process_order() {}".to_string(),
                 embedding: vec![0.0; 4],
@@ -3904,6 +3932,7 @@ mod tests {
                 path: "src/controller.rs".to_string(),
                 start_line: 1,
                 end_line: 5,
+                language: "rust".to_string(),
                 symbol_hint: Some("handle_request".to_string()),
                 text:
                     "use crate::service::process_order;\nfn handle_request() { process_order(); }"
@@ -3935,6 +3964,7 @@ mod tests {
                 path: "src/service.ts".to_string(),
                 start_line: 1,
                 end_line: 3,
+                language: "typescript".to_string(),
                 symbol_hint: Some("process_order".to_string()),
                 text: "export function process_order() { return true; }".to_string(),
                 embedding: vec![0.0; 4],
@@ -3944,6 +3974,7 @@ mod tests {
                 path: "src/controller.ts".to_string(),
                 start_line: 1,
                 end_line: 5,
+                language: "typescript".to_string(),
                 symbol_hint: Some("handle_request".to_string()),
                 text: "import { process_order as processOrderAlias } from './service';\nfunction handle_request() { processOrderAlias(); }".to_string(),
                 embedding: vec![0.0; 4],
@@ -3985,6 +4016,7 @@ mod tests {
                 path: "src/service.ts".to_string(),
                 start_line: 1,
                 end_line: 3,
+                language: "typescript".to_string(),
                 symbol_hint: Some("process_order".to_string()),
                 text: "export function process_order() { return true; }".to_string(),
                 embedding: vec![0.0; 4],
@@ -3994,6 +4026,7 @@ mod tests {
                 path: "src/controller.ts".to_string(),
                 start_line: 2,
                 end_line: 2,
+                language: "typescript".to_string(),
                 symbol_hint: Some("handle_request".to_string()),
                 text: "processOrderAlias();".to_string(),
                 embedding: vec![0.0; 4],
@@ -4023,6 +4056,7 @@ mod tests {
                 path: "src/service.rs".to_string(),
                 start_line: 1,
                 end_line: 3,
+                language: "rust".to_string(),
                 symbol_hint: Some("process_order".to_string()),
                 text: "pub fn process_order() {}".to_string(),
                 embedding: vec![0.0; 4],
@@ -4032,6 +4066,7 @@ mod tests {
                 path: "src/controller.rs".to_string(),
                 start_line: 1,
                 end_line: 5,
+                language: "rust".to_string(),
                 symbol_hint: Some("handle_request".to_string()),
                 text:
                     "use crate::service::process_order;\nfn handle_request() { process_order(); }"
@@ -4043,6 +4078,7 @@ mod tests {
                 path: "src/controller.rs".to_string(),
                 start_line: 6,
                 end_line: 10,
+                language: "rust".to_string(),
                 symbol_hint: Some("unrelated_helper".to_string()),
                 text: "fn unrelated_helper() { let local_flag = true; }".to_string(),
                 embedding: vec![0.0; 4],
@@ -4466,6 +4502,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 start_line: 1,
                 end_line: 8,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn alpha() {}".to_string(),
                 embedding: Vec::new(),
@@ -4475,6 +4512,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 start_line: 10,
                 end_line: 18,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn beta() {}".to_string(),
                 embedding: vec![0.2, 0.4],
@@ -4508,6 +4546,7 @@ mod tests {
                 path: "src/a.rs".to_string(),
                 start_line: 1,
                 end_line: 1,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn a() {}".to_string(),
                 embedding: vec![0.1, 0.2, 0.3],
@@ -4517,6 +4556,7 @@ mod tests {
                 path: "src/b.rs".to_string(),
                 start_line: 1,
                 end_line: 1,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn b() {}".to_string(),
                 embedding: vec![0.4, 0.5, 0.6],
@@ -4526,6 +4566,7 @@ mod tests {
                 path: "src/c.rs".to_string(),
                 start_line: 1,
                 end_line: 1,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn c() {}".to_string(),
                 embedding: vec![0.9, 1.0],
@@ -4542,6 +4583,7 @@ mod tests {
                 path: "src/a.rs".to_string(),
                 start_line: 1,
                 end_line: 1,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn a() {}".to_string(),
                 embedding: vec![0.1, 0.2, 0.3],
@@ -4551,6 +4593,7 @@ mod tests {
                 path: "src/b.rs".to_string(),
                 start_line: 1,
                 end_line: 1,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn b() {}".to_string(),
                 embedding: vec![0.4, f32::NAN, 0.6],
@@ -4560,6 +4603,7 @@ mod tests {
                 path: "src/c.rs".to_string(),
                 start_line: 1,
                 end_line: 1,
+                language: "rust".to_string(),
                 symbol_hint: None,
                 text: "fn c() {}".to_string(),
                 embedding: vec![0.9, 1.0],

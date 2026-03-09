@@ -5,6 +5,7 @@ use tree_sitter::{Language, Node, Parser};
 pub struct Chunk {
     pub start_line: usize,
     pub end_line: usize,
+    pub language: String,
     pub symbol_hint: Option<String>,
     pub text: String,
 }
@@ -144,6 +145,43 @@ enum AstLanguageKind {
     CSharp,
 }
 
+impl AstLanguageKind {
+    fn as_label(self) -> &'static str {
+        match self {
+            AstLanguageKind::JavaScript | AstLanguageKind::JavaScriptTSFallback => "javascript",
+            AstLanguageKind::TypeScript => "typescript",
+            AstLanguageKind::Python => "python",
+            AstLanguageKind::Rust => "rust",
+            AstLanguageKind::Go => "go",
+            AstLanguageKind::Java => "java",
+            AstLanguageKind::Cpp => "cpp",
+            AstLanguageKind::CSharp => "csharp",
+        }
+    }
+}
+
+pub fn language_label_for_path(file_path: &str) -> String {
+    if let Some((kind, _)) = ast_language_for_path(file_path) {
+        return kind.as_label().to_string();
+    }
+    let lower = file_path.to_ascii_lowercase();
+    if lower.ends_with(".json") {
+        "json".to_string()
+    } else if lower.ends_with(".toml") {
+        "toml".to_string()
+    } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        "yaml".to_string()
+    } else if lower.ends_with(".md") {
+        "markdown".to_string()
+    } else if lower.ends_with(".sh") || lower.ends_with(".bash") || lower.ends_with(".zsh") {
+        "shell".to_string()
+    } else if lower.ends_with(".sql") {
+        "sql".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
 fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)> {
     let lower = file_path.to_ascii_lowercase();
     if lower.ends_with(".ts") {
@@ -281,6 +319,7 @@ fn collect_top_level_chunks(
     root: Node<'_>,
     content: &str,
     lines: &[&str],
+    chunk_language: &str,
     language_kind: AstLanguageKind,
     lines_per_chunk: usize,
     overlap: usize,
@@ -301,6 +340,7 @@ fn collect_top_level_chunks(
             node,
             content,
             lines,
+            chunk_language,
             lines_per_chunk,
             overlap,
             language_kind,
@@ -322,6 +362,7 @@ fn ast_top_level_chunks(
     overlap: usize,
 ) -> Option<Vec<Chunk>> {
     let (language_kind, language) = ast_language_for_path(file_path)?;
+    let chunk_language = language_kind.as_label();
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
         return None;
@@ -349,6 +390,7 @@ fn ast_top_level_chunks(
                     ts_root,
                     content,
                     &lines,
+                    AstLanguageKind::JavaScriptTSFallback.as_label(),
                     AstLanguageKind::JavaScriptTSFallback,
                     lines_per_chunk,
                     overlap,
@@ -365,6 +407,7 @@ fn ast_top_level_chunks(
         root,
         content,
         &lines,
+        chunk_language,
         language_kind,
         lines_per_chunk,
         overlap,
@@ -403,6 +446,7 @@ fn append_node_chunks(
     node: Node<'_>,
     content: &str,
     lines: &[&str],
+    chunk_language: &str,
     lines_per_chunk: usize,
     overlap: usize,
     language_kind: AstLanguageKind,
@@ -426,6 +470,7 @@ fn append_node_chunks(
                 lines,
                 start_line.saturating_sub(1),
                 end_line,
+                chunk_language,
                 lines_per_chunk,
                 overlap,
             ));
@@ -443,6 +488,7 @@ fn append_node_chunks(
                     child,
                     content,
                     lines,
+                    chunk_language,
                     lines_per_chunk,
                     overlap,
                     language_kind,
@@ -454,6 +500,7 @@ fn append_node_chunks(
             lines,
             start_line.saturating_sub(1),
             end_line,
+            chunk_language,
             lines_per_chunk,
             overlap,
         ));
@@ -468,6 +515,7 @@ fn append_node_chunks(
     out.push(Chunk {
         start_line,
         end_line,
+        language: chunk_language.to_string(),
         symbol_hint,
         text: snippet,
     });
@@ -504,6 +552,7 @@ fn line_chunks_from_range(
     lines: &[&str],
     start_idx: usize,
     end_idx_exclusive: usize,
+    chunk_language: &str,
     lines_per_chunk: usize,
     overlap: usize,
 ) -> Vec<Chunk> {
@@ -523,6 +572,7 @@ fn line_chunks_from_range(
         chunks.push(Chunk {
             start_line: start + 1,
             end_line: end,
+            language: chunk_language.to_string(),
             symbol_hint,
             text: lines[start..end].join("\n"),
         });
@@ -534,12 +584,25 @@ fn line_chunks_from_range(
     chunks
 }
 
-fn line_window_chunks(content: &str, lines_per_chunk: usize, overlap: usize) -> Vec<Chunk> {
+fn line_window_chunks(
+    file_path: &str,
+    content: &str,
+    lines_per_chunk: usize,
+    overlap: usize,
+) -> Vec<Chunk> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return Vec::new();
     }
-    line_chunks_from_range(&lines, 0, lines.len(), lines_per_chunk, overlap)
+    let chunk_language = language_label_for_path(file_path);
+    line_chunks_from_range(
+        &lines,
+        0,
+        lines.len(),
+        &chunk_language,
+        lines_per_chunk,
+        overlap,
+    )
 }
 
 pub fn chunk_text(
@@ -553,7 +616,7 @@ pub fn chunk_text(
     {
         return chunks;
     }
-    line_window_chunks(content, lines_per_chunk, overlap)
+    line_window_chunks(file_path, content, lines_per_chunk, overlap)
 }
 
 #[cfg(test)]
@@ -568,6 +631,15 @@ mod tests {
             .join("\n");
         let chunks = chunk_text("README.unknown", &content, 40, 10);
         assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.language == "unknown"));
+    }
+
+    #[test]
+    fn python_chunks_record_language_label() {
+        let content = "def build_app():\n    return app\n";
+        let chunks = chunk_text("src/app.py", content, 40, 10);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| chunk.language == "python"));
     }
 
     #[test]

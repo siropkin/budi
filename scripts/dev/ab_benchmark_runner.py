@@ -1010,9 +1010,9 @@ def build_markdown(
     lines.append("## Per-Prompt Outcomes")
     lines.append("")
     lines.append(
-        "| # | Prompt | cost nb/wb | Q nb→wb | G nb→wb | intent | top | ctx | winner |"
+        "| # | Prompt | cost nb/wb | Q nb→wb | G nb→wb | intent | lang | top | ctx | winner |"
     )
-    lines.append("|---:|---|---:|---:|---:|---|---:|---:|---|")
+    lines.append("|---:|---|---:|---:|---:|---|---|---:|---:|---|")
     for i, row in enumerate(rows, start=1):
         prompt_short = row["prompt"][:100].replace("\n", " ")
         a = row["no_budi"]
@@ -1031,6 +1031,14 @@ def build_markdown(
             "path-lookup": "path",
             "non-code": "non-code",
         }.get(intent_raw, intent_raw or "—")
+        top_language = hook_out.get("retrieval_top_language")
+        languages = hook_out.get("retrieval_languages") or []
+        if isinstance(top_language, str) and top_language:
+            lang_str = top_language
+        elif isinstance(languages, list) and languages:
+            lang_str = ",".join(str(item) for item in languages[:3])
+        else:
+            lang_str = "—"
         top_score = hook_out.get("retrieval_top_score")
         ctx_chars = hook_out.get("context_chars")
         top_str = f"{top_score:.2f}" if isinstance(top_score, (int, float)) else "—"
@@ -1045,7 +1053,7 @@ def build_markdown(
         cost_wb = safe_num(b.get("total_cost_usd"))
         lines.append(
             f"| {i} | {prompt_short} | {cost_nb:.4f}/{cost_wb:.4f} | "
-            f"{q_str} | {g_str} | {intent_abbrev} | {top_str} | {ctx_str} | "
+            f"{q_str} | {g_str} | {intent_abbrev} | {lang_str} | {top_str} | {ctx_str} | "
             f"{judge.get('winner', 'n/a')} |"
         )
     lines.append("")

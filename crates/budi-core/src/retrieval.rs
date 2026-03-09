@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::chunking::language_label_for_path;
 use crate::config::BudiConfig;
 use crate::index::{ChunkRecord, RuntimeIndex};
 use crate::reason_codes::SKIP_REASON_NON_CODE_INTENT;
@@ -790,6 +791,7 @@ pub fn build_query_response(
                 path: cont.path.clone(),
                 start_line: cont.start_line,
                 end_line: cont.end_line,
+                language: cont.language.clone(),
                 score: cont_score,
                 reasons: vec![
                     if card2_is_alt_def {
@@ -856,6 +858,7 @@ pub fn build_query_response(
                 path: cont.path.clone(),
                 start_line: cont.start_line,
                 end_line: cont.end_line,
+                language: cont.language.clone(),
                 score: top_score * 0.60,
                 reasons: vec!["config-continuation".to_string()],
                 channel_scores: QueryChannelScores::default(),
@@ -892,6 +895,8 @@ pub fn build_query_response(
             .first()
             .map(|s| s.reasons.clone())
             .unwrap_or_default(),
+        top_language: selection.snippets.first().map(|s| s.language.clone()),
+        snippet_languages: selected_snippet_languages(&selection.snippets),
         recommended_injection: !selection.snippets.is_empty() && intent.code_related,
         skip_reason: if !intent.code_related {
             Some(SKIP_REASON_NON_CODE_INTENT.to_string())
@@ -917,6 +922,20 @@ pub fn build_query_response(
 /// Used by daemon.rs after post-retrieval filtering (session dedup, prefetch).
 pub fn format_context(snippets: &[QueryResultItem], budget: usize) -> String {
     context::build_context(snippets, budget)
+}
+
+fn selected_snippet_languages(snippets: &[QueryResultItem]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for snippet in snippets {
+        if snippet.language.is_empty() {
+            continue;
+        }
+        if seen.insert(snippet.language.clone()) {
+            out.push(snippet.language.clone());
+        }
+    }
+    out
 }
 
 /// Build a compact call graph summary for the top injected snippets.
@@ -1069,6 +1088,7 @@ fn build_symbol_definition_first_steps_card(
         path: continuation.path.clone(),
         start_line: continuation.start_line,
         end_line: continuation.end_line,
+        language: continuation.language.clone(),
         score,
         reasons: vec!["wrapper-implementation-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
@@ -1161,7 +1181,8 @@ fn find_best_runtime_env_chunk<'a>(
         if is_test_path(&chunk.path) || runtime.is_doc_like_chunk(chunk.id) {
             continue;
         }
-        let symbol_match = symbol.is_some_and(|expected| chunk.symbol_hint.as_deref() == Some(expected));
+        let symbol_match =
+            symbol.is_some_and(|expected| chunk.symbol_hint.as_deref() == Some(expected));
         let needle_hits = count_chunk_needle_hits(chunk, needles);
         if (!symbol_match && needle_hits == 0) || (require_needle_hit && needle_hits == 0) {
             continue;
@@ -1262,6 +1283,7 @@ fn build_web_request_flow_chain_card(
             .start_line
             .min(full_dispatch_chunk.start_line),
         end_line: wsgi_chunk.end_line.max(full_dispatch_chunk.end_line),
+        language: wsgi_chunk.language.clone(),
         score,
         reasons: vec!["web-request-flow-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
@@ -1287,12 +1309,8 @@ fn maybe_inject_runtime_env_var_pack(
         return;
     }
 
-    let Some(debug_chunk) = find_best_runtime_env_chunk(
-        runtime,
-        Some("get_debug_flag"),
-        &["FLASK_DEBUG"],
-        false,
-    )
+    let Some(debug_chunk) =
+        find_best_runtime_env_chunk(runtime, Some("get_debug_flag"), &["FLASK_DEBUG"], false)
     else {
         return;
     };
@@ -1301,8 +1319,7 @@ fn maybe_inject_runtime_env_var_pack(
         Some("get_load_dotenv"),
         &["FLASK_SKIP_DOTENV"],
         false,
-    )
-    else {
+    ) else {
         return;
     };
     let Some(cli_app_chunk) = find_best_runtime_env_chunk(
@@ -1310,8 +1327,7 @@ fn maybe_inject_runtime_env_var_pack(
         Some("load_app"),
         &["FLASK_APP", "flask --app", "wsgi.py", "app.py"],
         true,
-    )
-    else {
+    ) else {
         return;
     };
     let Some(app_run_chunk) = find_best_runtime_env_chunk(
@@ -1323,8 +1339,7 @@ fn maybe_inject_runtime_env_var_pack(
             "\"FLASK_DEBUG\" in os.environ",
         ],
         true,
-    )
-    else {
+    ) else {
         return;
     };
     let from_envvar_chunk = find_best_runtime_env_chunk(
@@ -1336,7 +1351,11 @@ fn maybe_inject_runtime_env_var_pack(
     let from_prefixed_env_chunk = find_best_runtime_env_chunk(
         runtime,
         Some("from_prefixed_env"),
-        &["prefix: str = \"FLASK\"", "key.startswith(prefix)", "from_prefixed_env("],
+        &[
+            "prefix: str = \"FLASK\"",
+            "key.startswith(prefix)",
+            "from_prefixed_env(",
+        ],
         false,
     );
 
@@ -1373,8 +1392,7 @@ fn build_runtime_env_var_card(
     score: f32,
 ) -> Option<QueryResultItem> {
     let (app_line, app_text) = extract_chunk_line_with_needle(cli_app_chunk, &["FLASK_APP"])?;
-    let (debug_line, debug_text) =
-        extract_chunk_line_with_needle(debug_chunk, &["FLASK_DEBUG"])?;
+    let (debug_line, debug_text) = extract_chunk_line_with_needle(debug_chunk, &["FLASK_DEBUG"])?;
     let (skip_line, skip_text) =
         extract_chunk_line_with_needle(load_dotenv_pref_chunk, &["FLASK_SKIP_DOTENV"])?;
     let dotenv_call = extract_chunk_line_with_needle(app_run_chunk, &["cli.load_dotenv("]);
@@ -1387,7 +1405,11 @@ fn build_runtime_env_var_card(
     let from_prefixed_env_line = from_prefixed_env_chunk.and_then(|chunk| {
         extract_chunk_line_with_needle(
             chunk,
-            &["prefix: str = \"FLASK\"", "key.startswith(prefix)", "from_prefixed_env("],
+            &[
+                "prefix: str = \"FLASK\"",
+                "key.startswith(prefix)",
+                "from_prefixed_env(",
+            ],
         )
     });
     let summary = if run_from_cli.is_some() {
@@ -1438,7 +1460,11 @@ fn build_runtime_env_var_card(
         .min(load_dotenv_pref_chunk.start_line)
         .min(cli_app_chunk.start_line)
         .min(app_run_chunk.start_line)
-        .min(from_envvar_chunk.map(|chunk| chunk.start_line).unwrap_or(usize::MAX))
+        .min(
+            from_envvar_chunk
+                .map(|chunk| chunk.start_line)
+                .unwrap_or(usize::MAX),
+        )
         .min(
             from_prefixed_env_chunk
                 .map(|chunk| chunk.start_line)
@@ -1449,7 +1475,11 @@ fn build_runtime_env_var_card(
         .max(load_dotenv_pref_chunk.end_line)
         .max(cli_app_chunk.end_line)
         .max(app_run_chunk.end_line)
-        .max(from_envvar_chunk.map(|chunk| chunk.end_line).unwrap_or_default())
+        .max(
+            from_envvar_chunk
+                .map(|chunk| chunk.end_line)
+                .unwrap_or_default(),
+        )
         .max(
             from_prefixed_env_chunk
                 .map(|chunk| chunk.end_line)
@@ -1459,6 +1489,7 @@ fn build_runtime_env_var_card(
         path: cli_app_chunk.path.clone(),
         start_line,
         end_line,
+        language: cli_app_chunk.language.clone(),
         score,
         reasons: vec!["runtime-env-var-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
@@ -1651,6 +1682,7 @@ fn build_symbol_definition_delegate_card(
         path: callee_chunk.path.clone(),
         start_line: alt_def_chunk.start_line.min(callee_chunk.start_line),
         end_line: alt_def_chunk.end_line.max(callee_chunk.end_line),
+        language: callee_chunk.language.clone(),
         score,
         reasons: vec!["delegated-definition-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
@@ -1668,6 +1700,7 @@ fn query_result_item_from_scored(
         path: chunk.path.clone(),
         start_line: chunk.start_line,
         end_line: chunk.end_line,
+        language: chunk.language.clone(),
         score: candidate.score,
         reasons: candidate.reasons.clone(),
         channel_scores: candidate.channel_scores,
@@ -2146,6 +2179,7 @@ fn build_test_file_inventory_card(
         path: path.to_string(),
         start_line: entries.first()?.line_number,
         end_line: entries.last()?.line_number,
+        language: language_label_for_path(path),
         score,
         reasons: vec!["test-file-inventory".to_string()],
         channel_scores: QueryChannelScores::default(),
@@ -2503,6 +2537,7 @@ pub fn prefetch_neighbors_for_file(
             path: chunk.path.clone(),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
+            language: chunk.language.clone(),
             score,
             reasons: vec!["graph-neighbor".to_string()],
             channel_scores: QueryChannelScores {
@@ -2638,6 +2673,7 @@ fn try_push_scored_chunk(
         path: chunk.path.clone(),
         start_line: chunk.start_line,
         end_line: chunk.end_line,
+        language: chunk.language.clone(),
         score: candidate.score,
         reasons: candidate.reasons.clone(),
         channel_scores: candidate.channel_scores,
@@ -4202,6 +4238,7 @@ mod tests {
             path: "src/ReactFiberCommitWork.js".to_string(),
             start_line: 601_usize,
             end_line: 680_usize,
+            language: "javascript".to_string(),
             score: 0.65,
             reasons: vec![],
             channel_scores: Default::default(),
@@ -4477,6 +4514,7 @@ it("renders", () => {})
             path: "internal/terraform/context_plan.go".to_string(),
             start_line: 180,
             end_line: 183,
+            language: "go".to_string(),
             score: 0.696,
             reasons: vec!["hint-match-boost".to_string()],
             channel_scores: QueryChannelScores::default(),
@@ -4488,6 +4526,7 @@ it("renders", () => {})
             path: "internal/terraform/context_plan.go".to_string(),
             start_line: 194,
             end_line: 273,
+            language: "go".to_string(),
             symbol_hint: Some("PlanAndEval".to_string()),
             text: "func (c *Context) PlanAndEval(...) {".to_string(),
             embedding: Vec::new(),
@@ -4505,6 +4544,7 @@ it("renders", () => {})
             path: "internal/terraform/context_plan.go".to_string(),
             start_line: 194,
             end_line: 273,
+            language: "go".to_string(),
             symbol_hint: Some("PlanAndEval".to_string()),
             text: "func (c *Context) PlanAndEval(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, *lang.Scope, tfdiags.Diagnostics) {\n    defer c.acquireRun(\"plan\")()\n    var diags tfdiags.Diagnostics\n    if opts == nil {\n        opts = DefaultPlanOpts\n    }\n}".to_string(),
             embedding: Vec::new(),
@@ -4537,6 +4577,7 @@ it("renders", () => {})
             path: "src/flask/app.py".to_string(),
             start_line: 1566,
             end_line: 1616,
+            language: "python".to_string(),
             symbol_hint: Some("wsgi_app".to_string()),
             text: "def wsgi_app(self, environ, start_response):\n    ctx = self.request_context(environ)\n    ctx.push()\n    response = self.full_dispatch_request(ctx)\n    return response(environ, start_response)\n".to_string(),
             embedding: Vec::new(),
@@ -4546,6 +4587,7 @@ it("renders", () => {})
             path: "src/flask/app.py".to_string(),
             start_line: 992,
             end_line: 1019,
+            language: "python".to_string(),
             symbol_hint: Some("full_dispatch_request".to_string()),
             text: "def full_dispatch_request(self, ctx):\n    rv = self.preprocess_request(ctx)\n    if rv is None:\n        rv = self.dispatch_request(ctx)\n    return self.finalize_request(ctx, rv)\n".to_string(),
             embedding: Vec::new(),
@@ -4555,6 +4597,7 @@ it("renders", () => {})
             path: "src/flask/app.py".to_string(),
             start_line: 966,
             end_line: 990,
+            language: "python".to_string(),
             symbol_hint: Some("dispatch_request".to_string()),
             text: "def dispatch_request(self, ctx):\n    req = ctx.request\n    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)\n".to_string(),
             embedding: Vec::new(),
@@ -4599,6 +4642,7 @@ it("renders", () => {})
             path: "src/flask/helpers.py".to_string(),
             start_line: 10,
             end_line: 26,
+            language: "python".to_string(),
             score: 0.61,
             reasons: vec!["hint-match-boost".to_string()],
             channel_scores: QueryChannelScores::default(),
@@ -4610,6 +4654,7 @@ it("renders", () => {})
             path: "src/flask/helpers.py".to_string(),
             start_line: 30,
             end_line: 80,
+            language: "python".to_string(),
             symbol_hint: Some("after_this_request".to_string()),
             text: "def after_this_request(f):".to_string(),
             embedding: Vec::new(),
@@ -4758,11 +4803,16 @@ it("renders", () => {})
             allow_docs: false,
             weights: weights_for_intent(QueryIntentKind::RuntimeConfig),
         };
-        let query =
-            "Which environment variables does Flask read at startup and how do they affect runtime behavior?";
+        let query = "Which environment variables does Flask read at startup and how do they affect runtime behavior?";
         let retrieval_query = query_for_initial_retrieval(query, &intent);
-        assert!(retrieval_query.contains("FLASK_APP"), "got: {retrieval_query}");
-        assert!(retrieval_query.contains("FLASK_DEBUG"), "got: {retrieval_query}");
+        assert!(
+            retrieval_query.contains("FLASK_APP"),
+            "got: {retrieval_query}"
+        );
+        assert!(
+            retrieval_query.contains("FLASK_DEBUG"),
+            "got: {retrieval_query}"
+        );
         assert!(
             retrieval_query.contains("FLASK_SKIP_DOTENV"),
             "got: {retrieval_query}"
@@ -4783,7 +4833,10 @@ it("renders", () => {})
         );
         let mut path_tokens = extract_query_path_tokens(&retrieval_query);
         augment_path_tokens_for_intent(&retrieval_query, &intent, &mut path_tokens);
-        assert!(path_tokens.iter().any(|t| t == "cli"), "got: {path_tokens:?}");
+        assert!(
+            path_tokens.iter().any(|t| t == "cli"),
+            "got: {path_tokens:?}"
+        );
         assert!(
             path_tokens.iter().any(|t| t == "helpers"),
             "got: {path_tokens:?}"
@@ -4807,6 +4860,7 @@ it("renders", () => {})
                     path: "framework/runtime_helpers.py".to_string(),
                     start_line: 28,
                     end_line: 33,
+                    language: "python".to_string(),
                     symbol_hint: Some("get_debug_flag".to_string()),
                     text: "def get_debug_flag() -> bool:\n    val = os.environ.get(\"FLASK_DEBUG\")\n    return bool(val)\n".to_string(),
                     embedding: Vec::new(),
@@ -4816,6 +4870,7 @@ it("renders", () => {})
                     path: "framework/runtime_helpers.py".to_string(),
                     start_line: 36,
                     end_line: 48,
+                    language: "python".to_string(),
                     symbol_hint: Some("get_load_dotenv".to_string()),
                     text: "def get_load_dotenv(default: bool = True) -> bool:\n    val = os.environ.get(\"FLASK_SKIP_DOTENV\")\n    if not val:\n        return default\n    return val.lower() in (\"0\", \"false\", \"no\")\n".to_string(),
                     embedding: Vec::new(),
@@ -4825,6 +4880,7 @@ it("renders", () => {})
                     path: "bootstrap/app_loader.py".to_string(),
                     start_line: 340,
                     end_line: 369,
+                    language: "python".to_string(),
                     symbol_hint: Some("load_app".to_string()),
                     text: "def load_app(self):\n    if app is None:\n        raise NoAppException(\n            \"Could not locate a Flask application. Use the\"\n            \" 'flask --app' option, 'FLASK_APP' environment\"\n            \" variable, or a 'wsgi.py' or 'app.py' file in the\"\n            \" current directory.\"\n        )\n".to_string(),
                     embedding: Vec::new(),
@@ -4834,6 +4890,7 @@ it("renders", () => {})
                     path: "server/runner_entry.py".to_string(),
                     start_line: 697,
                     end_line: 714,
+                    language: "python".to_string(),
                     symbol_hint: Some("run".to_string()),
                     text: "def run(self, host=None, port=None, debug=None, load_dotenv=True):\n    if os.environ.get(\"FLASK_RUN_FROM_CLI\") == \"true\":\n        return\n    if get_load_dotenv(load_dotenv):\n        cli.load_dotenv()\n        if \"FLASK_DEBUG\" in os.environ:\n            self.debug = get_debug_flag()\n".to_string(),
                     embedding: Vec::new(),
@@ -4843,6 +4900,7 @@ it("renders", () => {})
                     path: "settings/env_bridge.py".to_string(),
                     start_line: 102,
                     end_line: 124,
+                    language: "python".to_string(),
                     symbol_hint: Some("from_envvar".to_string()),
                     text: "def from_envvar(self, variable_name: str, silent: bool = False) -> bool:\n    rv = os.environ.get(variable_name)\n    if not rv:\n        raise RuntimeError(\"missing env var\")\n    return self.from_pyfile(rv, silent=silent)\n".to_string(),
                     embedding: Vec::new(),
@@ -4852,6 +4910,7 @@ it("renders", () => {})
                     path: "settings/env_bridge.py".to_string(),
                     start_line: 126,
                     end_line: 170,
+                    language: "python".to_string(),
                     symbol_hint: Some("from_prefixed_env".to_string()),
                     text: "def from_prefixed_env(self, prefix: str = \"FLASK\") -> bool:\n    prefix = f\"{prefix}_\"\n    for key in sorted(os.environ):\n        if not key.startswith(prefix):\n            continue\n        value = os.environ[key]\n        self[key.removeprefix(prefix)] = value\n".to_string(),
                     embedding: Vec::new(),
@@ -4861,6 +4920,7 @@ it("renders", () => {})
                     path: "models/app_state.py".to_string(),
                     start_line: 546,
                     end_line: 557,
+                    language: "python".to_string(),
                     symbol_hint: Some("debug".to_string()),
                     text: "@property\ndef debug(self) -> bool:\n    return self.config[\"DEBUG\"]\n".to_string(),
                     embedding: Vec::new(),
@@ -4886,14 +4946,31 @@ it("renders", () => {})
             "got: {:?}",
             response.snippets
         );
+        assert_eq!(first.language, "python");
         assert!(first.text.contains("FLASK_APP"), "got: {}", first.text);
         assert!(first.text.contains("FLASK_DEBUG"), "got: {}", first.text);
-        assert!(first.text.contains("FLASK_SKIP_DOTENV"), "got: {}", first.text);
-        assert!(first.text.contains("Config.from_envvar"), "got: {}", first.text);
+        assert!(
+            first.text.contains("FLASK_SKIP_DOTENV"),
+            "got: {}",
+            first.text
+        );
+        assert!(
+            first.text.contains("Config.from_envvar"),
+            "got: {}",
+            first.text
+        );
         assert!(
             first.text.contains("Config.from_prefixed_env"),
             "got: {}",
             first.text
+        );
+        assert_eq!(response.diagnostics.top_language.as_deref(), Some("python"));
+        assert!(
+            response
+                .diagnostics
+                .snippet_languages
+                .iter()
+                .any(|language| language == "python")
         );
         let _ = fs::remove_dir_all(&repo_root);
     }
@@ -4934,6 +5011,7 @@ it("renders", () => {})
                     path: "src/flask/wrappers.py".to_string(),
                     start_line: 161,
                     end_line: 178,
+                    language: "python".to_string(),
                     symbol_hint: Some("blueprint".to_string()),
                     text: "@property\ndef blueprint(self) -> str | None:\n    \"\"\"The registered name of the current blueprint.\"\"\"\n    return endpoint.rpartition(\".\")[0]\n".to_string(),
                     embedding: Vec::new(),
@@ -4943,6 +5021,7 @@ it("renders", () => {})
                     path: "src/flask/sansio/app.py".to_string(),
                     start_line: 566,
                     end_line: 592,
+                    language: "python".to_string(),
                     symbol_hint: Some("register_blueprint".to_string()),
                     text: "@setupmethod\ndef register_blueprint(self, blueprint: Blueprint, **options):\n    \"\"\"Register a Blueprint on the application.\"\"\"\n    blueprint.register(self, options)\n".to_string(),
                     embedding: Vec::new(),
@@ -4985,6 +5064,7 @@ it("renders", () => {})
                 path: "src/flask/sansio/scaffold.py".to_string(),
                 start_line: 486,
                 end_line: 505,
+                language: "python".to_string(),
                 symbol_hint: Some("after_request".to_string()),
                 text: "@setupmethod\ndef after_request(self, f):\n    \"\"\"Register a function to run after each request to this object.\"\"\"\n    self.after_request_funcs.setdefault(None, []).append(f)\n    return f\n".to_string(),
                 embedding: Vec::new(),

@@ -212,6 +212,7 @@ mod tests {
             path: path.to_string(),
             start_line: 1,
             end_line: 10,
+            language: "unknown".to_string(),
             score,
             reasons: vec!["lexical-hit".to_string()],
             channel_scores: QueryChannelScores::default(),

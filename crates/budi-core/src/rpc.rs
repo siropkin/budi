@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+fn default_chunk_language() -> String {
+    "unknown".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub repo_root: String,
@@ -64,6 +68,8 @@ pub struct QueryResultItem {
     pub path: String,
     pub start_line: usize,
     pub end_line: usize,
+    #[serde(default = "default_chunk_language")]
+    pub language: String,
     pub score: f32,
     #[serde(default)]
     pub reasons: Vec<String>,
@@ -80,6 +86,8 @@ pub struct SnippetRef {
     pub score: f32,
     pub start_line: usize,
     pub end_line: usize,
+    #[serde(default = "default_chunk_language")]
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +114,10 @@ pub struct QueryDiagnostics {
     pub top_score: f32,
     pub margin: f32,
     pub signals: Vec<String>,
+    #[serde(default)]
+    pub top_language: Option<String>,
+    #[serde(default)]
+    pub snippet_languages: Vec<String>,
     pub recommended_injection: bool,
     pub skip_reason: Option<String>,
 }

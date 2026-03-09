@@ -172,6 +172,8 @@ impl DaemonState {
                     top_score: 0.0,
                     margin: 0.0,
                     signals: Vec::new(),
+                    top_language: None,
+                    snippet_languages: Vec::new(),
                     recommended_injection: false,
                     skip_reason: Some(SKIP_REASON_NON_CODE_INTENT.to_string()),
                 },
@@ -224,6 +226,7 @@ impl DaemonState {
                 score: s.score,
                 start_line: s.start_line,
                 end_line: s.end_line,
+                language: s.language.clone(),
             })
             .collect();
 
