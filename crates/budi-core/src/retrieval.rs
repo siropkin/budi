@@ -141,6 +141,14 @@ pub fn build_query_response(
     augment_symbol_tokens_for_intent(&retrieval_query, &intent, &mut symbol_tokens);
     let exact_match_symbol_tokens =
         exact_match_symbol_tokens_for_intent(query, &intent, &symbol_tokens);
+    // Phase BZ: FlowTrace anchor — pre-compute camelCase-only tokens for weak definition
+    // seeding. Only camelCase (e.g. `reconcileChildFibers`, `useState`) — not TitleCase
+    // (e.g. "React", "Component") — to avoid over-boosting common type names.
+    let flowtrace_camelcase_tokens: Vec<String> = if intent.kind == QueryIntentKind::FlowTrace {
+        extract_flowtrace_camelcase_tokens(query)
+    } else {
+        Vec::new()
+    };
     let mut path_tokens = extract_query_path_tokens(&retrieval_query);
     let scope_hints = extract_scope_path_hints(&retrieval_query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
@@ -470,6 +478,24 @@ pub fn build_query_response(
             if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && exact_match {
                 adjusted += 0.30;
                 push_unique_reason(&mut reasons, "hint-match-boost");
+            }
+        }
+
+        // Phase BZ: FlowTrace — weak definition anchor for camelCase function targets.
+        // "What does reconcileChildFibers call / trace through useState" queries name a
+        // specific function. Boost its definition chunk (+0.10) to keep it above call-site
+        // chunks that may outscore it in a bad HNSW run (e.g. P07: call-site 0.38 vs
+        // definition 0.32 → without boost, call site wins → Claude gets misleading context).
+        // Uses only camelCase tokens (not TitleCase) to avoid boosting generic class names.
+        // Weaker than SymbolDefinition (+0.30) so it doesn't fully override flow semantics.
+        if !flowtrace_camelcase_tokens.is_empty()
+            && let Some(hint) = chunk.symbol_hint.as_deref()
+        {
+            let hint_lower = hint.to_ascii_lowercase();
+            let exact_match = flowtrace_camelcase_tokens.iter().any(|t| t == &hint_lower);
+            if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && exact_match {
+                adjusted += 0.10;
+                push_unique_reason(&mut reasons, "flowtrace-anchor");
             }
         }
 
@@ -2605,6 +2631,48 @@ fn push_scope_hint(token: &str, out: &mut Vec<String>, seen: &mut HashSet<String
     }
 }
 
+/// Phase BZ: extract camelCase identifiers from FlowTrace queries for weak anchor seeding.
+/// Returns only tokens where the original token has mixed case with uppercase after pos 0
+/// (true camelCase like `reconcileChildFibers`, `useState`, `performSyncWorkOnRoot`).
+/// Excludes TitleCase tokens (like "React", "Component") to avoid over-boosting generic names.
+fn extract_flowtrace_camelcase_tokens(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Backtick-quoted identifiers are always included (explicit symbol refs)
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            let token: String = chars.by_ref().take_while(|&ch| ch != '`').collect();
+            let ident = token
+                .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or(&token);
+            let normalized = ident.to_ascii_lowercase();
+            if normalized.len() >= 3 && normalized.len() <= 64 && seen.insert(normalized.clone()) {
+                out.push(normalized);
+            }
+        }
+    }
+
+    // camelCase tokens only: must have uppercase after position 0 (has_symbol_case_pattern)
+    for raw in query
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+    {
+        if raw.len() < 3 || raw.len() > 64 {
+            continue;
+        }
+        if has_symbol_case_pattern(raw) {
+            let normalized = raw.to_ascii_lowercase();
+            if seen.insert(normalized.clone()) {
+                out.push(normalized);
+            }
+        }
+    }
+    out
+}
+
 fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -3529,6 +3597,36 @@ mod tests {
         assert!(!is_test_path("src/scheduler.rs"));
         assert!(!is_test_path("crates/budi-core/src/daemon.rs"));
         assert!(!is_test_path("components/Button.tsx"));
+    }
+
+    // ── extract_flowtrace_camelcase_tokens (Phase BZ) ───────────────────────
+
+    #[test]
+    fn flowtrace_camelcase_tokens_extracts_camelcase() {
+        let tokens = extract_flowtrace_camelcase_tokens(
+            "What functions does reconcileChildFibers call and what does each return?",
+        );
+        assert!(tokens.contains(&"reconcilechildfibers".to_string()));
+        // "What", "does", "call" etc. are not camelCase — not extracted
+        assert!(!tokens.contains(&"what".to_string()));
+    }
+
+    #[test]
+    fn flowtrace_camelcase_tokens_excludes_titlecase() {
+        let tokens = extract_flowtrace_camelcase_tokens(
+            "Trace the lifecycle hook execution order when a React component mounts",
+        );
+        // "React" is TitleCase (uppercase only at pos 0) — should NOT be included
+        assert!(!tokens.contains(&"react".to_string()));
+        // No camelCase identifiers in this query, so tokens should be empty
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn flowtrace_camelcase_tokens_backtick_included() {
+        let tokens =
+            extract_flowtrace_camelcase_tokens("Trace `useState` internal call chain");
+        assert!(tokens.contains(&"usestate".to_string()));
     }
 
     #[test]
