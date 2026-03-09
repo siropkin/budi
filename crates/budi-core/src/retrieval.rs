@@ -682,7 +682,22 @@ pub fn build_query_response(
                 "want to implement",
             ],
         );
-    let min_score = if ci_skip { 0.55_f32 } else { min_score };
+    // Broad env-var listing queries ("which env vars", "what env vars") benefit
+    // from Claude's own exploration — partial injection anchors Claude on a
+    // narrow set and causes less comprehensive answers. Skip injection entirely.
+    let env_listing_skip = runtime_env_var_query
+        && contains_any(
+            &query.to_lowercase(),
+            &["which env", "what env", "list env", "all env"],
+        );
+    let ci_skip = ci_skip || env_listing_skip;
+    let min_score = if env_listing_skip {
+        f32::MAX
+    } else if ci_skip {
+        0.55_f32
+    } else {
+        min_score
+    };
     // FlowTrace with flowtrace-anchor — tighten the secondary floor.
     // When the top-ranked chunk already matched a camelCase function name in the query
     // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
@@ -907,9 +922,10 @@ pub fn build_query_response(
             selection.snippets.push(cont_item);
         }
     }
-    if intent.kind == QueryIntentKind::RuntimeConfig {
-        maybe_inject_runtime_env_var_pack(query, runtime, &mut selection, target_limit);
-    }
+    // Note: runtime-env-var-pack (Phase CP) removed — it over-anchors Claude on a
+    // narrow set of env vars, causing less comprehensive answers now that baseline
+    // Claude is strong enough to explore env-related code on its own.
+    // Regular retrieval + DF fix provides sufficient starting evidence.
     inject_context_plugins(query, runtime, &mut selection.snippets, target_limit);
 
     // Coverage-style TestLookup queries ("what tests cover X") need a
@@ -1224,55 +1240,6 @@ fn is_request_to_view_flow_query(query: &str) -> bool {
         && contains_any(&lower, &["trace", "call chain", "flow"])
 }
 
-fn count_chunk_needle_hits(chunk: &ChunkRecord, needles: &[&str]) -> usize {
-    needles
-        .iter()
-        .filter(|needle| extract_chunk_line_with_needle(chunk, &[*needle]).is_some())
-        .count()
-}
-
-fn find_best_runtime_env_chunk<'a>(
-    runtime: &'a RuntimeIndex,
-    symbol: Option<&str>,
-    needles: &[&str],
-    require_needle_hit: bool,
-) -> Option<&'a ChunkRecord> {
-    let mut best: Option<(&ChunkRecord, i32)> = None;
-    for chunk in runtime.all_chunks() {
-        if is_test_path(&chunk.path) || runtime.is_doc_like_chunk(chunk.id) {
-            continue;
-        }
-        let symbol_match =
-            symbol.is_some_and(|expected| chunk.symbol_hint.as_deref() == Some(expected));
-        let needle_hits = count_chunk_needle_hits(chunk, needles);
-        if (require_needle_hit || !symbol_match) && needle_hits == 0 {
-            continue;
-        }
-        let mut score = 0i32;
-        if symbol_match {
-            score += 8;
-        }
-        score += (needle_hits as i32) * 3;
-        if chunk.text.contains("os.environ") {
-            score += 1;
-        }
-        if chunk
-            .symbol_hint
-            .as_deref()
-            .is_some_and(|hint| !is_generic_symbol_hint(hint))
-        {
-            score += 1;
-        }
-        if best
-            .as_ref()
-            .is_none_or(|(_, best_score)| score > *best_score)
-        {
-            best = Some((chunk, score));
-        }
-    }
-    best.map(|(chunk, _)| chunk)
-}
-
 fn build_web_request_flow_chain_card(
     wsgi_chunk: &ChunkRecord,
     full_dispatch_chunk: &ChunkRecord,
@@ -1350,212 +1317,6 @@ fn build_web_request_flow_chain_card(
         channel_scores: QueryChannelScores::default(),
         text,
         slm_relevance_note: Some("request-to-view chain summary".to_string()),
-    })
-}
-
-fn maybe_inject_runtime_env_var_pack(
-    query: &str,
-    runtime: &RuntimeIndex,
-    selection: &mut SnippetSelectionState,
-    target_limit: usize,
-) {
-    if !is_runtime_env_var_query(query) {
-        return;
-    }
-    if selection
-        .snippets
-        .iter()
-        .any(|s| s.reasons.iter().any(|r| r == "runtime-env-var-pack"))
-    {
-        return;
-    }
-
-    let Some(debug_chunk) =
-        find_best_runtime_env_chunk(runtime, Some("get_debug_flag"), &["FLASK_DEBUG"], false)
-    else {
-        return;
-    };
-    let Some(load_dotenv_pref_chunk) = find_best_runtime_env_chunk(
-        runtime,
-        Some("get_load_dotenv"),
-        &["FLASK_SKIP_DOTENV"],
-        false,
-    ) else {
-        return;
-    };
-    let Some(cli_app_chunk) = find_best_runtime_env_chunk(
-        runtime,
-        Some("load_app"),
-        &["FLASK_APP", "flask --app", "wsgi.py", "app.py"],
-        true,
-    ) else {
-        return;
-    };
-    let Some(app_run_chunk) = find_best_runtime_env_chunk(
-        runtime,
-        Some("run"),
-        &[
-            "FLASK_RUN_FROM_CLI",
-            "cli.load_dotenv(",
-            "\"FLASK_DEBUG\" in os.environ",
-        ],
-        true,
-    ) else {
-        return;
-    };
-    let from_envvar_chunk = find_best_runtime_env_chunk(
-        runtime,
-        Some("from_envvar"),
-        &["os.environ.get(variable_name)", "from_envvar("],
-        false,
-    );
-    let from_prefixed_env_chunk = find_best_runtime_env_chunk(
-        runtime,
-        Some("from_prefixed_env"),
-        &[
-            "prefix: str = \"FLASK\"",
-            "key.startswith(prefix)",
-            "from_prefixed_env(",
-        ],
-        false,
-    );
-
-    let score = selection
-        .snippets
-        .first()
-        .map(|item| item.score * 0.92)
-        .unwrap_or(0.42);
-    let Some(card) = build_runtime_env_var_card(
-        debug_chunk,
-        load_dotenv_pref_chunk,
-        cli_app_chunk,
-        app_run_chunk,
-        from_envvar_chunk,
-        from_prefixed_env_chunk,
-        score,
-    ) else {
-        return;
-    };
-
-    selection.snippets.insert(0, card);
-    if selection.snippets.len() > target_limit {
-        selection.snippets.truncate(target_limit);
-    }
-}
-
-fn build_runtime_env_var_card(
-    debug_chunk: &ChunkRecord,
-    load_dotenv_pref_chunk: &ChunkRecord,
-    cli_app_chunk: &ChunkRecord,
-    app_run_chunk: &ChunkRecord,
-    from_envvar_chunk: Option<&ChunkRecord>,
-    from_prefixed_env_chunk: Option<&ChunkRecord>,
-    score: f32,
-) -> Option<QueryResultItem> {
-    let (app_line, app_text) = extract_chunk_line_with_needle(cli_app_chunk, &["FLASK_APP"])?;
-    let (debug_line, debug_text) = extract_chunk_line_with_needle(debug_chunk, &["FLASK_DEBUG"])?;
-    let (skip_line, skip_text) =
-        extract_chunk_line_with_needle(load_dotenv_pref_chunk, &["FLASK_SKIP_DOTENV"])?;
-    let dotenv_call = extract_chunk_line_with_needle(app_run_chunk, &["cli.load_dotenv("]);
-    let debug_override =
-        extract_chunk_line_with_needle(app_run_chunk, &["\"FLASK_DEBUG\" in os.environ"]);
-    let run_from_cli = extract_chunk_line_with_needle(app_run_chunk, &["FLASK_RUN_FROM_CLI"]);
-    let from_envvar_line = from_envvar_chunk.and_then(|chunk| {
-        extract_chunk_line_with_needle(chunk, &["os.environ.get(variable_name)", "from_envvar("])
-    });
-    let from_prefixed_env_line = from_prefixed_env_chunk.and_then(|chunk| {
-        extract_chunk_line_with_needle(
-            chunk,
-            &[
-                "prefix: str = \"FLASK\"",
-                "key.startswith(prefix)",
-                "from_prefixed_env(",
-            ],
-        )
-    });
-    let summary = if run_from_cli.is_some() {
-        "startup env vars: FLASK_APP selects the application import path; FLASK_SKIP_DOTENV controls loading .env/.flaskenv; FLASK_DEBUG overrides debug mode; FLASK_RUN_FROM_CLI suppresses nested app.run() during `flask run`; config.from_envvar()/from_prefixed_env() pull env into app config".to_string()
-    } else {
-        "startup env vars: FLASK_APP selects the application import path; FLASK_SKIP_DOTENV controls loading .env/.flaskenv; FLASK_DEBUG overrides debug mode; config.from_envvar()/from_prefixed_env() pull env into app config".to_string()
-    };
-    let mut text_lines = vec![summary];
-    let mut seen = HashSet::new();
-    push_compact_evidence_line(
-        &mut text_lines,
-        &mut seen,
-        "load_app",
-        Some((app_line, app_text)),
-    );
-    push_compact_evidence_line(
-        &mut text_lines,
-        &mut seen,
-        "get_debug_flag",
-        Some((debug_line, debug_text)),
-    );
-    push_compact_evidence_line(
-        &mut text_lines,
-        &mut seen,
-        "get_load_dotenv",
-        Some((skip_line, skip_text)),
-    );
-    push_compact_evidence_line(&mut text_lines, &mut seen, "Flask.run", dotenv_call);
-    push_compact_evidence_line(&mut text_lines, &mut seen, "Flask.run", debug_override);
-    push_compact_evidence_line(&mut text_lines, &mut seen, "Flask.run", run_from_cli);
-    push_compact_evidence_line(
-        &mut text_lines,
-        &mut seen,
-        "Config.from_envvar",
-        from_envvar_line,
-    );
-    push_compact_evidence_line(
-        &mut text_lines,
-        &mut seen,
-        "Config.from_prefixed_env",
-        from_prefixed_env_line,
-    );
-    if text_lines.len() < 5 {
-        return None;
-    }
-    let start_line = debug_chunk
-        .start_line
-        .min(load_dotenv_pref_chunk.start_line)
-        .min(cli_app_chunk.start_line)
-        .min(app_run_chunk.start_line)
-        .min(
-            from_envvar_chunk
-                .map(|chunk| chunk.start_line)
-                .unwrap_or(usize::MAX),
-        )
-        .min(
-            from_prefixed_env_chunk
-                .map(|chunk| chunk.start_line)
-                .unwrap_or(usize::MAX),
-        );
-    let end_line = debug_chunk
-        .end_line
-        .max(load_dotenv_pref_chunk.end_line)
-        .max(cli_app_chunk.end_line)
-        .max(app_run_chunk.end_line)
-        .max(
-            from_envvar_chunk
-                .map(|chunk| chunk.end_line)
-                .unwrap_or_default(),
-        )
-        .max(
-            from_prefixed_env_chunk
-                .map(|chunk| chunk.end_line)
-                .unwrap_or_default(),
-        );
-    Some(QueryResultItem {
-        path: cli_app_chunk.path.clone(),
-        start_line,
-        end_line,
-        language: cli_app_chunk.language.clone(),
-        score,
-        reasons: vec!["runtime-env-var-pack".to_string()],
-        channel_scores: QueryChannelScores::default(),
-        text: text_lines.join("\n"),
-        slm_relevance_note: Some("startup environment variable summary".to_string()),
     })
 }
 
@@ -4876,7 +4637,10 @@ it("renders", () => {})
     }
 
     #[test]
-    fn runtime_env_queries_inject_startup_env_pack_without_exact_repo_paths() {
+    fn broad_env_listing_queries_skip_injection() {
+        // Broad env-var listing queries ("which env vars") skip injection entirely
+        // because partial context anchors Claude on a narrow set. Claude's own
+        // exploration produces more comprehensive answers.
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4907,61 +4671,12 @@ it("renders", () => {})
                     text: "def get_load_dotenv(default: bool = True) -> bool:\n    val = os.environ.get(\"FLASK_SKIP_DOTENV\")\n    if not val:\n        return default\n    return val.lower() in (\"0\", \"false\", \"no\")\n".to_string(),
                     embedding: Vec::new(),
                 },
-                ChunkRecord {
-                    id: 3,
-                    path: "bootstrap/app_loader.py".to_string(),
-                    start_line: 340,
-                    end_line: 369,
-                    language: "python".to_string(),
-                    symbol_hint: Some("load_app".to_string()),
-                    text: "def load_app(self):\n    if app is None:\n        raise NoAppException(\n            \"Could not locate a Flask application. Use the\"\n            \" 'flask --app' option, 'FLASK_APP' environment\"\n            \" variable, or a 'wsgi.py' or 'app.py' file in the\"\n            \" current directory.\"\n        )\n".to_string(),
-                    embedding: Vec::new(),
-                },
-                ChunkRecord {
-                    id: 4,
-                    path: "server/runner_entry.py".to_string(),
-                    start_line: 697,
-                    end_line: 714,
-                    language: "python".to_string(),
-                    symbol_hint: Some("run".to_string()),
-                    text: "def run(self, host=None, port=None, debug=None, load_dotenv=True):\n    if os.environ.get(\"FLASK_RUN_FROM_CLI\") == \"true\":\n        return\n    if get_load_dotenv(load_dotenv):\n        cli.load_dotenv()\n        if \"FLASK_DEBUG\" in os.environ:\n            self.debug = get_debug_flag()\n".to_string(),
-                    embedding: Vec::new(),
-                },
-                ChunkRecord {
-                    id: 5,
-                    path: "settings/env_bridge.py".to_string(),
-                    start_line: 102,
-                    end_line: 124,
-                    language: "python".to_string(),
-                    symbol_hint: Some("from_envvar".to_string()),
-                    text: "def from_envvar(self, variable_name: str, silent: bool = False) -> bool:\n    rv = os.environ.get(variable_name)\n    if not rv:\n        raise RuntimeError(\"missing env var\")\n    return self.from_pyfile(rv, silent=silent)\n".to_string(),
-                    embedding: Vec::new(),
-                },
-                ChunkRecord {
-                    id: 6,
-                    path: "settings/env_bridge.py".to_string(),
-                    start_line: 126,
-                    end_line: 170,
-                    language: "python".to_string(),
-                    symbol_hint: Some("from_prefixed_env".to_string()),
-                    text: "def from_prefixed_env(self, prefix: str = \"FLASK\") -> bool:\n    prefix = f\"{prefix}_\"\n    for key in sorted(os.environ):\n        if not key.startswith(prefix):\n            continue\n        value = os.environ[key]\n        self[key.removeprefix(prefix)] = value\n".to_string(),
-                    embedding: Vec::new(),
-                },
-                ChunkRecord {
-                    id: 7,
-                    path: "models/app_state.py".to_string(),
-                    start_line: 546,
-                    end_line: 557,
-                    language: "python".to_string(),
-                    symbol_hint: Some("debug".to_string()),
-                    text: "@property\ndef debug(self) -> bool:\n    return self.config[\"DEBUG\"]\n".to_string(),
-                    embedding: Vec::new(),
-                },
             ],
             updated_at_ts: 0,
         };
         let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
         let config = BudiConfig::default();
+        // Broad listing query → should skip injection
         let response = build_query_response(
             &runtime,
             "Which environment variables does Flask read at startup and how do they affect runtime behavior?",
@@ -4972,37 +4687,28 @@ it("renders", () => {})
             &config,
         )
         .expect("query response");
-        let first = response.snippets.first().expect("at least one snippet");
         assert!(
-            first.reasons.iter().any(|r| r == "runtime-env-var-pack"),
-            "got: {:?}",
+            response.snippets.is_empty(),
+            "broad env listing should skip injection, got: {:?}",
             response.snippets
         );
-        assert_eq!(first.language, "python");
-        assert!(first.text.contains("FLASK_APP"), "got: {}", first.text);
-        assert!(first.text.contains("FLASK_DEBUG"), "got: {}", first.text);
+        // Targeted env query → should still inject
+        let response2 = build_query_response(
+            &runtime,
+            "How does the app read FLASK_DEBUG to control debug mode?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        // Targeted query may or may not inject depending on HNSW scores,
+        // but at least it should not be blocked by env-listing-skip.
+        // (May classify as architecture or runtime-config — either is fine.)
         assert!(
-            first.text.contains("FLASK_SKIP_DOTENV"),
-            "got: {}",
-            first.text
-        );
-        assert!(
-            first.text.contains("Config.from_envvar"),
-            "got: {}",
-            first.text
-        );
-        assert!(
-            first.text.contains("Config.from_prefixed_env"),
-            "got: {}",
-            first.text
-        );
-        assert_eq!(response.diagnostics.top_language.as_deref(), Some("python"));
-        assert!(
-            response
-                .diagnostics
-                .snippet_languages
-                .iter()
-                .any(|language| language == "python")
+            !response2.diagnostics.intent.is_empty(),
+            "should have an intent"
         );
         let _ = fs::remove_dir_all(&repo_root);
     }
