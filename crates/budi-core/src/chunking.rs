@@ -92,6 +92,9 @@ fn symbol_from_line(line: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
+    if trimmed.starts_with('@') || trimmed.starts_with("#[") {
+        return None;
+    }
     if let Some(rest) = trimmed.strip_prefix("func") {
         let rest = rest.trim_start();
         if let Some(rest) = rest.strip_prefix('(')
@@ -739,6 +742,28 @@ func (c *Context) Plan(opts *PlanOpts) (*plans.Plan, error) {
                 .iter()
                 .map(|c| c.symbol_hint.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn decorated_python_function_prefers_def_name_for_symbol_hint() {
+        let content = r#"
+@setupmethod
+def register_blueprint(blueprint, **options):
+    return blueprint
+"#;
+        let chunks = chunk_text("app.py", content, 80, 20);
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"register_blueprint"),
+            "expected register_blueprint in hints, got: {hints:?}"
+        );
+        assert!(
+            !hints.contains(&"setupmethod"),
+            "decorator should not become the symbol hint: {hints:?}"
         );
     }
 

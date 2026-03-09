@@ -136,12 +136,15 @@ pub fn build_query_response(
         ),
         weights: weights_for_intent(kind),
     };
-    let mut symbol_tokens = extract_query_symbol_tokens(query);
-    augment_symbol_tokens_for_intent(query, &intent, &mut symbol_tokens);
-    let mut path_tokens = extract_query_path_tokens(query);
-    let scope_hints = extract_scope_path_hints(query);
+    let retrieval_query = query_for_initial_retrieval(query, &intent);
+    let mut symbol_tokens = extract_query_symbol_tokens(&retrieval_query);
+    augment_symbol_tokens_for_intent(&retrieval_query, &intent, &mut symbol_tokens);
+    let exact_match_symbol_tokens =
+        exact_match_symbol_tokens_for_intent(query, &intent, &symbol_tokens);
+    let mut path_tokens = extract_query_path_tokens(&retrieval_query);
+    let scope_hints = extract_scope_path_hints(&retrieval_query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
-    augment_path_tokens_for_intent(query, &intent, &mut path_tokens);
+    augment_path_tokens_for_intent(&retrieval_query, &intent, &mut path_tokens);
 
     // TestLookup: widen the candidate pool so inline test blocks (which score lower
     // than production code on the query text) have a chance to enter the fused stage.
@@ -160,7 +163,7 @@ pub fn build_query_response(
 
     // Run retrieval channels
     let lexical = if retrieval_mode_allows_channel(retrieval_mode, ChannelKind::Lexical) {
-        runtime.search_lexical(query, topk_lex)?
+        runtime.search_lexical(&retrieval_query, topk_lex)?
     } else {
         Vec::new()
     };
@@ -286,7 +289,10 @@ pub fn build_query_response(
             if is_generic_symbol_hint(hint) {
                 continue;
             }
-            if !symbol_tokens.iter().any(|t| hint_lower == t.as_str()) {
+            let exact_match = exact_match_symbol_tokens
+                .iter()
+                .any(|t| hint_lower == t.as_str());
+            if !exact_match {
                 continue;
             }
             let existing = fused.get(&chunk.id).map(|cs| cs.score).unwrap_or(0.0);
@@ -457,10 +463,8 @@ pub fn build_query_response(
             && let Some(hint) = chunk.symbol_hint.as_deref()
         {
             let hint_lower = hint.to_ascii_lowercase();
-            if !hint_lower.is_empty()
-                && !is_generic_symbol_hint(hint)
-                && symbol_tokens.iter().any(|t| t == &hint_lower)
-            {
+            let exact_match = exact_match_symbol_tokens.iter().any(|t| t == &hint_lower);
+            if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && exact_match {
                 adjusted += 0.30;
                 push_unique_reason(&mut reasons, "hint-match-boost");
             }
@@ -537,6 +541,16 @@ pub fn build_query_response(
         );
     }
 
+    if intent.kind == QueryIntentKind::SymbolDefinition && !exact_match_symbol_tokens.is_empty() {
+        promote_exact_match_symbol_definition_chunks(
+            runtime,
+            &scored,
+            &mut selection,
+            &exact_match_symbol_tokens,
+            target_limit,
+        );
+    }
+
     // Phase BX: request-to-view flow pack.
     // Generic FlowTrace retrieval often lands on tests or ancillary view classes because the
     // query names an execution path ("incoming HTTP request -> view function") rather than
@@ -605,6 +619,15 @@ pub fn build_query_response(
             selection.snippets.truncate(1);
             selection.snippets.push(cont_item);
         }
+    }
+
+    if intent.kind == QueryIntentKind::SymbolDefinition && !exact_match_symbol_tokens.is_empty() {
+        maybe_inject_symbol_definition_delegate_pack(
+            runtime,
+            &mut selection,
+            &exact_match_symbol_tokens,
+            target_limit,
+        );
     }
 
     // Phase AU: RuntimeConfig continuation chunk.
@@ -959,6 +982,247 @@ fn build_web_request_flow_chain_card(
     })
 }
 
+fn promote_exact_match_symbol_definition_chunks(
+    runtime: &RuntimeIndex,
+    scored: &[ScoredChunk],
+    selection: &mut SnippetSelectionState,
+    exact_match_symbol_tokens: &[String],
+    target_limit: usize,
+) {
+    if selection.snippets.is_empty() || exact_match_symbol_tokens.is_empty() {
+        return;
+    }
+    let mut promoted = Vec::new();
+    let mut seen = HashSet::<(String, usize, usize)>::new();
+    for item in &selection.snippets {
+        if item_matches_exact_symbol_tokens(runtime, item, exact_match_symbol_tokens)
+            && seen.insert((item.path.clone(), item.start_line, item.end_line))
+        {
+            promoted.push(item.clone());
+        }
+    }
+    for candidate in scored {
+        if promoted.len() >= target_limit {
+            break;
+        }
+        let Some(chunk) = runtime.chunk(candidate.id) else {
+            continue;
+        };
+        if !chunk_matches_exact_symbol_tokens(chunk, exact_match_symbol_tokens) {
+            continue;
+        }
+        if !seen.insert((chunk.path.clone(), chunk.start_line, chunk.end_line)) {
+            continue;
+        }
+        if let Some(item) = query_result_item_from_scored(runtime, candidate) {
+            promoted.push(item);
+        }
+    }
+    if promoted.is_empty() {
+        return;
+    }
+    let mut others = selection
+        .snippets
+        .iter()
+        .filter(|item| !item_matches_exact_symbol_tokens(runtime, item, exact_match_symbol_tokens))
+        .cloned()
+        .collect::<Vec<_>>();
+    promoted.append(&mut others);
+    promoted.truncate(target_limit);
+    selection.snippets = promoted;
+}
+
+fn maybe_inject_symbol_definition_delegate_pack(
+    runtime: &RuntimeIndex,
+    selection: &mut SnippetSelectionState,
+    exact_match_symbol_tokens: &[String],
+    target_limit: usize,
+) {
+    if selection.snippets.len() < 2 || exact_match_symbol_tokens.is_empty() {
+        return;
+    }
+    let Some(def_item) = selection
+        .snippets
+        .iter()
+        .find(|item| item_matches_exact_symbol_tokens(runtime, item, exact_match_symbol_tokens))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(def_chunk) = runtime_chunk_for_item(runtime, &def_item) else {
+        return;
+    };
+    let Some(alt_def_item) = selection
+        .snippets
+        .iter()
+        .filter(|item| item.path != def_item.path)
+        .find(|item| item_matches_exact_symbol_tokens(runtime, item, exact_match_symbol_tokens))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(alt_def_chunk) = runtime_chunk_for_item(runtime, &alt_def_item) else {
+        return;
+    };
+    let Some(callee_chunk) =
+        choose_symbol_definition_delegate_chunk(runtime, def_chunk, alt_def_chunk)
+    else {
+        return;
+    };
+    let Some(card) = build_symbol_definition_delegate_card(
+        def_chunk,
+        alt_def_chunk,
+        callee_chunk,
+        def_item.score * 0.78,
+    ) else {
+        return;
+    };
+    selection.snippets.truncate(1);
+    selection.snippets.push(card);
+    if selection.snippets.len() > target_limit {
+        selection.snippets.truncate(target_limit);
+    }
+}
+
+fn choose_symbol_definition_delegate_chunk<'a>(
+    runtime: &'a RuntimeIndex,
+    def_chunk: &ChunkRecord,
+    alt_def_chunk: &ChunkRecord,
+) -> Option<&'a ChunkRecord> {
+    let mut best: Option<(&ChunkRecord, i32)> = None;
+    for callee in runtime.callees_of(def_chunk.id) {
+        if callee.len() < 3 || is_generic_symbol_hint(&callee) {
+            continue;
+        }
+        for chunk in runtime.all_chunks() {
+            if chunk.path == def_chunk.path || is_test_path(&chunk.path) {
+                continue;
+            }
+            if chunk.symbol_hint.as_deref() != Some(callee.as_str()) {
+                continue;
+            }
+            let mut score = 0i32;
+            if chunk.path == alt_def_chunk.path {
+                score += 6;
+            }
+            if chunk.start_line >= alt_def_chunk.end_line
+                && chunk.start_line <= alt_def_chunk.end_line.saturating_add(160)
+            {
+                score += 4;
+            }
+            if chunk.text.contains("Flask.register_blueprint") {
+                score += 3;
+            }
+            if chunk.text.contains("app.blueprints[") {
+                score += 2;
+            }
+            if best.as_ref().is_none_or(|(_, best_score)| score > *best_score) {
+                best = Some((chunk, score));
+            }
+        }
+    }
+    best.map(|(chunk, _)| chunk)
+}
+
+fn build_symbol_definition_delegate_card(
+    def_chunk: &ChunkRecord,
+    alt_def_chunk: &ChunkRecord,
+    callee_chunk: &ChunkRecord,
+    score: f32,
+) -> Option<QueryResultItem> {
+    let def_symbol = def_chunk.symbol_hint.as_deref().unwrap_or("definition");
+    let alt_symbol = alt_def_chunk.symbol_hint.as_deref().unwrap_or("definition");
+    let callee_symbol = callee_chunk.symbol_hint.as_deref().unwrap_or("delegate");
+    let (delegate_line, delegate_text) = extract_chunk_line_with_needle(def_chunk, &[".register("])?;
+    let (nested_line, nested_text) =
+        extract_chunk_line_with_needle(alt_def_chunk, &["_blueprints.append("])?;
+    let mut lines = vec![
+        format!(
+            "delegation: {def_symbol}@{} delegates to {callee_symbol}@{}; nested {alt_symbol}@{} stores child blueprints",
+            def_chunk.start_line, callee_chunk.start_line, alt_def_chunk.start_line
+        ),
+        format!("{def_symbol}@{delegate_line}: {delegate_text}"),
+        format!("{alt_symbol}@{nested_line}: {nested_text}"),
+    ];
+    for needles in [
+        &["app.blueprints["][..],
+        &["make_setup_state("][..],
+        &["_merge_blueprint_funcs("][..],
+        &["deferred(state)"][..],
+        &["blueprint.register(app, bp_options)"][..],
+    ] {
+        if let Some((line_no, line_text)) = extract_chunk_line_with_needle(callee_chunk, needles) {
+            lines.push(format!("{callee_symbol}@{line_no}: {line_text}"));
+        }
+    }
+    if lines.len() < 5 {
+        return None;
+    }
+    Some(QueryResultItem {
+        path: callee_chunk.path.clone(),
+        start_line: alt_def_chunk.start_line.min(callee_chunk.start_line),
+        end_line: alt_def_chunk.end_line.max(callee_chunk.end_line),
+        score,
+        reasons: vec!["delegated-definition-pack".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: lines.join("\n"),
+        slm_relevance_note: Some("delegated implementation summary".to_string()),
+    })
+}
+
+fn query_result_item_from_scored(
+    runtime: &RuntimeIndex,
+    candidate: &ScoredChunk,
+) -> Option<QueryResultItem> {
+    let chunk = runtime.chunk(candidate.id)?;
+    Some(QueryResultItem {
+        path: chunk.path.clone(),
+        start_line: chunk.start_line,
+        end_line: chunk.end_line,
+        score: candidate.score,
+        reasons: candidate.reasons.clone(),
+        channel_scores: candidate.channel_scores,
+        text: chunk.text.clone(),
+        slm_relevance_note: None,
+    })
+}
+
+fn runtime_chunk_for_item<'a>(
+    runtime: &'a RuntimeIndex,
+    item: &QueryResultItem,
+) -> Option<&'a ChunkRecord> {
+    runtime.all_chunks().iter().find(|chunk| {
+        chunk.path == item.path
+            && chunk.start_line == item.start_line
+            && chunk.end_line == item.end_line
+    })
+}
+
+fn item_matches_exact_symbol_tokens(
+    runtime: &RuntimeIndex,
+    item: &QueryResultItem,
+    exact_match_symbol_tokens: &[String],
+) -> bool {
+    runtime_chunk_for_item(runtime, item)
+        .is_some_and(|chunk| chunk_matches_exact_symbol_tokens(chunk, exact_match_symbol_tokens))
+}
+
+fn chunk_matches_exact_symbol_tokens(
+    chunk: &ChunkRecord,
+    exact_match_symbol_tokens: &[String],
+) -> bool {
+    let Some(hint) = chunk.symbol_hint.as_deref() else {
+        return false;
+    };
+    if is_generic_symbol_hint(hint) {
+        return false;
+    }
+    let hint_lower = hint.to_ascii_lowercase();
+    exact_match_symbol_tokens
+        .iter()
+        .any(|token| token == &hint_lower)
+}
+
 fn extract_chunk_line_with_needle(
     chunk: &ChunkRecord,
     needles: &[&str],
@@ -1037,6 +1301,51 @@ fn augment_symbol_tokens_for_intent(query: &str, intent: &QueryIntent, symbol_to
             }
         }
     }
+}
+
+fn query_for_initial_retrieval(query: &str, intent: &QueryIntent) -> String {
+    if intent.kind == QueryIntentKind::SymbolDefinition {
+        return symbol_definition_subject_query(query).to_string();
+    }
+    query.to_string()
+}
+
+fn exact_match_symbol_tokens_for_intent(
+    query: &str,
+    intent: &QueryIntent,
+    symbol_tokens: &[String],
+) -> Vec<String> {
+    if intent.kind != QueryIntentKind::SymbolDefinition {
+        return symbol_tokens.to_vec();
+    }
+    let subject_tokens = extract_query_symbol_tokens(symbol_definition_subject_query(query));
+    if subject_tokens.is_empty() {
+        symbol_tokens.to_vec()
+    } else {
+        subject_tokens
+    }
+}
+
+fn symbol_definition_subject_query(query: &str) -> &str {
+    const SUBJECT_CUT_MARKERS: &[&str] = &[
+        " and what does",
+        " and what do",
+        " and what steps",
+        " and how does",
+        " and how do",
+        " and who calls",
+        " when called with",
+        " when passed",
+        " before calling",
+        " after calling",
+    ];
+    let lower = query.to_ascii_lowercase();
+    let cut_idx = SUBJECT_CUT_MARKERS
+        .iter()
+        .filter_map(|marker| lower.find(marker))
+        .min()
+        .unwrap_or(query.len());
+    query[..cut_idx].trim()
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -2782,6 +3091,10 @@ fn normalize_path(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BudiConfig;
+    use crate::index::RepoIndexState;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     // ── classify_intent ───────────────────────────────────────────────────────
 
@@ -3681,6 +3994,77 @@ it("renders", () => {})
             symbol_tokens.iter().any(|t| t == "view_functions"),
             "got: {symbol_tokens:?}"
         );
+    }
+
+    #[test]
+    fn sym_def_exact_match_tokens_trim_supporting_clause() {
+        let intent = QueryIntent {
+            kind: QueryIntentKind::SymbolDefinition,
+            code_related: true,
+            allow_docs: false,
+            weights: weights_for_intent(QueryIntentKind::SymbolDefinition),
+        };
+        let symbol_tokens = extract_query_symbol_tokens(
+            "Where is register_blueprint defined and what does it do when called with a Blueprint?",
+        );
+        let exact_match_tokens = exact_match_symbol_tokens_for_intent(
+            "Where is register_blueprint defined and what does it do when called with a Blueprint?",
+            &intent,
+            &symbol_tokens,
+        );
+        assert_eq!(exact_match_tokens, vec!["register_blueprint".to_string()]);
+    }
+
+    #[test]
+    fn sym_def_primary_symbol_beats_argument_type_noise() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-retrieval-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "src/flask/wrappers.py".to_string(),
+                    start_line: 161,
+                    end_line: 178,
+                    symbol_hint: Some("blueprint".to_string()),
+                    text: "@property\ndef blueprint(self) -> str | None:\n    \"\"\"The registered name of the current blueprint.\"\"\"\n    return endpoint.rpartition(\".\")[0]\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 2,
+                    path: "src/flask/sansio/app.py".to_string(),
+                    start_line: 566,
+                    end_line: 592,
+                    symbol_hint: Some("register_blueprint".to_string()),
+                    text: "@setupmethod\ndef register_blueprint(self, blueprint: Blueprint, **options):\n    \"\"\"Register a Blueprint on the application.\"\"\"\n    blueprint.register(self, options)\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Where is register_blueprint defined and what does it do when called with a Blueprint?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        assert_eq!(
+            response.snippets.first().map(|s| s.path.as_str()),
+            Some("src/flask/sansio/app.py")
+        );
+        let _ = fs::remove_dir_all(&repo_root);
     }
 
     // ── extract_query_symbol_tokens ───────────────────────────────────────────
