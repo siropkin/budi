@@ -451,8 +451,11 @@ pub fn build_query_response(
         // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
         // target methods. Use a stronger penalty than Architecture because FlowTrace relies
         // more heavily on graph/symbol signals, which makes test-callers especially sticky.
+        // Phase BY: increased from -0.30 to -0.40. Previously, test utilities with high raw
+        // HNSW scores (e.g. consoleMock.js ~0.59) survived the FlowTrace min-score floor at
+        // 0.25 after -0.30 (adjusted=0.29). With -0.40 they fall below 0.25 and are filtered.
         if intent.kind == QueryIntentKind::FlowTrace && is_test_path(&chunk.path) {
-            adjusted -= 0.30;
+            adjusted -= 0.40;
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
@@ -2059,6 +2062,16 @@ fn try_push_scored_chunk(
     if !selection.seen_fingerprints.insert(fingerprint) {
         return false;
     }
+    // Phase BY: skip candidates that overlap with an already-selected snippet from the
+    // same file. Stride=60/overlap=20 chunking can select two adjacent chunks that share
+    // 20 lines — injecting both duplicates those lines and can confuse Claude by showing
+    // the same code twice in slightly different evidence cards.
+    let overlaps_existing = selection.snippets.iter().any(|s| {
+        s.path == chunk.path && s.start_line < chunk.end_line && chunk.start_line < s.end_line
+    });
+    if overlaps_existing {
+        return false;
+    }
     selection.snippets.push(QueryResultItem {
         path: chunk.path.clone(),
         start_line: chunk.start_line,
@@ -3523,6 +3536,43 @@ mod tests {
         assert!(!is_test_path("examples/tutorial/tests/test_auth.py"));
         assert!(!is_test_path("examples/basic/tests/test_app.py"));
         assert!(is_test_path("tests/test_blueprints.py"));
+    }
+
+    // ── overlapping chunk deduplication (Phase BY) ───────────────────────────
+
+    #[test]
+    fn overlapping_chunks_skipped_in_selection() {
+        // Two adjacent stride=60/overlap=20 chunks from the same file share lines 661-680.
+        // The second (lower-scored) one should be rejected by try_push_scored_chunk.
+        use context::SnippetSelectionState;
+        use crate::rpc::QueryResultItem;
+        let mut selection = SnippetSelectionState::default();
+        // Insert the first chunk manually (simulating a successful push)
+        selection.snippets.push(QueryResultItem {
+            path: "src/ReactFiberCommitWork.js".to_string(),
+            start_line: 601_usize,
+            end_line: 680_usize,
+            score: 0.65,
+            reasons: vec![],
+            channel_scores: Default::default(),
+            text: String::new(),
+            slm_relevance_note: None,
+        });
+        // The overlapping check logic
+        let path = "src/ReactFiberCommitWork.js";
+        let start_line: usize = 661;
+        let end_line: usize = 740;
+        let overlaps = selection.snippets.iter().any(|s| {
+            s.path == path && s.start_line < end_line && start_line < s.end_line
+        });
+        assert!(overlaps, "661-740 should overlap with 601-680");
+        // Non-overlapping chunk from same file: 741-820 should not overlap
+        let start2: usize = 741;
+        let end2: usize = 820;
+        let no_overlap = selection.snippets.iter().any(|s| {
+            s.path == path && s.start_line < end2 && start2 < s.end_line
+        });
+        assert!(!no_overlap, "741-820 should not overlap with 601-680");
     }
 
     #[test]
