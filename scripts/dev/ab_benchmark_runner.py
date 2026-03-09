@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import hashlib
 import json
 import os
@@ -218,6 +219,133 @@ def apply_prompt_limit(prompts: list[str], max_prompts: int) -> list[str]:
     if max_prompts <= 0:
         return list(prompts)
     return list(prompts[:max_prompts])
+
+
+def parse_prompt_indices(spec: str, total: int) -> list[int]:
+    if total <= 0:
+        return []
+    spec = spec.strip()
+    if not spec:
+        return list(range(total))
+
+    selected: list[int] = []
+    seen: set[int] = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_raw, end_raw = part.split("-", 1)
+            try:
+                start = int(start_raw.strip())
+                end = int(end_raw.strip())
+            except ValueError as exc:
+                raise SystemExit(f"Invalid prompt index range: {part}") from exc
+            if start <= 0 or end <= 0 or start > end or end > total:
+                raise SystemExit(
+                    f"Prompt index range out of bounds: {part} (valid: 1-{total})"
+                )
+            indices = range(start - 1, end)
+        else:
+            try:
+                one_based = int(part)
+            except ValueError as exc:
+                raise SystemExit(f"Invalid prompt index: {part}") from exc
+            if one_based <= 0 or one_based > total:
+                raise SystemExit(
+                    f"Prompt index out of bounds: {one_based} (valid: 1-{total})"
+                )
+            indices = [one_based - 1]
+        for idx in indices:
+            if idx not in seen:
+                seen.add(idx)
+                selected.append(idx)
+
+    if not selected:
+        raise SystemExit("Prompt index selection is empty")
+    return selected
+
+
+def select_prompt_subset(
+    prompts: list[str],
+    prompt_indices: str,
+    max_prompts: int,
+) -> tuple[list[str], list[int]]:
+    selected_zero_based = parse_prompt_indices(prompt_indices, len(prompts))
+    selected_prompts = [prompts[idx] for idx in selected_zero_based]
+    if max_prompts > 0:
+        selected_prompts = selected_prompts[:max_prompts]
+        selected_zero_based = selected_zero_based[: len(selected_prompts)]
+    return selected_prompts, [idx + 1 for idx in selected_zero_based]
+
+
+def select_rows_subset(
+    rows: list[dict[str, Any]],
+    prompt_indices: str,
+    max_prompts: int,
+) -> tuple[list[dict[str, Any]], list[str], list[int]]:
+    selected_zero_based = parse_prompt_indices(prompt_indices, len(rows))
+    selected_rows = [rows[idx] for idx in selected_zero_based]
+    if max_prompts > 0:
+        selected_rows = selected_rows[:max_prompts]
+        selected_zero_based = selected_zero_based[: len(selected_rows)]
+    prompts = [str(row.get("prompt", "")) for row in selected_rows]
+    return selected_rows, prompts, [idx + 1 for idx in selected_zero_based]
+
+
+def load_results_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise SystemExit(f"results file not found: {path}")
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"results file is not valid JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"results file is not a JSON object: {path}")
+    return payload
+
+
+def load_reusable_no_budi_baseline(
+    path: Path,
+    repo_root: Path,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    payload = load_results_payload(path)
+    loaded_repo_root = str(payload.get("repo_root", "")).strip()
+    if loaded_repo_root:
+        try:
+            loaded_repo_path = Path(loaded_repo_root).expanduser().resolve()
+        except OSError:
+            loaded_repo_path = None
+        if loaded_repo_path is not None and loaded_repo_path != repo_root.resolve():
+            raise SystemExit(
+                "reuse-no-budi baseline repo does not match requested repo: "
+                f"{loaded_repo_path} != {repo_root.resolve()}"
+            )
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise SystemExit(f"reuse-no-budi baseline has no rows: {path}")
+
+    baseline_by_prompt: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        prompt = normalize_prompt(str(row.get("prompt", "")))
+        if not prompt:
+            continue
+        if prompt in baseline_by_prompt:
+            raise SystemExit(
+                "reuse-no-budi baseline contains duplicate normalized prompt: "
+                f"{prompt}"
+            )
+        no_budi = row.get("no_budi")
+        if not isinstance(no_budi, dict) or not no_budi.get("ok"):
+            continue
+        baseline_by_prompt[prompt] = copy.deepcopy(no_budi)
+
+    if not baseline_by_prompt:
+        raise SystemExit(f"reuse-no-budi baseline has no successful no_budi rows: {path}")
+    return str(path), baseline_by_prompt
 
 
 def resolve_prompts(
@@ -711,18 +839,23 @@ def run_one_prompt(
     total: int,
     claude_timeout_sec: int,
     disable_with_budi_retry: bool,
+    reused_no_budi: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run no_budi and with_budi concurrently for one prompt, return a row dict."""
     _print(f"[ab] prompt {idx}/{total}", flush=True)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        no_budi_future = executor.submit(
-            run_claude_prompt, repo_root, prompt, True, claude_timeout_sec
-        )
-        with_budi_future = executor.submit(
-            run_claude_prompt, repo_root, prompt, False, claude_timeout_sec
-        )
-        no_budi = no_budi_future.result()
-        with_budi = with_budi_future.result()
+    if reused_no_budi is None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            no_budi_future = executor.submit(
+                run_claude_prompt, repo_root, prompt, True, claude_timeout_sec
+            )
+            with_budi_future = executor.submit(
+                run_claude_prompt, repo_root, prompt, False, claude_timeout_sec
+            )
+            no_budi = no_budi_future.result()
+            with_budi = with_budi_future.result()
+    else:
+        no_budi = copy.deepcopy(reused_no_budi)
+        with_budi = run_claude_prompt(repo_root, prompt, False, claude_timeout_sec)
 
     with_budi_hook_retry = False
     with_budi_hook: dict[str, Any] = {}
@@ -754,6 +887,7 @@ def run_one_prompt(
         "prompt": prompt,
         "no_budi": no_budi,
         "with_budi": with_budi,
+        "no_budi_reused": reused_no_budi is not None,
         "with_budi_hook": with_budi_hook,
         "with_budi_hook_retry": with_budi_hook_retry,
         "judge": {"ok": False},
@@ -801,6 +935,7 @@ def build_markdown(
     summary: dict[str, Any],
     judge_summary: dict[str, Any],
     prompt_set: dict[str, Any],
+    run_options: dict[str, Any],
     run_label: str,
     variant_id: str,
     variant_overrides: dict[str, Any],
@@ -812,11 +947,22 @@ def build_markdown(
     if run_label:
         lines.append(f"- Run label: `{run_label}`")
     lines.append(f"- Variant: `{variant_id}`")
+    lines.append(f"- Validation tier: `{run_options.get('validation_tier', 'full')}`")
     if variant_overrides:
         lines.append(f"- Variant overrides: `{json.dumps(variant_overrides, sort_keys=True)}`")
     lines.append(f"- Prompt source: `{prompt_set.get('source', 'unknown')}`")
     lines.append(f"- Prompt count: {int(prompt_set.get('count', len(prompts)))}")
     lines.append(f"- Prompt set SHA256: `{prompt_set.get('fingerprint_sha256', '')}`")
+    selected_indices = prompt_set.get("selected_indices_1based") or []
+    if selected_indices and (
+        str(run_options.get("prompt_indices", "")).strip()
+        or int(run_options.get("max_prompts", 0)) > 0
+    ):
+        rendered = ",".join(str(x) for x in selected_indices)
+        lines.append(f"- Prompt indices: `{rendered}`")
+    reused_no_budi = run_options.get("reuse_no_budi_from") or ""
+    if reused_no_budi:
+        lines.append(f"- Reused no_budi baseline: `{reused_no_budi}`")
     lines.append("- Mode A: `disableAllHooks=true` (no_budi)")
     lines.append("- Mode B: `disableAllHooks=false` (with_budi)")
     lines.append("- Claude run mode: `claude -p --output-format json`")
@@ -979,6 +1125,24 @@ def main() -> None:
         help="Optional inline JSON object with budi config overrides for this run",
     )
     parser.add_argument(
+        "--validation-tier",
+        choices=["fast", "focused", "full"],
+        default="full",
+        help=(
+            "Validation preset. `fast` skips the LLM judge by default for cheap inner-loop runs; "
+            "`focused` is intended for prompt subsets and/or reused no_budi baselines; "
+            "`full` preserves the current full judged A/B workflow."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-indices",
+        default="",
+        help=(
+            "Optional 1-based prompt indices/ranges applied after prompt resolution, "
+            'for example "4,6,13-15".'
+        ),
+    )
+    parser.add_argument(
         "--max-prompts",
         type=int,
         default=0,
@@ -988,6 +1152,14 @@ def main() -> None:
         "--skip-judge",
         action="store_true",
         help="Skip LLM judge pass (faster, but no quality/grounding metrics)",
+    )
+    parser.add_argument(
+        "--reuse-no-budi-from",
+        default="",
+        help=(
+            "Optional existing ab-results.json to reuse successful no_budi rows by normalized prompt "
+            "text and run only with_budi fresh."
+        ),
     )
     parser.add_argument(
         "--judge-limit",
@@ -1030,6 +1202,8 @@ def main() -> None:
     repo_root = Path(args.repo_root).expanduser().resolve()
     if not repo_root.exists():
         raise SystemExit(f"Repo does not exist: {repo_root}")
+    if args.reuse_results_json and args.reuse_no_budi_from:
+        raise SystemExit("--reuse-results-json and --reuse-no-budi-from are mutually exclusive")
     if args.max_prompts < 0:
         raise SystemExit("--max-prompts must be >= 0")
     if args.judge_limit < 0:
@@ -1038,16 +1212,12 @@ def main() -> None:
         raise SystemExit("--claude-timeout-sec must be >= 30")
     if args.judge_timeout_sec < 30:
         raise SystemExit("--judge-timeout-sec must be >= 30")
+    effective_skip_judge = bool(args.skip_judge or args.validation_tier == "fast")
+    if args.validation_tier == "fast" and not args.skip_judge:
+        _print("[ab] validation tier fast: skipping judge pass by default", flush=True)
 
     prompts: list[str] = []
     prompt_source = ""
-    if not args.reuse_results_json:
-        prompts, prompt_source = resolve_prompts(
-            prompts_file=args.prompts_file,
-            inline_prompts=args.prompt,
-            use_default_prompts=not args.no_default_prompts,
-        )
-        prompts = apply_prompt_limit(prompts, args.max_prompts)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else (
@@ -1061,30 +1231,71 @@ def main() -> None:
         args.variant_overrides_file,
         args.variant_overrides_json,
     )
+    selected_prompt_indices: list[int] = []
+    reused_no_budi_source = ""
+    reused_no_budi_by_prompt: dict[str, dict[str, Any]] = {}
     original_config_raw: str | None = None
     original_hook_settings_raw: str | None = None
     try:
         if args.reuse_results_json:
             source_path = Path(args.reuse_results_json).expanduser().resolve()
-            if not source_path.exists():
-                raise SystemExit(f"reuse results file not found: {source_path}")
             source_results_json = str(source_path)
-            loaded = json.loads(source_path.read_text())
+            loaded = load_results_payload(source_path)
             loaded_rows = loaded.get("rows")
             if not isinstance(loaded_rows, list) or not loaded_rows:
                 raise SystemExit("reuse results file has no rows")
-            rows = loaded_rows
-            prompts = [str(r.get("prompt", "")) for r in rows if str(r.get("prompt", "")).strip()]
-            prompts = apply_prompt_limit(prompts, args.max_prompts)
-            if args.max_prompts > 0:
-                rows = rows[: len(prompts)]
+            rows, prompts, selected_prompt_indices = select_rows_subset(
+                loaded_rows,
+                args.prompt_indices,
+                args.max_prompts,
+            )
+            if not prompts:
+                raise SystemExit(
+                    "Prompt selection is empty after applying --prompt-indices/--max-prompts"
+                )
             prompt_source = f"reuse:{source_path}"
             _print(f"[ab] reusing rows from: {source_path}", flush=True)
         else:
+            prompts, prompt_source = resolve_prompts(
+                prompts_file=args.prompts_file,
+                inline_prompts=args.prompt,
+                use_default_prompts=not args.no_default_prompts,
+            )
+            prompts, selected_prompt_indices = select_prompt_subset(
+                prompts,
+                args.prompt_indices,
+                args.max_prompts,
+            )
+            if not prompts:
+                raise SystemExit(
+                    "Prompt selection is empty after applying --prompt-indices/--max-prompts"
+                )
+            if args.reuse_no_budi_from:
+                baseline_path = Path(args.reuse_no_budi_from).expanduser().resolve()
+                reused_no_budi_source, reused_no_budi_by_prompt = load_reusable_no_budi_baseline(
+                    baseline_path,
+                    repo_root,
+                )
+                _print(
+                    f"[ab] reusing no_budi baseline from: {reused_no_budi_source}",
+                    flush=True,
+                )
             original_hook_settings_raw = pin_repo_hooks_to_dev_budi(repo_root)
             restart_budi_daemon(repo_root)
             ensure_budi_ready(repo_root)
             original_config_raw = ensure_debug_io_enabled(repo_root, variant_overrides)
+
+            def baseline_for_prompt(prompt: str) -> dict[str, Any] | None:
+                if not reused_no_budi_by_prompt:
+                    return None
+                normalized = normalize_prompt(prompt)
+                baseline = reused_no_budi_by_prompt.get(normalized)
+                if baseline is None:
+                    raise SystemExit(
+                        "reuse-no-budi baseline is missing prompt: "
+                        f"{prompt}"
+                    )
+                return baseline
 
             parallel = max(1, args.parallel)
             if parallel == 1:
@@ -1092,6 +1303,7 @@ def main() -> None:
                     rows.append(run_one_prompt(
                         repo_root, prompt, idx, len(prompts),
                         args.claude_timeout_sec, args.disable_with_budi_retry,
+                        baseline_for_prompt(prompt),
                     ))
             else:
                 _print(f"[ab] running {len(prompts)} prompts with --parallel {parallel}", flush=True)
@@ -1103,6 +1315,7 @@ def main() -> None:
                             run_one_prompt,
                             repo_root, prompt, idx, len(prompts),
                             args.claude_timeout_sec, args.disable_with_budi_retry,
+                            baseline_for_prompt(prompt),
                         ): idx
                         for idx, prompt in enumerate(prompts, start=1)
                     }
@@ -1116,6 +1329,7 @@ def main() -> None:
             "source": prompt_source or "unknown",
             "count": len(prompts),
             "fingerprint_sha256": prompt_set_fingerprint(prompts),
+            "selected_indices_1based": selected_prompt_indices,
         }
         _print(
             f"[ab] prompts={prompt_set['count']} source={prompt_set['source']} "
@@ -1132,7 +1346,7 @@ def main() -> None:
             no_budi = row.get("no_budi", {})
             with_budi = row.get("with_budi", {})
             if (
-                not args.skip_judge
+                not effective_skip_judge
                 and isinstance(no_budi, dict)
                 and isinstance(with_budi, dict)
                 and no_budi.get("ok")
@@ -1168,7 +1382,7 @@ def main() -> None:
 
         # Default non-eligible judge values
         for row in rows:
-            if args.skip_judge:
+            if effective_skip_judge:
                 row["judge"] = {"ok": False, "error": "judge_skipped"}
             else:
                 row["judge"] = {"ok": False, "error": "judge_not_selected"}
@@ -1199,7 +1413,7 @@ def main() -> None:
             "ties": ties,
             "judged_rows": len(judges),
             "judge_attempted_rows": judge_attempts,
-            "judge_skipped": bool(args.skip_judge),
+            "judge_skipped": effective_skip_judge,
             "judge_limit": args.judge_limit,
             "avg_score_no_budi": statistics.fmean([safe_num(j.get("score_no_budi")) for j in judges])
             if judges
@@ -1218,6 +1432,18 @@ def main() -> None:
         }
 
         hook_example = collect_hook_log_example(repo_root)
+        run_options = {
+            "validation_tier": args.validation_tier,
+            "prompt_indices": args.prompt_indices,
+            "selected_prompt_indices_1based": selected_prompt_indices,
+            "max_prompts": args.max_prompts,
+            "skip_judge": effective_skip_judge,
+            "judge_limit": args.judge_limit,
+            "claude_timeout_sec": args.claude_timeout_sec,
+            "judge_timeout_sec": args.judge_timeout_sec,
+            "disable_with_budi_retry": bool(args.disable_with_budi_retry),
+            "reuse_no_budi_from": reused_no_budi_source,
+        }
         results = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "repo_root": str(repo_root),
@@ -1227,14 +1453,7 @@ def main() -> None:
                 "id": args.variant_id,
                 "overrides": variant_overrides,
             },
-            "run_options": {
-                "max_prompts": args.max_prompts,
-                "skip_judge": bool(args.skip_judge),
-                "judge_limit": args.judge_limit,
-                "claude_timeout_sec": args.claude_timeout_sec,
-                "judge_timeout_sec": args.judge_timeout_sec,
-                "disable_with_budi_retry": bool(args.disable_with_budi_retry),
-            },
+            "run_options": run_options,
             "prompt_set": prompt_set,
             "prompts": prompts,
             "rows": rows,
@@ -1252,6 +1471,7 @@ def main() -> None:
             summary,
             judge_summary,
             prompt_set,
+            run_options,
             args.run_label,
             args.variant_id,
             variant_overrides,
