@@ -889,6 +889,7 @@ pub fn build_query_response(
     if react_effect_lifecycle_query {
         maybe_inject_react_effect_lifecycle_pack(runtime, &mut selection, target_limit);
     }
+    maybe_inject_nextjs_app_router_pack(query, runtime, &mut selection, target_limit);
 
     // Phase BU: coverage-style TestLookup queries ("what tests cover X") need a
     // compact inventory of the dominant test file, not just one tiny test chunk.
@@ -1447,6 +1448,297 @@ fn build_react_effect_lifecycle_card(
         text: text_lines.join("\n"),
         slm_relevance_note: Some("React effect lifecycle summary".to_string()),
     })
+}
+
+fn maybe_inject_nextjs_app_router_pack(
+    query: &str,
+    runtime: &RuntimeIndex,
+    selection: &mut SnippetSelectionState,
+    target_limit: usize,
+) {
+    if selection.snippets.is_empty() || !is_nextjs_app_router_query(query, &selection.snippets) {
+        return;
+    }
+    if selection
+        .snippets
+        .iter()
+        .any(|s| s.reasons.iter().any(|r| r == "nextjs-app-router-pack"))
+    {
+        return;
+    }
+    let top_score = selection.snippets.first().map(|s| s.score).unwrap_or(0.40);
+    let Some(card) = build_nextjs_app_router_card(runtime, top_score * 0.96) else {
+        return;
+    };
+    selection.snippets.insert(0, card);
+    if selection.snippets.len() > target_limit {
+        selection.snippets.truncate(target_limit);
+    }
+}
+
+fn is_nextjs_app_router_query(query: &str, snippets: &[QueryResultItem]) -> bool {
+    let query_ecosystems = detect_query_ecosystems(query);
+    let has_nextjs_signal = query_ecosystems
+        .iter()
+        .any(|ecosystem| ecosystem == "nextjs")
+        || snippets.iter().any(|snippet| {
+            snippet_ecosystems(snippet)
+                .iter()
+                .any(|ecosystem| ecosystem == "nextjs")
+        });
+    if !has_nextjs_signal {
+        return false;
+    }
+    let lower = query.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "app router",
+            "route boundary",
+            "route boundaries",
+            "route handler",
+            "layout.tsx",
+            "page.tsx",
+            "route.ts",
+            "segment",
+            "segments",
+            "nested route",
+            "route ownership",
+        ],
+    ) || (contains_any(&lower, &["layout", "page"])
+        && contains_any(&lower, &["route", "router", "api", "boundary"]))
+}
+
+fn build_nextjs_app_router_card(runtime: &RuntimeIndex, score: f32) -> Option<QueryResultItem> {
+    let mut paths = runtime
+        .all_chunks()
+        .iter()
+        .filter_map(|chunk| {
+            if is_nextjs_app_router_file_path(&chunk.path) {
+                Some(chunk.path.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+
+    let mut entries = Vec::new();
+    for path in paths {
+        let Some(role) = nextjs_app_router_role_for_path(&path) else {
+            continue;
+        };
+        let Some(segment) = nextjs_app_router_segment(&path) else {
+            continue;
+        };
+        let Some(chunk) = best_nextjs_app_router_chunk(runtime, &path, role) else {
+            continue;
+        };
+        entries.push((segment, role, path, chunk));
+    }
+    if entries.len() < 2 {
+        return None;
+    }
+    entries.sort_by(
+        |(segment_a, role_a, path_a, _), (segment_b, role_b, path_b, _)| {
+            nextjs_segment_sort_key(segment_a)
+                .cmp(&nextjs_segment_sort_key(segment_b))
+                .then_with(|| nextjs_role_sort_key(role_a).cmp(&nextjs_role_sort_key(role_b)))
+                .then_with(|| path_a.cmp(path_b))
+        },
+    );
+
+    let mut text_lines = vec!["app-router inventory:".to_string()];
+    let mut seen = HashSet::new();
+    for (segment, role, path, chunk) in &entries {
+        if *role == "route" {
+            text_lines.push(format!("handler {segment} => route {path}"));
+        } else {
+            text_lines.push(format!("segment {segment} => {role} {path}"));
+        }
+        push_compact_evidence_line(
+            &mut text_lines,
+            &mut seen,
+            path,
+            nextjs_app_router_evidence(chunk, role),
+        );
+    }
+
+    let first_chunk = entries.first()?.3;
+    let start_line = entries
+        .iter()
+        .map(|(_, _, _, chunk)| chunk.start_line)
+        .min()
+        .unwrap_or(first_chunk.start_line);
+    let end_line = entries
+        .iter()
+        .map(|(_, _, _, chunk)| chunk.end_line)
+        .max()
+        .unwrap_or(first_chunk.end_line);
+    Some(QueryResultItem {
+        path: first_chunk.path.clone(),
+        start_line,
+        end_line,
+        language: first_chunk.language.clone(),
+        score,
+        reasons: vec!["nextjs-app-router-pack".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: text_lines.join("\n"),
+        slm_relevance_note: Some("Next.js app-router boundary summary".to_string()),
+    })
+}
+
+fn best_nextjs_app_router_chunk<'a>(
+    runtime: &'a RuntimeIndex,
+    path: &str,
+    role: &str,
+) -> Option<&'a ChunkRecord> {
+    let primary_needles = nextjs_primary_role_needles(role);
+    let mut fallback: Option<&ChunkRecord> = None;
+    for chunk in runtime
+        .all_chunks()
+        .iter()
+        .filter(|chunk| chunk.path == path)
+    {
+        if fallback.is_none_or(|existing| chunk.start_line < existing.start_line) {
+            fallback = Some(chunk);
+        }
+        if extract_chunk_line_with_needle(chunk, primary_needles).is_some() {
+            return Some(chunk);
+        }
+    }
+    fallback
+}
+
+fn nextjs_app_router_evidence(chunk: &ChunkRecord, role: &str) -> Option<(usize, String)> {
+    extract_chunk_line_with_needle(chunk, nextjs_primary_role_needles(role))
+        .or_else(|| extract_chunk_line_with_needle(chunk, nextjs_secondary_role_needles(role)))
+        .or_else(|| extract_first_meaningful_line(chunk))
+}
+
+fn nextjs_primary_role_needles(role: &str) -> &'static [&'static str] {
+    match role {
+        "layout" | "page" | "loading" | "error" => {
+            &["export default function", "export default async function"]
+        }
+        "route" => &[
+            "export async function GET",
+            "export function GET",
+            "export async function POST",
+            "export function POST",
+            "export async function PUT",
+            "export function PUT",
+            "export async function DELETE",
+            "export function DELETE",
+        ],
+        _ => &["export default function"],
+    }
+}
+
+fn nextjs_secondary_role_needles(role: &str) -> &'static [&'static str] {
+    match role {
+        "layout" | "page" | "loading" | "error" => {
+            &["export const metadata", "\"use client\"", "'use client'"]
+        }
+        "route" => &["Response.json("],
+        _ => &[],
+    }
+}
+
+fn nextjs_segment_sort_key(segment: &str) -> (usize, String) {
+    let rank = if segment == "/" { 0 } else { 1 };
+    (rank, segment.to_string())
+}
+
+fn nextjs_role_sort_key(role: &str) -> usize {
+    match role {
+        "layout" => 0,
+        "page" => 1,
+        "loading" => 2,
+        "error" => 3,
+        "route" => 4,
+        _ => 5,
+    }
+}
+
+fn nextjs_app_router_relative_path(path: &str) -> Option<&str> {
+    path.strip_prefix("app/")
+        .or_else(|| path.split_once("/app/").map(|(_, rest)| rest))
+}
+
+fn is_nextjs_app_router_file_path(path: &str) -> bool {
+    let Some(rel) = nextjs_app_router_relative_path(path) else {
+        return false;
+    };
+    nextjs_app_router_role_from_relative_path(rel).is_some()
+}
+
+fn nextjs_app_router_role_for_path(path: &str) -> Option<&'static str> {
+    let rel = nextjs_app_router_relative_path(path)?;
+    nextjs_app_router_role_from_relative_path(rel)
+}
+
+fn nextjs_app_router_role_from_relative_path(rel: &str) -> Option<&'static str> {
+    if rel == "layout.js"
+        || rel == "layout.jsx"
+        || rel == "layout.ts"
+        || rel == "layout.tsx"
+        || rel.ends_with("/layout.js")
+        || rel.ends_with("/layout.jsx")
+        || rel.ends_with("/layout.ts")
+        || rel.ends_with("/layout.tsx")
+    {
+        Some("layout")
+    } else if rel == "page.js"
+        || rel == "page.jsx"
+        || rel == "page.ts"
+        || rel == "page.tsx"
+        || rel.ends_with("/page.js")
+        || rel.ends_with("/page.jsx")
+        || rel.ends_with("/page.ts")
+        || rel.ends_with("/page.tsx")
+    {
+        Some("page")
+    } else if rel == "loading.js"
+        || rel == "loading.jsx"
+        || rel == "loading.ts"
+        || rel == "loading.tsx"
+        || rel.ends_with("/loading.js")
+        || rel.ends_with("/loading.jsx")
+        || rel.ends_with("/loading.ts")
+        || rel.ends_with("/loading.tsx")
+    {
+        Some("loading")
+    } else if rel == "error.js"
+        || rel == "error.jsx"
+        || rel == "error.ts"
+        || rel == "error.tsx"
+        || rel.ends_with("/error.js")
+        || rel.ends_with("/error.jsx")
+        || rel.ends_with("/error.ts")
+        || rel.ends_with("/error.tsx")
+    {
+        Some("error")
+    } else if rel == "route.js"
+        || rel == "route.ts"
+        || rel.ends_with("/route.js")
+        || rel.ends_with("/route.ts")
+    {
+        Some("route")
+    } else {
+        None
+    }
+}
+
+fn nextjs_app_router_segment(path: &str) -> Option<String> {
+    let rel = nextjs_app_router_relative_path(path)?;
+    let (dir, _) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if dir.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(format!("/{dir}"))
+    }
 }
 
 fn maybe_inject_web_request_flow_chain_card(
@@ -2159,6 +2451,25 @@ fn extract_chunk_line_with_needle(
                 raw_line.split_whitespace().collect::<Vec<_>>().join(" "),
             ));
         }
+    }
+    None
+}
+
+fn extract_first_meaningful_line(chunk: &ChunkRecord) -> Option<(usize, String)> {
+    for (idx, raw_line) in chunk.text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with('#')
+            || line == "{"
+            || line == "}"
+        {
+            continue;
+        }
+        return Some((
+            chunk.start_line + idx,
+            raw_line.split_whitespace().collect::<Vec<_>>().join(" "),
+        ));
     }
     None
 }
@@ -3062,6 +3373,7 @@ fn try_push_scored_chunk(
                 | "wrapper-implementation-pack"
                 | "delegated-definition-pack"
                 | "react-effect-lifecycle-pack"
+                | "nextjs-app-router-pack"
         )
     });
     let overlaps_existing = !is_synthetic_pack
@@ -5774,6 +6086,194 @@ it("renders", () => {})
             response.snippets
         );
         assert_eq!(response.diagnostics.top_ecosystem.as_deref(), Some("react"));
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn nextjs_app_router_query_injects_boundary_pack_and_nextjs_diagnostics() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-nextjs-router-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "app/layout.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 18,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("RootLayout".to_string()),
+                    text: "export const metadata = {\n  title: \"Budi Next Smoke\",\n};\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return <html>{children}</html>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 2,
+                    path: "app/page.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 7,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("HomePage".to_string()),
+                    text: "export default function HomePage() {\n  return <main>home</main>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 3,
+                    path: "app/dashboard/layout.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 7,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("DashboardLayout".to_string()),
+                    text: "export default function DashboardLayout({ children }: { children: React.ReactNode }) {\n  return <section>{children}</section>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 4,
+                    path: "app/dashboard/page.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 7,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("DashboardPage".to_string()),
+                    text: "export default function DashboardPage() {\n  return <main>dashboard</main>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 5,
+                    path: "app/api/users/route.ts".to_string(),
+                    start_line: 1,
+                    end_line: 5,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("GET".to_string()),
+                    text: "export async function GET() {\n  return Response.json({ users: [\"ada\"] });\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "How is this Next.js app-router structured, and which layout.tsx/page.tsx files own each route boundary?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        let first = response.snippets.first().expect("at least one snippet");
+        assert!(
+            first
+                .reasons
+                .iter()
+                .any(|reason| reason == "nextjs-app-router-pack"),
+            "got: {:?}",
+            response.snippets
+        );
+        assert!(
+            first.text.contains("segment / => layout app/layout.tsx"),
+            "got: {}",
+            first.text
+        );
+        assert!(
+            first
+                .text
+                .contains("handler /api/users => route app/api/users/route.ts"),
+            "got: {}",
+            first.text
+        );
+        assert_eq!(
+            response.diagnostics.top_ecosystem.as_deref(),
+            Some("nextjs")
+        );
+        assert!(
+            response
+                .diagnostics
+                .snippet_ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem == "nextjs"),
+            "got: {:?}",
+            response.diagnostics.snippet_ecosystems
+        );
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn nextjs_route_boundary_query_without_framework_name_still_injects_pack() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root =
+            std::env::temp_dir().join(format!("budi-nextjs-router-no-name-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![
+                ChunkRecord {
+                    id: 1,
+                    path: "app/layout.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 6,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("RootLayout".to_string()),
+                    text: "export default function RootLayout({ children }: { children: React.ReactNode }) {\n  return <html>{children}</html>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 2,
+                    path: "app/page.tsx".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("HomePage".to_string()),
+                    text: "export default function HomePage() {\n  return <main>home</main>;\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+                ChunkRecord {
+                    id: 3,
+                    path: "app/api/users/route.ts".to_string(),
+                    start_line: 1,
+                    end_line: 5,
+                    language: "typescript".to_string(),
+                    symbol_hint: Some("GET".to_string()),
+                    text: "export async function GET() {\n  return Response.json({ users: [\"ada\"] });\n}\n".to_string(),
+                    embedding: Vec::new(),
+                },
+            ],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Which file handles the /api/users route, and how is it separated from the page/layout boundaries?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        let first = response.snippets.first().expect("at least one snippet");
+        assert!(
+            first
+                .reasons
+                .iter()
+                .any(|reason| reason == "nextjs-app-router-pack"),
+            "got: {:?}",
+            response.snippets
+        );
+        assert_eq!(
+            response.diagnostics.top_ecosystem.as_deref(),
+            Some("nextjs")
+        );
         let _ = fs::remove_dir_all(&repo_root);
     }
 

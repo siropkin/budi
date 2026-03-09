@@ -228,7 +228,8 @@ fn is_nextjs_chunk(lower_path: &str, lower_text: &str) -> bool {
         || lower_path.ends_with("next.config.mjs")
         || lower_path.ends_with("next.config.cjs")
         || lower_path.ends_with("next.config.ts");
-    let app_router_file = lower_path.contains("/app/")
+    let in_app_dir = lower_path.starts_with("app/") || lower_path.contains("/app/");
+    let app_router_file = in_app_dir
         && (lower_path.ends_with("/page.js")
             || lower_path.ends_with("/page.jsx")
             || lower_path.ends_with("/page.ts")
@@ -840,6 +841,17 @@ mod tests {
             "app/dashboard/page.tsx",
             "typescript",
             "\"use client\";\nimport { useState } from \"react\";\nexport default function Page() { const [count] = useState(0); return <div>{count}</div>; }",
+        );
+        assert!(tags.iter().any(|tag| tag == "nextjs"), "got: {tags:?}");
+        assert!(tags.iter().any(|tag| tag == "react"), "got: {tags:?}");
+    }
+
+    #[test]
+    fn ecosystem_tags_identify_root_level_nextjs_app_router_chunk() {
+        let tags = ecosystem_tags_for_chunk(
+            "app/layout.tsx",
+            "typescript",
+            "export default function RootLayout({ children }) { return <html>{children}</html>; }",
         );
         assert!(tags.iter().any(|tag| tag == "nextjs"), "got: {tags:?}");
         assert!(tags.iter().any(|tag| tag == "react"), "got: {tags:?}");
