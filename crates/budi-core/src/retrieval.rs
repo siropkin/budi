@@ -136,7 +136,8 @@ pub fn build_query_response(
         ),
         weights: weights_for_intent(kind),
     };
-    let symbol_tokens = extract_query_symbol_tokens(query);
+    let mut symbol_tokens = extract_query_symbol_tokens(query);
+    augment_symbol_tokens_for_intent(query, &intent, &mut symbol_tokens);
     let mut path_tokens = extract_query_path_tokens(query);
     let scope_hints = extract_scope_path_hints(query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
@@ -439,6 +440,16 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
+        // FlowTrace queries are about production execution paths, so tests that merely call
+        // into framework entrypoints should not outrank the actual runtime chain. The graph
+        // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
+        // target methods. Use a stronger penalty than Architecture because FlowTrace relies
+        // more heavily on graph/symbol signals, which makes test-callers especially sticky.
+        if intent.kind == QueryIntentKind::FlowTrace && is_test_path(&chunk.path) {
+            adjusted -= 0.30;
+            push_unique_reason(&mut reasons, "test-path-penalty");
+        }
+
         // S1: SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
         // query token. This surfaces definition chunks over reference/usage chunks when
         // the dominant function in a window is precisely what the user asked about.
@@ -525,6 +536,14 @@ pub fn build_query_response(
             GRAPH_NEIGHBOR_EXPANSION_LIMIT,
         );
     }
+
+    // Phase BX: request-to-view flow pack.
+    // Generic FlowTrace retrieval often lands on tests or ancillary view classes because the
+    // query names an execution path ("incoming HTTP request -> view function") rather than
+    // concrete symbols. When the runtime contains a canonical request dispatch chain such as
+    // wsgi_app -> full_dispatch_request -> dispatch_request, inject a compact same-file chain
+    // pack built from exact code lines.
+    maybe_inject_web_request_flow_chain_card(query, runtime, &mut selection, target_limit);
 
     // Phase AR: SymbolDefinition continuation chunk.
     // When sym_def_seeded (hint-match-boost confirmed the definition was found), the
@@ -833,6 +852,132 @@ fn build_symbol_definition_first_steps_card(
     })
 }
 
+fn maybe_inject_web_request_flow_chain_card(
+    query: &str,
+    runtime: &RuntimeIndex,
+    selection: &mut SnippetSelectionState,
+    target_limit: usize,
+) {
+    if selection.snippets.is_empty() || !is_request_to_view_flow_query(query) {
+        return;
+    }
+
+    let Some(wsgi_chunk) = find_symbol_chunk(runtime, None, "wsgi_app") else {
+        return;
+    };
+    let path = wsgi_chunk.path.clone();
+    let Some(full_dispatch_chunk) =
+        find_symbol_chunk(runtime, Some(path.as_str()), "full_dispatch_request")
+    else {
+        return;
+    };
+    let Some(dispatch_chunk) = find_symbol_chunk(runtime, Some(path.as_str()), "dispatch_request")
+    else {
+        return;
+    };
+    let top_score = selection
+        .snippets
+        .first()
+        .map(|s| s.score)
+        .unwrap_or(0.40);
+    let Some(card) = build_web_request_flow_chain_card(
+        wsgi_chunk,
+        full_dispatch_chunk,
+        dispatch_chunk,
+        top_score * 0.95,
+    ) else {
+        return;
+    };
+
+    if selection
+        .snippets
+        .iter()
+        .any(|s| s.path == card.path && s.reasons.iter().any(|r| r == "web-request-flow-pack"))
+    {
+        return;
+    }
+
+    selection.snippets.insert(0, card);
+    if selection.snippets.len() > target_limit {
+        selection.snippets.truncate(target_limit);
+    }
+}
+
+fn is_request_to_view_flow_query(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    contains_any(&lower, &["http", "request"])
+        && contains_any(&lower, &["view", "handler", "endpoint"])
+        && contains_any(&lower, &["trace", "call chain", "flow"])
+}
+
+fn find_symbol_chunk<'a>(
+    runtime: &'a RuntimeIndex,
+    path: Option<&str>,
+    symbol: &str,
+) -> Option<&'a ChunkRecord> {
+    runtime
+        .all_chunks()
+        .iter()
+        .filter(|chunk| path.is_none_or(|p| chunk.path == p))
+        .find(|chunk| chunk.symbol_hint.as_deref() == Some(symbol))
+}
+
+fn build_web_request_flow_chain_card(
+    wsgi_chunk: &ChunkRecord,
+    full_dispatch_chunk: &ChunkRecord,
+    dispatch_chunk: &ChunkRecord,
+    score: f32,
+) -> Option<QueryResultItem> {
+    let (wsgi_call_line, wsgi_call_text) =
+        extract_chunk_line_with_needle(wsgi_chunk, &["full_dispatch_request("])?;
+    let (full_dispatch_line, full_dispatch_text) =
+        extract_chunk_line_with_needle(full_dispatch_chunk, &["dispatch_request("])?;
+    let (dispatch_line, dispatch_text) = extract_chunk_line_with_needle(
+        dispatch_chunk,
+        &["view_functions[", "view_function(", "ensure_sync(self.view_functions["],
+    )?;
+    let summary = format!(
+        "chain: wsgi_app@{} -> full_dispatch_request@{} -> dispatch_request@{} -> view_functions[rule.endpoint]@{}",
+        wsgi_chunk.start_line, full_dispatch_chunk.start_line, dispatch_chunk.start_line, dispatch_line
+    );
+    let text = [
+        summary,
+        format!("wsgi_app@{wsgi_call_line}: {wsgi_call_text}"),
+        format!("full_dispatch_request@{full_dispatch_line}: {full_dispatch_text}"),
+        format!("dispatch_request@{dispatch_line}: {dispatch_text}"),
+    ]
+    .join("\n");
+    Some(QueryResultItem {
+        path: wsgi_chunk.path.clone(),
+        start_line: dispatch_chunk.start_line.min(full_dispatch_chunk.start_line),
+        end_line: wsgi_chunk.end_line.max(full_dispatch_chunk.end_line),
+        score,
+        reasons: vec!["web-request-flow-pack".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text,
+        slm_relevance_note: Some("request-to-view chain summary".to_string()),
+    })
+}
+
+fn extract_chunk_line_with_needle(
+    chunk: &ChunkRecord,
+    needles: &[&str],
+) -> Option<(usize, String)> {
+    for (idx, raw_line) in chunk.text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        if needles.iter().any(|needle| line.contains(needle)) {
+            return Some((
+                chunk.start_line + idx,
+                raw_line.split_whitespace().collect::<Vec<_>>().join(" "),
+            ));
+        }
+    }
+    None
+}
+
 fn extract_symbol_definition_first_steps(text: &str, max_steps: usize) -> Vec<String> {
     if max_steps == 0 {
         return Vec::new();
@@ -865,6 +1010,33 @@ fn extract_symbol_definition_first_steps(text: &str, max_steps: usize) -> Vec<St
         }
     }
     steps
+}
+
+fn augment_symbol_tokens_for_intent(query: &str, intent: &QueryIntent, symbol_tokens: &mut Vec<String>) {
+    if intent.kind != QueryIntentKind::FlowTrace {
+        return;
+    }
+    let lower = query.to_ascii_lowercase();
+    if contains_any(&lower, &["http", "request"])
+        && contains_any(&lower, &["view", "handler", "endpoint"])
+    {
+        let mut seen: HashSet<String> = symbol_tokens.iter().cloned().collect();
+        for token in [
+            "wsgi_app",
+            "request_context",
+            "full_dispatch_request",
+            "dispatch_request",
+            "view_functions",
+            "view_function",
+            "handle_request",
+            "serve_http",
+        ] {
+            let owned = token.to_string();
+            if seen.insert(owned.clone()) {
+                symbol_tokens.push(owned);
+            }
+        }
+    }
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -3300,6 +3472,61 @@ it("renders", () => {})
     }
 
     #[test]
+    fn request_to_view_flow_query_detection_matches_web_flow_prompt() {
+        assert!(is_request_to_view_flow_query(
+            "Trace the call chain from an incoming HTTP request to the view function."
+        ));
+        assert!(!is_request_to_view_flow_query(
+            "Where is dispatch_request defined?"
+        ));
+    }
+
+    #[test]
+    fn web_request_flow_chain_card_builds_compact_chain() {
+        let wsgi_chunk = ChunkRecord {
+            id: 1,
+            path: "src/flask/app.py".to_string(),
+            start_line: 1566,
+            end_line: 1616,
+            symbol_hint: Some("wsgi_app".to_string()),
+            text: "def wsgi_app(self, environ, start_response):\n    ctx = self.request_context(environ)\n    response = self.full_dispatch_request(ctx)\n    return response(environ, start_response)\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let full_dispatch_chunk = ChunkRecord {
+            id: 2,
+            path: "src/flask/app.py".to_string(),
+            start_line: 992,
+            end_line: 1019,
+            symbol_hint: Some("full_dispatch_request".to_string()),
+            text: "def full_dispatch_request(self, ctx):\n    rv = self.preprocess_request(ctx)\n    if rv is None:\n        rv = self.dispatch_request(ctx)\n    return self.finalize_request(ctx, rv)\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let dispatch_chunk = ChunkRecord {
+            id: 3,
+            path: "src/flask/app.py".to_string(),
+            start_line: 966,
+            end_line: 990,
+            symbol_hint: Some("dispatch_request".to_string()),
+            text: "def dispatch_request(self, ctx):\n    req = ctx.request\n    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)\n".to_string(),
+            embedding: Vec::new(),
+        };
+        let card = build_web_request_flow_chain_card(
+            &wsgi_chunk,
+            &full_dispatch_chunk,
+            &dispatch_chunk,
+            0.4,
+        )
+        .expect("expected flow chain card");
+        assert!(card.text.contains("chain: wsgi_app@1566 -> full_dispatch_request@992"));
+        assert!(card.text.contains("wsgi_app@1568: response = self.full_dispatch_request(ctx)"));
+        assert!(card.text.contains("dispatch_request@968: return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)"));
+        assert_eq!(
+            card.slm_relevance_note.as_deref(),
+            Some("request-to-view chain summary")
+        );
+    }
+
+    #[test]
     fn non_wrapper_does_not_replace_alt_definition_with_continuation() {
         let def_item = QueryResultItem {
             path: "src/flask/helpers.py".to_string(),
@@ -3423,6 +3650,36 @@ it("renders", () => {})
         assert_eq!(
             parse_retrieval_mode(Some("  vector  ")),
             RetrievalMode::Vector
+        );
+    }
+
+    #[test]
+    fn flow_trace_web_queries_seed_dispatch_symbols() {
+        let intent = QueryIntent {
+            kind: QueryIntentKind::FlowTrace,
+            code_related: true,
+            allow_docs: false,
+            weights: weights_for_intent(QueryIntentKind::FlowTrace),
+        };
+        let mut symbol_tokens = extract_query_symbol_tokens(
+            "Trace the call chain from an incoming HTTP request to the view function.",
+        );
+        augment_symbol_tokens_for_intent(
+            "Trace the call chain from an incoming HTTP request to the view function.",
+            &intent,
+            &mut symbol_tokens,
+        );
+        assert!(
+            symbol_tokens.iter().any(|t| t == "wsgi_app"),
+            "got: {symbol_tokens:?}"
+        );
+        assert!(
+            symbol_tokens.iter().any(|t| t == "dispatch_request"),
+            "got: {symbol_tokens:?}"
+        );
+        assert!(
+            symbol_tokens.iter().any(|t| t == "view_functions"),
+            "got: {symbol_tokens:?}"
         );
     }
 
