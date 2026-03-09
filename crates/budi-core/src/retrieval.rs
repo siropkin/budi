@@ -454,6 +454,21 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
+        // Phase CB: Architecture queries — penalise examples/ paths.
+        // Tutorial and example directories (e.g. examples/tutorial/) frequently contain
+        // snippets that mention production concepts ("application factory", "register_blueprint")
+        // but in a simplified sample context. For arch queries about the real production module
+        // layout and entry points, these samples are misleading: they describe how users integrate
+        // the library, not how the library itself is structured.
+        // −0.50 pushes tutorial files well below the arch floor in both the top≥0.60 case
+        // (floor=0.40) and the low-confidence case (floor=0.30). A score of 0.73−0.50=0.23
+        // falls below both floors. examples/ is intentionally excluded from is_test_path()
+        // (so TestLookup keeps them), so this penalty is arch-specific.
+        if intent.kind == QueryIntentKind::Architecture && is_examples_path(&chunk.path) {
+            adjusted -= 0.50;
+            push_unique_reason(&mut reasons, "examples-path-penalty");
+        }
+
         // FlowTrace queries are about production execution paths, so tests that merely call
         // into framework entrypoints should not outrank the actual runtime chain. The graph
         // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
@@ -1436,6 +1451,15 @@ fn is_test_path(path: &str) -> bool {
         || name_stem.starts_with("mock_")
         || name_stem.starts_with("mock")
             && (filename.ends_with(".go") || filename.ends_with(".ts") || filename.ends_with(".js"))
+}
+
+/// True if the chunk lives under an examples/ directory.
+/// These are tutorial/sample files, not production source — they should be penalised
+/// on Architecture queries but kept for TestLookup (which explicitly excludes them from
+/// is_test_path() to avoid false test-path-boost).
+fn is_examples_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("examples/") || lower.contains("/examples/")
 }
 
 /// True if the chunk text contains an inline test block.
@@ -3669,6 +3693,15 @@ mod tests {
         assert!(!is_test_path("examples/tutorial/tests/test_auth.py"));
         assert!(!is_test_path("examples/basic/tests/test_app.py"));
         assert!(is_test_path("tests/test_blueprints.py"));
+    }
+
+    #[test]
+    fn is_examples_path_detects_examples_dirs() {
+        assert!(is_examples_path("examples/tutorial/flaskr/db.py"));
+        assert!(is_examples_path("examples/basic/app.py"));
+        assert!(is_examples_path("src/examples/demo.py"));
+        assert!(!is_examples_path("src/flask/app.py"));
+        assert!(!is_examples_path("tests/test_blueprints.py"));
     }
 
     // ── overlapping chunk deduplication (Phase BY) ───────────────────────────
