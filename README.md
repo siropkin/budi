@@ -109,6 +109,13 @@ budi index --hard --progress
 budi repo status
 budi repo search "payment validation"
 budi repo preview "why is the payment form failing validation?"
+```
+
+For troubleshooting:
+
+```bash
+budi doctor
+# deeper watcher/index diagnostics:
 budi doctor --deep
 ```
 

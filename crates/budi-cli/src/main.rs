@@ -68,27 +68,27 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Init {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         no_daemon: bool,
     },
     Index {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         hard: bool,
         #[arg(long, default_value_t = false)]
         progress: bool,
-        #[arg(long = "ignore-pattern", action = ArgAction::Append)]
+        #[arg(long = "ignore-pattern", action = ArgAction::Append, hide = true)]
         ignore_patterns: Vec<String>,
-        #[arg(long = "include-ext", action = ArgAction::Append)]
+        #[arg(long = "include-ext", action = ArgAction::Append, hide = true)]
         include_extensions: Vec<String>,
     },
     Doctor {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, hide = true)]
         deep: bool,
     },
     // Dev-only benchmarking workflow; keep available but out of daily help.
@@ -208,7 +208,7 @@ enum RepoCommands {
         dry_run: bool,
     },
     Status {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
     // Maintenance/debug workflow; keep available but out of daily help.
@@ -221,22 +221,22 @@ enum RepoCommands {
     },
     Search {
         query: String,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, default_value_t = 8)]
         limit: usize,
-        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
+        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid, hide = true)]
         mode: RetrievalModeArg,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, hide = true)]
         json: bool,
     },
     Preview {
         prompt: String,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
+        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid, hide = true)]
         mode: RetrievalModeArg,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, hide = true)]
         json: bool,
     },
 }
@@ -3184,6 +3184,17 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    fn render_subcommand_help(path: &[&str]) -> String {
+        let mut command = Cli::command();
+        let mut current = &mut command;
+        for segment in path {
+            current = current
+                .find_subcommand_mut(segment)
+                .unwrap_or_else(|| panic!("missing subcommand: {segment}"));
+        }
+        current.render_help().to_string()
+    }
+
     fn make_eval_report(fixtures_path: &str, retrieval_mode: &str) -> RetrievalEvalReport {
         RetrievalEvalReport {
             repo_root: "/tmp/repo".to_string(),
@@ -3511,5 +3522,52 @@ mod tests {
         assert!(!lower.contains("remove"));
         assert!(!lower.contains("wipe"));
         assert!(!lower.contains("stats"));
+    }
+
+    #[test]
+    fn init_help_hides_advanced_setup_flags_from_default_surface() {
+        let help = render_subcommand_help(&["init"]);
+        let lower = help.to_ascii_lowercase();
+        assert!(!lower.contains("--repo-root"));
+        assert!(!lower.contains("--no-daemon"));
+    }
+
+    #[test]
+    fn index_help_hides_support_override_flags_from_default_surface() {
+        let help = render_subcommand_help(&["index"]);
+        let lower = help.to_ascii_lowercase();
+        assert!(lower.contains("--hard"));
+        assert!(lower.contains("--progress"));
+        assert!(!lower.contains("--repo-root"));
+        assert!(!lower.contains("--ignore-pattern"));
+        assert!(!lower.contains("--include-ext"));
+    }
+
+    #[test]
+    fn doctor_help_hides_deep_support_flags_from_default_surface() {
+        let help = render_subcommand_help(&["doctor"]);
+        let lower = help.to_ascii_lowercase();
+        assert!(!lower.contains("--repo-root"));
+        assert!(!lower.contains("--deep"));
+    }
+
+    #[test]
+    fn repo_daily_commands_hide_advanced_flags_from_default_help() {
+        let status_help = render_subcommand_help(&["repo", "status"]);
+        let status_lower = status_help.to_ascii_lowercase();
+        assert!(!status_lower.contains("--repo-root"));
+
+        let search_help = render_subcommand_help(&["repo", "search"]);
+        let search_lower = search_help.to_ascii_lowercase();
+        assert!(search_lower.contains("--limit"));
+        assert!(!search_lower.contains("--repo-root"));
+        assert!(!search_lower.contains("--mode"));
+        assert!(!search_lower.contains("--json"));
+
+        let preview_help = render_subcommand_help(&["repo", "preview"]);
+        let preview_lower = preview_help.to_ascii_lowercase();
+        assert!(!preview_lower.contains("--repo-root"));
+        assert!(!preview_lower.contains("--mode"));
+        assert!(!preview_lower.contains("--json"));
     }
 }
