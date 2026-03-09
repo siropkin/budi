@@ -2,13 +2,13 @@
 
 ## Latest results
 
-Across 13 runs, 216 judged tasks (React and ripgrep repos):
+Across 4 open-source repos (React, ripgrep, Flask, Terraform) with 18 prompts each:
 
-- **Cost**: 18.7% lower on average
-- **Speed**: 13% faster on average (median API time); up to 30% on some repos
-- **Quality**: budi wins 160/216 judged tasks (~75% win rate)
+- **Cost**: 15–23% lower on average
+- **Speed**: 13–32% faster median API time depending on repo
+- **Quality**: budi wins on 57/72 prompts (~79% win rate), including 18/18 on React
 
-Full evidence: `docs/benchmark-details.md`
+These numbers come from the latest validated full-suite A/B runs. HNSW non-determinism causes ±2–3 prompt variance per run; we average across multiple passes.
 
 ## What we measure
 
@@ -34,7 +34,7 @@ Current prompt sets:
 - `scripts/dev/benchmarks/flask-structural-v1.prompts.json` — 18 prompts, Flask source (Python)
 - `scripts/dev/benchmarks/terraform-v1.prompts.json` — 18 prompts, Terraform source (Go)
 
-Results live in root-level `ab-bench-*` directories, one folder per run.
+Results are stored in `~/.local/share/budi/repos/<repo>/benchmarks/` per run.
 
 ## Reproduce
 
@@ -43,35 +43,26 @@ Clone repos:
 ```bash
 git clone --depth 1 https://github.com/facebook/react.git ./react
 git clone --depth 1 https://github.com/BurntSushi/ripgrep.git ./ripgrep
+git clone --depth 1 https://github.com/pallets/flask.git ./flask
+git clone --depth 1 https://github.com/hashicorp/terraform.git ./terraform
 ```
 
-Run A/B on each:
+Index each repo, then run A/B:
 
 ```bash
-python3 scripts/ab_benchmark_runner.py \
-  --repo-root "/absolute/path/react" \
-  --prompts-file "./scripts/dev/benchmarks/react-structural-v1.prompts.json" \
-  --out-dir "./tmp/bench_react" \
-  --run-label "react-v1"
+budi init --repo-root /absolute/path/react
+budi index --hard --repo-root /absolute/path/react
 
-python3 scripts/ab_benchmark_runner.py \
-  --repo-root "/absolute/path/ripgrep" \
-  --prompts-file "./scripts/dev/benchmarks/ripgrep-v1.prompts.json" \
-  --out-dir "./tmp/bench_ripgrep" \
-  --run-label "ripgrep-v1"
+python3 scripts/dev/ab_benchmark_runner.py \
+  --repo-root "/absolute/path/react" \
+  --prompts-file "./scripts/dev/benchmarks/react-structural-v1.prompts.json"
 ```
+
+Use `--validation-tier fast` to skip the judge pass, or `--validation-tier focused --prompt-indices 3,7,12` to judge specific prompts.
 
 ## Notes about validity
 
 - A row is considered an injected `with_budi` run when hook output has `success=true` and `reason=ok`.
 - The runner captures `with_budi_hook` per session and retries once if hook retrieval fails with transient reasons.
 - Always compare runs with the same prompt-set fingerprint.
-
-## Retrieval-only regression checks
-
-Use fixture-driven retrieval eval for ranking metrics independent of full model behavior:
-
-```bash
-budi eval retrieval --fixtures ./scripts/dev/retrieval_eval/golden.example.json --limit 8 --mode hybrid
-budi eval retrieval --fixtures ./scripts/dev/retrieval_eval/golden.example.json --limit 8 --mode hybrid --fail-on-regression --max-regression 0.01
-```
+- HNSW vector search is non-deterministic; run at least 2 passes before drawing conclusions.

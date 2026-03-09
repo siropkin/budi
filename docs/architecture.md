@@ -112,11 +112,25 @@
 ## Score Floors and Boosts (Phases N/P/R/S/T)
 
 - `min_selection_score(candidates, intent)` returns a per-intent floor:
-  - FlowTrace: 0.25, SymbolDefinition: 0.20, SymbolUsage: 0.22, TestLookup: 0.22, RuntimeConfig: 0.18
+  - FlowTrace: max(top×0.40, 0.25), SymbolDefinition: max(top×0.40, 0.30), SymbolUsage: max(top×0.40, 0.22), TestLookup: max(top×0.40, 0.22), RuntimeConfig: 0.40 when top≥0.60 else max(top×0.40, 0.18), Architecture: 0.40 when top≥0.60 else max(top×0.40, 0.30)
 - `is_test_path(path)` — detects `/test`, `/spec`, `__tests__/`, `__spec__/` — used for `+0.15` test-path boost on TestLookup queries.
 - **Hint-match boost (S1)**: `+0.30` when intent is SymbolDefinition and the chunk's `symbol_hint` exactly matches a query token, surfacing the definition chunk over reference noise.
 - `dominant_symbol_hint(lines)` — picks the symbol spanning the most lines in a window, preventing short local functions from stealing the hint from the dominant definition.
 - `truncate_to(s, max)` — UTF-8 safe: walks back to the nearest char boundary rather than slicing at a byte offset.
+
+## Repo Plugins and Ecosystem Detection
+
+`budi-core` includes a built-in repo-plugin registry (`crates/budi-core/src/repo_plugins/`) that keeps framework-specific heuristics out of the generic retrieval pipeline.
+
+Each plugin declares:
+- **Chunk matcher**: path/text/language patterns for per-chunk ecosystem tagging
+- **Query matcher**: keywords that indicate the query targets a specific framework
+- **Repo shape hint** (optional): manifest file patterns (package.json, pyproject.toml) and structural path patterns to detect the framework from project structure
+- **Context pack** (optional): synthetic evidence card builder for framework-specific condensers
+
+Built-in plugins: React, Next.js, Flask, Django, FastAPI, Express.
+
+At `RuntimeIndex` construction, `detect_repo_ecosystems()` scans manifest files on disk and indexed file paths to identify the repo's primary frameworks. These repo-level ecosystems merge with query-detected ecosystems during retrieval, so the `+0.08` ecosystem-match boost fires even when queries don't mention the framework by name.
 
 ## Cross-Session File Affinity (Phase J/M)
 
