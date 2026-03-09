@@ -481,6 +481,24 @@ pub fn build_query_response(
             }
         }
 
+        // Phase CA: SymbolUsage — demote definition chunks that happen to rank above callers.
+        // "What calls evaluateExpr" (SymbolUsage) should surface CALLERS, but the symbol
+        // channel can rank the definition/mock implementation highly because it also has
+        // `evaluateexpr` in its symbol_tokens. When the dominant symbol_hint of a chunk
+        // exactly matches a query token in a SymbolUsage query, the chunk is likely the
+        // definition rather than a call site — apply -0.22 to push it below the min-score
+        // floor (e.g. eval_context_mock.go: raw 0.43 → 0.21 < 0.22 floor → filtered).
+        if intent.kind == QueryIntentKind::SymbolUsage
+            && let Some(hint) = chunk.symbol_hint.as_deref()
+        {
+            let hint_lower = hint.to_ascii_lowercase();
+            let is_definition_chunk = exact_match_symbol_tokens.iter().any(|t| t == &hint_lower);
+            if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && is_definition_chunk {
+                adjusted -= 0.22;
+                push_unique_reason(&mut reasons, "sym-usage-def-demote");
+            }
+        }
+
         // Phase BZ: FlowTrace — weak definition anchor for camelCase function targets.
         // "What does reconcileChildFibers call / trace through useState" queries name a
         // specific function. Boost its definition chunk (+0.10) to keep it above call-site
@@ -1383,12 +1401,30 @@ fn is_test_path(path: &str) -> bool {
     if lower.starts_with("examples/") || lower.contains("/examples/") {
         return false;
     }
-    lower.contains("/test")
+    // Path-level test directory detection
+    if lower.contains("/test")
         || lower.contains("/spec")
         || lower.contains("__tests__")
         || lower.contains("__spec__")
         || lower.starts_with("test")
         || lower.starts_with("spec")
+    {
+        return true;
+    }
+    // Phase CA: test-utility directories (e.g. packages/internal-test-utils/)
+    if lower.contains("-test-") {
+        return true;
+    }
+    // Phase CA: mock implementation files (e.g. eval_context_mock.go, consoleMock.js,
+    // mock_provider.go). Mock files define test doubles — they are not real callers
+    // for SymbolUsage queries and not real production paths for FlowTrace queries.
+    let filename = lower.split('/').next_back().unwrap_or("");
+    let name_stem = filename.split('.').next().unwrap_or(filename);
+    name_stem.ends_with("mock")
+        || name_stem.ends_with("_mock")
+        || name_stem.starts_with("mock_")
+        || name_stem.starts_with("mock")
+            && (filename.ends_with(".go") || filename.ends_with(".ts") || filename.ends_with(".js"))
 }
 
 /// True if the chunk text contains an inline test block.
@@ -3681,6 +3717,27 @@ mod tests {
         assert!(is_test_path("src/testUtils.ts")); // contains /test (in /testUtils)
         // Top-level file starting with "test" is also detected
         assert!(is_test_path("testUtils.ts"));
+    }
+
+    #[test]
+    fn is_test_path_detects_test_utils_dirs() {
+        // Phase CA: test-utility directories like internal-test-utils
+        assert!(is_test_path(
+            "packages/internal-test-utils/consoleMock.js"
+        ));
+        assert!(is_test_path("src/react-test-helpers/setup.ts"));
+    }
+
+    #[test]
+    fn is_test_path_detects_mock_files() {
+        // Phase CA: mock implementation files
+        assert!(is_test_path("internal/terraform/eval_context_mock.go"));
+        assert!(is_test_path("internal/configs/mock_provider.go"));
+        assert!(is_test_path("packages/internal-test-utils/consoleMock.js"));
+        assert!(is_test_path("src/__mocks__/consoleMock.ts"));
+        // Non-mock production files should not be detected
+        assert!(!is_test_path("src/components/Modal.tsx"));
+        assert!(!is_test_path("internal/terraform/context.go"));
     }
 
     // ── is_inline_test_chunk ─────────────────────────────────────────────────
