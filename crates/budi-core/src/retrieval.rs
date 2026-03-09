@@ -580,6 +580,29 @@ pub fn build_query_response(
         ..SnippetSelectionState::default()
     };
     let min_score = min_selection_score(&scored, intent.kind);
+    // Phase CI: Generative test queries ("what unit tests would you add/write") with
+    // low top confidence (< 0.55) inject mediocre production code that anchors Claude
+    // to specific implementations, hurting creative test-design responses.
+    // When top < 0.55 and the Architecture query is design-oriented ("would you add/write"),
+    // raise the floor to 0.55 so no chunks pass and Claude answers freely.
+    let min_score = if intent.kind == QueryIntentKind::Architecture
+        && scored.first().is_some_and(|c| c.score < 0.55)
+        && contains_any(
+            &query.to_lowercase(),
+            &[
+                "would you add",
+                "would you write",
+                "should we add",
+                "tests to add",
+                "tests to write",
+                "suggest tests",
+            ],
+        )
+    {
+        0.55_f32
+    } else {
+        min_score
+    };
     // Phase CC: FlowTrace with flowtrace-anchor — tighten the secondary floor.
     // When the top-ranked chunk already matched a camelCase function name in the query
     // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
@@ -652,6 +675,9 @@ pub fn build_query_response(
     // key operations that follow the DEV guards — for "what are its first steps" queries
     // like P3 (scheduleUpdateOnFiber, lines 967-1095, chunk at 961-1040 + 1021-1100).
     if sym_def_seeded {
+        // Phase CJ: track when Phase CH blocks a wrong-symbol continuation so we can
+        // also drop the noisy foreign card 2 (rather than leaving it in place).
+        let mut phase_ch_blocked = false;
         let continuation = selection.snippets.first().and_then(|def_item| {
             let def_path = def_item.path.clone();
             let def_start = def_item.start_line;
@@ -687,6 +713,8 @@ pub fn build_query_response(
                         .iter()
                         .any(|t| cont_sym_lower == t.as_str());
                     if !matches_target {
+                        // Phase CJ: signal to remove noisy foreign card 2 as well.
+                        phase_ch_blocked = true;
                         return None;
                     }
                 }
@@ -719,6 +747,11 @@ pub fn build_query_response(
             // Replace card 2 (foreign call site) with the continuation of the function body.
             selection.snippets.truncate(1);
             selection.snippets.push(cont_item);
+        } else if phase_ch_blocked {
+            // Phase CJ: Phase CH blocked a wrong-symbol continuation; the foreign card 2
+            // is also noise (e.g. devtools type definition when querying for a WorkLoop fn).
+            // The definition fits entirely in card 1 — serve just that.
+            selection.snippets.truncate(1);
         }
     }
 
