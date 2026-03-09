@@ -91,6 +91,8 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         deep: bool,
     },
+    // Dev-only benchmarking workflow; keep available but out of daily help.
+    #[command(hide = true)]
     Bench {
         #[arg(long)]
         repo_root: Option<PathBuf>,
@@ -99,6 +101,8 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         iterations: usize,
     },
+    // Dev-only retrieval evaluation workflow; keep available but out of daily help.
+    #[command(hide = true)]
     Eval {
         #[command(subcommand)]
         command: EvalCommands,
@@ -3170,6 +3174,7 @@ fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn make_eval_report(fixtures_path: &str, retrieval_mode: &str) -> RetrievalEvalReport {
         RetrievalEvalReport {
@@ -3469,5 +3474,17 @@ mod tests {
         assert!(should_retry_hook_query(QueryErrorReason::TransportError));
         assert!(!should_retry_hook_query(QueryErrorReason::HttpError));
         assert!(!should_retry_hook_query(QueryErrorReason::Error));
+    }
+
+    #[test]
+    fn help_hides_dev_only_commands_from_default_surface() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        let lower = help.to_ascii_lowercase();
+        assert!(lower.contains("init"));
+        assert!(lower.contains("doctor"));
+        assert!(lower.contains("repo"));
+        assert!(!lower.contains("bench"));
+        assert!(!lower.contains("eval"));
     }
 }
