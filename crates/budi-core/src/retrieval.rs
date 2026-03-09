@@ -1035,10 +1035,15 @@ fn build_web_request_flow_chain_card(
     dispatch_chunk: &ChunkRecord,
     score: f32,
 ) -> Option<QueryResultItem> {
+    let request_context_line = extract_chunk_line_with_needle(wsgi_chunk, &["request_context("]);
+    let push_context_line = extract_chunk_line_with_needle(wsgi_chunk, &["ctx.push("]);
     let (wsgi_call_line, wsgi_call_text) =
         extract_chunk_line_with_needle(wsgi_chunk, &["full_dispatch_request("])?;
+    let preprocess_line =
+        extract_chunk_line_with_needle(full_dispatch_chunk, &["preprocess_request("]);
     let (full_dispatch_line, full_dispatch_text) =
         extract_chunk_line_with_needle(full_dispatch_chunk, &["dispatch_request("])?;
+    let finalize_line = extract_chunk_line_with_needle(full_dispatch_chunk, &["finalize_request("]);
     let (dispatch_line, dispatch_text) = extract_chunk_line_with_needle(
         dispatch_chunk,
         &[
@@ -1054,13 +1059,41 @@ fn build_web_request_flow_chain_card(
         dispatch_chunk.start_line,
         dispatch_line
     );
-    let text = [
-        summary,
-        format!("wsgi_app@{wsgi_call_line}: {wsgi_call_text}"),
-        format!("full_dispatch_request@{full_dispatch_line}: {full_dispatch_text}"),
-        format!("dispatch_request@{dispatch_line}: {dispatch_text}"),
-    ]
-    .join("\n");
+    let mut text_lines = vec![summary];
+    let mut seen = HashSet::new();
+    push_compact_evidence_line(&mut text_lines, &mut seen, "wsgi_app", request_context_line);
+    push_compact_evidence_line(&mut text_lines, &mut seen, "wsgi_app", push_context_line);
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "wsgi_app",
+        Some((wsgi_call_line, wsgi_call_text)),
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "full_dispatch_request",
+        preprocess_line,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "full_dispatch_request",
+        Some((full_dispatch_line, full_dispatch_text)),
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "full_dispatch_request",
+        finalize_line,
+    );
+    push_compact_evidence_line(
+        &mut text_lines,
+        &mut seen,
+        "dispatch_request",
+        Some((dispatch_line, dispatch_text)),
+    );
+    let text = text_lines.join("\n");
     Some(QueryResultItem {
         path: wsgi_chunk.path.clone(),
         start_line: dispatch_chunk
@@ -1337,6 +1370,20 @@ fn extract_chunk_line_with_needle(
         }
     }
     None
+}
+
+fn push_compact_evidence_line(
+    out: &mut Vec<String>,
+    seen: &mut HashSet<(usize, String)>,
+    label: &str,
+    evidence: Option<(usize, String)>,
+) {
+    let Some((line_no, text)) = evidence else {
+        return;
+    };
+    if seen.insert((line_no, text.clone())) {
+        out.push(format!("{label}@{line_no}: {text}"));
+    }
 }
 
 fn extract_symbol_definition_first_steps(text: &str, max_steps: usize) -> Vec<String> {
@@ -4094,7 +4141,7 @@ it("renders", () => {})
             start_line: 1566,
             end_line: 1616,
             symbol_hint: Some("wsgi_app".to_string()),
-            text: "def wsgi_app(self, environ, start_response):\n    ctx = self.request_context(environ)\n    response = self.full_dispatch_request(ctx)\n    return response(environ, start_response)\n".to_string(),
+            text: "def wsgi_app(self, environ, start_response):\n    ctx = self.request_context(environ)\n    ctx.push()\n    response = self.full_dispatch_request(ctx)\n    return response(environ, start_response)\n".to_string(),
             embedding: Vec::new(),
         };
         let full_dispatch_chunk = ChunkRecord {
@@ -4128,7 +4175,19 @@ it("renders", () => {})
         );
         assert!(
             card.text
-                .contains("wsgi_app@1568: response = self.full_dispatch_request(ctx)")
+                .contains("wsgi_app@1567: ctx = self.request_context(environ)")
+        );
+        assert!(
+            card.text
+                .contains("wsgi_app@1569: response = self.full_dispatch_request(ctx)")
+        );
+        assert!(
+            card.text
+                .contains("full_dispatch_request@993: rv = self.preprocess_request(ctx)")
+        );
+        assert!(
+            card.text
+                .contains("full_dispatch_request@996: return self.finalize_request(ctx, rv)")
         );
         assert!(card.text.contains("dispatch_request@968: return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)"));
         assert_eq!(
