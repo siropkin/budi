@@ -34,37 +34,22 @@ flowchart LR
 
 ## Latest A/B numbers
 
-Across the latest aggregate benchmark runs:
+Across 4 open-source repos (72 prompts total), judged by an independent LLM:
 
-- 13 runs
-- 216 judged tasks
-- 13% faster median API time
-- 18.7% lower average cost
-- 160/216 judged wins (about 75%)
-- Up to 30% faster on some repos
-
-Latest fully public reproducible snapshot across 3 open-source repos and 9 cases:
-
-- 32.16% faster API time
-- 31.48% faster end-to-end time
-- 18.42% lower total cost
-
-```mermaid
-xychart-beta
-    title "Latest public A/B snapshot"
-    x-axis ["API speedup", "Wall speedup", "Cost reduction"]
-    y-axis "Percent" 0 --> 35
-    bar [32.16, 31.48, 18.42]
-```
+- 5–23% lower cost
+- Equal or better quality on the majority of prompts
+- No regressions on prompts where budi skips injection
+- Wins on targeted queries (symbol lookup, call tracing, config); ties on broad overview queries where baseline Claude is already strong
 
 ```mermaid
 pie showData
-    title "Latest aggregate judged outcomes"
-    "budi wins" : 160
-    "other outcomes" : 56
+    title "Latest validated outcomes (React + Flask, 36 prompts)"
+    "budi wins" : 10
+    "ties" : 20
+    "budi losses" : 6
 ```
 
-The README keeps benchmark repo names out of the headline copy. Full methodology, prompts, raw evidence, and judge rationale live in `docs/benchmark.md` and `docs/benchmark-details.md`.
+Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
 
 ## Install in 60 seconds
 

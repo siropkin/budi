@@ -109,6 +109,17 @@
 - Per-intent snippet budgets further narrow the payload for precision intents: SymbolDefinition → 3000 chars, SymbolUsage/RuntimeConfig → 4000, FlowTrace → 5500, TestLookup → 5000, Architecture/default → full configured budget.
 - Progressive truncation in `build_context()`: top snippet ≤ 40% of budget, each next ≤ 60% of remaining.
 
+## Broad-Query Skip Logic
+
+Certain broad/overview queries are better served by Claude exploring on its own than by injecting a few code snippets that anchor it to a narrow subset:
+
+- **Design/test-gen Architecture queries** (top < 0.55): "would you add", "I want to implement", etc.
+- **Module-layout Architecture queries** (top < 0.55): "module layout", "directory structure", "codebase structure"
+- **Env-var listing RuntimeConfig queries**: "which env vars", "what env vars"
+- **Lifecycle-overview FlowTrace queries** (top < 0.55): "lifecycle hook execution order", "cleanup order for effects"
+
+When these patterns fire, injection is skipped entirely. Additionally, when a synthetic condenser pack is the top card for FlowTrace, remaining HNSW cards are filtered to pack_score × 0.95 to reduce context noise.
+
 ## Score Floors and Boosts (Phases N/P/R/S/T)
 
 - `min_selection_score(candidates, intent)` returns a per-intent floor:
