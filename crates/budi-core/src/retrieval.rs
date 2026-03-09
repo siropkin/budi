@@ -584,8 +584,8 @@ pub fn build_query_response(
     // low top confidence (< 0.55) inject mediocre production code that anchors Claude
     // to specific implementations, hurting creative test-design responses.
     // When top < 0.55 and the Architecture query is design-oriented ("would you add/write"),
-    // raise the floor to 0.55 so no chunks pass and Claude answers freely.
-    let min_score = if intent.kind == QueryIntentKind::Architecture
+    // skip injection entirely — also bypasses the empty-selection fallback below.
+    let ci_skip = intent.kind == QueryIntentKind::Architecture
         && scored.first().is_some_and(|c| c.score < 0.55)
         && contains_any(
             &query.to_lowercase(),
@@ -597,12 +597,8 @@ pub fn build_query_response(
                 "tests to write",
                 "suggest tests",
             ],
-        )
-    {
-        0.55_f32
-    } else {
-        min_score
-    };
+        );
+    let min_score = if ci_skip { 0.55_f32 } else { min_score };
     // Phase CC: FlowTrace with flowtrace-anchor — tighten the secondary floor.
     // When the top-ranked chunk already matched a camelCase function name in the query
     // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
@@ -634,7 +630,10 @@ pub fn build_query_response(
         }
         let _ = try_push_scored_chunk(runtime, candidate, &mut selection);
     }
+    // Phase CI: when generative-test skip is active, leave selection empty so no
+    // context is injected — do not fall through to the best-effort fallback below.
     if selection.snippets.is_empty()
+        && !ci_skip
         && let Some(best) = scored.first()
     {
         let _ = try_push_scored_chunk(runtime, best, &mut selection);
