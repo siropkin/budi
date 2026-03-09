@@ -1,4 +1,4 @@
-use super::{ChunkKeywordSignals, RepoPlugin};
+use super::{ChunkKeywordSignals, RepoPlugin, RepoShapeHint};
 
 pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::simple(
     "flask",
@@ -27,4 +27,15 @@ pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::simple(
         "current_app",
         "app.route",
     ],
-);
+)
+.with_repo_shape(RepoShapeHint::new(
+    &[
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "Pipfile",
+    ],
+    &["flask"],
+    &["src/flask/"],
+));

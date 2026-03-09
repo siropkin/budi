@@ -82,12 +82,42 @@ pub(crate) enum QueryMatcher {
     Custom(fn(&str) -> bool),
 }
 
+/// Repo-level shape hint: detect a framework from manifest files (package.json, Cargo.toml, etc.)
+/// and their dependency lists, so the ecosystem activates from project structure rather than
+/// requiring chunk-level text matches.
+pub(crate) struct RepoShapeHint {
+    /// File paths (relative to repo root) that indicate the manifest, e.g. "package.json", "go.mod".
+    /// Matched against indexed file paths using ends_with (to handle subdirectory manifests).
+    pub manifest_paths: &'static [&'static str],
+    /// Needles searched inside the manifest file content. If any needle matches, the plugin
+    /// activates at repo level. For example `"\"react\""` in package.json.
+    pub dependency_needles: &'static [&'static str],
+    /// Structural paths: if any indexed file path matches (starts_with or contains), the
+    /// plugin activates even without a manifest file. For example `"app/page."` for Next.js.
+    pub structural_paths: &'static [&'static str],
+}
+
+impl RepoShapeHint {
+    pub const fn new(
+        manifest_paths: &'static [&'static str],
+        dependency_needles: &'static [&'static str],
+        structural_paths: &'static [&'static str],
+    ) -> Self {
+        Self {
+            manifest_paths,
+            dependency_needles,
+            structural_paths,
+        }
+    }
+}
+
 pub(crate) struct RepoPlugin {
     pub tag: &'static str,
     pub implied_tags: &'static [&'static str],
     pub chunk_matcher: ChunkMatcher,
     pub query_matcher: QueryMatcher,
     pub context_pack: Option<ContextPackPlugin>,
+    pub repo_shape: Option<RepoShapeHint>,
 }
 
 impl RepoPlugin {
@@ -103,6 +133,7 @@ impl RepoPlugin {
             chunk_matcher: ChunkMatcher::Signals(chunk_signals),
             query_matcher: QueryMatcher::Keywords(query_keywords),
             context_pack: None,
+            repo_shape: None,
         }
     }
 
@@ -118,11 +149,17 @@ impl RepoPlugin {
             chunk_matcher: ChunkMatcher::Custom(match_chunk),
             query_matcher: QueryMatcher::Custom(match_query),
             context_pack: None,
+            repo_shape: None,
         }
     }
 
     pub const fn with_context_pack(mut self, context_pack: ContextPackPlugin) -> Self {
         self.context_pack = Some(context_pack);
+        self
+    }
+
+    pub const fn with_repo_shape(mut self, repo_shape: RepoShapeHint) -> Self {
+        self.repo_shape = Some(repo_shape);
         self
     }
 
@@ -221,6 +258,81 @@ pub fn inject_context_plugins(
     }
 }
 
+/// Detect repo-level ecosystems from the repo root directory.
+/// Scans manifest files on disk (package.json, pyproject.toml, etc.) and checks
+/// indexed file paths for structural signals (app/page.tsx → nextjs).
+/// Runs once at `RuntimeIndex` construction.
+pub fn detect_repo_ecosystems(
+    repo_root: &std::path::Path,
+    files: &[crate::index::FileRecord],
+) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for plugin in BUILTIN_REPO_PLUGINS {
+        let Some(shape) = &plugin.repo_shape else {
+            continue;
+        };
+        if repo_shape_matches(repo_root, shape, files) {
+            push_unique_tag(&mut tags, plugin.tag);
+            for implied in plugin.implied_tags {
+                push_unique_tag(&mut tags, implied);
+            }
+        }
+    }
+    tags
+}
+
+fn repo_shape_matches(
+    repo_root: &std::path::Path,
+    shape: &RepoShapeHint,
+    files: &[crate::index::FileRecord],
+) -> bool {
+    // Check structural paths (from indexed file list — cheap, no disk I/O).
+    if !shape.structural_paths.is_empty() {
+        let structural_hit = files.iter().any(|f| {
+            let lower = f.path.to_ascii_lowercase();
+            shape
+                .structural_paths
+                .iter()
+                .any(|pattern| lower.contains(pattern))
+        });
+        if structural_hit {
+            return true;
+        }
+    }
+
+    // Check manifest files on disk. These are typically not indexed (toml, json, txt)
+    // but they're small and fast to read.
+    if shape.manifest_paths.is_empty() {
+        return false;
+    }
+    for manifest in shape.manifest_paths {
+        let manifest_path = repo_root.join(manifest);
+        if !manifest_path.is_file() {
+            continue;
+        }
+        if shape.dependency_needles.is_empty() {
+            // Manifest exists, no dependency check needed
+            return true;
+        }
+        // Read the manifest (cap at 64 KB to avoid accidentally reading huge files)
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        if content.len() > 65_536 {
+            continue;
+        }
+        let lower_content = content.to_ascii_lowercase();
+        if shape
+            .dependency_needles
+            .iter()
+            .any(|needle| lower_content.contains(needle))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
     if !tags.iter().any(|existing| existing == tag) {
         tags.push(tag.to_string());
@@ -247,7 +359,142 @@ fn ends_with_any(input: &str, suffixes: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChunkKeywordSignals, ChunkMatchContext, RepoPlugin};
+    use super::{ChunkKeywordSignals, ChunkMatchContext, RepoPlugin, detect_repo_ecosystems};
+    use crate::index::FileRecord;
+
+    fn stub_file(path: &str) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+            hash: String::new(),
+            size_bytes: 0,
+            modified_unix_ms: 0,
+        }
+    }
+
+    fn temp_repo(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("budi-repo-shape-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn detect_react_from_package_json_dependency() {
+        let root = temp_repo("react");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "dependencies": { "react": "^18.2.0", "react-dom": "^18.2.0" } }"#,
+        )
+        .unwrap();
+        let files = vec![stub_file("package.json"), stub_file("src/App.tsx")];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(
+            ecosystems.iter().any(|e| e == "react"),
+            "expected react in {ecosystems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_nextjs_from_next_config_structural_path() {
+        let root = temp_repo("nextjs");
+        // next.config.js structural path triggers nextjs even without reading the file
+        let files = vec![stub_file("next.config.js"), stub_file("app/page.tsx")];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(
+            ecosystems.iter().any(|e| e == "nextjs"),
+            "expected nextjs in {ecosystems:?}"
+        );
+        assert!(
+            ecosystems.iter().any(|e| e == "react"),
+            "expected implied react in {ecosystems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_flask_from_pyproject_toml() {
+        let root = temp_repo("flask");
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"flask\"\ndependencies = [\"flask>=2.0\"]",
+        )
+        .unwrap();
+        let files = vec![stub_file("pyproject.toml"), stub_file("src/flask/app.py")];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(
+            ecosystems.iter().any(|e| e == "flask"),
+            "expected flask in {ecosystems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_flask_from_structural_path() {
+        let root = temp_repo("flask-struct");
+        let files = vec![
+            stub_file("src/flask/app.py"),
+            stub_file("src/flask/__init__.py"),
+        ];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(
+            ecosystems.iter().any(|e| e == "flask"),
+            "expected flask from structural path in {ecosystems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_false_positives_for_unrelated_repo() {
+        let root = temp_repo("rust");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"my-cli\"\nversion = \"1.0.0\"",
+        )
+        .unwrap();
+        let files = vec![stub_file("Cargo.toml"), stub_file("src/main.rs")];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(
+            ecosystems.is_empty(),
+            "expected no ecosystems for a plain Rust repo, got {ecosystems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_express_from_package_json() {
+        let root = temp_repo("express");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "dependencies": { "express": "^4.18.0" } }"#,
+        )
+        .unwrap();
+        let files = vec![stub_file("package.json"), stub_file("src/server.js")];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(
+            ecosystems.iter().any(|e| e == "express"),
+            "expected express in {ecosystems:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn implied_tags_are_included() {
+        let root = temp_repo("nextjs-implied");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "dependencies": { "next": "^14.0.0" } }"#,
+        )
+        .unwrap();
+        let files = vec![stub_file("package.json")];
+        let ecosystems = detect_repo_ecosystems(&root, &files);
+        assert!(ecosystems.iter().any(|e| e == "nextjs"));
+        assert!(ecosystems.iter().any(|e| e == "react"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn simple_plugin_matches_suffix_and_query_keywords() {

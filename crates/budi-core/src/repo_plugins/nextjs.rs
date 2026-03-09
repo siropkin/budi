@@ -7,7 +7,7 @@ use super::common::{
     contains_any, contains_any_literal, extract_chunk_line_with_needle,
     extract_first_meaningful_line, path_matches_any, push_compact_evidence_line,
 };
-use super::{ChunkMatchContext, ContextPackPlugin, ContextPackRequest, RepoPlugin};
+use super::{ChunkMatchContext, ContextPackPlugin, ContextPackRequest, RepoPlugin, RepoShapeHint};
 
 pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::custom(
     "nextjs",
@@ -18,6 +18,16 @@ pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::custom(
 .with_context_pack(ContextPackPlugin::new(
     "nextjs-app-router-pack",
     build_nextjs_context_pack,
+))
+.with_repo_shape(RepoShapeHint::new(
+    &["package.json"],
+    &["\"next\"", "'next'"],
+    &[
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.cjs",
+        "next.config.ts",
+    ],
 ));
 
 fn matches_nextjs_chunk(context: &ChunkMatchContext<'_>) -> bool {

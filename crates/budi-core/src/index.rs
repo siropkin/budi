@@ -20,7 +20,9 @@ use tantivy::schema::{
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term, doc};
 use tracing::{info, warn};
 
-use crate::chunking::{chunk_text, ecosystem_tags_for_chunk, language_label_for_path};
+use crate::chunking::{
+    chunk_text, detect_repo_ecosystems, ecosystem_tags_for_chunk, language_label_for_path,
+};
 use crate::config::{self, BudiConfig};
 use crate::index_scope::{
     build_basename_allowlist, build_extension_allowlist, is_always_skipped_dir_name,
@@ -87,6 +89,7 @@ pub struct RuntimeIndex {
     /// Forward index: chunk ID → resolved callee tokens (symbols this chunk calls)
     chunk_to_graph_tokens: HashMap<u64, Vec<String>>,
     chunk_to_ecosystems: HashMap<u64, Vec<String>>,
+    repo_ecosystems: Vec<String>,
 }
 
 impl RuntimeIndex {
@@ -100,6 +103,7 @@ impl RuntimeIndex {
                 ecosystem_tags_for_chunk(&chunk.path, &chunk.language, &chunk.text),
             );
         }
+        let repo_ecosystems = detect_repo_ecosystems(repo_root, &state.files);
         let hnsw = build_hnsw(&state.chunks)?;
         let tantivy = TantivyBundle::open_or_rebuild(repo_root, &state.chunks)?;
         let (
@@ -128,6 +132,7 @@ impl RuntimeIndex {
             doc_like_chunk_ids,
             chunk_to_graph_tokens,
             chunk_to_ecosystems,
+            repo_ecosystems,
         })
     }
 
@@ -213,6 +218,11 @@ impl RuntimeIndex {
 
     pub fn chunk_ecosystems(&self, chunk_id: u64) -> Option<&[String]> {
         self.chunk_to_ecosystems.get(&chunk_id).map(Vec::as_slice)
+    }
+
+    /// Ecosystems detected from repo-level signals (manifest files, project structure).
+    pub fn repo_ecosystems(&self) -> &[String] {
+        &self.repo_ecosystems
     }
 
     /// Returns chunks that call/reference `symbol`, deduplicated by file path.

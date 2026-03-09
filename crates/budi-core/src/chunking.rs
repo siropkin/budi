@@ -186,6 +186,13 @@ pub fn ecosystem_tags_for_chunk(file_path: &str, language: &str, text: &str) -> 
     crate::repo_plugins::ecosystem_tags_for_chunk(file_path, language, text)
 }
 
+pub fn detect_repo_ecosystems(
+    repo_root: &std::path::Path,
+    files: &[crate::index::FileRecord],
+) -> Vec<String> {
+    crate::repo_plugins::detect_repo_ecosystems(repo_root, files)
+}
+
 fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)> {
     let lower = file_path.to_ascii_lowercase();
     if lower.ends_with(".ts") {

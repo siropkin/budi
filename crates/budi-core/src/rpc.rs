@@ -119,6 +119,8 @@ pub struct QueryDiagnostics {
     #[serde(default)]
     pub snippet_languages: Vec<String>,
     #[serde(default)]
+    pub repo_ecosystems: Vec<String>,
+    #[serde(default)]
     pub top_ecosystem: Option<String>,
     #[serde(default)]
     pub snippet_ecosystems: Vec<String>,

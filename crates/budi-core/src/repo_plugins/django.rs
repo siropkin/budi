@@ -1,4 +1,4 @@
-use super::{ChunkKeywordSignals, RepoPlugin};
+use super::{ChunkKeywordSignals, RepoPlugin, RepoShapeHint};
 
 pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::simple(
     "django",
@@ -26,4 +26,15 @@ pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::simple(
         "manage.py",
         "settings.py",
     ],
-);
+)
+.with_repo_shape(RepoShapeHint::new(
+    &[
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "Pipfile",
+    ],
+    &["django"],
+    &["/manage.py", "django/conf/"],
+));

@@ -6,7 +6,9 @@ use crate::rpc::{QueryChannelScores, QueryResultItem};
 use super::common::{
     contains_any, extract_chunk_line_with_needle, find_symbolish_chunk, push_compact_evidence_line,
 };
-use super::{ChunkKeywordSignals, ContextPackPlugin, ContextPackRequest, RepoPlugin};
+use super::{
+    ChunkKeywordSignals, ContextPackPlugin, ContextPackRequest, RepoPlugin, RepoShapeHint,
+};
 
 const REACT_QUERY_KEYWORDS: &[&str] = &[
     "react",
@@ -53,6 +55,11 @@ pub(crate) const PLUGIN: RepoPlugin = RepoPlugin::simple(
 .with_context_pack(ContextPackPlugin::new(
     "react-effect-lifecycle-pack",
     build_react_context_pack,
+))
+.with_repo_shape(RepoShapeHint::new(
+    &["package.json"],
+    &["\"react\"", "'react'"],
+    &["packages/react/", "packages/react-"],
 ));
 
 fn build_react_context_pack(request: &ContextPackRequest<'_>) -> Option<QueryResultItem> {

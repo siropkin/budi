@@ -174,6 +174,7 @@ impl DaemonState {
                     signals: Vec::new(),
                     top_language: None,
                     snippet_languages: Vec::new(),
+                    repo_ecosystems: Vec::new(),
                     top_ecosystem: None,
                     snippet_ecosystems: Vec::new(),
                     recommended_injection: false,

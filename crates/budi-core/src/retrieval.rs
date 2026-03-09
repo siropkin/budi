@@ -160,7 +160,15 @@ pub fn build_query_response(
     let scope_hints = extract_scope_path_hints(&retrieval_query);
     add_dynamic_path_tokens(&mut path_tokens, &scope_hints);
     augment_path_tokens_for_intent(&retrieval_query, &intent, &mut path_tokens);
-    let query_ecosystems = detect_query_ecosystems(query);
+    let mut query_ecosystems = detect_query_ecosystems(query);
+    // Merge repo-level ecosystems so the ecosystem boost fires even when the query
+    // doesn't mention the framework by name. For example, in a React repo, a plain
+    // "how does the router work?" query still benefits from React chunk affinity.
+    for repo_eco in runtime.repo_ecosystems() {
+        if !query_ecosystems.iter().any(|existing| existing == repo_eco) {
+            query_ecosystems.push(repo_eco.clone());
+        }
+    }
 
     // TestLookup: widen the candidate pool so inline test blocks (which score lower
     // than production code on the query text) have a chance to enter the fused stage.
@@ -911,6 +919,7 @@ pub fn build_query_response(
             .unwrap_or_default(),
         top_language: selection.snippets.first().map(|s| s.language.clone()),
         snippet_languages: selected_snippet_languages(&selection.snippets),
+        repo_ecosystems: runtime.repo_ecosystems().to_vec(),
         top_ecosystem: selection
             .snippets
             .first()
