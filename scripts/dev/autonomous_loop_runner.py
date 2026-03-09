@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -51,6 +52,14 @@ class ClaudeCycleResult:
     raw: dict[str, Any]
 
 
+@dataclass
+class ClaudeCommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -92,6 +101,12 @@ def parse_json_output(raw: str) -> dict[str, Any]:
     raise ValueError(f"Unable to parse JSON output:\n{raw[:2000]}")
 
 
+def tail_text(text: str, limit: int = 4000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
 def default_claude_env(workspace_root: Path) -> dict[str, str]:
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
@@ -105,6 +120,59 @@ def default_claude_env(workspace_root: Path) -> dict[str, str]:
     if dev_daemon.exists():
         env["BUDI_DAEMON_BIN"] = str(dev_daemon)
     return env
+
+
+def git_stdout(workspace_root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(workspace_root),
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def git_head_sha(workspace_root: Path) -> str:
+    return git_stdout(workspace_root, "rev-parse", "HEAD")
+
+
+def summarize_repo_delta(
+    workspace_root: Path,
+    head_before: str,
+    *,
+    include_branch_status: bool,
+) -> str:
+    head_after = git_head_sha(workspace_root)
+    status_text = git_stdout(workspace_root, "status", "--short", "--branch")
+    status_lines = [line for line in status_text.splitlines() if line.strip()]
+    header = status_lines[0] if status_lines and status_lines[0].startswith("## ") else ""
+    non_header = [
+        line for line in status_lines if not line.startswith("## ") and line.strip()
+    ]
+
+    parts: list[str] = []
+    if head_before and head_after:
+        parts.append(f"- HEAD before: `{head_before}`\n")
+        parts.append(f"- HEAD after: `{head_after}`\n")
+        if head_after != head_before:
+            new_commits = git_stdout(
+                workspace_root, "log", "--oneline", f"{head_before}..{head_after}"
+            )
+            commit_lines = [line for line in new_commits.splitlines() if line.strip()]
+            if commit_lines:
+                parts.append("- New commits during cycle:\n")
+                parts.extend(f"  - `{line}`\n" for line in commit_lines)
+
+    should_show_status = bool(non_header) or include_branch_status
+    if should_show_status and header:
+        parts.append(f"- Branch status: `{header}`\n")
+    if non_header:
+        parts.append("- Worktree changes after cycle:\n")
+        parts.extend(f"  - `{line}`\n" for line in non_header)
+
+    return "".join(parts)
 
 
 def summarize_ab_results(results_json: Path) -> str:
@@ -148,6 +216,7 @@ def build_agent_prompt(
     cycle_index: int,
     extra_prompt: str,
     require_web_research: bool,
+    timeout_sec: int,
 ) -> str:
     research_block = """
 Periodic web research:
@@ -184,6 +253,7 @@ Autonomy rules:
 - Commit and push successful validated changes as part of the loop.
 - Update the improvement plan file with meaningful findings/results.
 - If a version bump is warranted by shipped work, do it.
+- If you inherit local commits or worktree changes from a previously interrupted loop pass, reconcile them first before starting a fresh large task.
 
 Cycle instructions:
 1. Read the plan file and current repo state.
@@ -193,6 +263,12 @@ Cycle instructions:
 5. Validate.
 6. Commit and push if the change is validated.
 7. Return structured status JSON.
+
+Hard execution budget:
+- The supervisor will terminate this pass after {max(1, timeout_sec // 60)} minutes.
+- Keep each pass small: do at most one validated improvement batch per cycle.
+- If validation or benchmarking may take more than a few minutes, launch it in the background and return `"wait"`.
+- After you make and validate a commit/push, stop and return structured JSON instead of starting another major task in the same cycle.
 
 Long-running benchmark rule:
 - If you decide to run a long A/B benchmark or other long validation, start it in the background yourself.
@@ -245,6 +321,7 @@ def run_claude_cycle(
         require_web_research=should_require_web_research(
             cycle_index, web_research_every_cycles
         ),
+        timeout_sec=timeout_sec,
     )
     settings = json.dumps({"disableAllHooks": True})
     args = [
@@ -264,20 +341,57 @@ def run_claude_cycle(
         "--add-dir",
         str(Path("/Users/ivan.seredkin/_projects/public-budi-bench")),
     ]
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         args,
         cwd=str(workspace_root),
-        input=prompt,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
-        timeout=timeout_sec,
         env=default_claude_env(workspace_root),
+        start_new_session=True,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude exited with {proc.returncode}\nstdout:\n{proc.stdout[-4000:]}\nstderr:\n{proc.stderr[-4000:]}"
+    try:
+        stdout, stderr = proc.communicate(prompt, timeout=timeout_sec)
+        command_result = ClaudeCommandResult(
+            returncode=proc.returncode,
+            stdout=stdout or "",
+            stderr=stderr or "",
+            timed_out=False,
         )
-    raw = parse_json_output(proc.stdout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+        command_result = ClaudeCommandResult(
+            returncode=proc.returncode if proc.returncode is not None else -1,
+            stdout=(stdout or "") or (exc.stdout or "") or "",
+            stderr=(stderr or "") or (exc.stderr or "") or "",
+            timed_out=True,
+        )
+
+    if command_result.timed_out:
+        raise TimeoutError(
+            f"claude timed out after {timeout_sec} seconds"
+            f"\nstdout tail:\n{tail_text(command_result.stdout)}"
+            f"\nstderr tail:\n{tail_text(command_result.stderr)}"
+        )
+    if command_result.returncode != 0:
+        raise RuntimeError(
+            f"claude exited with {command_result.returncode}"
+            f"\nstdout tail:\n{tail_text(command_result.stdout)}"
+            f"\nstderr tail:\n{tail_text(command_result.stderr)}"
+        )
+    raw = parse_json_output(command_result.stdout)
     structured = raw.get("structured_output")
     if not isinstance(structured, dict):
         raise RuntimeError(f"Missing structured_output in claude response: {raw}")
@@ -369,6 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Require a short latest-ideas web research sweep every N Claude cycles (0 = disable).",
     )
+    parser.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=3,
+        help="Stop only after this many consecutive Claude cycle failures/timeouts.",
+    )
     return parser
 
 
@@ -395,9 +515,16 @@ def main() -> int:
             append_log(summary_file, summarize_ab_results(Path(results_json)))
 
     cycle = 0
+    consecutive_failures = 0
     while args.max_cycles <= 0 or cycle < args.max_cycles:
         cycle += 1
-        append_log(summary_file, f"## Claude Cycle {cycle}\n\n- Started at: `{utc_now()}`\n")
+        head_before = git_head_sha(workspace_root)
+        append_log(
+            summary_file,
+            f"## Claude Cycle {cycle}\n\n"
+            f"- Started at: `{utc_now()}`\n"
+            + (f"- HEAD before: `{head_before}`\n" if head_before else ""),
+        )
         try:
             result = run_claude_cycle(
                 workspace_root=workspace_root,
@@ -409,11 +536,32 @@ def main() -> int:
                 web_research_every_cycles=args.web_research_every_cycles,
             )
         except Exception as exc:
+            consecutive_failures += 1
             append_log(
                 summary_file,
-                f"- Cycle failed at: `{utc_now()}`\n- Error: `{exc}`\n",
+                f"- Cycle failed at: `{utc_now()}`\n"
+                f"- Error: `{exc}`\n"
+                + summarize_repo_delta(
+                    workspace_root,
+                    head_before,
+                    include_branch_status=True,
+                )
+                + f"- Consecutive failures: `{consecutive_failures}/{max(1, args.max_consecutive_failures)}`\n",
             )
-            return 1
+            if 0 < args.max_consecutive_failures <= consecutive_failures:
+                append_log(
+                    summary_file,
+                    "## Loop Exit\n\n"
+                    f"- Ended at: `{utc_now()}`\n"
+                    "- Reason: `too many consecutive Claude cycle failures`\n",
+                )
+                return 1
+            append_log(
+                summary_file,
+                f"- Continuing after failure at: `{utc_now()}`\n",
+            )
+            time.sleep(5)
+            continue
 
         payload = result.payload
         status = str(payload.get("status", "")).strip() or "blocked"
@@ -424,12 +572,14 @@ def main() -> int:
         research_urls = payload.get("research_urls")
         if not isinstance(research_urls, list):
             research_urls = []
+        consecutive_failures = 0
         append_log(
             summary_file,
             f"- Finished at: `{utc_now()}`\n"
             f"- Status: `{status}`\n"
             f"- Summary: {summary}\n"
             f"- Next focus: {next_focus}\n"
+            + (f"- Session ID: `{result.session_id}`\n" if result.session_id else "")
             + (
                 f"- Commit: `{payload.get('commit_sha')}`\n"
                 if payload.get("commit_sha")
@@ -444,6 +594,11 @@ def main() -> int:
                 f"- Web research: `{research_summary}`\n"
                 if did_web_research and research_summary
                 else ""
+            )
+            + summarize_repo_delta(
+                workspace_root,
+                head_before,
+                include_branch_status=False,
             ),
         )
         if did_web_research and research_urls:
