@@ -7,5 +7,6 @@ mod index_scope;
 pub mod pre_filter;
 pub mod project_map;
 pub mod reason_codes;
+pub mod repo_plugins;
 pub mod retrieval;
 pub mod rpc;
