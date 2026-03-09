@@ -893,8 +893,7 @@ fn build_symbol_definition_first_steps_card(
         return None;
     }
     let mut summary = String::from("first steps:");
-    let mut included = 0usize;
-    for step in &steps {
+    for (included, step) in steps.iter().enumerate() {
         let sep = if included == 0 { " " } else { ", " };
         if summary.len() + sep.len() + step.len() > 160 {
             let remaining = steps.len().saturating_sub(included);
@@ -905,7 +904,6 @@ fn build_symbol_definition_first_steps_card(
         }
         summary.push_str(sep);
         summary.push_str(step);
-        included += 1;
     }
     let mut text_lines = Vec::with_capacity(steps.len() + 1);
     text_lines.push(summary);
@@ -1766,11 +1764,7 @@ fn extract_test_inventory_entries(file_text: &str) -> Vec<TestInventoryEntry> {
 fn extract_named_test_definition(line: &str) -> Option<String> {
     for prefix in ["async def test_", "def test_", "pub fn test_", "fn test_"] {
         if let Some(rest) = line.strip_prefix(prefix) {
-            let name = if prefix.starts_with("async def ") || prefix.starts_with("def ") {
-                format!("test_{}", take_identifier(rest))
-            } else {
-                format!("test_{}", take_identifier(rest))
-            };
+            let name = format!("test_{}", take_identifier(rest));
             if name != "test_" {
                 return Some(name);
             }
@@ -1803,8 +1797,7 @@ fn build_test_inventory_lines(
         .map(|(idx, group)| {
             let prefix = inventory_line_prefix(idx, group_count);
             let mut line = String::from(prefix);
-            let mut included = 0usize;
-            for entry in group {
+            for (included, entry) in group.iter().enumerate() {
                 let token = format!("{}@{}", entry.label, entry.line_number);
                 let sep = if included == 0 { " " } else { ", " };
                 if line.len() + sep.len() + token.len() > max_chars_per_line {
@@ -1819,7 +1812,6 @@ fn build_test_inventory_lines(
                 }
                 line.push_str(sep);
                 line.push_str(&token);
-                included += 1;
             }
             line
         })

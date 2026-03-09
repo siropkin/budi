@@ -2096,10 +2096,10 @@ fn extract_definition_name(line: &str) -> Option<String> {
             break;
         }
     }
-    if let Some(rest) = normalized.strip_prefix('(') {
-        if let Some((_, after_receiver)) = rest.split_once(')') {
-            normalized = after_receiver.trim_start();
-        }
+    if let Some(rest) = normalized.strip_prefix('(')
+        && let Some((_, after_receiver)) = rest.split_once(')')
+    {
+        normalized = after_receiver.trim_start();
     }
     let candidate = normalized
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
