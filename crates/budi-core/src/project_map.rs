@@ -6,10 +6,37 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::index::RuntimeIndex;
+use crate::retrieval::{is_devtools_path, is_test_path};
 
 const MAX_ENTRY_POINTS: usize = 10;
 const MAX_HOTSPOT_FILES: usize = 10;
 const MAX_SYMBOLS: usize = 20;
+
+/// True if the path looks like a build/config/tooling file (not production source).
+fn is_build_or_config_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let stem = Path::new(&lower)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // Config/build files at any depth
+    matches!(
+        stem,
+        ".eslintrc"
+            | "eslintrc"
+            | ".prettierrc"
+            | "prettierrc"
+            | "babel.config"
+            | "jest.config"
+            | "tsconfig"
+            | "webpack.config"
+            | "rollup.config"
+            | "vite.config"
+            | "dangerfile"
+    ) || lower.ends_with(".config.js")
+        || lower.ends_with(".config.ts")
+        || lower.ends_with(".config.mjs")
+}
 
 pub fn generate_project_map(runtime: &RuntimeIndex) -> String {
     let chunks = runtime.all_chunks();
@@ -20,24 +47,36 @@ pub fn generate_project_map(runtime: &RuntimeIndex) -> String {
         *chunks_per_file.entry(chunk.path.as_str()).or_insert(0) += 1;
     }
 
-    // Entry points by basename heuristic
+    // Entry points by basename heuristic — exclude test/devtools paths
     let mut entry_points: Vec<&str> = chunks_per_file
         .keys()
         .copied()
-        .filter(|path| is_entry_point(path))
+        .filter(|path| {
+            is_entry_point(path) && !is_test_path(path) && !is_devtools_path(path)
+        })
         .collect();
     entry_points.sort();
     entry_points.truncate(MAX_ENTRY_POINTS);
 
-    // Top files by chunk count
-    let mut hotspots: Vec<(&str, usize)> = chunks_per_file.iter().map(|(p, c)| (*p, *c)).collect();
+    // Top files by chunk count — exclude test/devtools/config files
+    let mut hotspots: Vec<(&str, usize)> = chunks_per_file
+        .iter()
+        .filter(|(p, _)| !is_test_path(p) && !is_devtools_path(p))
+        .map(|(p, c)| (*p, *c))
+        .collect();
     hotspots.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     hotspots.truncate(MAX_HOTSPOT_FILES);
 
-    // Top symbols from symbol_hint fields (deduplicated)
+    // Top symbols from symbol_hint fields — skip test/devtools/config files
     let mut seen_symbols: HashSet<&str> = HashSet::new();
     let mut symbol_entries: Vec<(&str, &str, usize)> = Vec::new();
     for chunk in chunks {
+        if is_test_path(&chunk.path)
+            || is_devtools_path(&chunk.path)
+            || is_build_or_config_path(&chunk.path)
+        {
+            continue;
+        }
         if let Some(sym) = &chunk.symbol_hint {
             let sym = sym.trim();
             if !sym.is_empty() && seen_symbols.insert(sym) {
@@ -112,4 +151,26 @@ fn top_dir(path: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(".")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_build_or_config_path_detects_configs() {
+        assert!(is_build_or_config_path(".eslintrc.js"));
+        assert!(is_build_or_config_path("babel.config.js"));
+        assert!(is_build_or_config_path("jest.config.js"));
+        assert!(is_build_or_config_path("dangerfile.js"));
+        assert!(is_build_or_config_path("webpack.config.js"));
+        assert!(is_build_or_config_path("src/vite.config.ts"));
+    }
+
+    #[test]
+    fn is_build_or_config_path_allows_source() {
+        assert!(!is_build_or_config_path("src/app.ts"));
+        assert!(!is_build_or_config_path("lib/hooks.js"));
+        assert!(!is_build_or_config_path("packages/react/index.js"));
+    }
 }

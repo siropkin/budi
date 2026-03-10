@@ -1873,7 +1873,7 @@ fn symbol_definition_subject_query(query: &str) -> &str {
     query[..cut_idx].trim()
 }
 
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     // examples/ directories contain sample code, not repository test suites.
     if lower.starts_with("examples/") || lower.contains("/examples/") {
@@ -1918,7 +1918,7 @@ fn is_test_path(path: &str) -> bool {
 /// True if the chunk lives under a devtools or internal-tooling directory.
 /// DevTools directories contain debugging, visualization, and profiling tools —
 /// they are internal infrastructure, not the production code architecture.
-fn is_devtools_path(path: &str) -> bool {
+pub(crate) fn is_devtools_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower.contains("devtools")
         || lower.contains("noop-renderer")
