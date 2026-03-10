@@ -770,6 +770,15 @@ pub fn build_query_response(
     // Extend the same rule to cover "I want to add/implement" design queries.
     // These are architecturally equivalent to the test-writing pattern: the user wants
     // Claude to reason freely about design, not anchor to a partial low-quality context.
+    // Entry-points and crate-responsibilities queries always need broad exploration.
+    // Even high-confidence retrieval results (0.70+) are typically build scripts or
+    // re-export modules — not the holistic overview Claude produces by exploring.
+    // Skip unconditionally for Architecture queries matching these patterns.
+    let entry_points_skip = intent.kind == QueryIntentKind::Architecture
+        && contains_any(
+            &query.to_lowercase(),
+            &["entry points", "entry point", "crate responsibilities"],
+        );
     let ci_skip = intent.kind == QueryIntentKind::Architecture
         && scored.first().is_some_and(|c| c.score < 0.55)
         && contains_any(
@@ -833,14 +842,19 @@ pub fn build_query_response(
         && scored
             .first()
             .is_some_and(|c| c.reasons.iter().any(|r| r == "test-subject-file-seed"));
-    let ci_skip = ci_skip || env_listing_skip || lifecycle_overview_skip || test_coverage_skip;
-    let min_score = if env_listing_skip || lifecycle_overview_skip || test_coverage_skip {
-        f32::MAX
-    } else if ci_skip {
-        0.55_f32
-    } else {
-        min_score
-    };
+    let ci_skip = ci_skip
+        || env_listing_skip
+        || lifecycle_overview_skip
+        || test_coverage_skip
+        || entry_points_skip;
+    let min_score =
+        if env_listing_skip || lifecycle_overview_skip || test_coverage_skip || entry_points_skip {
+            f32::MAX
+        } else if ci_skip {
+            0.55_f32
+        } else {
+            min_score
+        };
     // FlowTrace with flowtrace-anchor — tighten the secondary floor.
     // When the top-ranked chunk already matched a camelCase function name in the query
     // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
