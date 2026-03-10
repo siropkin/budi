@@ -1,6 +1,6 @@
 {
   "name": "budi-hooks",
-  "version": "2.61.0",
+  "version": "2.62.0",
   "description": "Claude Code hooks that inject local budi context before Claude starts searching.",
   "author": {
     "name": "Ivan Seredkin",
