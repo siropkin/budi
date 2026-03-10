@@ -429,6 +429,8 @@ pub fn build_or_update(
     let mut pending_chunks: Vec<PendingChunk> = Vec::new();
     let mut missing_embedding_queue: Vec<(usize, String)> = Vec::new();
     let mut repaired_embeddings = 0usize;
+    let mut embedding_batches_since_save = 0usize;
+    const EMBEDDING_CACHE_SAVE_INTERVAL: usize = 50;
 
     emit_progress(
         &mut progress_cb,
@@ -587,6 +589,18 @@ pub fn build_or_update(
                 embedding_retry_attempts,
                 embedding_retry_backoff_ms,
             )?;
+            embedding_batches_since_save += 1;
+
+            // Periodically save embedding cache so crash-restarts reuse computed embeddings.
+            if embedding_cache_dirty
+                && embedding_batches_since_save >= EMBEDDING_CACHE_SAVE_INTERVAL
+            {
+                embedding_cache.updated_at_ts = Utc::now().timestamp();
+                if let Err(err) = save_embedding_cache(&embedding_cache) {
+                    warn!("Periodic embedding cache save failed: {:#}", err);
+                }
+                embedding_batches_since_save = 0;
+            }
         }
 
         processed_files += 1;
