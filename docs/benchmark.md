@@ -6,7 +6,7 @@ Across 4 open-source repos (React, ripgrep, Flask, Terraform) with 18 prompts ea
 
 - **Cost**: 5–24% lower on average
 - **Speed**: faster median API time depending on repo
-- **Quality**: budi wins or ties on most prompts; React 8W/3L/7T, Flask 3W/1L/14T, ripgrep 1W/2L/12T (v2.49.0)
+- **Quality**: budi wins or ties on most prompts; React 8W/3L/7T, Flask 3W/1L/14T, ripgrep 1W/2L/12T, Terraform 5W/5L/8T (v2.49.0–v2.50.0)
 
 These numbers come from the latest validated full-suite A/B runs. HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions. Baseline Claude quality has improved significantly — many prompts now score 9→9 as ties.
 
