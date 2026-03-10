@@ -409,6 +409,70 @@ pub fn build_query_response(
         }
     }
 
+    // TestLookup: seed chunks from dedicated test files whose filename matches
+    // the queried subject. Problem: lexical/vector channels favor test helpers
+    // (e.g. testPlan()) over actual test files (plan_test.go) because the helper
+    // function name matches the query more directly. Fix: ensure chunks from
+    // files named {subject}_test.* or test_{subject}.* enter the candidate pool.
+    // Use only the FIRST subject token (most specific in query order), pick the
+    // best 3 candidates by path relevance, and seed them at a competitive score.
+    if intent.kind == QueryIntentKind::TestLookup {
+        let subject_tokens = test_subject_tokens(query);
+        if let Some(primary_subject) = subject_tokens.first() {
+            const TEST_FILE_SEED_SCORE: f32 = 0.55;
+            const MAX_SEEDED_FILES: usize = 3;
+            // Collect candidate (chunk_id, path) pairs, deduplicated by path.
+            let mut seen_paths: HashSet<String> = HashSet::new();
+            let mut candidates: Vec<(u64, String)> = Vec::new();
+            for chunk in runtime.all_chunks() {
+                if !is_test_path(&chunk.path) || is_mock_path(&chunk.path) {
+                    continue;
+                }
+                let filename = chunk.path.rsplit('/').next().unwrap_or(&chunk.path);
+                let Some(stem) = extract_test_subject_stem(filename) else {
+                    continue;
+                };
+                if &stem != primary_subject {
+                    continue;
+                }
+                if !seen_paths.insert(chunk.path.clone()) {
+                    continue;
+                }
+                candidates.push((chunk.id, chunk.path.clone()));
+            }
+            // Sort by path relevance: prefer paths containing other subject tokens,
+            // then shorter paths (closer to the module root).
+            candidates.sort_by(|a, b| {
+                let a_lower = a.1.to_ascii_lowercase();
+                let b_lower = b.1.to_ascii_lowercase();
+                let a_extra = subject_tokens
+                    .iter()
+                    .skip(1)
+                    .filter(|t| a_lower.contains(t.as_str()))
+                    .count();
+                let b_extra = subject_tokens
+                    .iter()
+                    .skip(1)
+                    .filter(|t| b_lower.contains(t.as_str()))
+                    .count();
+                b_extra.cmp(&a_extra).then(a.1.len().cmp(&b.1.len()))
+            });
+            for (chunk_id, _path) in candidates.into_iter().take(MAX_SEEDED_FILES) {
+                let existing = fused.get(&chunk_id).map(|cs| cs.score).unwrap_or(0.0);
+                if TEST_FILE_SEED_SCORE > existing {
+                    fused.insert(
+                        chunk_id,
+                        CandidateScore {
+                            score: TEST_FILE_SEED_SCORE,
+                            signals: vec!["test-subject-file-seed".to_string()],
+                            channel_scores: QueryChannelScores::default(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     let cwd_rel = cwd
         .and_then(|path| path.to_str())
         .map(normalize_path)
@@ -462,6 +526,27 @@ pub fn build_query_response(
         {
             adjusted += 0.15;
             push_unique_reason(&mut reasons, "test-path-boost");
+        }
+
+        // TestLookup: demote mock/test-double files. Coverage queries ("what tests cover
+        // the plan command") want actual test functions, not mock implementations. Mock
+        // files can score high via lexical/symbol matches (they define the same symbols)
+        // but provide no test coverage information.
+        if intent.kind == QueryIntentKind::TestLookup && is_mock_path(&chunk.path) {
+            adjusted -= 0.20;
+            push_unique_reason(&mut reasons, "mock-path-penalty");
+        }
+
+        // TestLookup: demote Go test helper functions. In Go, test functions are
+        // TestXxx (uppercase T), while test helpers are testXxx (lowercase t).
+        // Helpers create fixtures/setup — not what "what tests cover X" wants.
+        // testPlan() returning *plans.Plan is a fixture factory, not a test.
+        if intent.kind == QueryIntentKind::TestLookup
+            && is_test_path(&chunk.path)
+            && is_go_test_helper_chunk(&chunk.text)
+        {
+            adjusted -= 0.20;
+            push_unique_reason(&mut reasons, "test-helper-demote");
         }
 
         // Architecture queries — penalise test-path chunks.
@@ -1784,10 +1869,20 @@ fn is_test_path(path: &str) -> bool {
     if lower.contains("-test-") {
         return true;
     }
+    // Filename-level test file detection for Go (_test.go), JS/TS (.test.ts, .spec.ts),
+    // and Python (test_*.py) conventions — these files live alongside production code
+    // rather than under a /test or /spec directory.
+    let filename = lower.split('/').next_back().unwrap_or("");
+    if filename.contains("_test.go")
+        || filename.contains(".test.")
+        || filename.contains(".spec.")
+        || filename.starts_with("test_")
+    {
+        return true;
+    }
     // Mock implementation files (e.g. eval_context_mock.go, consoleMock.js,
     // mock_provider.go). Mock files define test doubles — they are not real callers
     // for SymbolUsage queries and not real production paths for FlowTrace queries.
-    let filename = lower.split('/').next_back().unwrap_or("");
     let name_stem = filename.split('.').next().unwrap_or(filename);
     name_stem.ends_with("mock")
         || name_stem.ends_with("_mock")
@@ -1805,6 +1900,66 @@ fn is_devtools_path(path: &str) -> bool {
         || lower.contains("noop-renderer")
         || lower.contains("noop_renderer")
         || lower.contains("nooprenderer")
+}
+
+/// True if the chunk text starts with a Go test helper function (lowercase `test` prefix).
+/// In Go, actual test functions are `func TestXxx(t *testing.T)` (uppercase T).
+/// Helpers like `func testPlan(t *testing.T) *plans.Plan` are private fixture factories.
+fn is_go_test_helper_chunk(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    // Pattern: func test<Uppercase>...
+    if let Some(rest) = trimmed.strip_prefix("func test")
+        && let Some(first_char) = rest.chars().next()
+    {
+        return first_char.is_ascii_uppercase();
+    }
+    false
+}
+
+/// True if the path is a mock/test-double file (subset of is_test_path).
+/// Mock files define stubs — they are usually not what "what tests cover X" queries want.
+fn is_mock_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let filename = lower.split('/').next_back().unwrap_or("");
+    let name_stem = filename.split('.').next().unwrap_or(filename);
+    name_stem.ends_with("mock")
+        || name_stem.ends_with("_mock")
+        || name_stem.starts_with("mock_")
+        || name_stem.starts_with("mock")
+            && (filename.ends_with(".go") || filename.ends_with(".ts") || filename.ends_with(".js"))
+}
+
+/// Extract the "subject" from a test filename.
+/// Examples: `plan_test.go` → Some("plan"), `test_plan.py` → Some("plan"),
+/// `plan.test.ts` → Some("plan"), `command_test.go` → Some("command").
+fn extract_test_subject_stem(filename: &str) -> Option<String> {
+    let lower = filename.to_ascii_lowercase();
+    // Split into parts by '.' first to handle plan.test.ts / plan.spec.js
+    let parts: Vec<&str> = lower.split('.').collect();
+    // Go/Rust: plan_test.go → parts = ["plan_test", "go"]
+    if parts.len() >= 2 {
+        let stem = parts[0];
+        // {subject}_test pattern (Go, Rust)
+        if let Some(subject) = stem.strip_suffix("_test")
+            && !subject.is_empty()
+        {
+            return Some(subject.to_string());
+        }
+        // test_{subject} pattern (Python)
+        if let Some(subject) = stem.strip_prefix("test_")
+            && !subject.is_empty()
+        {
+            return Some(subject.to_string());
+        }
+    }
+    // JS/TS: plan.test.ts / plan.spec.js → parts = ["plan", "test"/"spec", "ts"/"js"]
+    if parts.len() >= 3 && matches!(parts[1], "test" | "spec") {
+        let subject = parts[0];
+        if !subject.is_empty() {
+            return Some(subject.to_string());
+        }
+    }
+    None
 }
 
 /// True if the chunk lives under an examples/ directory.
@@ -1989,12 +2144,30 @@ fn maybe_inject_test_file_inventory_card(
 
 fn select_test_inventory_path<'a>(query: &str, snippets: &'a [QueryResultItem]) -> Option<&'a str> {
     let subject_tokens = test_subject_tokens(query);
-    snippets
+    let test_snippets: Vec<&QueryResultItem> = snippets
         .iter()
-        .filter(|s| is_test_path(&s.path))
+        .filter(|s| is_test_path(&s.path) && !is_mock_path(&s.path))
+        .collect();
+    // Priority 1: iterate subject tokens in query order (most specific first).
+    // For "What tests cover the plan command", "plan" appears before "command",
+    // so plan_test.go (stem "plan") is preferred over command_test.go (stem "command").
+    for subject in &subject_tokens {
+        if let Some(s) = test_snippets.iter().find(|s| {
+            let filename = s.path.rsplit('/').next().unwrap_or(&s.path);
+            extract_test_subject_stem(filename).is_some_and(|stem| &stem == subject)
+        }) {
+            return Some(s.path.as_str());
+        }
+    }
+    // Priority 2: file whose full path contains a subject token.
+    if let Some(s) = test_snippets
+        .iter()
         .find(|s| path_matches_subject_tokens(&s.path, &subject_tokens))
-        .or_else(|| snippets.iter().find(|s| is_test_path(&s.path)))
-        .map(|s| s.path.as_str())
+    {
+        return Some(s.path.as_str());
+    }
+    // Priority 3: any test file in selection.
+    test_snippets.first().map(|s| s.path.as_str())
 }
 
 fn path_matches_subject_tokens(path: &str, subject_tokens: &[String]) -> bool {
@@ -4163,6 +4336,94 @@ mod tests {
         // Non-mock production files should not be detected
         assert!(!is_test_path("src/components/Modal.tsx"));
         assert!(!is_test_path("internal/terraform/context.go"));
+    }
+
+    #[test]
+    fn is_test_path_detects_filename_test_conventions() {
+        // Go _test.go convention
+        assert!(is_test_path("internal/command/plan_test.go"));
+        assert!(is_test_path("internal/terraform/context_plan_test.go"));
+        // JS/TS .test.ts / .spec.ts convention
+        assert!(is_test_path("src/components/Button.test.tsx"));
+        assert!(is_test_path("src/utils/parser.spec.ts"));
+        // Python test_ convention
+        assert!(is_test_path("app/test_views.py"));
+        // Production files should NOT match
+        assert!(!is_test_path("internal/command/plan.go"));
+        assert!(!is_test_path("src/components/Button.tsx"));
+    }
+
+    #[test]
+    fn extract_test_subject_stem_go() {
+        assert_eq!(
+            extract_test_subject_stem("plan_test.go"),
+            Some("plan".to_string())
+        );
+        assert_eq!(
+            extract_test_subject_stem("context_plan_test.go"),
+            Some("context_plan".to_string())
+        );
+        assert_eq!(
+            extract_test_subject_stem("command_test.go"),
+            Some("command".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_test_subject_stem_python() {
+        assert_eq!(
+            extract_test_subject_stem("test_views.py"),
+            Some("views".to_string())
+        );
+        assert_eq!(
+            extract_test_subject_stem("test_plan.py"),
+            Some("plan".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_test_subject_stem_js_ts() {
+        assert_eq!(
+            extract_test_subject_stem("Button.test.tsx"),
+            Some("button".to_string())
+        );
+        assert_eq!(
+            extract_test_subject_stem("parser.spec.ts"),
+            Some("parser".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_test_subject_stem_non_test_file() {
+        assert_eq!(extract_test_subject_stem("plan.go"), None);
+        assert_eq!(extract_test_subject_stem("Button.tsx"), None);
+    }
+
+    #[test]
+    fn is_mock_path_detects_mocks() {
+        assert!(is_mock_path("internal/terraform/eval_context_mock.go"));
+        assert!(is_mock_path("internal/providers/mock.go"));
+        assert!(is_mock_path("internal/cloud/tfe_client_mock.go"));
+        assert!(!is_mock_path("internal/command/plan_test.go"));
+        assert!(!is_mock_path("internal/command/plan.go"));
+    }
+
+    #[test]
+    fn is_go_test_helper_chunk_detects_helpers() {
+        // Go test helper (lowercase t)
+        assert!(is_go_test_helper_chunk(
+            "func testPlan(t *testing.T) *plans.Plan {"
+        ));
+        assert!(is_go_test_helper_chunk(
+            "func testFixturePath(name string) string {"
+        ));
+        // Actual Go test function (uppercase T) — NOT a helper
+        assert!(!is_go_test_helper_chunk("func TestPlan(t *testing.T) {"));
+        assert!(!is_go_test_helper_chunk(
+            "func TestPlanHuman_operation(t *testing.T) {"
+        ));
+        // Non-test function
+        assert!(!is_go_test_helper_chunk("func Plan(ctx *Context) error {"));
     }
 
     // ── is_inline_test_chunk ─────────────────────────────────────────────────
