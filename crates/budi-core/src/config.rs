@@ -112,7 +112,7 @@ impl Default for BudiConfig {
             chunk_lines: 80,
             chunk_overlap: 20,
             // Embeddings
-            embedding_batch_size: 96,
+            embedding_batch_size: 32,
             embedding_retry_attempts: 3,
             embedding_retry_backoff_ms: 75,
             // Debug
