@@ -434,7 +434,10 @@ mod tests {
         // Merged span covers both
         assert!(out.contains("span: 1-15"), "span should be merged: {}", out);
         // Secondary anchor folded into proof
-        assert!(out.contains("fn beta()"), "secondary anchor should appear in proof");
+        assert!(
+            out.contains("fn beta()"),
+            "secondary anchor should appear in proof"
+        );
     }
 
     #[test]
