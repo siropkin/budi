@@ -1153,7 +1153,8 @@ pub fn build_query_response(
         },
     };
 
-    let context = build_context(&selection.snippets, config.context_char_budget);
+    let query_tokens = extract_query_proof_tokens(query);
+    let context = build_context(&selection.snippets, config.context_char_budget, &query_tokens);
     Ok(QueryResponse {
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
@@ -1168,8 +1169,12 @@ pub fn build_query_response(
 
 /// Build an injected context string from a list of snippets.
 /// Used by daemon.rs after post-retrieval filtering (session dedup, prefetch).
-pub fn format_context(snippets: &[QueryResultItem], budget: usize) -> String {
-    context::build_context(snippets, budget)
+pub fn format_context(
+    snippets: &[QueryResultItem],
+    budget: usize,
+    query_tokens: &[String],
+) -> String {
+    context::build_context(snippets, budget, query_tokens)
 }
 
 fn selected_snippet_languages(snippets: &[QueryResultItem]) -> Vec<String> {
@@ -2631,7 +2636,7 @@ pub fn prefetch_neighbors_for_file(
         });
     }
 
-    let context = context::build_context(&snippets, context_budget);
+    let context = context::build_context(&snippets, context_budget, &[]);
     (snippets, context)
 }
 
@@ -3389,6 +3394,27 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Extract meaningful query words for proof-line needle matching.
+/// Filters out common English stop words and very short tokens.
+/// Returns lowercase tokens that help proof lines match the user's question.
+pub fn extract_query_proof_tokens(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "her", "was", "one",
+        "our", "out", "has", "its", "this", "that", "with", "from", "they", "been", "have",
+        "what", "where", "which", "when", "why", "how", "does", "will", "would", "could",
+        "should", "describe", "trace", "show", "list", "explain", "tell", "give", "each",
+        "defined", "called", "used", "using", "before", "after", "during", "into", "being",
+    ];
+    let mut seen = HashSet::new();
+    query
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|tok| tok.len() >= 4)
+        .map(|tok| tok.to_ascii_lowercase())
+        .filter(|tok| !STOP.contains(&tok.as_str()))
+        .filter(|tok| seen.insert(tok.clone()))
+        .collect()
 }
 
 fn has_symbol_case_pattern(raw: &str) -> bool {
@@ -4375,6 +4401,23 @@ mod tests {
         assert!(is_test_path("test/fixtures/sample_config.json"));
         // Production paths should not match
         assert!(!is_test_path("internal/stacks/stackruntime/eval.go"));
+    }
+
+    #[test]
+    fn extract_query_proof_tokens_filters_stop_words() {
+        let tokens = extract_query_proof_tokens(
+            "Where is Plan defined and what steps does it take from a loaded configuration?",
+        );
+        // Should include meaningful words
+        assert!(tokens.contains(&"plan".to_string()));
+        assert!(tokens.contains(&"steps".to_string()));
+        assert!(tokens.contains(&"loaded".to_string()));
+        assert!(tokens.contains(&"configuration".to_string()));
+        // Should exclude stop words
+        assert!(!tokens.contains(&"where".to_string()));
+        assert!(!tokens.contains(&"what".to_string()));
+        assert!(!tokens.contains(&"does".to_string()));
+        assert!(!tokens.contains(&"from".to_string()));
     }
 
     #[test]

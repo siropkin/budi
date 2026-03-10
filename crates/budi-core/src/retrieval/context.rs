@@ -29,7 +29,11 @@ pub(super) fn path_diversity_bucket(path: &str) -> String {
 /// Build the injected context string from selected snippets.
 /// Always renders evidence cards. Uses score-weighted progressive truncation so
 /// the highest-scoring snippet gets proportionally more budget than later ones.
-pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> String {
+pub(super) fn build_context(
+    snippets: &[QueryResultItem],
+    budget: usize,
+    query_tokens: &[String],
+) -> String {
     let mut out = String::new();
     out.push_str("[budi context]\n");
     out.push_str("rules:\n");
@@ -56,7 +60,7 @@ pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> Stri
         }
         .min(remaining_budget);
 
-        let card = render_evidence_card(snippet);
+        let card = render_evidence_card(snippet, query_tokens);
         if card.len() <= snippet_budget {
             out.push_str(&card);
             remaining_budget = remaining_budget.saturating_sub(card.len());
@@ -70,12 +74,12 @@ pub(super) fn build_context(snippets: &[QueryResultItem], budget: usize) -> Stri
     out
 }
 
-fn render_evidence_card(snippet: &QueryResultItem) -> String {
+fn render_evidence_card(snippet: &QueryResultItem, query_tokens: &[String]) -> String {
     // Strip score/signals — debugging metadata that adds noise for Claude.
     // Context Rot research: even harmless distractors degrade attention/focus.
     // Keep: file, span, anchor (what to look at), proof (why it's relevant).
     let anchor = extract_anchor_line(&snippet.text);
-    let proof_lines = extract_proof_lines(&snippet.text, 3);
+    let proof_lines = extract_proof_lines(&snippet.text, 3, &anchor, query_tokens);
     let mut out = String::new();
     out.push_str(&format!("- file: {}\n", snippet.path));
     out.push_str(&format!(
@@ -108,12 +112,17 @@ fn extract_anchor_line(text: &str) -> String {
     "(empty)".to_string()
 }
 
-fn extract_proof_lines(text: &str, max_lines: usize) -> Vec<String> {
+fn extract_proof_lines(
+    text: &str,
+    max_lines: usize,
+    anchor: &str,
+    query_tokens: &[String],
+) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
     }
     // General code proof needles (not intent-specific)
-    let needles: &[&str] = &[
+    let fixed_needles: &[&str] = &[
         "listen(",
         "route",
         "router",
@@ -136,28 +145,54 @@ fn extract_proof_lines(text: &str, max_lines: usize) -> Vec<String> {
 
     let mut picked = Vec::new();
     let mut seen = HashSet::new();
+    let anchor_lower = anchor.to_ascii_lowercase();
 
-    // Priority: lines matching code needles
+    // Skip lines that duplicate the anchor (function signature already shown).
+    let is_anchor_dup = |line: &str| -> bool {
+        let l = line.to_ascii_lowercase();
+        l == anchor_lower || (l.len() > 20 && anchor_lower.contains(&l))
+    };
+
+    // Priority 1: lines matching query tokens (most relevant to the specific question)
+    if !query_tokens.is_empty() {
+        for raw_line in text.lines() {
+            if picked.len() >= max_lines {
+                break;
+            }
+            let line = sanitize_evidence_line(raw_line);
+            if line.is_empty() || is_comment_only_line(line.as_str()) || is_anchor_dup(&line) {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            if query_tokens.iter().any(|tok| lower.contains(tok.as_str()))
+                && seen.insert(line.clone())
+            {
+                picked.push(line);
+            }
+        }
+    }
+
+    // Priority 2: lines matching fixed code needles
     for raw_line in text.lines() {
         if picked.len() >= max_lines {
             break;
         }
         let line = sanitize_evidence_line(raw_line);
-        if line.is_empty() || is_comment_only_line(line.as_str()) {
+        if line.is_empty() || is_comment_only_line(line.as_str()) || is_anchor_dup(&line) {
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if needles.iter().any(|needle| lower.contains(needle)) && seen.insert(line.clone()) {
+        if fixed_needles.iter().any(|needle| lower.contains(needle)) && seen.insert(line.clone()) {
             picked.push(line);
         }
     }
-    // Fill with any non-empty, non-comment lines
+    // Fill with any non-empty, non-comment, non-anchor lines
     for raw_line in text.lines() {
         if picked.len() >= max_lines {
             break;
         }
         let line = sanitize_evidence_line(raw_line);
-        if line.is_empty() || is_comment_only_line(line.as_str()) {
+        if line.is_empty() || is_comment_only_line(line.as_str()) || is_anchor_dup(&line) {
             continue;
         }
         if seen.insert(line.clone()) {
@@ -225,7 +260,7 @@ mod tests {
 
     #[test]
     fn empty_snippets_returns_header_only() {
-        let out = build_context(&[], 4096);
+        let out = build_context(&[], 4096, &[]);
         assert!(out.starts_with("[budi context]"), "missing header");
         assert!(
             out.contains("evidence_cards:"),
@@ -242,7 +277,7 @@ mod tests {
             "fn commitRoot() { schedule(); }",
             0.75,
         )];
-        let out = build_context(&snippets, 4096);
+        let out = build_context(&snippets, 4096, &[]);
         assert!(out.contains("file: src/scheduler.rs"), "missing file path");
         assert!(out.contains("span: 1-10"), "missing span");
         // Score and signals are stripped from emitted context (debugging metadata)
@@ -259,7 +294,7 @@ mod tests {
     #[test]
     fn zero_budget_returns_header_only() {
         let snippets = vec![make_snippet("src/foo.rs", "fn foo() {}", 0.8)];
-        let out = build_context(&snippets, 0);
+        let out = build_context(&snippets, 0, &[]);
         // Budget 0 < header length, so content_budget is 0, loop breaks immediately
         assert!(out.starts_with("[budi context]"));
         assert!(
@@ -276,7 +311,7 @@ mod tests {
             make_snippet("src/b.rs", &long_text, 0.8),
         ];
         let budget = 2000;
-        let out = build_context(&snippets, budget);
+        let out = build_context(&snippets, budget, &[]);
         assert!(
             out.len() <= budget + 20, // small tolerance for header math
             "output len {} exceeds budget {}",
@@ -295,7 +330,7 @@ mod tests {
             make_snippet("src/big.rs", &long, 0.5),
         ];
         let budget = 4096;
-        let out = build_context(&snippets, budget);
+        let out = build_context(&snippets, budget, &[]);
         // Both files should appear since budget is generous
         assert!(out.contains("file: src/top.rs"));
         assert!(out.contains("file: src/big.rs"));
@@ -308,7 +343,7 @@ mod tests {
             "pub fn query(&self) -> Result<QueryResponse> { return Ok(resp); }",
             0.82,
         )];
-        let out = build_context(&snippets, 4096);
+        let out = build_context(&snippets, 4096, &[]);
         assert!(out.contains("anchor:"), "missing anchor");
         assert!(out.contains("proof:"), "missing proof section");
     }
@@ -320,7 +355,7 @@ mod tests {
             "// top comment\nroute(\"/api\", handler)\nreturn response;",
             0.7,
         )];
-        let out = build_context(&snippets, 4096);
+        let out = build_context(&snippets, 4096, &[]);
         // Should include the "route" line as a proof needle match
         assert!(out.contains("route"), "expected route proof line");
     }

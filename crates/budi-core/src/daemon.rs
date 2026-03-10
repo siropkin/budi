@@ -293,9 +293,11 @@ impl DaemonState {
         } else {
             intent_snippet_budget
         };
+        // Extract query tokens for query-aware proof line selection.
+        let query_tokens = retrieval::extract_query_proof_tokens(&request.prompt);
         // Rebuild context after dedup + prepend call graph summary.
         let base_context = if request.session_id.is_some() || call_graph.is_some() {
-            retrieval::format_context(&response.snippets, base_budget)
+            retrieval::format_context(&response.snippets, base_budget, &query_tokens)
         } else {
             response.context.clone()
         };
