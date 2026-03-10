@@ -402,7 +402,10 @@ pub fn build_or_update(
         .count();
 
     let deleted_files = count_deleted_paths(&changed_set, &current_hashes);
-    let mut embedder = EmbeddingEngine::new();
+    // Defer embedder creation until first embedding batch. This avoids loading
+    // the ONNX model (~1-2GB on Apple Silicon) while file scanning/chunking data
+    // is still in memory, reducing peak memory for large repos.
+    let mut embedder: Option<EmbeddingEngine> = None;
     let previous_embeddings_by_fingerprint: HashMap<[u8; 32], Vec<f32>> = previous
         .chunks
         .iter()
@@ -574,8 +577,9 @@ pub fn build_or_update(
                     done: false,
                 },
             );
+            let emb = embedder.get_or_insert_with(EmbeddingEngine::new);
             flush_missing_embedding_queue(
-                &mut embedder,
+                emb,
                 &mut pending_chunks,
                 &mut missing_embedding_queue,
                 &mut embedding_cache,
@@ -602,6 +606,11 @@ pub fn build_or_update(
         }
     }
 
+    // Free previous-state maps after the file loop — no longer referenced.
+    drop(previous_chunks_by_path);
+    drop(previous_hashes);
+    drop(previous_files_by_path);
+
     if !missing_embedding_queue.is_empty() {
         emit_progress(
             &mut progress_cb,
@@ -614,8 +623,9 @@ pub fn build_or_update(
                 done: false,
             },
         );
+        let emb = embedder.get_or_insert_with(EmbeddingEngine::new);
         flush_missing_embedding_queue(
-            &mut embedder,
+            emb,
             &mut pending_chunks,
             &mut missing_embedding_queue,
             &mut embedding_cache,
@@ -664,7 +674,7 @@ pub fn build_or_update(
         });
     }
 
-    if embedder.is_available() {
+    if embedder.as_ref().is_some_and(|e| e.is_available()) {
         emit_progress(
             &mut progress_cb,
             IndexBuildProgress {
@@ -676,9 +686,10 @@ pub fn build_or_update(
                 done: false,
             },
         );
+        let emb = embedder.as_mut().unwrap();
         repaired_embeddings = reconcile_missing_chunk_embeddings(
             &mut chunks,
-            &mut embedder,
+            emb,
             &mut embedding_cache,
             &mut embedding_cache_dirty,
             embedding_batch_size,
@@ -688,7 +699,7 @@ pub fn build_or_update(
     }
 
     let mut invalid_embeddings = sanitize_chunk_embeddings(&mut chunks);
-    if invalid_embeddings > 0 && embedder.is_available() {
+    if invalid_embeddings > 0 && embedder.as_ref().is_some_and(|e| e.is_available()) {
         emit_progress(
             &mut progress_cb,
             IndexBuildProgress {
@@ -700,10 +711,11 @@ pub fn build_or_update(
                 done: false,
             },
         );
+        let emb = embedder.as_mut().unwrap();
         repaired_embeddings =
             repaired_embeddings.saturating_add(reconcile_missing_chunk_embeddings(
                 &mut chunks,
-                &mut embedder,
+                emb,
                 &mut embedding_cache,
                 &mut embedding_cache_dirty,
                 embedding_batch_size,
@@ -719,6 +731,9 @@ pub fn build_or_update(
         .count();
     let embedded_chunks = chunks.len().saturating_sub(missing_embeddings);
 
+    // Save embedding cache before dropping it, then free the embedder and cache
+    // memory before HNSW construction. The ONNX embedding runtime uses ~6-10GB on
+    // Apple Silicon; releasing it here avoids peak memory = embedder + HNSW graph.
     if embedding_cache_dirty {
         emit_progress(
             &mut progress_cb,
@@ -736,6 +751,11 @@ pub fn build_or_update(
             warn!("Failed saving global embedding cache: {:#}", err);
         }
     }
+
+    // Release embedding engine and caches before HNSW construction to free memory.
+    drop(embedder);
+    drop(embedding_cache);
+    drop(previous_embeddings_by_fingerprint);
 
     chunks.sort_by(|a, b| (&a.path, a.start_line).cmp(&(&b.path, b.start_line)));
 
