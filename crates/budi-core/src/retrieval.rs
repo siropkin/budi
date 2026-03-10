@@ -1906,6 +1906,10 @@ pub(crate) fn is_test_path(path: &str) -> bool {
     if lower.contains("-test-") {
         return true;
     }
+    // Stub/fixture directories containing test doubles (e.g. stubs/, fixtures/)
+    if lower.contains("/stubs/") || lower.contains("/fixtures/") {
+        return true;
+    }
     // Filename-level test file detection for Go (_test.go), JS/TS (.test.ts, .spec.ts),
     // and Python (test_*.py) conventions — these files live alongside production code
     // rather than under a /test or /spec directory.
@@ -4361,6 +4365,16 @@ mod tests {
         // Test-utility directories like internal-test-utils
         assert!(is_test_path("packages/internal-test-utils/consoleMock.js"));
         assert!(is_test_path("src/react-test-helpers/setup.ts"));
+    }
+
+    #[test]
+    fn is_test_path_detects_stubs_and_fixtures_dirs() {
+        assert!(is_test_path(
+            "internal/stacks/stackruntime/internal/stackeval/stubs/errored.go"
+        ));
+        assert!(is_test_path("test/fixtures/sample_config.json"));
+        // Production paths should not match
+        assert!(!is_test_path("internal/stacks/stackruntime/eval.go"));
     }
 
     #[test]
