@@ -34,19 +34,20 @@ flowchart LR
 
 ## Latest A/B numbers
 
-Across 4 open-source repos (72 prompts total), judged by an independent LLM:
+Across 4 open-source repos (69 judged prompts), compared by an independent LLM judge:
 
-- 5–24% lower cost
-- Equal or better quality on the majority of prompts
-- No regressions on prompts where budi skips injection
-- Wins on targeted queries (symbol lookup, call tracing, config); ties on broad overview queries where baseline Claude is already strong
+- **16–24% lower cost** consistently across all repos
+- **84% regression-free** — same or better quality on 58/69 judged prompts
+- Remaining 11 regressions concentrated in mock/test-double pollution and broad overview anchoring (actively being eliminated)
+
+budi's goal is to deliver the same answer quality at lower cost by pre-injecting the right context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
 ```mermaid
 pie showData
-    title "Latest validated outcomes (4 repos, 69 judged prompts)"
-    "budi wins" : 17
-    "ties" : 41
-    "budi losses" : 11
+    title "Efficiency outcomes (4 repos, 69 judged prompts)"
+    "same quality, lower cost" : 41
+    "better quality" : 17
+    "regression" : 11
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.

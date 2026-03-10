@@ -985,13 +985,40 @@ def build_markdown(
         b = summary.get("with_budi", {}).get(key, 0.0)
         delta = b - a
         lines.append(f"| {label} | {a:,.2f} | {b:,.2f} | {delta:,.2f} |")
+    # ── Efficiency summary ──
+    # budi's goal: same quality at lower cost. Wins and ties are both successes.
+    # A regression = the judge found budi's answer worse (winner=no_budi).
+    judged = int(judge_summary.get("judged_rows", 0))
+    regressions = int(judge_summary.get("no_budi_wins", 0))
+    non_regressions = judged - regressions
+    cost_nb = summary.get("no_budi", {}).get("cost_usd_total", 0.0)
+    cost_wb = summary.get("with_budi", {}).get("cost_usd_total", 0.0)
+    cost_pct = ((cost_wb - cost_nb) / cost_nb * 100) if cost_nb else 0.0
+
+    lines.append("")
+    lines.append("## Efficiency Summary")
+    lines.append("")
+    lines.append(
+        "budi's goal: deliver the same answer quality at lower cost. "
+        "Ties and wins are both successes; only regressions (quality drops) are failures."
+    )
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|---|---:|")
+    lines.append(f"| Judged prompts | {judged} |")
+    lines.append(f"| Non-regressions (wins + ties) | {non_regressions} |")
+    lines.append(f"| Regressions (quality drops) | {regressions} |")
+    if judged:
+        lines.append(f"| Regression rate | {regressions / judged * 100:.0f}% |")
+    lines.append(f"| Total cost savings | ${abs(cost_wb - cost_nb):.2f} ({cost_pct:+.0f}%) |")
+
     lines.append("")
     lines.append("## Response Quality (LLM Judge)")
     lines.append("")
     lines.append("| Metric | Value |")
     lines.append("|---|---:|")
     lines.append(f"| Prompts evaluated | {len(prompts)} |")
-    lines.append(f"| Rows judged | {int(judge_summary.get('judged_rows', 0))} |")
+    lines.append(f"| Rows judged | {judged} |")
     lines.append(f"| Judge attempts | {int(judge_summary.get('judge_attempted_rows', 0))} |")
     lines.append(f"| Judge skipped | {bool(judge_summary.get('judge_skipped', False))} |")
     lines.append(f"| Judge limit | {int(judge_summary.get('judge_limit', 0))} |")
@@ -1010,7 +1037,7 @@ def build_markdown(
     lines.append("## Per-Prompt Outcomes")
     lines.append("")
     lines.append(
-        "| # | Prompt | cost nb/wb | Q nb→wb | G nb→wb | intent | lang | eco | top | ctx | winner |"
+        "| # | Prompt | cost Δ% | Q nb→wb | G nb→wb | intent | lang | eco | top | ctx | outcome |"
     )
     lines.append("|---:|---|---:|---:|---:|---|---|---|---:|---:|---|")
     for i, row in enumerate(rows, start=1):
@@ -1059,10 +1086,18 @@ def build_markdown(
         g_str = f"{g_nb:.0f}→{g_wb:.0f}" if judge.get("ok") else "—"
         cost_nb = safe_num(a.get("total_cost_usd"))
         cost_wb = safe_num(b.get("total_cost_usd"))
+        cost_delta_pct = ((cost_wb - cost_nb) / cost_nb * 100) if cost_nb else 0.0
+        winner = judge.get("winner", "n/a")
+        if winner == "no_budi":
+            outcome = "regression"
+        elif winner in ("with_budi", "tie"):
+            outcome = "ok"
+        else:
+            outcome = "n/a"
         lines.append(
-            f"| {i} | {prompt_short} | {cost_nb:.4f}/{cost_wb:.4f} | "
+            f"| {i} | {prompt_short} | {cost_delta_pct:+.0f}% | "
             f"{q_str} | {g_str} | {intent_abbrev} | {lang_str} | {eco_str} | {top_str} | {ctx_str} | "
-            f"{judge.get('winner', 'n/a')} |"
+            f"{outcome} |"
         )
     lines.append("")
     return "\n".join(lines)

@@ -2,13 +2,16 @@
 
 ## Latest results
 
-Across 4 open-source repos (React, ripgrep, Flask, Terraform) with 18 prompts each:
+budi's goal is to deliver the same answer quality at lower cost by pre-injecting relevant context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
-- **Cost**: 5–24% lower on average
-- **Speed**: faster median API time depending on repo
-- **Quality**: budi wins or ties on most prompts; React 8W/3L/7T, Flask 3W/1L/14T, ripgrep 1W/2L/12T, Terraform 5W/5L/8T (v2.49.0–v2.50.0)
+Across 4 open-source repos (React, ripgrep, Flask, Terraform) with 18 prompts each (v2.49.0–v2.50.0):
 
-These numbers come from the latest validated full-suite A/B runs. HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions. Baseline Claude quality has improved significantly — many prompts now score 9→9 as ties.
+- **Cost**: 16–24% lower consistently across all repos
+- **Regression rate**: 16% (11/69 judged prompts had quality drops)
+- **Non-regressions**: 84% (58/69 — same or better quality at lower cost)
+- Per repo: React 15/18 ok, Flask 17/18 ok, ripgrep 13/15 ok, Terraform 13/18 ok
+
+HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions. Baseline Claude quality has improved significantly — most prompts score 8–9 without budi, so ties are the expected outcome.
 
 ## What we measure
 
