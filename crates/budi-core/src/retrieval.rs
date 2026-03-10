@@ -809,6 +809,24 @@ pub fn build_query_response(
             &query.to_lowercase(),
             &["entry points", "entry point", "crate responsibilities"],
         );
+    // Module-layout / directory-structure queries always need breadth — Claude
+    // exploring many directories produces better answers than 2-3 code snippets
+    // that anchor it to a narrow slice. Skip unconditionally (like entry-points).
+    // Django P2 (top=0.711): autoreload.py + startapp.py noise anchors Claude.
+    let module_layout_skip = intent.kind == QueryIntentKind::Architecture
+        && contains_any(
+            &query.to_lowercase(),
+            &[
+                "module layout",
+                "directory structure",
+                "codebase structure",
+                "project structure",
+                "folder structure",
+                "which files own",
+                "which directories own",
+                "which dirs own",
+            ],
+        );
     let ci_skip = intent.kind == QueryIntentKind::Architecture
         && scored.first().is_some_and(|c| c.score < 0.55)
         && contains_any(
@@ -827,18 +845,6 @@ pub fn build_query_response(
                 "i need to implement",
                 "want to add",
                 "want to implement",
-                // Module-layout / directory-structure / entry-point queries need
-                // breadth (Claude exploring many directories) not 2-3 code snippets
-                // that anchor it to a narrow slice of the project.
-                "module layout",
-                "directory structure",
-                "which files own",
-                "which directories own",
-                "which dirs own",
-                "codebase structure",
-                "project structure",
-                "folder structure",
-                "entry points",
             ],
         );
     // Broad env-var listing queries ("which env vars", "what env vars") benefit
@@ -885,11 +891,13 @@ pub fn build_query_response(
         || lifecycle_overview_skip
         || test_coverage_skip
         || entry_points_skip
+        || module_layout_skip
         || sym_use_low_confidence_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
         || test_coverage_skip
         || entry_points_skip
+        || module_layout_skip
         || sym_use_low_confidence_skip
     {
         f32::MAX
@@ -5917,7 +5925,7 @@ it("renders", () => {})
     }
 
     #[test]
-    fn module_layout_query_ci_skip_blocks_low_confidence_injection() {
+    fn module_layout_query_unconditional_skip_blocks_injection() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5953,7 +5961,7 @@ it("renders", () => {})
         .expect("query response");
         assert!(
             response.snippets.is_empty(),
-            "expected module-layout ci_skip to block injection, got: {:?}",
+            "expected module-layout unconditional skip to block injection, got: {:?}",
             response.snippets
         );
         let _ = fs::remove_dir_all(&repo_root);
