@@ -842,19 +842,32 @@ pub fn build_query_response(
         && scored
             .first()
             .is_some_and(|c| c.reasons.iter().any(|r| r == "test-subject-file-seed"));
+    // Low-confidence SymbolUsage skip: when top < 0.28, no callers scored high
+    // enough to be useful. Injecting marginal results (examples, struct defs at
+    // 0.23-0.24) anchors Claude on irrelevant code. Ripgrep P9 sometimes has
+    // top=0.24 (simplegrep.rs example), which this catches. When HNSW gives
+    // top=0.40 (hiargs.rs Paths struct), the regression persists but that case
+    // is harder to distinguish from valid results without over-skipping.
+    let sym_use_low_confidence_skip = intent.kind == QueryIntentKind::SymbolUsage
+        && scored.first().is_some_and(|c| c.score < 0.28);
     let ci_skip = ci_skip
         || env_listing_skip
         || lifecycle_overview_skip
         || test_coverage_skip
-        || entry_points_skip;
-    let min_score =
-        if env_listing_skip || lifecycle_overview_skip || test_coverage_skip || entry_points_skip {
-            f32::MAX
-        } else if ci_skip {
-            0.55_f32
-        } else {
-            min_score
-        };
+        || entry_points_skip
+        || sym_use_low_confidence_skip;
+    let min_score = if env_listing_skip
+        || lifecycle_overview_skip
+        || test_coverage_skip
+        || entry_points_skip
+        || sym_use_low_confidence_skip
+    {
+        f32::MAX
+    } else if ci_skip {
+        0.55_f32
+    } else {
+        min_score
+    };
     // FlowTrace with flowtrace-anchor — tighten the secondary floor.
     // When the top-ranked chunk already matched a camelCase function name in the query
     // (flowtrace-anchor), we have a strong definition anchor. Secondary HNSW candidates
