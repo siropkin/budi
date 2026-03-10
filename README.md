@@ -36,17 +36,17 @@ flowchart LR
 
 Across 4 open-source repos (72 prompts total), judged by an independent LLM:
 
-- 5–23% lower cost
+- 5–24% lower cost
 - Equal or better quality on the majority of prompts
 - No regressions on prompts where budi skips injection
 - Wins on targeted queries (symbol lookup, call tracing, config); ties on broad overview queries where baseline Claude is already strong
 
 ```mermaid
 pie showData
-    title "Latest validated outcomes (React + Flask, 36 prompts)"
-    "budi wins" : 11
-    "ties" : 21
-    "budi losses" : 4
+    title "Latest validated outcomes (React + Flask + ripgrep, 51 judged prompts)"
+    "budi wins" : 12
+    "ties" : 33
+    "budi losses" : 6
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
