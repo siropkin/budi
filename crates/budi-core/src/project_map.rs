@@ -51,9 +51,7 @@ pub fn generate_project_map(runtime: &RuntimeIndex) -> String {
     let mut entry_points: Vec<&str> = chunks_per_file
         .keys()
         .copied()
-        .filter(|path| {
-            is_entry_point(path) && !is_test_path(path) && !is_devtools_path(path)
-        })
+        .filter(|path| is_entry_point(path) && !is_test_path(path) && !is_devtools_path(path))
         .collect();
     entry_points.sort();
     entry_points.truncate(MAX_ENTRY_POINTS);
