@@ -823,8 +823,18 @@ pub fn build_query_response(
                 && contains_any(&lq, &["order", "sequence", "when a", "execution"])
                 && contains_any(&lq, &["mount", "unmount", "component", "effect", "hook"])
         };
-    let ci_skip = ci_skip || env_listing_skip || lifecycle_overview_skip;
-    let min_score = if env_listing_skip || lifecycle_overview_skip {
+    // Broad test-coverage inventory queries ("what tests cover X and where do they
+    // live") need Claude to explore the repo widely. Injecting 2-3 partial test file
+    // fragments anchors Claude on those snippets instead of finding the complete test
+    // structure. Skip when the results are dominated by subject-file-seed (synthetic,
+    // not organically ranked) — i.e., the real retrieval didn't find strong matches.
+    let test_coverage_skip = intent.kind == QueryIntentKind::TestLookup
+        && is_test_coverage_inventory_query(query)
+        && scored
+            .first()
+            .is_some_and(|c| c.reasons.iter().any(|r| r == "test-subject-file-seed"));
+    let ci_skip = ci_skip || env_listing_skip || lifecycle_overview_skip || test_coverage_skip;
+    let min_score = if env_listing_skip || lifecycle_overview_skip || test_coverage_skip {
         f32::MAX
     } else if ci_skip {
         0.55_f32
