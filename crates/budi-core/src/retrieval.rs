@@ -1154,7 +1154,11 @@ pub fn build_query_response(
     };
 
     let query_tokens = extract_query_proof_tokens(query);
-    let context = build_context(&selection.snippets, config.context_char_budget, &query_tokens);
+    let context = build_context(
+        &selection.snippets,
+        config.context_char_budget,
+        &query_tokens,
+    );
     Ok(QueryResponse {
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
         context,
@@ -3401,11 +3405,11 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
 /// Returns lowercase tokens that help proof lines match the user's question.
 pub fn extract_query_proof_tokens(query: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "the", "and", "for", "are", "but", "not", "you", "all", "can", "her", "was", "one",
-        "our", "out", "has", "its", "this", "that", "with", "from", "they", "been", "have",
-        "what", "where", "which", "when", "why", "how", "does", "will", "would", "could",
-        "should", "describe", "trace", "show", "list", "explain", "tell", "give", "each",
-        "defined", "called", "used", "using", "before", "after", "during", "into", "being",
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "her", "was", "one", "our",
+        "out", "has", "its", "this", "that", "with", "from", "they", "been", "have", "what",
+        "where", "which", "when", "why", "how", "does", "will", "would", "could", "should",
+        "describe", "trace", "show", "list", "explain", "tell", "give", "each", "defined",
+        "called", "used", "using", "before", "after", "during", "into", "being",
     ];
     let mut seen = HashSet::new();
     query
