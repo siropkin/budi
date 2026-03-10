@@ -4,12 +4,12 @@
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting relevant context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
-Across 4 open-source repos (React, ripgrep, Flask, Terraform) with 18 prompts each (v2.49.0–v2.50.0):
+Across 8 open-source repos with 111 judged prompts (v2.55.0):
 
-- **Cost**: 16–24% lower consistently across all repos
-- **Regression rate**: 16% (11/69 judged prompts had quality drops)
-- **Non-regressions**: 84% (58/69 — same or better quality at lower cost)
-- Per repo: React 15/18 ok, Flask 17/18 ok, ripgrep 13/15 ok, Terraform 13/18 ok
+- **Cost**: 3–32% lower on most repos
+- **Regression rate**: 9% (10/111 judged prompts had quality drops)
+- **Non-regressions**: 91% (101/111 — same or better quality)
+- Per repo: React 16/18, Flask 16/18, ripgrep 13/16, Fastify 17/18, FastAPI 18/18, Django 17/18, Express 4/5
 
 HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions. Baseline Claude quality has improved significantly — most prompts score 8–9 without budi, so ties are the expected outcome.
 
@@ -36,6 +36,9 @@ Current prompt sets:
 - `scripts/dev/benchmarks/ripgrep-v1.prompts.json` — 18 prompts, ripgrep source (same categories)
 - `scripts/dev/benchmarks/flask-structural-v1.prompts.json` — 18 prompts, Flask source (Python)
 - `scripts/dev/benchmarks/terraform-v1.prompts.json` — 18 prompts, Terraform source (Go)
+- `scripts/dev/benchmarks/fastify-v1.prompts.json` — 18 prompts, Fastify source (Node.js)
+- `scripts/dev/benchmarks/fastapi-v1.prompts.json` — 18 prompts, FastAPI source (Python)
+- `scripts/dev/benchmarks/django-v1.prompts.json` — 18 prompts, Django source (Python)
 
 Results are stored in `~/.local/share/budi/repos/<repo>/benchmarks/` per run.
 
@@ -48,6 +51,9 @@ git clone --depth 1 https://github.com/facebook/react.git ./react
 git clone --depth 1 https://github.com/BurntSushi/ripgrep.git ./ripgrep
 git clone --depth 1 https://github.com/pallets/flask.git ./flask
 git clone --depth 1 https://github.com/hashicorp/terraform.git ./terraform
+git clone --depth 1 https://github.com/fastify/fastify.git ./fastify
+git clone --depth 1 https://github.com/fastapi/fastapi.git ./fastapi
+git clone --depth 1 https://github.com/django/django.git ./django
 ```
 
 Index each repo, then run A/B:

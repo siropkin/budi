@@ -34,20 +34,21 @@ flowchart LR
 
 ## Latest A/B numbers
 
-Across 4 open-source repos (69 judged prompts), compared by an independent LLM judge:
+Across 8 open-source repos (111 judged prompts), compared by an independent LLM judge:
 
-- **16–24% lower cost** consistently across all repos
-- **84% regression-free** — same or better quality on 58/69 judged prompts
-- Remaining 11 regressions concentrated in mock/test-double pollution and broad overview anchoring (actively being eliminated)
+- **3–32% lower cost** on most repos (up to +6% on repos where budi adds quality)
+- **91% regression-free** — same or better quality on 101/111 judged prompts
+- FastAPI: 100% non-regression with 11 quality wins; Django: 94%, −11% cost
+- Remaining 10 regressions concentrated in flow-trace anchoring and broad overview queries (actively being eliminated)
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting the right context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
 ```mermaid
 pie showData
-    title "Efficiency outcomes (4 repos, 69 judged prompts)"
-    "same quality, lower cost" : 41
-    "better quality" : 17
-    "regression" : 11
+    title "Efficiency outcomes (8 repos, 111 judged prompts)"
+    "same quality, lower cost" : 60
+    "better quality" : 31
+    "regression" : 10
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
