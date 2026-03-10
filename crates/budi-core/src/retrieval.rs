@@ -575,6 +575,17 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
+        // SymbolDefinition — demote stub/placeholder implementations.
+        // Functions like `panic("not implemented")`, `unimplemented!()`, or
+        // `return fmt.Errorf("unsupported ...")` are stubs — the real implementation
+        // lives elsewhere. When hint-match-boost pushes a stub to the top (e.g.
+        // Terraform ReadStateBytes: provider.go stub at 0.787), Claude gets anchored
+        // on useless code. -0.35 pushes stubs well below the sym-def floor (0.30).
+        if intent.kind == QueryIntentKind::SymbolDefinition && is_stub_body(&chunk.text) {
+            adjusted -= 0.35;
+            push_unique_reason(&mut reasons, "stub-body-demote");
+        }
+
         // Architecture queries — penalise examples/ paths.
         // Tutorial and example directories (e.g. examples/tutorial/) frequently contain
         // snippets that mention production concepts ("application factory", "register_blueprint")
@@ -2000,6 +2011,41 @@ fn is_go_test_helper_chunk(text: &str) -> bool {
         && let Some(first_char) = rest.chars().next()
     {
         return first_char.is_ascii_uppercase();
+    }
+    false
+}
+
+/// True if the chunk text looks like a stub/placeholder implementation.
+/// Stub bodies contain markers like `panic("not implemented")`, `unimplemented!()`,
+/// `todo!()`, `raise NotImplementedError`, or consist only of returning an error.
+/// These are not useful definitions for SymbolDefinition queries — the real implementation
+/// lives elsewhere and Claude should find it instead of getting anchored on the stub.
+fn is_stub_body(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    // Explicit stub markers across languages
+    if lower.contains("not implemented")
+        || lower.contains("unimplemented!(")
+        || lower.contains("unimplemented!()")
+        || lower.contains("todo!(")
+        || lower.contains("todo!()")
+        || lower.contains("raise notimplementederror")
+        || lower.contains("throw new error(\"not implemented")
+    {
+        return true;
+    }
+    // Very short function that just returns an error/unsupported message.
+    // e.g. `func (p *Provider) ReadStateBytes(...) { return fmt.Errorf("unsupported") }`
+    // Count non-blank lines (excluding braces/signatures) — if ≤ 5 and contains "unsupported"
+    // or "not supported", it's a stub.
+    let non_blank: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "{" && *l != "}" && *l != ")")
+        .collect();
+    if non_blank.len() <= 6
+        && (lower.contains("unsupported") || lower.contains("not supported"))
+    {
+        return true;
     }
     false
 }
@@ -6101,5 +6147,56 @@ it("renders", () => {})
         assert_eq!(normalize_path("src\\Foo\\Bar"), "src/foo/bar");
         assert_eq!(normalize_path("src/foo/"), "src/foo");
         assert_eq!(normalize_path("SRC/FOO"), "src/foo");
+    }
+
+    // ── is_stub_body ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_stub_body_detects_go_panic_not_implemented() {
+        let text = r#"func (p *GRPCProvider) ReadStateBytes(r providers.ReadStateBytesRequest) providers.ReadStateBytesResponse {
+	panic("not implemented")
+}"#;
+        assert!(is_stub_body(text));
+    }
+
+    #[test]
+    fn is_stub_body_detects_rust_unimplemented() {
+        assert!(is_stub_body("fn foo() {\n    unimplemented!()\n}"));
+        assert!(is_stub_body("fn bar() -> Result<()> {\n    todo!()\n}"));
+    }
+
+    #[test]
+    fn is_stub_body_detects_python_not_implemented() {
+        assert!(is_stub_body(
+            "def read_state(self):\n    raise NotImplementedError"
+        ));
+    }
+
+    #[test]
+    fn is_stub_body_detects_short_unsupported_error() {
+        let text = r#"func (p *Provider) ReadStateBytes(req providers.ReadStateBytesRequest) providers.ReadStateBytesResponse {
+	var resp providers.ReadStateBytesResponse
+	resp.Diagnostics.Append(fmt.Errorf("unsupported state store type %q", req.TypeName))
+	return resp
+}"#;
+        assert!(is_stub_body(text));
+    }
+
+    #[test]
+    fn is_stub_body_rejects_real_implementation() {
+        let text = r#"func (c *Context) Plan(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, tfdiags.Diagnostics) {
+	plan, _, diags := c.PlanAndEval(config, prevRunState, opts)
+	if diags.HasErrors() {
+		return nil, diags
+	}
+	plan.Complete = true
+	plan.Timestamp = time.Now()
+	err := plan.Validate()
+	if err != nil {
+		diags = diags.Append(err)
+	}
+	return plan, diags
+}"#;
+        assert!(!is_stub_body(text));
     }
 }
