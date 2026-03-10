@@ -16,18 +16,36 @@ struct MergedCard<'a> {
 /// Group snippets by file path. Same-file snippets are merged into one card:
 /// the highest-scored snippet becomes primary, and secondary snippets contribute
 /// their anchor lines as additional proof. Preserves score-order for card rendering.
+/// Maximum total span (in lines) for a merged card. Prevents misleading
+/// mega-spans from chaining many consecutive chunks in large files.
+const MAX_MERGED_SPAN_LINES: usize = 200;
+
 fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>> {
     let mut cards: Vec<MergedCard<'_>> = Vec::new();
     let mut path_to_idx: HashMap<&str, usize> = HashMap::new();
 
     for snippet in snippets {
         if let Some(&existing_idx) = path_to_idx.get(snippet.path.as_str()) {
-            let card = &mut cards[existing_idx];
-            card.merged_start = card.merged_start.min(snippet.start_line);
-            card.merged_end = card.merged_end.max(snippet.end_line);
-            let anchor = extract_anchor_line(&snippet.text);
-            if anchor != "(empty)" {
-                card.extra_anchors.push(anchor);
+            let card = &cards[existing_idx];
+            // Only merge if the resulting span stays within the limit.
+            let new_start = card.merged_start.min(snippet.start_line);
+            let new_end = card.merged_end.max(snippet.end_line);
+            if new_end - new_start <= MAX_MERGED_SPAN_LINES {
+                let card = &mut cards[existing_idx];
+                card.merged_start = new_start;
+                card.merged_end = new_end;
+                let anchor = extract_anchor_line(&snippet.text);
+                if anchor != "(empty)" {
+                    card.extra_anchors.push(anchor);
+                }
+            } else {
+                // Span would be too large — create a separate card.
+                cards.push(MergedCard {
+                    primary: snippet,
+                    merged_start: snippet.start_line,
+                    merged_end: snippet.end_line,
+                    extra_anchors: Vec::new(),
+                });
             }
         } else {
             path_to_idx.insert(&snippet.path, cards.len());
@@ -490,6 +508,24 @@ mod tests {
         let out = build_context(&snippets, 4096, &[]);
         assert!(out.contains("file: src/a.rs"));
         assert!(out.contains("file: src/b.rs"));
+    }
+
+    #[test]
+    fn distant_same_file_snippets_stay_separate() {
+        let mut s1 = make_snippet("tests/test_big.py", "def test_alpha(): pass", 0.9);
+        s1.start_line = 10;
+        s1.end_line = 20;
+        let mut s2 = make_snippet("tests/test_big.py", "def test_omega(): pass", 0.7);
+        s2.start_line = 900;
+        s2.end_line = 910;
+        let snippets = vec![s1, s2];
+        let out = build_context(&snippets, 4096, &[]);
+        let file_count = out.matches("file: tests/test_big.py").count();
+        assert_eq!(
+            file_count, 2,
+            "distant same-file snippets should produce separate cards: {}",
+            out
+        );
     }
 
     // ── word boundary matching ─────────────────────────────────────────────
