@@ -128,6 +128,19 @@ Force context injection for one prompt:
 - Architecture: `docs/architecture.md`
 - Installer details: `docs/installer.md`
 
+## How budi compares
+
+| | budi | context-mode | Claude Context Local | GitNexus |
+|---|---|---|---|---|
+| **Approach** | Pre-injects code before Claude searches | Compresses tool output after Claude searches | Semantic search via MCP (on demand) | Knowledge graph + MCP |
+| **Integration** | Claude Code hooks (automatic) | Claude Code hooks (intercept) | MCP tools (explicit) | MCP + hooks |
+| **Retrieval** | 5-channel (lexical, vector, symbol, path, graph) with intent routing | BM25 with 4-layer fallback | FAISS vector search | BM25 + semantic + RRF |
+| **A/B validated** | 8 repos, 111 prompts, 91% non-regression | No | No | No |
+| **Language** | Rust (single binary) | TypeScript (npm) | Python | TypeScript |
+| **Privacy** | 100% local | 100% local | 100% local | 100% local |
+
+budi is complementary with output-compression tools like context-mode. Use budi to inject the right code, and context-mode to compress verbose tool results.
+
 ## Privacy
 
 Everything runs locally. No cloud index. No repo upload. No external retrieval service needed to do the core job.
