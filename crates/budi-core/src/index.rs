@@ -3163,6 +3163,16 @@ fn build_effective_extension_allowlist(
     allowlist
 }
 
+/// Ignore files that semantically mean "these files are not part of the codebase".
+/// Tool-specific ignore files (.prettierignore, .npmignore, .eslintignore, .dockerignore,
+/// .stylelintignore) are excluded because they control tool behavior, not codebase membership.
+const CODEBASE_IGNORE_FILES: &[&str] = &[
+    ".gitignore",
+    ".budiignore",
+    ".cursorignore",
+    ".codeiumignore",
+];
+
 fn root_ignore_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let entries = fs::read_dir(repo_root)
@@ -3176,7 +3186,7 @@ fn root_ignore_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
         let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if file_name.ends_with("ignore") {
+        if CODEBASE_IGNORE_FILES.contains(&file_name) {
             files.push(path);
         }
     }
@@ -4391,7 +4401,7 @@ mod tests {
     }
 
     #[test]
-    fn root_ignore_files_include_dot_ignore_sources() {
+    fn root_ignore_files_include_codebase_ignore_sources_only() {
         let temp_root = std::env::temp_dir().join(format!(
             "budi-root-ignore-test-{}-{}",
             std::process::id(),
@@ -4401,6 +4411,9 @@ mod tests {
         fs::write(temp_root.join(".cursorignore"), "scratch/**\n").expect("write cursor ignore");
         fs::write(temp_root.join(".codeiumignore"), "generated/**\n")
             .expect("write codeium ignore");
+        fs::write(temp_root.join(".prettierignore"), "*\n").expect("write prettier ignore");
+        fs::write(temp_root.join(".npmignore"), "src/**\n").expect("write npm ignore");
+        fs::write(temp_root.join(".eslintignore"), "dist/**\n").expect("write eslint ignore");
         fs::write(temp_root.join("notes.txt"), "not an ignore file").expect("write notes");
 
         let discovered = root_ignore_files(&temp_root).expect("discover root ignore files");
@@ -4408,13 +4421,20 @@ mod tests {
             .iter()
             .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
             .collect::<Vec<_>>();
+        // Codebase-level ignore files are picked up
         assert!(discovered_names.contains(&".cursorignore"));
         assert!(discovered_names.contains(&".codeiumignore"));
+        // Tool-specific ignore files are NOT picked up
+        assert!(!discovered_names.contains(&".prettierignore"));
+        assert!(!discovered_names.contains(&".npmignore"));
+        assert!(!discovered_names.contains(&".eslintignore"));
         assert!(!discovered_names.contains(&"notes.txt"));
 
         let rules = load_repo_ignore_rules(&temp_root, &[]).expect("load ignore rules");
         assert!(should_skip_index_path("scratch/tmp.rs", false, &rules));
         assert!(should_skip_index_path("generated/out.rs", false, &rules));
+        // .prettierignore's `*` pattern must NOT exclude everything
+        assert!(!should_skip_index_path("lib/server.js", false, &rules));
 
         let _ = fs::remove_dir_all(&temp_root);
     }
