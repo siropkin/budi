@@ -2,6 +2,46 @@ use std::collections::{HashMap, HashSet};
 
 use crate::rpc::QueryResultItem;
 
+/// A merged evidence card: primary snippet + extra anchors from same-file secondary snippets.
+struct MergedCard<'a> {
+    primary: &'a QueryResultItem,
+    /// Start line of the merged span (min of all same-file snippets).
+    merged_start: usize,
+    /// End line of the merged span (max of all same-file snippets).
+    merged_end: usize,
+    /// Anchor lines from secondary (lower-scored) same-file snippets.
+    extra_anchors: Vec<String>,
+}
+
+/// Group snippets by file path. Same-file snippets are merged into one card:
+/// the highest-scored snippet becomes primary, and secondary snippets contribute
+/// their anchor lines as additional proof. Preserves score-order for card rendering.
+fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>> {
+    let mut cards: Vec<MergedCard<'_>> = Vec::new();
+    let mut path_to_idx: HashMap<&str, usize> = HashMap::new();
+
+    for snippet in snippets {
+        if let Some(&existing_idx) = path_to_idx.get(snippet.path.as_str()) {
+            let card = &mut cards[existing_idx];
+            card.merged_start = card.merged_start.min(snippet.start_line);
+            card.merged_end = card.merged_end.max(snippet.end_line);
+            let anchor = extract_anchor_line(&snippet.text);
+            if anchor != "(empty)" {
+                card.extra_anchors.push(anchor);
+            }
+        } else {
+            path_to_idx.insert(&snippet.path, cards.len());
+            cards.push(MergedCard {
+                primary: snippet,
+                merged_start: snippet.start_line,
+                merged_end: snippet.end_line,
+                extra_anchors: Vec::new(),
+            });
+        }
+    }
+    cards
+}
+
 #[derive(Debug, Default)]
 pub(super) struct SnippetSelectionState {
     pub(super) snippets: Vec<QueryResultItem>,
@@ -27,8 +67,9 @@ pub(super) fn path_diversity_bucket(path: &str) -> String {
 }
 
 /// Build the injected context string from selected snippets.
-/// Always renders evidence cards. Uses score-weighted progressive truncation so
-/// the highest-scoring snippet gets proportionally more budget than later ones.
+/// Same-file snippets are merged into one card (cross-chunk synthesis).
+/// Uses score-weighted progressive truncation so the highest-scoring
+/// card gets proportionally more budget than later ones.
 pub(super) fn build_context(
     snippets: &[QueryResultItem],
     budget: usize,
@@ -47,25 +88,27 @@ pub(super) fn build_context(
     let content_budget = budget.saturating_sub(header_len);
     let mut remaining_budget = content_budget;
 
-    for (idx, snippet) in snippets.iter().enumerate() {
+    let merged = merge_same_file_snippets(snippets);
+
+    for (idx, card_data) in merged.iter().enumerate() {
         if remaining_budget == 0 {
             break;
         }
-        // Progressive truncation: top snippet gets up to 40% of content budget;
-        // each subsequent snippet gets up to 60% of what remains.
-        let snippet_budget = if idx == 0 {
+        // Progressive truncation: top card gets up to 40% of content budget;
+        // each subsequent card gets up to 60% of what remains.
+        let card_budget = if idx == 0 {
             (content_budget as f32 * 0.40).ceil() as usize
         } else {
             (remaining_budget as f32 * 0.60).ceil() as usize
         }
         .min(remaining_budget);
 
-        let card = render_evidence_card(snippet, query_tokens);
-        if card.len() <= snippet_budget {
+        let card = render_merged_card(card_data, query_tokens);
+        if card.len() <= card_budget {
             out.push_str(&card);
             remaining_budget = remaining_budget.saturating_sub(card.len());
-        } else if snippet_budget > 0 {
-            out.push_str(&card.chars().take(snippet_budget).collect::<String>());
+        } else if card_budget > 0 {
+            out.push_str(&card.chars().take(card_budget).collect::<String>());
             break;
         } else {
             break;
@@ -74,17 +117,30 @@ pub(super) fn build_context(
     out
 }
 
-fn render_evidence_card(snippet: &QueryResultItem, query_tokens: &[String]) -> String {
-    // Strip score/signals — debugging metadata that adds noise for Claude.
-    // Context Rot research: even harmless distractors degrade attention/focus.
-    // Keep: file, span, anchor (what to look at), proof (why it's relevant).
+/// Render a merged card. When secondary same-file snippets exist, their
+/// anchor lines are folded into the proof section (up to the 3-line limit).
+fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> String {
+    let snippet = card_data.primary;
     let anchor = extract_anchor_line(&snippet.text);
-    let proof_lines = extract_proof_lines(&snippet.text, 3, &anchor, query_tokens);
+    let max_proof = 3;
+    let mut proof_lines = extract_proof_lines(&snippet.text, max_proof, &anchor, query_tokens);
+
+    // Fold secondary anchors as additional proof (they show what else is in this file).
+    for extra in &card_data.extra_anchors {
+        if proof_lines.len() >= max_proof {
+            break;
+        }
+        let sanitized = sanitize_evidence_line(extra);
+        if !sanitized.is_empty() && !proof_lines.contains(&sanitized) {
+            proof_lines.push(sanitized);
+        }
+    }
+
     let mut out = String::new();
     out.push_str(&format!("- file: {}\n", snippet.path));
     out.push_str(&format!(
         "  span: {}-{}\n",
-        snippet.start_line, snippet.end_line
+        card_data.merged_start, card_data.merged_end
     ));
     out.push_str(&format!("  anchor: {}\n", anchor));
     if let Some(note) = &snippet.slm_relevance_note {
@@ -358,6 +414,38 @@ mod tests {
         let out = build_context(&snippets, 4096, &[]);
         // Should include the "route" line as a proof needle match
         assert!(out.contains("route"), "expected route proof line");
+    }
+
+    // ── same-file card merging ─────────────────────────────────────────────
+
+    #[test]
+    fn same_file_snippets_merged_into_one_card() {
+        let mut s1 = make_snippet("src/foo.rs", "fn alpha() { return 1; }", 0.9);
+        s1.start_line = 1;
+        s1.end_line = 5;
+        let mut s2 = make_snippet("src/foo.rs", "fn beta() { return 2; }", 0.7);
+        s2.start_line = 10;
+        s2.end_line = 15;
+        let snippets = vec![s1, s2];
+        let out = build_context(&snippets, 4096, &[]);
+        // Only one file: card should appear
+        let file_count = out.matches("file: src/foo.rs").count();
+        assert_eq!(file_count, 1, "same-file snippets should produce one card");
+        // Merged span covers both
+        assert!(out.contains("span: 1-15"), "span should be merged: {}", out);
+        // Secondary anchor folded into proof
+        assert!(out.contains("fn beta()"), "secondary anchor should appear in proof");
+    }
+
+    #[test]
+    fn different_file_snippets_stay_separate() {
+        let snippets = vec![
+            make_snippet("src/a.rs", "fn a() {}", 0.9),
+            make_snippet("src/b.rs", "fn b() {}", 0.7),
+        ];
+        let out = build_context(&snippets, 4096, &[]);
+        assert!(out.contains("file: src/a.rs"));
+        assert!(out.contains("file: src/b.rs"));
     }
 
     // ── path_diversity_bucket ────────────────────────────────────────────────

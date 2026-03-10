@@ -276,14 +276,16 @@ impl DaemonState {
         // Per-intent snippet budget.
         // Research: context rot begins immediately; every irrelevant token costs attention
         // bandwidth. Precision intents (sym-def, sym-use) need ≤4k chars of code — injecting
-        // 10k adds noise. Breadth intents (architecture) genuinely benefit from wider coverage.
+        // 10k adds noise. Query-aware proof lines (DS) are denser, so all intents can use
+        // tighter budgets without losing quality.
         let intent_snippet_budget = match response.detected_intent.as_deref() {
             Some("symbol-definition") => 3_000,
             Some("symbol-usage") => 4_000,
             Some("runtime-config") => 4_000,
             Some("flow-trace") => 5_500,
             Some("test-lookup") => 5_000,
-            _ => config.context_char_budget, // architecture + default: full budget
+            Some("architecture") => 8_000,
+            _ => config.context_char_budget, // default: full budget
         }
         .min(config.context_char_budget);
 
