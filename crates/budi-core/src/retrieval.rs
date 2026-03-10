@@ -478,6 +478,18 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
+        // SymbolDefinition queries — penalise test-path chunks.
+        // Mock implementations and test doubles (provider_mock.go, eval_context_mock.go)
+        // define the same symbol as the real production code but with stub behavior.
+        // When sym-hint-seed + hint-match-boost pushes a mock definition to the top,
+        // Claude gets anchored on the test double instead of the real implementation.
+        // −0.30 combined with the sym-def floor (0.30) filters most mock definitions
+        // while keeping production definitions intact.
+        if intent.kind == QueryIntentKind::SymbolDefinition && is_test_path(&chunk.path) {
+            adjusted -= 0.30;
+            push_unique_reason(&mut reasons, "test-path-penalty");
+        }
+
         // Architecture queries — penalise examples/ paths.
         // Tutorial and example directories (e.g. examples/tutorial/) frequently contain
         // snippets that mention production concepts ("application factory", "register_blueprint")
