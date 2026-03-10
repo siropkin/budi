@@ -690,6 +690,25 @@ pub fn build_query_response(
             }
         }
 
+        // SymbolUsage — demote struct/class/type definition chunks.
+        // "What calls search_path" should surface CALL SITES, not struct definitions like
+        // `struct Paths { ... }` that lexically match on "path". Detect via:
+        // (1) PascalCase symbol_hint → class/struct name, or
+        // (2) chunk text starts with struct/type/class keyword.
+        if intent.kind == QueryIntentKind::SymbolUsage
+            && !reasons.iter().any(|r| r == "sym-usage-def-demote")
+        {
+            let hint_is_type = chunk
+                .symbol_hint
+                .as_deref()
+                .is_some_and(|h| h.chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+            let text_is_struct = is_struct_or_type_definition(&chunk.text);
+            if hint_is_type || text_is_struct {
+                adjusted -= 0.25;
+                push_unique_reason(&mut reasons, "sym-usage-struct-demote");
+            }
+        }
+
         // FlowTrace — weak definition anchor for camelCase function targets.
         // "What does reconcileChildFibers call / trace through useState" queries name a
         // specific function. Boost its definition chunk (+0.10) to keep it above call-site
@@ -1950,6 +1969,25 @@ pub(crate) fn is_devtools_path(path: &str) -> bool {
         || lower.contains("noop-renderer")
         || lower.contains("noop_renderer")
         || lower.contains("nooprenderer")
+}
+
+/// True if the chunk text starts with a struct, type, or class definition.
+/// These are type definitions, not function call sites — wrong context for
+/// SymbolUsage queries that ask "what calls X".
+fn is_struct_or_type_definition(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    // Strip visibility modifiers (pub, pub(crate), export, etc.)
+    let stripped = trimmed
+        .strip_prefix("pub(crate) ")
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .or_else(|| trimmed.strip_prefix("pub "))
+        .or_else(|| trimmed.strip_prefix("export "))
+        .unwrap_or(trimmed);
+    stripped.starts_with("struct ")
+        || stripped.starts_with("type ")
+        || stripped.starts_with("class ")
+        || stripped.starts_with("interface ")
+        || stripped.starts_with("enum ")
 }
 
 /// True if the chunk text starts with a Go test helper function (lowercase `test` prefix).
