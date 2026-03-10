@@ -209,7 +209,8 @@ fn extract_proof_lines(
         l == anchor_lower || (l.len() > 20 && anchor_lower.contains(&l))
     };
 
-    // Priority 1: lines matching query tokens (most relevant to the specific question)
+    // Priority 1: lines matching query tokens (most relevant to the specific question).
+    // Use word-boundary matching to avoid false positives like "return" in "returnFiber".
     if !query_tokens.is_empty() {
         for raw_line in text.lines() {
             if picked.len() >= max_lines {
@@ -220,7 +221,9 @@ fn extract_proof_lines(
                 continue;
             }
             let lower = line.to_ascii_lowercase();
-            if query_tokens.iter().any(|tok| lower.contains(tok.as_str()))
+            if query_tokens
+                .iter()
+                .any(|tok| contains_at_word_boundary(&lower, tok))
                 && seen.insert(line.clone())
             {
                 picked.push(line);
@@ -272,6 +275,44 @@ fn sanitize_evidence_line(raw: &str) -> String {
         out = out.replace('\t', " ");
     }
     out
+}
+
+/// Check if `needle` appears in `haystack` with appropriate boundary matching.
+/// Short tokens (≤10 chars, e.g. "return", "call") require at least one word
+/// boundary to avoid false positives like "return" in "returnFiber".
+/// Long tokens (>10 chars, e.g. "reconcilechildfibers") use substring matching
+/// since they are specific enough to be unambiguous.
+fn contains_at_word_boundary(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    // Long tokens are specific enough — substring match is fine.
+    if needle.len() > 10 {
+        return haystack.contains(needle);
+    }
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let needle_len = needle_bytes.len();
+    if bytes.len() < needle_len {
+        return false;
+    }
+
+    for start in 0..=bytes.len() - needle_len {
+        if &bytes[start..start + needle_len] == needle_bytes {
+            // Both boundaries must be at word boundaries for short tokens.
+            let left_ok = start == 0 || !is_ident_char(bytes[start - 1]);
+            let right_ok =
+                start + needle_len >= bytes.len() || !is_ident_char(bytes[start + needle_len]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 fn is_comment_only_line(line: &str) -> bool {
@@ -449,6 +490,38 @@ mod tests {
         let out = build_context(&snippets, 4096, &[]);
         assert!(out.contains("file: src/a.rs"));
         assert!(out.contains("file: src/b.rs"));
+    }
+
+    // ── word boundary matching ─────────────────────────────────────────────
+
+    #[test]
+    fn word_boundary_rejects_substring_in_identifier() {
+        // "return" should NOT match inside "returnFiber"
+        assert!(
+            !contains_at_word_boundary("returnfiber: fiber,", "return"),
+            "return inside returnFiber is not a word boundary match"
+        );
+    }
+
+    #[test]
+    fn word_boundary_matches_standalone_keyword() {
+        assert!(contains_at_word_boundary("return foo;", "return"));
+        assert!(contains_at_word_boundary("let x = return;", "return"));
+    }
+
+    #[test]
+    fn word_boundary_matches_at_start_or_end() {
+        assert!(contains_at_word_boundary("return", "return"));
+        assert!(contains_at_word_boundary("return()", "return"));
+    }
+
+    #[test]
+    fn word_boundary_matches_full_identifier() {
+        // Full camelCase identifier should match
+        assert!(contains_at_word_boundary(
+            "const x = reconcilechildfibersimpl(",
+            "reconcilechildfibers"
+        ));
     }
 
     // ── path_diversity_bucket ────────────────────────────────────────────────
