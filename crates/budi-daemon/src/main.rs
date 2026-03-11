@@ -162,6 +162,14 @@ async fn main() -> Result<()> {
         .route("/hook/tool-use", post(hook_tool_use))
         .with_state(app_state);
 
+    // Prime the ONNX embedding runtime in the background so the first real
+    // query doesn't suffer cold-start score degradation.
+    tokio::task::spawn_blocking(|| {
+        let start = std::time::Instant::now();
+        budi_core::index::warmup_embedder();
+        tracing::info!("embedder warmup completed in {:?}", start.elapsed());
+    });
+
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("budi-daemon listening on {}", addr);

@@ -4060,14 +4060,25 @@ pub fn split_identifier(ident: &str) -> Vec<String> {
     words
 }
 
+fn query_embedder() -> &'static Mutex<EmbeddingEngine> {
+    static QUERY_EMBEDDER: OnceLock<Mutex<EmbeddingEngine>> = OnceLock::new();
+    QUERY_EMBEDDER.get_or_init(|| Mutex::new(EmbeddingEngine::new()))
+}
+
 pub fn embed_query(repo_root: &Path, query: &str) -> Result<Option<Vec<f32>>> {
     let _ = repo_root;
-    static QUERY_EMBEDDER: OnceLock<Mutex<EmbeddingEngine>> = OnceLock::new();
-    let shared = QUERY_EMBEDDER.get_or_init(|| Mutex::new(EmbeddingEngine::new()));
-    let mut guard = shared
+    let mut guard = query_embedder()
         .lock()
         .map_err(|_| anyhow::anyhow!("Query embedder lock poisoned"))?;
     guard.embed_query(query)
+}
+
+/// Prime the ONNX embedding runtime so the first real query gets consistent results.
+/// Without this, cold-start queries can produce degraded HNSW scores (observed 0.0 vs 0.40).
+pub fn warmup_embedder() {
+    if let Ok(mut guard) = query_embedder().lock() {
+        let _ = guard.embed_query("warmup");
+    }
 }
 
 #[cfg(test)]
