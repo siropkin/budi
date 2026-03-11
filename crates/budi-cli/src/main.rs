@@ -664,34 +664,116 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     let paths = config::repo_paths(&repo_root)?;
-    println!("repo root: {}", repo_root.display());
-    println!(".git: {}", repo_root.join(".git").exists());
-    println!("local data dir: {}", paths.data_dir.display());
-    println!("config: {}", paths.config_file.exists());
-    println!(
-        "repo budi ignore: {}",
-        config::ignore_path(&repo_root)?.exists()
-    );
-    println!(
-        "global budi ignore: {}",
-        config::global_ignore_path()?.exists()
-    );
-    println!(
-        "hook settings: {}",
-        repo_root.join(CLAUDE_LOCAL_SETTINGS).exists()
-    );
+    let mut issues: Vec<String> = Vec::new();
 
-    let health = daemon_health(&config);
-    println!("daemon health: {health}");
-    if !health {
-        println!("Attempting daemon start...");
-        ensure_daemon_running(&repo_root, &config)?;
-        println!("daemon health after start: {}", daemon_health(&config));
+    println!("budi doctor — {}", repo_root.display());
+    println!();
+
+    // Git repo check
+    let has_git = repo_root.join(".git").exists();
+    doctor_check("git repo", has_git, None);
+    if !has_git {
+        issues.push("Not a git repository. Run `git init` first.".into());
     }
+
+    // Config check
+    let has_config = paths.config_file.exists();
+    doctor_check("config", has_config, Some(&paths.config_file));
+
+    // Hook settings check
+    let hooks_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
+    let has_hooks = hooks_path.exists();
+    doctor_check("hook settings", has_hooks, Some(&hooks_path));
+    if !has_hooks {
+        issues.push("No hook settings. Run `budi init` to install hooks.".into());
+    }
+
+    // Ignore files (optional)
+    let has_repo_ignore = config::ignore_path(&repo_root)
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    let has_global_ignore = config::global_ignore_path()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    doctor_check("repo .budiignore", has_repo_ignore, None);
+    doctor_check("global .budiignore", has_global_ignore, None);
+
+    // Daemon health
+    let health = daemon_health(&config);
+    doctor_check("daemon", health, None);
+    if !health {
+        println!("  Attempting daemon start...");
+        match ensure_daemon_running(&repo_root, &config) {
+            Ok(()) => {
+                let retry = daemon_health(&config);
+                doctor_check("daemon (retry)", retry, None);
+                if !retry {
+                    issues
+                        .push("Daemon failed to start. Check logs with `budi -vv doctor`.".into());
+                }
+            }
+            Err(e) => {
+                println!("  x daemon start failed: {e}");
+                issues.push(format!("Daemon start error: {e}"));
+            }
+        }
+    }
+
+    // Index state (if daemon is healthy)
+    if daemon_health(&config) {
+        match fetch_status_snapshot(&config.daemon_base_url(), &repo_root.display().to_string()) {
+            Ok(status) => {
+                let indexed = status.indexed_chunks > 0;
+                doctor_check(
+                    &format!(
+                        "index ({} files, {} chunks, {} embedded)",
+                        status.tracked_files, status.indexed_chunks, status.embedded_chunks
+                    ),
+                    indexed,
+                    None,
+                );
+                if !indexed {
+                    issues.push(
+                        "No indexed chunks. Run `budi index --hard` to build the index.".into(),
+                    );
+                }
+                if status.missing_embeddings > 0 {
+                    println!(
+                        "  ! {} missing embeddings — run `budi index` to repair",
+                        status.missing_embeddings
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  x index status unavailable: {e}");
+            }
+        }
+    }
+
+    // Summary
+    println!();
+    if issues.is_empty() {
+        println!("All checks passed.");
+    } else {
+        println!("Issues found:");
+        for issue in &issues {
+            println!("  - {issue}");
+        }
+    }
+
     if deep {
         run_deep_doctor_checks(&repo_root, &config)?;
     }
     Ok(())
+}
+
+fn doctor_check(label: &str, ok: bool, path: Option<&std::path::Path>) {
+    let mark = if ok { "ok" } else { "!!" };
+    if let Some(p) = path {
+        println!("  [{mark}] {label}: {}", p.display());
+    } else {
+        println!("  [{mark}] {label}");
+    }
 }
 
 fn cmd_preview(
