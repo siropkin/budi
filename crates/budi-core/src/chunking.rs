@@ -492,6 +492,31 @@ fn append_node_chunks(out: &mut Vec<Chunk>, node: Node<'_>, context: &NodeChunki
         let mut boundary_children: Vec<Node<'_>> = Vec::new();
         collect_boundary_descendants(node, context.language_kind, &mut boundary_children);
         if !boundary_children.is_empty() {
+            // Emit a chunk for the preamble BEFORE the first boundary child.
+            // For Python/Java classes, this captures the class declaration, docstring,
+            // and attribute annotations (e.g. `class Session(...):` + 50 lines of
+            // type hints) that would otherwise fall through the cracks.
+            // Restrict to Python and Java where large class preambles are common.
+            // JS/TS export wrappers don't need this — their preambles are typically
+            // just 1-2 lines of export/function boilerplate.
+            if matches!(
+                context.language_kind,
+                AstLanguageKind::Python | AstLanguageKind::Java
+            ) {
+                let first_child_start = boundary_children[0].start_position().row + 1;
+                let preamble_start = start_line.saturating_sub(1);
+                let preamble_end = first_child_start.saturating_sub(1);
+                if preamble_end > preamble_start + 2 {
+                    out.extend(line_chunks_from_range(
+                        context.lines,
+                        preamble_start,
+                        preamble_end,
+                        context.chunk_language,
+                        context.lines_per_chunk,
+                        context.overlap,
+                    ));
+                }
+            }
             for child in boundary_children {
                 append_node_chunks(out, child, context);
             }

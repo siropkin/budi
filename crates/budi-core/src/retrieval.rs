@@ -148,6 +148,11 @@ pub fn build_query_response(
     augment_symbol_tokens_for_intent(&retrieval_query, &intent, &mut symbol_tokens);
     let exact_match_symbol_tokens =
         exact_match_symbol_tokens_for_intent(query, &intent, &symbol_tokens);
+    // PascalCase tokens from the query (original case).  When the user writes
+    // "Session" or "Engine", chunks whose symbol_hint is lowercase "session"
+    // (property accessor / method) should score lower than chunks whose hint is
+    // PascalCase "Session" (class / type definition).
+    let query_pascal_tokens: HashSet<String> = extract_query_pascal_tokens(query);
     // Pre-compute camelCase-only tokens for weak FlowTrace definition anchoring.
     // Only camelCase (e.g. `reconcileChildFibers`, `useState`) — not TitleCase
     // (e.g. "React", "Component") — to avoid over-boosting common type names.
@@ -628,14 +633,29 @@ pub fn build_query_response(
         // SymbolDefinition — boost chunks whose symbol_hint is an exact match for a
         // query token. This surfaces definition chunks over reference/usage chunks when
         // the dominant function in a window is precisely what the user asked about.
+        //
+        // When the query uses PascalCase (e.g. "Session", "Engine"), the user likely
+        // means a class/type, not a property accessor. Chunks whose symbol_hint is
+        // lowercase (e.g. `def session(self)`) get a reduced boost compared to those
+        // whose hint is PascalCase (e.g. `class Session`). This prevents property
+        // accessors from outranking the actual class definition.
         if intent.kind == QueryIntentKind::SymbolDefinition
             && let Some(hint) = chunk.symbol_hint.as_deref()
         {
             let hint_lower = hint.to_ascii_lowercase();
             let exact_match = exact_match_symbol_tokens.iter().any(|t| t == &hint_lower);
             if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && exact_match {
-                adjusted += 0.30;
-                push_unique_reason(&mut reasons, "hint-match-boost");
+                let query_has_pascal = query_pascal_tokens.contains(&hint_lower);
+                let hint_is_lowercase =
+                    hint.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+                if query_has_pascal && hint_is_lowercase {
+                    // Property/method with same name as a class — reduced boost.
+                    adjusted += 0.10;
+                    push_unique_reason(&mut reasons, "hint-match-boost-weak");
+                } else {
+                    adjusted += 0.30;
+                    push_unique_reason(&mut reasons, "hint-match-boost");
+                }
             }
         }
 
@@ -3594,6 +3614,57 @@ fn is_titlecase_symbol_candidate(raw: &str) -> bool {
     !STOP.contains(&raw.to_ascii_lowercase().as_str())
 }
 
+/// Extract PascalCase tokens from the query, preserving original case.
+/// Returns tokens like "Session", "Engine", "Context" — words that start with
+/// uppercase and contain at least one lowercase character (not ALL_CAPS).
+/// These indicate the user is likely referring to a class/type, not a method/property.
+fn extract_query_pascal_tokens(query: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    // Check backtick-quoted identifiers first
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            let token: String = chars.by_ref().take_while(|&ch| ch != '`').collect();
+            if is_pascal_case(&token) {
+                out.insert(token.to_ascii_lowercase());
+            }
+        }
+    }
+    // Check bare words
+    for raw in query
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+    {
+        if is_pascal_case(raw) {
+            out.insert(raw.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// True when the token is PascalCase: starts uppercase, has at least one lowercase,
+/// and is not a common English sentence-start word.
+fn is_pascal_case(token: &str) -> bool {
+    const STOP: &[&str] = &[
+        "where", "what", "which", "when", "why", "how", "describe", "trace", "show", "list",
+        "explain", "tell", "give", "does", "the", "and", "but", "from", "with", "this",
+        "that", "they", "there", "their", "into", "would", "could", "should", "also",
+        "walk", "here",
+    ];
+    if token.len() < 3 || token.len() > 64 {
+        return false;
+    }
+    let first = token.chars().next().unwrap_or('a');
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
+    if !has_lower {
+        return false; // ALL_CAPS — not PascalCase
+    }
+    !STOP.contains(&token.to_ascii_lowercase().as_str())
+}
+
 fn extract_query_path_tokens(query: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -6264,5 +6335,38 @@ it("renders", () => {})
 	return plan, diags
 }"#;
         assert!(!is_stub_body(text));
+    }
+
+    #[test]
+    fn extract_query_pascal_tokens_finds_class_names() {
+        let tokens = extract_query_pascal_tokens("Where is Session class defined?");
+        assert!(tokens.contains("session"));
+        assert!(!tokens.contains("where")); // stop word
+    }
+
+    #[test]
+    fn extract_query_pascal_tokens_ignores_stop_words() {
+        let tokens = extract_query_pascal_tokens("Describe the Engine type");
+        assert!(tokens.contains("engine"));
+        assert!(!tokens.contains("describe"));
+        assert!(!tokens.contains("the"));
+    }
+
+    #[test]
+    fn extract_query_pascal_tokens_backtick_pascal() {
+        let tokens = extract_query_pascal_tokens("Where is `Session` defined?");
+        assert!(tokens.contains("session"));
+    }
+
+    #[test]
+    fn is_pascal_case_basic() {
+        assert!(is_pascal_case("Session"));
+        assert!(is_pascal_case("Engine"));
+        assert!(is_pascal_case("Context"));
+        assert!(is_pascal_case("RuntimeConfig"));
+        assert!(!is_pascal_case("session"));   // lowercase
+        assert!(!is_pascal_case("SESSION"));   // ALL_CAPS
+        assert!(!is_pascal_case("Where"));     // stop word
+        assert!(!is_pascal_case("ab"));        // too short
     }
 }
