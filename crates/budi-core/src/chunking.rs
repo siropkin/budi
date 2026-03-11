@@ -27,6 +27,7 @@ fn looks_like_symbol(line: &str) -> bool {
         || trimmed.starts_with("pub trait ")
         || trimmed.starts_with("trait ")
         || trimmed.starts_with("pub type ")
+        || trimmed.starts_with("type ")
         || trimmed.starts_with("def ")
         || trimmed.starts_with("async def ")
         // JS/TS bare and exported forms
@@ -1102,6 +1103,30 @@ pub struct WorkLoop {
         assert!(
             hints.contains(&"WorkLoop"),
             "expected WorkLoop hint, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn go_type_struct_gets_symbol_hint() {
+        let content = r#"
+package plans
+
+// Plan represents a saved plan.
+type Plan struct {
+    UIMode Mode
+    VariableValues map[string]DynamicValue
+    Changes *Changes
+}
+"#;
+        let chunks = chunk_text("plan.go", content, 80, 20);
+        assert!(!chunks.is_empty());
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"Plan"),
+            "expected Plan hint, got: {hints:?}"
         );
     }
 }
