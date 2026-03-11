@@ -88,6 +88,26 @@ debug_io_max_chars = 4000
 
 ---
 
+## .budiignore
+
+Place a `.budiignore` file in the repo root to exclude paths from the index. Uses gitignore syntax. Especially useful for large repos where tests or documentation would bloat the index.
+
+```gitignore
+# Example for a large Python repo
+tests/
+docs/
+
+# Example for a large Go repo
+*_test.go
+**/testdata/
+docs/
+website/
+```
+
+A global `.budiignore` at `~/.local/share/budi/global.budiignore` applies to all repos.
+
+---
+
 ## Example production config
 
 ```toml
