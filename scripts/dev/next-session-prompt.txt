@@ -3,43 +3,37 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 
 ## Current state (post-v3.1.0, 2026-03-11)
 
-- Branch: main, CI green, all 290 tests pass (265 budi-core + 21 budi-cli + 4 budi-daemon)
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp
+- Branch: main, CI green, all 292 tests pass (267 budi-core + 21 budi-cli + 4 budi-daemon)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (freshly copied from release build)
 - 0 clippy warnings
-- v3.1.0 released + 6 post-release commits on main
+- v3.1.0 released + 10 post-release commits on main
+- 18 repos in ~/.local/share/budi/repos/ (cleaned from 128)
 
 ## What was done in the last session
 
 All committed and pushed to main, CI green:
-1. 5 new language grammars: Ruby, Kotlin, Swift, Scala, PHP — 13 AST languages total (d9cdc88)
-2. Definition boundary detection for new languages in retrieval pipeline (012176d)
-3. Status line for Claude Code: `budi statusline` command shows live stats (d2b1210)
-4. Indexing progress in status line: purple ⟳ indicator during active builds (e8e9a5b)
-5. Auto-install status line on `budi init`, simplified display (a96475f)
-6. Web research: Augment Context Engine MCP (GA), HTTP hooks, nomic-embed-code (7B)
+1. Indexing robustness (#37): incremental HNSW delta updates (2.5x faster), git worktree index sharing, timing instrumentation (bb2e707 + c0db6d6)
+2. README overhaul (#38): restructured following top GitHub repo patterns — bold-noun feature bullets, comparison anchor tagline, mermaid charts removed, 171→112 lines (9e53e87)
+3. Status line alignment (#40): padding 1→0 so budi aligns with Claude Code's built-in lines (5fef8f3)
+4. Doctor UX fix: optional config.toml no longer shows [!!], shows "using defaults" instead (5e11a11)
+5. Install docs fix: README curl-pipe-to-bash didn't work, fixed to clone-then-run (f4d98d6)
+6. MCP docs: added MCP server section to docs/configuration.md
+7. Repo hygiene: cleaned 110 stale test repos (128→18)
 
 ## Priority queue for next session
 
-### 1. Indexing robustness and performance (#37) — HIGH PRIORITY
-The indexing pipeline needs a focused research + optimization pass:
-- **Speed**: Profile hot paths, target <60s for 1000+ file repos
-- **Lazy/incremental**: Only re-chunk changed files, soft re-index as default
-- **Dirty file support**: Index uncommitted/unstaged changes (developers work on dirty files)
-- **Git worktree support**: Share base index across worktrees, only re-index diffs — NO full re-index
-- **Index size**: Audit SQLite + HNSW + embedding cache disk usage
-- **Non-blocking**: Verify no deadlocks between index writes and queries, stress test
-- **Research first**: Look at Augment Context Engine, GitNexus, Sourcegraph approaches
+### 1. Demo GIF/asciicast for README — QUICK WIN
+README has a placeholder `<!-- TODO: Add demo GIF/asciicast -->`. Record a terminal demo showing budi in action: init, query, injection, status line. Tools: asciinema or vhs (charmbracelet/vhs).
 
-Start with research and profiling, then implement. This is the biggest technical risk for adoption on large real-world repos.
+### 2. Verkada-Web real-world validation (#39) — MEDIUM PRIORITY
+Install latest budi on a large production TS monorepo. Index, use for real dev work, collect stats (injection rate, accuracy, read hit rate, cost). The ultimate product readiness test. Do this now that indexing robustness (#37) is done.
 
-### 2. README overhaul (#38) — MEDIUM PRIORITY
-Research top GitHub READMEs, replace mermaid charts with GIF/asciicast, better "why budi", keep concise.
-
-### 3. Verkada-Web real-world validation (#39) — AFTER #37
-Install on a large TS monorepo, collect stats over multiple sessions, analyze. Do this after indexing is robust.
+### 3. Lightweight reranker (#32) — STRATEGIC
+Small cross-encoder over top-N candidates could replace many hand-tuned score floors. 131-prompt benchmark dataset = ready-made eval set. Research: ms-marco-MiniLM-L-6-v2 (80MB ONNX) or code-specific alternatives.
 
 ## Other items still on the backlog
 - HTTP hooks migration (eliminate CLI subprocess overhead)
 - nomic-embed-code (7B) evaluation (better local embeddings)
 - Benchmark against Augment Context Engine MCP
 - Impact analysis / git-blame indexing
+- Train retrieval weights from 131-prompt benchmark data

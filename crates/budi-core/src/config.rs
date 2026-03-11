@@ -274,7 +274,9 @@ pub fn global_ignore_path() -> Result<PathBuf> {
 /// Per-repo local ignore file stored in budi's data directory (not in the repo).
 /// Useful for enterprise repos where you can't commit a `.budiignore` file.
 pub fn local_ignore_path(repo_root: &Path) -> Result<PathBuf> {
-    Ok(repo_paths(repo_root)?.data_dir.join(BUDI_LOCAL_IGNORE_FILE_NAME))
+    Ok(repo_paths(repo_root)?
+        .data_dir
+        .join(BUDI_LOCAL_IGNORE_FILE_NAME))
 }
 
 pub fn layered_ignore_paths(repo_root: &Path) -> Result<Vec<PathBuf>> {
