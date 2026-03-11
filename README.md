@@ -34,10 +34,10 @@ flowchart LR
 
 ## Latest A/B numbers
 
-Across 8 open-source repos (128 judged prompts), compared by an independent LLM judge:
+Across 8 open-source repos (131 judged prompts), compared by an independent LLM judge:
 
 - **3–32% lower cost** on most repos (up to +6% on repos where budi adds quality)
-- **~91% regression-free** — same or better quality on ~116/128 judged prompts
+- **~91% regression-free** — same or better quality on ~119/131 judged prompts
 - FastAPI: 100% non-regression with 11 quality wins; Flask: 94%; Terraform: 89–94%, −27% cost
 - Remaining regressions are mild (Q −1) from HNSW variance
 
@@ -45,9 +45,9 @@ budi's goal is to deliver the same answer quality at lower cost by pre-injecting
 
 ```mermaid
 pie showData
-    title "Efficiency outcomes (8 repos, 128 judged prompts)"
-    "same quality, lower cost" : 58
-    "better quality" : 58
+    title "Efficiency outcomes (8 repos, 131 judged prompts)"
+    "same quality, lower cost" : 60
+    "better quality" : 59
     "regression" : 12
 ```
 
@@ -159,7 +159,7 @@ Requirements: the `budi-daemon` must be running (`budi init --index` starts it a
 | **Approach** | Pre-injects code before Claude searches | Compresses tool output after Claude searches | Semantic search via MCP (on demand) | Knowledge graph + MCP |
 | **Integration** | Claude Code hooks (automatic) | Claude Code hooks (intercept) | MCP tools (explicit) | MCP + hooks |
 | **Retrieval** | 5-channel (lexical, vector, symbol, path, graph) with intent routing | BM25 with 4-layer fallback | FAISS vector search | BM25 + semantic + RRF |
-| **A/B validated** | 8 repos, 128 prompts, 92% non-regression | No | No | No |
+| **A/B validated** | 8 repos, 131 prompts, 91% non-regression | No | No | No |
 | **Language** | Rust (single binary) | TypeScript (npm) | Python | TypeScript |
 | **Privacy** | 100% local | 100% local | 100% local | 100% local |
 

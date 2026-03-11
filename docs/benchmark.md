@@ -4,12 +4,12 @@
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting relevant context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
-Across 8 open-source repos with 128 judged prompts (v3.0.0):
+Across 8 open-source repos with 131 judged prompts (v3.1.0):
 
 - **Cost**: 3–32% lower on most repos (up to +6% on repos where budi adds quality)
-- **Regression rate**: ~9% (~12/128 judged prompts had quality drops)
-- **Non-regressions**: ~91% (~116/128 — same or better quality)
-- Per repo: React 16/18, Flask 17/18, ripgrep 13/15, Fastify 17/18, FastAPI 18/18, Django 15/18, Terraform 16/18, Express 4/5
+- **Regression rate**: ~9% (~12/131 judged prompts had quality drops, multi-run average)
+- **Non-regressions**: ~91% (~119/131 — same or better quality)
+- Per repo: React 15-16/18, Flask 15-17/18, ripgrep 13/15, Fastify 17/18, FastAPI 18/18, Django 14-15/18, Terraform 16/18, Express 4/5
 
 HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions. Baseline Claude quality has improved significantly — most prompts score 8–9 without budi, so ties are the expected outcome.
 
