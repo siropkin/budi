@@ -1018,17 +1018,7 @@ pub fn build_query_response(
         && !exact_match_symbol_tokens.is_empty()
         && !scored.iter().take(3).any(|c| {
             runtime.chunk(c.id).is_some_and(|chunk| {
-                let text_lower = chunk.text.to_ascii_lowercase();
-                exact_match_symbol_tokens.iter().any(|token| {
-                    let call_pat = format!("{token}(");
-                    text_lower.match_indices(&call_pat).any(|(pos, _)| {
-                        let before = &text_lower[..pos];
-                        !before.ends_with("def ")
-                            && !before.ends_with("fn ")
-                            && !before.ends_with("func ")
-                            && !before.ends_with("function ")
-                    })
-                })
+                text_contains_call_to_any(&chunk.text, &exact_match_symbol_tokens)
             })
         });
     // FlowTrace callee-query skip: "What functions does X call and what does each return?"
@@ -2275,6 +2265,23 @@ fn is_go_test_helper_chunk(text: &str) -> bool {
 /// `todo!()`, `raise NotImplementedError`, or consist only of returning an error.
 /// These are not useful definitions for SymbolDefinition queries — the real implementation
 /// lives elsewhere and Claude should find it instead of getting anchored on the stub.
+/// Returns true if `text` contains a call expression to any of the given `tokens`.
+/// A call expression is `token(` NOT preceded by a definition keyword (`def `, `fn `, etc.).
+/// Used by the sym-use no-call-site skip to detect wrong-direction retrieval.
+fn text_contains_call_to_any(text: &str, tokens: &[String]) -> bool {
+    let text_lower = text.to_ascii_lowercase();
+    tokens.iter().any(|token| {
+        let call_pat = format!("{token}(");
+        text_lower.match_indices(&call_pat).any(|(pos, _)| {
+            let before = &text_lower[..pos];
+            !before.ends_with("def ")
+                && !before.ends_with("fn ")
+                && !before.ends_with("func ")
+                && !before.ends_with("function ")
+        })
+    })
+}
+
 /// Returns true if the chunk text begins with a new top-level definition
 /// (function, class, impl block, etc.) after stripping leading whitespace.
 /// Used to guard extended continuation: don't cross definition boundaries.
@@ -6808,5 +6815,88 @@ it("renders", () => {})
         assert!(!chunk_starts_new_definition("if is_proxy:"));
         assert!(!chunk_starts_new_definition("// comment"));
         assert!(!chunk_starts_new_definition(""));
+    }
+
+    #[test]
+    fn text_contains_call_detects_method_call() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(text_contains_call_to_any(
+            "response = self.handle_exception(ctx, e)",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_detects_bare_call() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(text_contains_call_to_any(
+            "result = handle_exception(error)",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_rejects_python_def() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(!text_contains_call_to_any(
+            "    def handle_exception(self, ctx, e):\n        pass",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_rejects_rust_fn() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(!text_contains_call_to_any(
+            "pub fn handle_exception(ctx: &Context) -> Result<()> {",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_rejects_go_func() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(!text_contains_call_to_any(
+            "func handle_exception(ctx context.Context) error {",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_rejects_js_function() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(!text_contains_call_to_any(
+            "function handle_exception(ctx) {",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_rejects_docstring_only() {
+        let tokens = vec!["handle_exception".to_string()];
+        // No `handle_exception(` pattern — just a :meth: reference
+        assert!(!text_contains_call_to_any(
+            "\"\"\"This is called by :meth:`handle_exception`\nif debugging...\"\"\"",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_mixed_def_and_call() {
+        let tokens = vec!["dispatch".to_string()];
+        // Both a def and a call — the call should make it return true
+        assert!(text_contains_call_to_any(
+            "def dispatch(self, request):\n    return self.dispatch(request)",
+            &tokens
+        ));
+    }
+
+    #[test]
+    fn text_contains_call_async_def() {
+        let tokens = vec!["handle_exception".to_string()];
+        assert!(!text_contains_call_to_any(
+            "async def handle_exception(self, ctx):",
+            &tokens
+        ));
     }
 }
