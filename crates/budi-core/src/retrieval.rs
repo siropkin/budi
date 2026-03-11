@@ -858,6 +858,51 @@ pub fn build_query_response(
 
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
 
+    // ── Cross-encoder reranking (optional) ────────────────────────────────────
+    // Rerank the top-N candidates using the cross-encoder model. This adjusts
+    // fused scores by blending the original heuristic score with a learned
+    // relevance score from (query, chunk_text) pairs.
+    if config.reranker_enabled {
+        let rerank_topk = crate::reranker::DEFAULT_RERANK_TOPK.min(scored.len());
+        if rerank_topk > 0 {
+            let candidates: Vec<crate::reranker::RerankCandidate> = scored[..rerank_topk]
+                .iter()
+                .filter_map(|sc| {
+                    runtime
+                        .chunk(sc.id)
+                        .map(|chunk| crate::reranker::RerankCandidate {
+                            id: sc.id,
+                            score: sc.score,
+                            text: chunk.text.clone(),
+                        })
+                })
+                .collect();
+            if let Some(results) =
+                crate::reranker::rerank(query, &candidates, config.reranker_alpha)
+            {
+                let reranked: std::collections::HashMap<u64, &crate::reranker::RerankResult> =
+                    results.iter().map(|r| (r.id, r)).collect();
+                for sc in scored.iter_mut().take(rerank_topk) {
+                    if let Some(rr) = reranked.get(&sc.id) {
+                        let old_score = sc.score;
+                        sc.channel_scores.rerank += rr.blended_score - sc.score;
+                        sc.score = rr.blended_score;
+                        push_unique_reason(&mut sc.reasons, "reranked");
+                        tracing::debug!(
+                            "rerank id={} ce={:.4} old={:.4} blended={:.4}",
+                            sc.id,
+                            rr.cross_encoder_score,
+                            old_score,
+                            rr.blended_score
+                        );
+                    }
+                }
+                // Re-sort after score adjustment.
+                scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
+        }
+    }
+
     // Per-intent retrieval limit. Honour explicit user config override.
     let default_limit = intent_retrieval_limit(intent.kind);
     // SymbolDefinition with hint-match-boost → definition confirmed found.

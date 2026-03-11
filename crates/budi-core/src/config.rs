@@ -80,6 +80,12 @@ pub struct BudiConfig {
     /// Milliseconds to wait between embedding retries (exponential backoff base). Default: 75.
     pub embedding_retry_backoff_ms: u64,
 
+    // ── Reranker ────────────────────────────────────────────────────────────────
+    /// Enable cross-encoder reranking of retrieval candidates. Default: false.
+    pub reranker_enabled: bool,
+    /// Blending weight for reranker scores: 0.0 = heuristic only, 1.0 = cross-encoder only. Default: 0.3.
+    pub reranker_alpha: f32,
+
     // ── Debug / Telemetry ─────────────────────────────────────────────────────
     /// Enable hook I/O telemetry. When true, every hook event (query, prefetch, session-start)
     /// is logged to `~/.local/share/budi/repos/<id>/logs/hook-io.jsonl`. Default: false.
@@ -116,6 +122,9 @@ impl Default for BudiConfig {
             embedding_batch_size: 32,
             embedding_retry_attempts: 3,
             embedding_retry_backoff_ms: 75,
+            // Reranker
+            reranker_enabled: false,
+            reranker_alpha: 0.3,
             // Debug
             debug_io: false,
             debug_io_full_text: false,

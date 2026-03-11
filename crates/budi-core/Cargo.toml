@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 blake3.workspace = true
 chrono.workspace = true
 fastembed.workspace = true
@@ -22,6 +22,8 @@ tantivy.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
+ort = { version = "2.0.0-rc.11", default-features = false }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 tracing.workspace = true
 tree-sitter = "0.26.6"
 tree-sitter-c-sharp = "0.23.1"
