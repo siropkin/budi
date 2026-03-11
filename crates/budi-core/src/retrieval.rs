@@ -1886,7 +1886,9 @@ fn maybe_inject_symbol_definition_delegate_pack(
         return;
     };
     // The callee must be substantially larger than the smaller alt-def to be worth injecting.
-    let callee_span = callee_chunk.end_line.saturating_sub(callee_chunk.start_line);
+    let callee_span = callee_chunk
+        .end_line
+        .saturating_sub(callee_chunk.start_line);
     if callee_span < 20 {
         return;
     }
@@ -6774,7 +6776,9 @@ it("renders", () => {})
 
         // Negative cases — continuation code, not new definitions
         assert!(!chunk_starts_new_definition("return nil, nil, diags"));
-        assert!(!chunk_starts_new_definition("new_class.add_to_class(\"_meta\", Options(meta))"));
+        assert!(!chunk_starts_new_definition(
+            "new_class.add_to_class(\"_meta\", Options(meta))"
+        ));
         assert!(!chunk_starts_new_definition("if is_proxy:"));
         assert!(!chunk_starts_new_definition("// comment"));
         assert!(!chunk_starts_new_definition(""));
