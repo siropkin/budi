@@ -750,6 +750,42 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Activity summary (if daemon is healthy and has stats)
+    if daemon_health(&config)
+        && let Some(stats) = fetch_daemon_stats(&config)
+    {
+        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
+        if queries > 0 {
+            let injections = stats
+                .get("injections")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let rate = stats
+                .get("injection_rate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("n/a");
+            let confirmed = stats
+                .get("confirmed_reads")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total_reads = stats
+                .get("total_reads")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!();
+            println!(
+                "  activity: {} queries, {} injections ({})",
+                queries, injections, rate
+            );
+            if total_reads > 0 {
+                println!(
+                    "  feedback: {}/{} file reads were pre-injected by budi",
+                    confirmed, total_reads
+                );
+            }
+        }
+    }
+
     // Summary
     println!();
     if issues.is_empty() {
