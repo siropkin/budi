@@ -1176,6 +1176,23 @@ pub fn build_query_response(
         );
     }
 
+    // Thin-wrapper reorder: when sym-def card 1 is a very short wrapper (≤5 lines)
+    // and card 2 is a longer alt-def (≥3x larger), swap them so the substantive
+    // implementation is presented first. "Important info at START" improves LLM attention.
+    if intent.kind == QueryIntentKind::SymbolDefinition && selection.snippets.len() >= 2 {
+        let card1_span =
+            selection.snippets[0].end_line.saturating_sub(selection.snippets[0].start_line);
+        let card2_span =
+            selection.snippets[1].end_line.saturating_sub(selection.snippets[1].start_line);
+        let card2_is_alt_def = selection.snippets[1]
+            .reasons
+            .iter()
+            .any(|r| r == "hint-match-boost");
+        if card1_span <= 5 && card2_is_alt_def && card2_span >= card1_span * 3 {
+            selection.snippets.swap(0, 1);
+        }
+    }
+
     // RuntimeConfig continuation chunk.
     // rt-cfg queries about "how is X loaded" often retrieve the env-var lookup in chunk N
     // (e.g. config.rs:16-53 for RIPGREP_CONFIG_PATH) but miss the actual parsing/merging
