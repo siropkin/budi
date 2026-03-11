@@ -153,11 +153,11 @@ pub fn build_query_response(
     // (property accessor / method) should score lower than chunks whose hint is
     // PascalCase "Session" (class / type definition).
     let query_pascal_tokens: HashSet<String> = extract_query_pascal_tokens(query);
-    // Pre-compute camelCase-only tokens for weak FlowTrace definition anchoring.
-    // Only camelCase (e.g. `reconcileChildFibers`, `useState`) — not TitleCase
-    // (e.g. "React", "Component") — to avoid over-boosting common type names.
-    let flowtrace_camelcase_tokens: Vec<String> = if intent.kind == QueryIntentKind::FlowTrace {
-        extract_flowtrace_camelcase_tokens(query)
+    // Pre-compute function-name tokens for FlowTrace definition anchoring.
+    // Includes camelCase (e.g. `reconcileChildFibers`) and snake_case (e.g.
+    // `get_response`, `dispatch_request`) — not TitleCase or plain English words.
+    let flowtrace_anchor_tokens: Vec<String> = if intent.kind == QueryIntentKind::FlowTrace {
+        extract_flowtrace_anchor_tokens(query)
     } else {
         Vec::new()
     };
@@ -740,18 +740,34 @@ pub fn build_query_response(
             }
         }
 
-        // FlowTrace — weak definition anchor for camelCase function targets.
-        // "What does reconcileChildFibers call / trace through useState" queries name a
-        // specific function. Boost its definition chunk (+0.10) to keep it above call-site
-        // chunks that may outscore it in a bad HNSW run. Without the boost, the call site
-        // can win and give Claude misleading context.
-        // Uses only camelCase tokens (not TitleCase) to avoid boosting generic class names.
+        // FlowTrace — pure-lexical demotion. Chunks matching only on common-word
+        // lexical hits (e.g. "call", "return", "does") with zero semantic/symbol/graph
+        // signal are usually irrelevant noise for flow-trace queries. For instance,
+        // "What functions does get_response call?" matches `describe()` in migrations
+        // and `adapt_timefield_value()` in backends purely on lexical overlap.
+        // A -0.10 penalty pushes these below anchored/semantic matches.
+        if intent.kind == QueryIntentKind::FlowTrace
+            && channel_scores.lexical > 0.0
+            && channel_scores.vector == 0.0
+            && channel_scores.symbol == 0.0
+            && channel_scores.graph == 0.0
+        {
+            adjusted -= 0.10;
+            push_unique_reason(&mut reasons, "flowtrace-lexical-only-demote");
+        }
+
+        // FlowTrace — definition anchor for named function targets.
+        // "What does reconcileChildFibers call" or "What functions does get_response call"
+        // queries name a specific function. Boost its definition chunk (+0.10) to keep it
+        // above irrelevant lexical matches. Without the boost, common-word lexical hits
+        // (e.g. "describe", "adapt_timefield_value") can outrank the actual target function.
+        // Includes camelCase and snake_case tokens — not TitleCase or plain English words.
         // Weaker than SymbolDefinition (+0.30) so it doesn't fully override flow semantics.
-        if !flowtrace_camelcase_tokens.is_empty()
+        if !flowtrace_anchor_tokens.is_empty()
             && let Some(hint) = chunk.symbol_hint.as_deref()
         {
             let hint_lower = hint.to_ascii_lowercase();
-            let exact_match = flowtrace_camelcase_tokens.iter().any(|t| t == &hint_lower);
+            let exact_match = flowtrace_anchor_tokens.iter().any(|t| t == &hint_lower);
             if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && exact_match {
                 adjusted += 0.10;
                 push_unique_reason(&mut reasons, "flowtrace-anchor");
@@ -3465,11 +3481,13 @@ fn push_scope_hint(token: &str, out: &mut Vec<String>, seen: &mut HashSet<String
     }
 }
 
-/// Extract camelCase identifiers from FlowTrace queries for weak anchor seeding.
-/// Returns only tokens where the original token has mixed case with uppercase after pos 0
-/// (true camelCase like `reconcileChildFibers`, `useState`, `performSyncWorkOnRoot`).
-/// Excludes TitleCase tokens (like "React", "Component") to avoid over-boosting generic names.
-fn extract_flowtrace_camelcase_tokens(query: &str) -> Vec<String> {
+/// Extract function identifiers from FlowTrace queries for anchor seeding.
+/// Includes:
+/// - Backtick-quoted identifiers (explicit symbol refs)
+/// - camelCase tokens (`reconcileChildFibers`, `useState`) — not TitleCase
+/// - snake_case tokens with underscores (`get_response`, `dispatch_request`)
+///   These are unambiguous code identifiers since English words never contain underscores.
+fn extract_flowtrace_anchor_tokens(query: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -3489,7 +3507,6 @@ fn extract_flowtrace_camelcase_tokens(query: &str) -> Vec<String> {
         }
     }
 
-    // camelCase tokens only: must have uppercase after position 0 (has_symbol_case_pattern)
     for raw in query
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|t| !t.is_empty())
@@ -3497,7 +3514,8 @@ fn extract_flowtrace_camelcase_tokens(query: &str) -> Vec<String> {
         if raw.len() < 3 || raw.len() > 64 {
             continue;
         }
-        if has_symbol_case_pattern(raw) {
+        // camelCase (has uppercase after pos 0) or snake_case (contains underscore)
+        if has_symbol_case_pattern(raw) || raw.contains('_') {
             let normalized = raw.to_ascii_lowercase();
             if seen.insert(normalized.clone()) {
                 out.push(normalized);
@@ -3551,7 +3569,59 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
             out.push(normalized);
         }
     }
+
+    // Natural language pattern: "the X function/method/class" where X is a plain
+    // lowercase identifier that lacks syntactic signals (underscore, camelCase).
+    // E.g. "Where is the resolve function defined" → extract "resolve".
+    extract_named_symbol_from_prose(query, &mut out, &mut seen);
+
     out
+}
+
+/// Detect "the X function/method/class/..." patterns in natural language queries.
+/// Captures bare identifiers like "resolve" that have no camelCase/underscore signal.
+fn extract_named_symbol_from_prose(
+    query: &str,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    const CODE_NOUNS: &[&str] = &[
+        "function",
+        "method",
+        "class",
+        "struct",
+        "type",
+        "interface",
+        "trait",
+        "module",
+        "enum",
+        "metaclass",
+    ];
+    let words: Vec<&str> = query.split_whitespace().collect();
+    for (i, &word) in words.iter().enumerate() {
+        let clean = word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+        let lower = clean.to_ascii_lowercase();
+        if !CODE_NOUNS.contains(&lower.as_str()) {
+            continue;
+        }
+        // "the X function" or "X function" — the word before the noun
+        if i > 0 {
+            let prev = words[i - 1].trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+            let prev_lower = prev.to_ascii_lowercase();
+            if prev_lower.len() >= 2
+                && prev_lower.len() <= 64
+                && prev_lower != "the"
+                && prev_lower != "this"
+                && prev_lower != "that"
+                && prev_lower != "a"
+                && prev_lower != "an"
+                && prev_lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && seen.insert(prev_lower.clone())
+            {
+                out.push(prev_lower);
+            }
+        }
+    }
 }
 
 /// Extract meaningful query words for proof-line needle matching.
@@ -4500,11 +4570,11 @@ mod tests {
         assert!(!is_test_path("components/Button.tsx"));
     }
 
-    // ── extract_flowtrace_camelcase_tokens ───────────────────────────────────
+    // ── extract_flowtrace_anchor_tokens ───────────────────────────────────
 
     #[test]
-    fn flowtrace_camelcase_tokens_extracts_camelcase() {
-        let tokens = extract_flowtrace_camelcase_tokens(
+    fn flowtrace_anchor_tokens_extracts_camelcase() {
+        let tokens = extract_flowtrace_anchor_tokens(
             "What functions does reconcileChildFibers call and what does each return?",
         );
         assert!(tokens.contains(&"reconcilechildfibers".to_string()));
@@ -4513,20 +4583,81 @@ mod tests {
     }
 
     #[test]
-    fn flowtrace_camelcase_tokens_excludes_titlecase() {
-        let tokens = extract_flowtrace_camelcase_tokens(
+    fn flowtrace_anchor_tokens_excludes_titlecase() {
+        let tokens = extract_flowtrace_anchor_tokens(
             "Trace the lifecycle hook execution order when a React component mounts",
         );
         // "React" is TitleCase (uppercase only at pos 0) — should NOT be included
         assert!(!tokens.contains(&"react".to_string()));
-        // No camelCase identifiers in this query, so tokens should be empty
+        // No camelCase or snake_case identifiers in this query
         assert!(tokens.is_empty());
     }
 
     #[test]
-    fn flowtrace_camelcase_tokens_backtick_included() {
-        let tokens = extract_flowtrace_camelcase_tokens("Trace `useState` internal call chain");
+    fn flowtrace_anchor_tokens_backtick_included() {
+        let tokens = extract_flowtrace_anchor_tokens("Trace `useState` internal call chain");
         assert!(tokens.contains(&"usestate".to_string()));
+    }
+
+    #[test]
+    fn flowtrace_anchor_tokens_includes_snake_case() {
+        let tokens = extract_flowtrace_anchor_tokens(
+            "What functions does get_response call and what does each return?",
+        );
+        assert!(tokens.contains(&"get_response".to_string()));
+        // Plain English words without underscores should NOT be included
+        assert!(!tokens.contains(&"functions".to_string()));
+        assert!(!tokens.contains(&"call".to_string()));
+    }
+
+    #[test]
+    fn flowtrace_anchor_tokens_snake_case_python() {
+        let tokens = extract_flowtrace_anchor_tokens(
+            "Trace the call chain from dispatch_request to the view function",
+        );
+        assert!(tokens.contains(&"dispatch_request".to_string()));
+    }
+
+    // ── extract_named_symbol_from_prose ──────────────────────────────────
+
+    #[test]
+    fn named_symbol_from_prose_resolve_function() {
+        let tokens = extract_query_symbol_tokens(
+            "Where is the resolve function defined and what is its role in URL resolution?",
+        );
+        assert!(
+            tokens.contains(&"resolve".to_string()),
+            "expected 'resolve' from 'the resolve function', got: {:?}",
+            tokens
+        );
+    }
+
+    #[test]
+    fn named_symbol_from_prose_modelbase_metaclass() {
+        let tokens = extract_query_symbol_tokens(
+            "Where is the ModelBase metaclass defined?",
+        );
+        // "ModelBase" should be found by TitleCase detection AND by "X metaclass" pattern
+        assert!(tokens.contains(&"modelbase".to_string()));
+    }
+
+    #[test]
+    fn named_symbol_from_prose_ignores_determiners() {
+        let tokens = extract_query_symbol_tokens("Where is the function defined?");
+        // "the" before "function" should be skipped
+        assert!(!tokens.contains(&"the".to_string()));
+    }
+
+    #[test]
+    fn named_symbol_from_prose_handler_class() {
+        let tokens = extract_query_symbol_tokens(
+            "Where is the handler class defined?",
+        );
+        assert!(
+            tokens.contains(&"handler".to_string()),
+            "expected 'handler' from 'the handler class', got: {:?}",
+            tokens
+        );
     }
 
     #[test]
