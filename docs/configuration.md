@@ -108,6 +108,34 @@ A global `.budiignore` at `~/.local/share/budi/global.budiignore` applies to all
 
 ---
 
+## MCP server
+
+`budi` ships an MCP server (`budi-mcp`) for editors that support the [Model Context Protocol](https://modelcontextprotocol.io/): Cursor, Zed, Windsurf, and others.
+
+Add to your editor's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "budi": {
+      "command": "budi-mcp",
+      "env": {
+        "BUDI_DAEMON_URL": "http://127.0.0.1:7878"
+      }
+    }
+  }
+}
+```
+
+The MCP server exposes two tools:
+
+- `budi_search` — search the indexed codebase for code relevant to a question
+- `budi_status` — check if a repository is indexed and ready
+
+The `budi-daemon` must be running (`budi init --index` starts it automatically).
+
+---
+
 ## Example production config
 
 ```toml

@@ -5,166 +5,107 @@
 [![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-**The context buster for Claude Code.**
+**Stop paying Claude to rediscover your codebase on every prompt.**
 
-`budi` finds the code Claude is about to look for and injects it before Claude starts searching.
+`budi` indexes your repo locally and pre-injects the right code snippets before Claude starts searching. Faster answers, fewer wasted tool calls, 3-32% lower cost.
 
-That means faster first useful answers, fewer wasted tool calls, lower token burn, and better grounding on medium and large repos.
+<!-- TODO: Add demo GIF/asciicast here showing budi in action -->
 
-Stop paying Claude to rediscover your codebase on every prompt.
+## How it works
 
-- Local-first: your code stays on your machine
-- Fast: retrieval runs in about 10ms
-- Automatic: Claude Code hooks work in the background
-- Practical: skip once with `@nobudi`, force once with `@forcebudi`
+You ask Claude Code a question. Before Claude starts searching, `budi` detects your intent, searches a local index across five retrieval channels (lexical, semantic, symbol, path, call graph), and injects the best snippets into context. Claude starts reasoning with the right code already in view.
 
-## Why it feels better
+No extra tool calls. No round trips. Just the code Claude was about to look for, already there.
 
-Without `budi`, Claude often spends its first few turns doing repo discovery: searching for files, opening imports, tracing the obvious path, and only then starting to reason.
+## Features
 
-With `budi`, the likely files are already in context when Claude sees your prompt.
+- **Fast** — retrieval runs in ~10ms; indexing takes seconds with warm cache
+- **Automatic** — Claude Code hooks run silently in the background
+- **Local** — your code stays on your machine; no cloud, no uploads
+- **Intent-aware** — routes queries through symbol lookup, call tracing, architecture, config, and test discovery
+- **Language-aware** — AST-powered chunking for JS/TS, Python, Rust, Go, Java, C/C++, C#, Ruby, Kotlin, Swift, Scala, PHP
+- **Incremental** — file edits update the index in-place without rebuilding
+- **Controllable** — skip once with `@nobudi`, force once with `@forcebudi`
 
-```mermaid
-flowchart LR
-    A[You ask Claude Code] --> B[budi detects intent]
-    B --> C[budi searches the local index]
-    C --> D[budi injects the best snippets]
-    D --> E[Claude starts with the right code]
-```
+## A/B results
 
-## Latest A/B numbers
+Tested on 8 open-source repos (131 judged prompts) with an independent LLM judge:
 
-Across 8 open-source repos (131 judged prompts), compared by an independent LLM judge:
+| Metric | Result |
+|--------|--------|
+| Non-regression rate | **~91%** (same or better quality) |
+| Cost savings | **3-32%** lower on most repos |
+| Best result | FastAPI: 100% non-regression, 11 quality wins |
 
-- **3–32% lower cost** on most repos (up to +6% on repos where budi adds quality)
-- **~91% regression-free** — same or better quality on ~119/131 judged prompts
-- FastAPI: 100% non-regression with 11 quality wins; Flask: 94%; Terraform: 89–94%, −27% cost
-- Remaining regressions are mild (Q −1) from HNSW variance
+budi's goal: same answer quality at lower cost. Ties (same quality, less cost) are the primary success metric.
 
-budi's goal is to deliver the same answer quality at lower cost by pre-injecting the right context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
+Full methodology, prompts, and per-prompt evidence: [docs/benchmark.md](docs/benchmark.md)
 
-```mermaid
-pie showData
-    title "Efficiency outcomes (8 repos, 131 judged prompts)"
-    "same quality, lower cost" : 60
-    "better quality" : 59
-    "regression" : 12
-```
+## Install
 
-Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
-
-## Install in 60 seconds
-
-1. Install the local binary:
-
-```bash
-./scripts/install.sh --from-release
-# or build locally:
-./scripts/install.sh
-```
-
-2. Install the Claude Code plugin:
+### Quick start (Claude Code plugin)
 
 ```text
 /plugin marketplace add siropkin/budi
 /plugin install budi-hooks@budi-plugins
 ```
 
-3. Enable `budi` in your repo:
+Then in your repo:
 
 ```bash
-cd /path/to/your/repo
 budi init --index
 ```
 
-Then use Claude Code normally. `budi` runs silently in the background.
+That's it. Use Claude Code normally.
 
-## What happens on each prompt
+### Manual install
 
-1. `budi` intercepts your prompt through a Claude Code hook.
-2. It figures out intent: symbol lookup, architecture question, call tracing, config hunt, and more.
-3. It searches a local index using lexical, semantic, symbol, and graph signals.
-4. It injects the best snippets into Claude's context.
-5. Claude starts answering with the likely code already in view.
+```bash
+# From latest release:
+curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install.sh | bash -s -- --from-release
+
+# Or build from source:
+git clone https://github.com/siropkin/budi.git && cd budi
+cargo build --release && cp target/release/budi target/release/budi-daemon ~/.local/bin/
+```
 
 ## Useful commands
 
 ```bash
-budi repo status
-budi repo search "payment validation"
-budi repo preview "why is the payment form failing validation?"
-budi index --hard --progress
+budi doctor              # check installation health
+budi repo status         # see index state and stats
+budi repo search "X"     # search the index directly
+budi repo preview "..."  # preview what budi would inject
+budi index --hard        # full re-index
 ```
 
-For troubleshooting:
+## MCP server
 
-```bash
-budi doctor
-# deeper watcher/index diagnostics:
-budi doctor --deep
-```
+`budi` also works in Cursor, Zed, Windsurf, and any editor supporting [MCP](https://modelcontextprotocol.io/). See [configuration docs](docs/configuration.md#mcp-server) for setup.
 
-## Prompt controls
+## Compared to alternatives
 
-Skip context injection for one prompt:
+| | budi | context-mode | Augment Context Engine | GitNexus |
+|---|---|---|---|---|
+| **Strategy** | Pre-inject before search | Compress output after search | MCP search on demand | Knowledge graph + MCP |
+| **Latency** | Zero (hooks, no round trip) | Zero (intercept) | +1 tool call | +1 tool call |
+| **Retrieval** | 5-channel with intent routing | BM25 with fallback | Proprietary | BM25 + semantic |
+| **A/B validated** | 8 repos, 131 prompts | No | No | No |
+| **Privacy** | 100% local | 100% local | Cloud | 100% local |
 
-```text
-@nobudi your prompt here
-```
-
-Force context injection for one prompt:
-
-```text
-@forcebudi your prompt here
-```
-
-## MCP server (Cursor, Zed, and other editors)
-
-`budi` also ships an MCP server (`budi-mcp`) that exposes retrieval over the standard [Model Context Protocol](https://modelcontextprotocol.io/). This makes `budi` usable in any editor that supports MCP: Cursor, Zed, Windsurf, and more.
-
-Add to your editor's MCP config:
-
-```json
-{
-  "mcpServers": {
-    "budi": {
-      "command": "budi-mcp",
-      "env": {
-        "BUDI_DAEMON_URL": "http://127.0.0.1:7878"
-      }
-    }
-  }
-}
-```
-
-The MCP server exposes two tools:
-
-- `budi_search` — search the indexed codebase for code relevant to a question
-- `budi_status` — check if a repository is indexed and ready
-
-Requirements: the `budi-daemon` must be running (`budi init --index` starts it automatically).
+budi is complementary with output-compression tools like context-mode.
 
 ## Docs
 
-- Benchmark methodology: `docs/benchmark.md`
-- Public evidence: `docs/benchmark-details.md`
-- Configuration: `docs/configuration.md`
-- Architecture: `docs/architecture.md`
-- Installer details: `docs/installer.md`
-
-## How budi compares
-
-| | budi | context-mode | Claude Context Local | GitNexus |
-|---|---|---|---|---|
-| **Approach** | Pre-injects code before Claude searches | Compresses tool output after Claude searches | Semantic search via MCP (on demand) | Knowledge graph + MCP |
-| **Integration** | Claude Code hooks (automatic) | Claude Code hooks (intercept) | MCP tools (explicit) | MCP + hooks |
-| **Retrieval** | 5-channel (lexical, vector, symbol, path, graph) with intent routing | BM25 with 4-layer fallback | FAISS vector search | BM25 + semantic + RRF |
-| **A/B validated** | 8 repos, 131 prompts, 91% non-regression | No | No | No |
-| **Language** | Rust (single binary) | TypeScript (npm) | Python | TypeScript |
-| **Privacy** | 100% local | 100% local | 100% local | 100% local |
-
-budi is complementary with output-compression tools like context-mode. Use budi to inject the right code, and context-mode to compress verbose tool results.
+- [Benchmark methodology](docs/benchmark.md) and [per-prompt evidence](docs/benchmark-details.md)
+- [Configuration](docs/configuration.md)
+- [Architecture](docs/architecture.md)
+- [Installer details](docs/installer.md)
 
 ## Privacy
 
-Everything runs locally. No cloud index. No repo upload. No external retrieval service needed to do the core job.
+Everything runs locally. No cloud index. No repo upload. No external retrieval service.
+
+## License
+
+[MIT](LICENSE)
