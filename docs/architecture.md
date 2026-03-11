@@ -73,7 +73,7 @@
 
 ## Query Intent Routing
 
-`classify_intent(prompt)` maps each query to one of 7 intent kinds:
+`classify_intent(prompt)` maps each query to one of 6 intent kinds:
 
 | Intent | Trigger keywords (examples) |
 |--------|----------------------------|
@@ -83,7 +83,6 @@
 | `Architecture` | "explain the architecture", "how is the system structured" |
 | `TestLookup` | "unit test for", "test coverage of" |
 | `RuntimeConfig` | "config file", "env var", "load config" |
-| `NonCode` | everything else (injection skipped) |
 
 `weights_for_intent(kind)` adjusts the 5-channel blend (lexical/vector/symbol/path/graph) per intent. `intent_retrieval_limit(kind)` sets per-intent snippet caps (5–8).
 
