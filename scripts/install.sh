@@ -15,7 +15,6 @@ FORCE=0
 NO_PATH_WARN=0
 FROM_RELEASE=0
 SKIP_OLLAMA=0
-OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:3b}"
 
 usage() {
   cat <<'EOF'
@@ -34,11 +33,11 @@ Options:
   --skip-build            Skip build step and only copy existing binaries
   --force                 Overwrite existing binaries without backup
   --no-path-warn          Suppress PATH guidance output
-  --skip-ollama           Skip Ollama install and model pull
+  --skip-ollama           (deprecated, no-op)
   -h, --help              Show this help
 
 Environment overrides:
-  PREFIX, BIN_DIR, PROFILE, RELEASE_REPO, RELEASE_TAG, OLLAMA_MODEL
+  PREFIX, BIN_DIR, PROFILE, RELEASE_REPO, RELEASE_TAG
 EOF
 }
 
@@ -109,56 +108,9 @@ ensure_cargo() {
 }
 
 ensure_ollama() {
-  if [[ "$SKIP_OLLAMA" -eq 1 ]]; then
-    return
-  fi
-
-  # Install Ollama if not present
-  if ! command -v ollama >/dev/null 2>&1; then
-    log "Ollama not found; installing..."
-    local os
-    os="$(uname -s)"
-    if [[ "$os" == "Darwin" ]]; then
-      if command -v brew >/dev/null 2>&1; then
-        brew install --quiet ollama
-      else
-        curl -fsSL https://ollama.com/install.sh | sh
-      fi
-    else
-      curl -fsSL https://ollama.com/install.sh | sh
-    fi
-    command -v ollama >/dev/null 2>&1 || { log "WARNING: Ollama install failed; skipping model pull. Run \`ollama pull $OLLAMA_MODEL\` manually."; return; }
-    log "Ollama installed."
-  else
-    log "Ollama already installed."
-  fi
-
-  # Start Ollama serve in background if no server is listening
-  if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-    log "Starting Ollama server in background..."
-    ollama serve >/dev/null 2>&1 &
-    local i
-    for i in $(seq 1 10); do
-      sleep 1
-      if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-        log "Ollama server ready."
-        break
-      fi
-    done
-    if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-      log "WARNING: Ollama server did not start in time; run \`ollama pull $OLLAMA_MODEL\` manually."
-      return
-    fi
-  fi
-
-  # Pull model if not already present
-  if ollama list 2>/dev/null | grep -q "^${OLLAMA_MODEL%:*}"; then
-    log "Ollama model $OLLAMA_MODEL already present."
-  else
-    log "Pulling Ollama model $OLLAMA_MODEL (this may take a few minutes)..."
-    ollama pull "$OLLAMA_MODEL" || log "WARNING: Failed to pull $OLLAMA_MODEL; run \`ollama pull $OLLAMA_MODEL\` manually."
-    log "Model $OLLAMA_MODEL ready."
-  fi
+  # No-op: Ollama is no longer used by budi.
+  # Flag kept for backward compatibility.
+  :
 }
 
 install_binaries_from_dir() {
