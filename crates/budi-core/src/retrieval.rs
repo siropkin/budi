@@ -639,6 +639,15 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "build-infra-penalty");
         }
 
+        // i18n message definition demotion. In React/TS monorepos, `defineMessages()`
+        // calls contain natural-language `defaultMessage` text that matches many queries
+        // lexically. These chunks describe UI copy, not code logic. Demote across all
+        // intents so actual component/function code wins over message catalogs.
+        if is_i18n_message_definition(&chunk.text) {
+            adjusted -= 0.25;
+            push_unique_reason(&mut reasons, "i18n-message-demote");
+        }
+
         // FlowTrace queries are about production execution paths, so tests that merely call
         // into framework entrypoints should not outrank the actual runtime chain. The graph
         // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
@@ -2232,6 +2241,25 @@ pub(crate) fn is_devtools_path(path: &str) -> bool {
         || lower.contains("noop-renderer")
         || lower.contains("noop_renderer")
         || lower.contains("nooprenderer")
+}
+
+/// True if the chunk text is primarily an i18n message definition block.
+/// Detects react-intl `defineMessages()`, `formatMessage()` constant objects,
+/// and similar i18n patterns. These chunks contain natural-language UI copy
+/// that lexically matches many queries but provides no code logic insight.
+fn is_i18n_message_definition(text: &str) -> bool {
+    // Must contain the defining call
+    if !text.contains("defineMessages(") && !text.contains("defineMessage(") {
+        return false;
+    }
+    // The chunk should be dominated by message definitions: check for multiple
+    // id/defaultMessage pairs, which indicates a message catalog chunk rather
+    // than a component that happens to import defineMessages.
+    let id_count = text.matches("id:").count() + text.matches("id :").count();
+    let msg_count =
+        text.matches("defaultMessage:").count() + text.matches("defaultMessage :").count();
+    // At least 2 message entries → this is a message catalog, not incidental usage
+    id_count >= 2 && msg_count >= 2
 }
 
 /// True if the path is build/bundler/CI infrastructure rather than production source.
@@ -5172,6 +5200,42 @@ mod tests {
         assert!(!is_build_infra_path("src/flask/app.py"));
         assert!(!is_build_infra_path("internal/terraform/context.go"));
         assert!(!is_build_infra_path("crates/budi-core/src/retrieval.rs"));
+    }
+
+    // ── is_i18n_message_definition ────────────────────────────────────────────
+
+    #[test]
+    fn i18n_detects_define_messages_block() {
+        let text = r#"const INTL_MESSAGES = defineMessages({
+  description: {
+    id: 'Foo.description',
+    defaultMessage: 'Move the PTZ to match the field of view.',
+  },
+  tooltip: {
+    id: 'Foo.tooltip',
+    defaultMessage: 'Go back to home view',
+  },
+});"#;
+        assert!(is_i18n_message_definition(text));
+    }
+
+    #[test]
+    fn i18n_rejects_component_with_single_message() {
+        // A component that uses defineMessages with only one message — not a catalog
+        let text = r#"const msgs = defineMessages({
+  title: { id: 'Page.title', defaultMessage: 'Camera Settings' },
+});
+export function CameraSettings() { return <h1>{msgs.title}</h1>; }"#;
+        assert!(!is_i18n_message_definition(text));
+    }
+
+    #[test]
+    fn i18n_rejects_plain_component_code() {
+        let text = r#"export function VideoPlayer({ src }: Props) {
+  const ref = useRef<HTMLVideoElement>(null);
+  return <video ref={ref} src={src} />;
+}"#;
+        assert!(!is_i18n_message_definition(text));
     }
 
     // ── is_inline_test_chunk ─────────────────────────────────────────────────

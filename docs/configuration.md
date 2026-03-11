@@ -90,7 +90,17 @@ debug_io_max_chars = 4000
 
 ## .budiignore
 
-Place a `.budiignore` file in the repo root to exclude paths from the index. Uses gitignore syntax. Especially useful for large repos where tests or documentation would bloat the index.
+Exclude paths from the index using gitignore syntax. Especially useful for large repos where tests or documentation would bloat the index.
+
+Ignore files are loaded in order (later files override earlier ones):
+
+| File | Location | Use case |
+|------|----------|----------|
+| Global | `~/.local/share/budi/global.budiignore` | Patterns applied to all repos |
+| Local | `~/.local/share/budi/repos/<key>/budiignore.local` | Per-repo patterns without touching the repo (enterprise use) |
+| Repo | `<repo_root>/.budiignore` | Committed patterns shared with the team |
+
+The local ignore file is ideal for enterprise monorepos where you can't commit a `.budiignore`. Find its path with `budi doctor`.
 
 ```gitignore
 # Example for a large Python repo
@@ -102,9 +112,12 @@ docs/
 **/testdata/
 docs/
 website/
-```
 
-A global `.budiignore` at `~/.local/share/budi/global.budiignore` applies to all repos.
+# Example for a large TS monorepo — keep only specific product areas
+src/command/alarms/
+src/command/admin/
+packages/legacy/
+```
 
 ---
 

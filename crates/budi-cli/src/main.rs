@@ -710,10 +710,18 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let has_repo_ignore = config::ignore_path(&repo_root)
         .map(|p| p.exists())
         .unwrap_or(false);
+    let has_local_ignore = config::local_ignore_path(&repo_root)
+        .map(|p| p.exists())
+        .unwrap_or(false);
     let has_global_ignore = config::global_ignore_path()
         .map(|p| p.exists())
         .unwrap_or(false);
     doctor_check("repo .budiignore", has_repo_ignore, None);
+    doctor_check(
+        "local budiignore",
+        has_local_ignore,
+        config::local_ignore_path(&repo_root).ok().as_deref(),
+    );
     doctor_check("global .budiignore", has_global_ignore, None);
 
     // Daemon health

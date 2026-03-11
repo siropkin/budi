@@ -11,6 +11,7 @@ pub const BUDI_HOME_DEFAULT_REL: &str = ".local/share/budi";
 pub const BUDI_REPOS_DIR: &str = "repos";
 pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub const BUDI_IGNORE_FILE_NAME: &str = ".budiignore";
+pub const BUDI_LOCAL_IGNORE_FILE_NAME: &str = "budiignore.local";
 pub const BUDI_GLOBAL_IGNORE_FILE_NAME: &str = "global.budiignore";
 pub const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub const BUDI_INDEX_DIR_NAME: &str = "index";
@@ -270,8 +271,18 @@ pub fn global_ignore_path() -> Result<PathBuf> {
     Ok(budi_home_dir()?.join(BUDI_GLOBAL_IGNORE_FILE_NAME))
 }
 
+/// Per-repo local ignore file stored in budi's data directory (not in the repo).
+/// Useful for enterprise repos where you can't commit a `.budiignore` file.
+pub fn local_ignore_path(repo_root: &Path) -> Result<PathBuf> {
+    Ok(repo_paths(repo_root)?.data_dir.join(BUDI_LOCAL_IGNORE_FILE_NAME))
+}
+
 pub fn layered_ignore_paths(repo_root: &Path) -> Result<Vec<PathBuf>> {
-    Ok(vec![global_ignore_path()?, ignore_path(repo_root)?])
+    Ok(vec![
+        global_ignore_path()?,
+        local_ignore_path(repo_root)?,
+        ignore_path(repo_root)?,
+    ])
 }
 
 pub fn index_db_path(repo_root: &Path) -> Result<PathBuf> {
@@ -467,8 +478,9 @@ mod tests {
     fn layered_ignore_paths_include_global_then_repo() {
         let repo_root = Path::new("/tmp/repo");
         let paths = layered_ignore_paths(repo_root).expect("layered paths");
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 3);
         assert!(paths[0].ends_with(BUDI_GLOBAL_IGNORE_FILE_NAME));
-        assert_eq!(paths[1], repo_root.join(BUDI_IGNORE_FILE_NAME));
+        assert!(paths[1].ends_with(BUDI_LOCAL_IGNORE_FILE_NAME));
+        assert_eq!(paths[2], repo_root.join(BUDI_IGNORE_FILE_NAME));
     }
 }
