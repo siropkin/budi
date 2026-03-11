@@ -770,6 +770,22 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "lexical-only-demote");
         }
 
+        // SymbolUsage — vector-only demotion. Cards with only vector+ecosystem signal
+        // (no lexical, no symbol, no graph) are semantically similar but not actual call
+        // sites. "What calls performSyncWorkOnRoot" → ReactFizzServer.js (server-rendering,
+        // thematically related but never calls performSyncWorkOnRoot). Real callers have at
+        // least one structural signal (lexical match on function name, symbol index hit, or
+        // call-graph edge).
+        if intent.kind == QueryIntentKind::SymbolUsage
+            && channel_scores.lexical == 0.0
+            && channel_scores.symbol == 0.0
+            && channel_scores.graph == 0.0
+            && channel_scores.vector > 0.0
+        {
+            adjusted -= 0.10;
+            push_unique_reason(&mut reasons, "vector-only-demote");
+        }
+
         // FlowTrace — definition anchor for named function targets.
         // "What does reconcileChildFibers call" or "What functions does get_response call"
         // queries name a specific function. Boost its definition chunk (+0.10) to keep it
