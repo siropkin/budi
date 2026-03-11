@@ -51,7 +51,7 @@ budi repo status  # prints the data directory path
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `embedding_batch_size` | integer | `96` | Chunks embedded per batch call. Reduce if the process runs out of memory on large repos. |
+| `embedding_batch_size` | integer | `32` | Chunks embedded per batch call. Reduce if the process runs out of memory on large repos. |
 | `embedding_retry_attempts` | integer | `3` | Retries on a failed embedding batch before the chunk is skipped. |
 | `embedding_retry_backoff_ms` | integer | `75` | Base backoff in milliseconds between retries (exponential). |
 
