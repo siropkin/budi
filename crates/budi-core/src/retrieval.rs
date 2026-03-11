@@ -1268,11 +1268,11 @@ pub fn build_query_response(
         let card2_span = selection.snippets[1]
             .end_line
             .saturating_sub(selection.snippets[1].start_line);
-        let card2_is_alt_def = selection.snippets[1]
+        let card2_is_substantial = selection.snippets[1]
             .reasons
             .iter()
-            .any(|r| r == "hint-match-boost");
-        if card1_span <= 5 && card2_is_alt_def && card2_span >= card1_span * 3 {
+            .any(|r| r == "hint-match-boost" || r == "delegated-definition");
+        if card1_span <= 5 && card2_is_substantial && card2_span >= card1_span * 3 {
             selection.snippets.swap(0, 1);
         }
     }
@@ -1843,6 +1843,9 @@ fn promote_exact_match_symbol_definition_chunks(
     selection.snippets = promoted;
 }
 
+/// When two alt-def cards exist and one delegates to a method in the other's file,
+/// replace the non-delegating alt-def with the callee chunk. This gives Claude
+/// the entry point + implementation instead of two thin definitions.
 fn maybe_inject_symbol_definition_delegate_pack(
     runtime: &RuntimeIndex,
     selection: &mut SnippetSelectionState,
@@ -1875,57 +1878,81 @@ fn maybe_inject_symbol_definition_delegate_pack(
     let Some(alt_def_chunk) = runtime_chunk_for_item(runtime, &alt_def_item) else {
         return;
     };
-    let Some(callee_chunk) =
-        choose_symbol_definition_delegate_chunk(runtime, def_chunk, alt_def_chunk)
-    else {
+    // Bidirectional callee search: check callees of both definitions.
+    // Try def→alt_file first, then alt→def_file.
+    let result = find_delegate_callee(runtime, def_chunk, alt_def_chunk)
+        .or_else(|| find_delegate_callee(runtime, alt_def_chunk, def_chunk));
+    let Some((delegator_chunk, callee_chunk)) = result else {
         return;
     };
-    let Some(card) = build_symbol_definition_delegate_card(
-        def_chunk,
-        alt_def_chunk,
-        callee_chunk,
-        def_item.score * 0.78,
-    ) else {
+    // The callee must be substantially larger than the smaller alt-def to be worth injecting.
+    let callee_span = callee_chunk.end_line.saturating_sub(callee_chunk.start_line);
+    if callee_span < 20 {
         return;
+    }
+    // Build selection: delegator as card 1, callee as card 2.
+    let delegator_item = if delegator_chunk.id == def_chunk.id {
+        def_item.clone()
+    } else {
+        alt_def_item.clone()
     };
-    selection.snippets.truncate(1);
-    selection.snippets.push(card);
+    let callee_item = QueryResultItem {
+        path: callee_chunk.path.clone(),
+        start_line: callee_chunk.start_line,
+        end_line: callee_chunk.end_line,
+        language: callee_chunk.language.clone(),
+        score: delegator_item.score * 0.78,
+        reasons: vec!["delegated-definition".to_string()],
+        channel_scores: QueryChannelScores::default(),
+        text: callee_chunk.text.clone(),
+        slm_relevance_note: None,
+    };
+    selection.snippets.clear();
+    selection.snippets.push(delegator_item);
+    selection.snippets.push(callee_item);
     if selection.snippets.len() > target_limit {
         selection.snippets.truncate(target_limit);
     }
 }
 
-fn choose_symbol_definition_delegate_chunk<'a>(
+/// Search callees of `source_chunk` for a chunk in a different file from `source_chunk`
+/// that is near `target_chunk` (same file, within proximity). Returns (delegator, callee).
+fn find_delegate_callee<'a>(
     runtime: &'a RuntimeIndex,
-    def_chunk: &ChunkRecord,
-    alt_def_chunk: &ChunkRecord,
-) -> Option<&'a ChunkRecord> {
+    source_chunk: &'a ChunkRecord,
+    target_chunk: &'a ChunkRecord,
+) -> Option<(&'a ChunkRecord, &'a ChunkRecord)> {
     let mut best: Option<(&ChunkRecord, i32)> = None;
-    for callee in runtime.callees_of(def_chunk.id) {
+    for callee in runtime.callees_of(source_chunk.id) {
         if callee.len() < 3 || is_generic_symbol_hint(&callee) {
             continue;
         }
         for chunk in runtime.all_chunks() {
-            if chunk.path == def_chunk.path || is_test_path(&chunk.path) {
+            // Callee must be in a different file from the source definition.
+            if chunk.path == source_chunk.path || is_test_path(&chunk.path) {
                 continue;
             }
             if chunk.symbol_hint.as_deref() != Some(callee.as_str()) {
                 continue;
             }
             let mut score = 0i32;
-            if chunk.path == alt_def_chunk.path {
+            // Prefer callees in the same file as the other definition.
+            if chunk.path == target_chunk.path {
                 score += 6;
             }
-            if chunk.start_line >= alt_def_chunk.end_line
-                && chunk.start_line <= alt_def_chunk.end_line.saturating_add(160)
+            // Prefer callees near the other definition (within 160 lines).
+            if chunk.path == target_chunk.path
+                && chunk.start_line >= target_chunk.end_line
+                && chunk.start_line <= target_chunk.end_line.saturating_add(160)
             {
                 score += 4;
             }
-            if chunk.text.contains("Flask.register_blueprint") {
+            // Prefer longer implementations.
+            let span = chunk.end_line.saturating_sub(chunk.start_line);
+            if span >= 50 {
                 score += 3;
-            }
-            if chunk.text.contains("app.blueprints[") {
-                score += 2;
+            } else if span >= 20 {
+                score += 1;
             }
             if best
                 .as_ref()
@@ -1935,55 +1962,7 @@ fn choose_symbol_definition_delegate_chunk<'a>(
             }
         }
     }
-    best.map(|(chunk, _)| chunk)
-}
-
-fn build_symbol_definition_delegate_card(
-    def_chunk: &ChunkRecord,
-    alt_def_chunk: &ChunkRecord,
-    callee_chunk: &ChunkRecord,
-    score: f32,
-) -> Option<QueryResultItem> {
-    let def_symbol = def_chunk.symbol_hint.as_deref().unwrap_or("definition");
-    let alt_symbol = alt_def_chunk.symbol_hint.as_deref().unwrap_or("definition");
-    let callee_symbol = callee_chunk.symbol_hint.as_deref().unwrap_or("delegate");
-    let (delegate_line, delegate_text) =
-        extract_chunk_line_with_needle(def_chunk, &[".register("])?;
-    let (nested_line, nested_text) =
-        extract_chunk_line_with_needle(alt_def_chunk, &["_blueprints.append("])?;
-    let mut lines = vec![
-        format!(
-            "delegation: {def_symbol}@{} delegates to {callee_symbol}@{}; nested {alt_symbol}@{} stores child blueprints",
-            def_chunk.start_line, callee_chunk.start_line, alt_def_chunk.start_line
-        ),
-        format!("{def_symbol}@{delegate_line}: {delegate_text}"),
-        format!("{alt_symbol}@{nested_line}: {nested_text}"),
-    ];
-    for needles in [
-        &["app.blueprints["][..],
-        &["make_setup_state("][..],
-        &["_merge_blueprint_funcs("][..],
-        &["deferred(state)"][..],
-        &["blueprint.register(app, bp_options)"][..],
-    ] {
-        if let Some((line_no, line_text)) = extract_chunk_line_with_needle(callee_chunk, needles) {
-            lines.push(format!("{callee_symbol}@{line_no}: {line_text}"));
-        }
-    }
-    if lines.len() < 5 {
-        return None;
-    }
-    Some(QueryResultItem {
-        path: callee_chunk.path.clone(),
-        start_line: alt_def_chunk.start_line.min(callee_chunk.start_line),
-        end_line: alt_def_chunk.end_line.max(callee_chunk.end_line),
-        language: callee_chunk.language.clone(),
-        score,
-        reasons: vec!["delegated-definition-pack".to_string()],
-        channel_scores: QueryChannelScores::default(),
-        text: lines.join("\n"),
-        slm_relevance_note: Some("delegated implementation summary".to_string()),
-    })
+    best.map(|(callee, _)| (source_chunk, callee))
 }
 
 fn query_result_item_from_scored(
@@ -3139,7 +3118,6 @@ fn try_push_scored_chunk(
             r.as_str(),
             "web-request-flow-pack"
                 | "wrapper-implementation-pack"
-                | "delegated-definition-pack"
                 | "react-effect-lifecycle-pack"
                 | "nextjs-app-router-pack"
         )
