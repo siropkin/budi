@@ -22,6 +22,7 @@
 - `budi-cli`: init, index, status, doctor, preview, and hook entrypoints.
 - `budi-daemon`: local HTTP daemon serving query/index/status/update.
   - `/index` schedules async full-index jobs; clients poll `/progress` for job state/outcome
+- `budi-mcp`: MCP server exposing retrieval over stdio transport (for Cursor/Zed/Windsurf).
 - `budi-core`: shared logic:
   - file discovery from `git ls-files` (tracked + untracked), respecting `.gitignore`, repo-root `*.ignore` files (for example `.cursorignore`/`.codeiumignore`/`.contextignore`), global `~/.local/share/budi/global.budiignore`, and repo-local `.budiignore` rules (`!unignore` supported), with code-first type filtering via extension and basename allowlists and one-shot CLI overrides (`--ignore-pattern`, `--include-ext`)
   - chunking
@@ -51,26 +52,26 @@
 - `/status` and `budi doctor --deep` expose watcher health counters (`watch_events_seen`, `watch_events_accepted`, `watch_events_dropped`).
 - Incremental updates short-circuit no-op batches (unsupported/ignored/unchanged hints) and surface `updates_noop` / `updates_applied` counters.
 
-## Project Map (Phase D)
+## Project Map
 
 - After each full index job, `generate_project_map()` writes local `.claude/budi-project-map.md` into the repo with a high-level file-tree summary grouped by directory.
 - The project map is generated state, so `.claude/` is treated as local-only rather than tracked documentation.
 - `budi hook session-start` reads this file and outputs it as an `AsyncSystemMessageOutput`, injecting it into the Claude Code system prompt at session start.
 
-## Call Graph / Structural Oracle (Phase E)
+## Call Graph / Structural Oracle
 
 - `RuntimeIndex` maintains `chunk_to_graph_tokens` (forward index: chunk → callee symbol tokens).
 - `callers_of(symbol)` and `callees_of(chunk_id)` navigate the graph bidirectionally.
 - `build_call_graph_summary(runtime, snippets)` generates a `[structural context]` block appended to context when intent warrants it.
 - Call graph budget is gated by intent and top-snippet confidence (see Context Budget below).
 
-## PostToolUse Prefetch (Phase B)
+## PostToolUse Prefetch
 
 - When Claude reads or globs a file, the `PostToolUse` hook fires immediately.
 - The hook POSTs `/prefetch-neighbors` with the file path, and the daemon returns graph neighbors of that file.
 - Neighbors are delivered as `AsyncSystemMessageOutput` — low latency, zero interference with the main prompt flow.
 
-## Query Intent Routing (Phase H/K)
+## Query Intent Routing
 
 `classify_intent(prompt)` maps each query to one of 7 intent kinds:
 
@@ -101,7 +102,7 @@
   - this fallback includes only verified production file paths with runtime-config signals
   - tests/examples/fixtures are filtered out unless the user explicitly asks for them
 
-## Context Budget Discipline (Phase L)
+## Context Budget Discipline
 
 - Total injected context is hard-capped at `context_char_budget` (default 12,000 chars).
 - Call graph budget is subtracted from the base budget before evidence-card context is assembled.
@@ -120,12 +121,12 @@ Certain broad/overview queries are better served by Claude exploring on its own 
 
 When these patterns fire, injection is skipped entirely. Additionally, when a synthetic condenser pack is the top card for FlowTrace, remaining HNSW cards are filtered to pack_score × 0.95 to reduce context noise.
 
-## Score Floors and Boosts (Phases N/P/R/S/T)
+## Score Floors and Boosts
 
 - `min_selection_score(candidates, intent)` returns a per-intent floor:
   - FlowTrace: max(top×0.40, 0.25), SymbolDefinition: max(top×0.40, 0.30), SymbolUsage: max(top×0.40, 0.22), TestLookup: max(top×0.40, 0.22), RuntimeConfig: 0.40 when top≥0.60 else max(top×0.40, 0.18), Architecture: 0.40 when top≥0.60 else max(top×0.40, 0.30)
 - `is_test_path(path)` — detects `/test`, `/spec`, `__tests__/`, `__spec__/` — used for `+0.15` test-path boost on TestLookup queries.
-- **Hint-match boost (S1)**: `+0.30` when intent is SymbolDefinition and the chunk's `symbol_hint` exactly matches a query token, surfacing the definition chunk over reference noise.
+- **Hint-match boost**: `+0.30` when intent is SymbolDefinition and the chunk's `symbol_hint` exactly matches a query token, surfacing the definition chunk over reference noise.
 - `dominant_symbol_hint(lines)` — picks the symbol spanning the most lines in a window, preventing short local functions from stealing the hint from the dominant definition.
 - `truncate_to(s, max)` — UTF-8 safe: walks back to the nearest char boundary rather than slicing at a byte offset.
 
@@ -143,13 +144,31 @@ Built-in plugins: React, Next.js, Flask, Django, FastAPI, Express.
 
 At `RuntimeIndex` construction, `detect_repo_ecosystems()` scans manifest files on disk and indexed file paths to identify the repo's primary frameworks. These repo-level ecosystems merge with query-detected ecosystems during retrieval, so the `+0.08` ecosystem-match boost fires even when queries don't mention the framework by name.
 
-## Cross-Session File Affinity (Phase J/M)
+## Cross-Session File Affinity
 
 - After each successful injection, `update_session_affinity(repo_root, snippets)` persists injected file paths + anchor lines to `session-affinity.json` (top 50 by recency, stored outside the repo).
 - Format: `HashMap<path, AffinityEntry { ts: u64, anchors: Vec<String> }>`.
 - `budi hook session-start` appends a `## Recently Relevant Files` block (top 5 paths with anchors) to the session-start system message.
 
-## Per-Step Timing (Phase I)
+## MCP Server
+
+`budi-mcp` is a thin stdio MCP server that makes budi's retrieval available to any editor supporting the Model Context Protocol:
+
+- Uses the `rmcp` crate (Rust MCP SDK) with stdio transport.
+- Exposes two tools: `budi_search` (query + optional repo_root) and `budi_status` (repo_root).
+- Connects to the existing `budi-daemon` via HTTP — no embedded index, no dependency on `budi-core`.
+- `BUDI_DAEMON_URL` env var overrides the default `http://127.0.0.1:7878`.
+
+## Post-Injection Feedback
+
+The daemon tracks which injected files Claude subsequently reads:
+
+- `SessionState.injected_files` records all file paths from injected evidence cards.
+- When `prefetch_neighbors` is called (PostToolUse/Read), the daemon checks if the read file was previously injected.
+- Counters: `confirmed_reads` (budi pre-delivered), `total_reads` (all reads tracked).
+- Exposed via `/stats` endpoint and `budi repo stats` / `budi doctor`.
+
+## Per-Step Timing
 
 - When `config.debug_io = true`, `QueryResponse.timing_ms` is populated with millisecond durations for each pipeline step: `load`, `embed`, `retrieval`, `dedup`, `callgraph`.
 - The CLI logs timing as a `"timing"` key in `hook-io.jsonl`.
