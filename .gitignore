@@ -22,6 +22,13 @@ ab-bench-*/
 react-eval-out*/
 toolcall-bench-out*/
 
+# Reranker training artifacts
+scripts/dev/reranker-venv/
+scripts/dev/reranker-finetuned/
+scripts/dev/reranker-onnx/
+scripts/dev/reranker_training_data.jsonl
+scripts/dev/reranker_training_data.summary.json
+
 # Local Claude / scratch artifacts
 .claude/
 *.plan.*
