@@ -240,11 +240,25 @@ async fn hook_prompt_submit(
 
     let repo_root = match config::find_repo_root(&cwd) {
         Ok(path) => path,
-        Err(_) => return Json(UserPromptSubmitOutput::allow_with_context(String::new())),
+        Err(e) => {
+            tracing::warn!(
+                "hook/prompt-submit: no repo root for {}: {:#}",
+                cwd.display(),
+                e
+            );
+            return Json(UserPromptSubmitOutput::allow_with_context(String::new()));
+        }
     };
     let config = match config::load_or_default(&repo_root) {
         Ok(c) => c,
-        Err(_) => return Json(UserPromptSubmitOutput::allow_with_context(String::new())),
+        Err(e) => {
+            tracing::warn!(
+                "hook/prompt-submit: config error for {}: {:#}",
+                repo_root.display(),
+                e
+            );
+            return Json(UserPromptSubmitOutput::allow_with_context(String::new()));
+        }
     };
 
     let directives = parse_prompt_directives(&input.prompt);
@@ -271,7 +285,10 @@ async fn hook_prompt_submit(
 
     let response = match state.daemon_state.query(request, &config).await {
         Ok(r) => r,
-        Err(_) => return Json(UserPromptSubmitOutput::allow_with_context(String::new())),
+        Err(e) => {
+            tracing::warn!("hook/prompt-submit: query failed: {:#}", e);
+            return Json(UserPromptSubmitOutput::allow_with_context(String::new()));
+        }
     };
 
     let skip_reason = evaluate_context_skip(&config, &directives, &response.diagnostics);
@@ -316,11 +333,17 @@ async fn hook_tool_use(
     let session_id = input.common.session_id.clone();
     let repo_root = match config::find_repo_root(&cwd) {
         Ok(path) => path,
-        Err(_) => return Json(json!({})),
+        Err(e) => {
+            tracing::warn!("hook/tool-use: no repo root for {}: {:#}", cwd.display(), e);
+            return Json(json!({}));
+        }
     };
     let config = match config::load_or_default(&repo_root) {
         Ok(c) => c,
-        Err(_) => return Json(json!({})),
+        Err(e) => {
+            tracing::warn!("hook/tool-use: config error: {:#}", e);
+            return Json(json!({}));
+        }
     };
     let repo_root_str = repo_root.display().to_string();
     state
