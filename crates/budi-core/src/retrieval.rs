@@ -253,7 +253,11 @@ pub fn build_query_response(
                 })
             })
             .collect();
-        candidates.sort_by(|a, b| b.fused_score.partial_cmp(&a.fused_score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.fused_score
+                .partial_cmp(&a.fused_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         candidates.truncate(100); // Top 100 is enough for analysis
         candidates
     } else {
