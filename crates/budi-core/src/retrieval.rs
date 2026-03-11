@@ -2336,6 +2336,23 @@ fn chunk_starts_new_definition(trimmed: &str) -> bool {
         || trimmed.starts_with("export class ")
         || trimmed.starts_with("@") // Python decorator → new method/function follows
         || trimmed.starts_with("#[") // Rust attribute → new item follows
+        // Kotlin
+        || trimmed.starts_with("fun ")
+        || trimmed.starts_with("object ")
+        || trimmed.starts_with("data class ")
+        || trimmed.starts_with("sealed class ")
+        // Ruby
+        || trimmed.starts_with("module ")
+        // Swift
+        || trimmed.starts_with("protocol ")
+        // Scala
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("object ")
+        // PHP
+        || trimmed.starts_with("function ")
+        || trimmed.starts_with("public function ")
+        || trimmed.starts_with("private function ")
+        || trimmed.starts_with("protected function ")
 }
 
 fn is_stub_body(text: &str) -> bool {
@@ -2351,6 +2368,11 @@ fn is_stub_body(text: &str) -> bool {
         || trimmed_first.starts_with("trait ")
         || trimmed_first.starts_with("enum ")
         || trimmed_first.starts_with("pub enum ")
+        || trimmed_first.starts_with("module ") // Ruby
+        || trimmed_first.starts_with("data class ") // Kotlin
+        || trimmed_first.starts_with("sealed class ") // Kotlin
+        || trimmed_first.starts_with("object ") // Kotlin/Scala
+        || trimmed_first.starts_with("protocol ") // Swift
     {
         return false;
     }
