@@ -2851,7 +2851,7 @@ fn cmd_statusline_install() -> Result<()> {
     settings["statusLine"] = json!({
         "type": "command",
         "command": "budi statusline",
-        "padding": 1
+        "padding": 0
     });
     let raw = serde_json::to_string_pretty(&settings)?;
     fs::write(&settings_path, raw)
