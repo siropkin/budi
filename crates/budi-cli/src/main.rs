@@ -56,7 +56,9 @@ const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
-#[command(about = "Local RAG context booster for Claude Code — pre-injects relevant code snippets via hooks")]
+#[command(
+    about = "Local RAG context booster for Claude Code — pre-injects relevant code snippets via hooks"
+)]
 #[command(version)]
 #[command(after_help = "Get started:\n  cd /path/to/repo && budi init --index")]
 struct Cli {

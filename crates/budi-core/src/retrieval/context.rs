@@ -357,7 +357,10 @@ fn contains_at_word_boundary(haystack: &str, needle: &str) -> bool {
 /// (e.g., "return" should not match inside "returnFiber").
 fn needle_matches(haystack: &str, needle: &str) -> bool {
     // If needle contains non-identifier chars, it's specific enough for substring match.
-    if needle.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_') {
+    if needle
+        .bytes()
+        .any(|b| !b.is_ascii_alphanumeric() && b != b'_')
+    {
         return haystack.contains(needle);
     }
     contains_at_word_boundary(haystack, needle)
@@ -376,8 +379,22 @@ fn is_low_value_proof_line(line: &str) -> bool {
     // Bare braces / structural punctuation
     if matches!(
         trimmed,
-        "{" | "}" | "};" | "})" | "});" | "}," | ");" | ")," | "(" | ")" | "[]" | "[" | "]"
-            | ") {" | ") =>" | "} else {" | "} else"
+        "{" | "}"
+            | "};"
+            | "})"
+            | "});"
+            | "},"
+            | ");"
+            | "),"
+            | "("
+            | ")"
+            | "[]"
+            | "["
+            | "]"
+            | ") {"
+            | ") =>"
+            | "} else {"
+            | "} else"
     ) {
         return true;
     }
@@ -392,9 +409,7 @@ fn is_low_value_proof_line(line: &str) -> bool {
     // (single identifier/keyword, optionally followed by comma/semicolon)
     let bare = trimmed.trim_end_matches([',', ';']);
     if !bare.is_empty()
-        && bare
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && bare.len() <= 30
         && !matches!(
             bare,
@@ -765,11 +780,15 @@ mod tests {
         // Return statements
         assert!(!is_low_value_proof_line("return fiber;"));
         // Conditionals
-        assert!(!is_low_value_proof_line("if (fiber.tag === HostComponent) {"));
+        assert!(!is_low_value_proof_line(
+            "if (fiber.tag === HostComponent) {"
+        ));
         // String values (config lines)
         assert!(!is_low_value_proof_line("name: \"flask\","));
         // Regular code
-        assert!(!is_low_value_proof_line("reconcileChildFibers(fiber, child);"));
+        assert!(!is_low_value_proof_line(
+            "reconcileChildFibers(fiber, child);"
+        ));
     }
 
     // ── call expression detection ─────────────────────────────────────────────
@@ -786,7 +805,9 @@ mod tests {
     fn call_expression_rejects_declarations() {
         assert!(!has_call_expression("fn foo(bar: i32) {"));
         assert!(!has_call_expression("def handle_request(self, request):"));
-        assert!(!has_call_expression("function reconcileChildFibers(returnFiber) {"));
+        assert!(!has_call_expression(
+            "function reconcileChildFibers(returnFiber) {"
+        ));
         assert!(!has_call_expression("pub fn query(&self) -> Result<()> {"));
         assert!(!has_call_expression("class MyComponent(Component):"));
     }
@@ -808,7 +829,8 @@ mod tests {
                      deleteChild(returnFiber, currentFirstChild);\n\
                      placeSingleChild(newFiber);\n\
                      return newFiber;\n";
-        let anchor = "fn reconcileChildFibers(returnFiber: Fiber, currentFirstChild: Fiber | null) {";
+        let anchor =
+            "fn reconcileChildFibers(returnFiber: Fiber, currentFirstChild: Fiber | null) {";
         let proof = extract_proof_lines(text, 3, anchor, &[]);
         // Should pick call expressions and return, not parameter declarations
         assert!(

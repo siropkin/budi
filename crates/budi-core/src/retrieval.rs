@@ -894,9 +894,9 @@ pub fn build_query_response(
     let sym_use_thin_caller_skip = intent.kind == QueryIntentKind::SymbolUsage
         && scored.first().is_some_and(|c| {
             !c.reasons.iter().any(|r| r == "sym-usage-def-demote")
-                && runtime.chunk(c.id).is_some_and(|chunk| {
-                    chunk.start_line <= 2 && chunk.end_line <= 15
-                })
+                && runtime
+                    .chunk(c.id)
+                    .is_some_and(|chunk| chunk.start_line <= 2 && chunk.end_line <= 15)
         });
     let ci_skip = ci_skip
         || env_listing_skip
