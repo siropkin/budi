@@ -4,12 +4,12 @@
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting relevant context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
-Across 8 open-source repos with 111 judged prompts (v2.55.0):
+Across 8 open-source repos with 129 judged prompts (v3.0.0):
 
-- **Cost**: 3–32% lower on most repos
-- **Regression rate**: 9% (10/111 judged prompts had quality drops)
-- **Non-regressions**: 91% (101/111 — same or better quality)
-- Per repo: React 16/18, Flask 16/18, ripgrep 13/16, Fastify 17/18, FastAPI 18/18, Django 17/18, Express 4/5
+- **Cost**: 3–32% lower on most repos (up to +6% on repos where budi adds quality)
+- **Regression rate**: 11% (15/129 judged prompts had quality drops)
+- **Non-regressions**: 89% (114/129 — same or better quality)
+- Per repo: React 16/18, Flask 14/18, ripgrep 13/15, Fastify 17/18, FastAPI 18/18, Django 15/18, Terraform 17/18, Express 4/5
 
 HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions. Baseline Claude quality has improved significantly — most prompts score 8–9 without budi, so ties are the expected outcome.
 
@@ -39,6 +39,7 @@ Current prompt sets:
 - `scripts/dev/benchmarks/fastify-v1.prompts.json` — 18 prompts, Fastify source (Node.js)
 - `scripts/dev/benchmarks/fastapi-v1.prompts.json` — 18 prompts, FastAPI source (Python)
 - `scripts/dev/benchmarks/django-v1.prompts.json` — 18 prompts, Django source (Python)
+- `scripts/dev/benchmarks/express-v1.prompts.json` — 5 prompts, Express source (Node.js)
 
 Results are stored in `~/.local/share/budi/repos/<repo>/benchmarks/` per run.
 
@@ -54,13 +55,14 @@ git clone --depth 1 https://github.com/hashicorp/terraform.git ./terraform
 git clone --depth 1 https://github.com/fastify/fastify.git ./fastify
 git clone --depth 1 https://github.com/fastapi/fastapi.git ./fastapi
 git clone --depth 1 https://github.com/django/django.git ./django
+git clone --depth 1 https://github.com/expressjs/express.git ./express
 ```
 
 Index each repo, then run A/B:
 
 ```bash
-budi init --repo-root /absolute/path/react
-budi index --hard --repo-root /absolute/path/react
+cd /absolute/path/react
+budi init --index
 
 python3 scripts/dev/ab_benchmark_runner.py \
   --repo-root "/absolute/path/react" \
