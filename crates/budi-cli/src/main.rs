@@ -380,6 +380,7 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, auto_index: bool) -> Re
     config::ensure_repo_layout(&repo_root)?;
     config::save(&repo_root, &config)?;
     install_hooks(&repo_root)?;
+    install_statusline_if_missing();
 
     if !no_daemon {
         ensure_daemon_running(&repo_root, &config)?;
@@ -2748,10 +2749,6 @@ fn cmd_statusline() -> Result<()> {
                     .get("injections")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let chars = stats
-                    .get("chars_injected")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
                 let confirmed = stats
                     .get("confirmed_reads")
                     .and_then(|v| v.as_u64())
@@ -2780,16 +2777,26 @@ fn cmd_statusline() -> Result<()> {
                 if queries == 0 {
                     println!("\x1b[36mbudi \x1b[32m✓\x1b[0m ready{}", idx_suffix);
                 } else {
-                    let chars_k = chars as f64 / 1000.0;
-                    let mut line = format!(
-                        "\x1b[36mbudi \x1b[33m⚡\x1b[0m {}i/{} · {:.1}k chars",
-                        injections, queries, chars_k
-                    );
+                    let skips = queries.saturating_sub(injections);
+                    let mut parts: Vec<String> = Vec::new();
+                    parts.push(format!(
+                        "{} boosted{}",
+                        injections,
+                        if skips > 0 {
+                            format!(", {} skipped", skips)
+                        } else {
+                            String::new()
+                        }
+                    ));
                     if total_reads > 0 && confirmed > 0 {
                         let hit_pct = confirmed as f64 / total_reads as f64 * 100.0;
-                        line.push_str(&format!(" · {:.0}% hits", hit_pct));
+                        parts.push(format!("{:.0}% accurate", hit_pct));
                     }
-                    line.push_str(&idx_suffix);
+                    let line = format!(
+                        "\x1b[36mbudi \x1b[33m⚡\x1b[0m {}{}",
+                        parts.join(" · "),
+                        idx_suffix
+                    );
                     println!("{}", line);
                 }
             }
@@ -2830,6 +2837,30 @@ fn cmd_statusline_install() -> Result<()> {
         .with_context(|| format!("Failed writing {}", settings_path.display()))?;
     eprintln!("Installed budi status line in {}", settings_path.display());
     Ok(())
+}
+
+fn install_statusline_if_missing() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
+    let existing = settings_path
+        .exists()
+        .then(|| fs::read_to_string(&settings_path).ok())
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+
+    // Don't overwrite an existing statusLine (user may have customized it)
+    if let Some(ref s) = existing
+        && s.get("statusLine").is_some()
+    {
+        return;
+    }
+
+    // Install budi statusline
+    if let Ok(()) = cmd_statusline_install() {
+        eprintln!("Status line: installed in {}", settings_path.display());
+    }
 }
 
 fn install_hooks(repo_root: &Path) -> Result<()> {
