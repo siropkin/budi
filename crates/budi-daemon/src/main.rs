@@ -11,7 +11,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use budi_core::config::{self, BudiConfig, DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
 use budi_core::daemon::DaemonState;
+use budi_core::hooks::{UserPromptSubmitInput, UserPromptSubmitOutput};
 use budi_core::index;
+use budi_core::prompt_controls::{
+    build_runtime_guard_context, evaluate_context_skip, parse_prompt_directives,
+    sanitize_prompt_for_query,
+};
 use budi_core::rpc::{
     IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, PrefetchRequest,
     PrefetchResponse, QueryRequest, QueryResponse, StatusRequest, StatusResponse, UpdateRequest,
@@ -153,6 +158,8 @@ async fn main() -> Result<()> {
         .route("/prefetch-neighbors", post(prefetch_neighbors))
         .route("/stats", get(stats))
         .route("/session-stats", post(session_stats))
+        .route("/hook/prompt-submit", post(hook_prompt_submit))
+        .route("/hook/tool-use", post(hook_tool_use))
         .with_state(app_state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -220,6 +227,138 @@ async fn session_stats(
     } else {
         Json(serde_json::json!({}))
     }
+}
+
+/// HTTP hook endpoint for UserPromptSubmit. Receives Claude Code's hook JSON
+/// directly and returns the UserPromptSubmitOutput, eliminating CLI subprocess overhead.
+async fn hook_prompt_submit(
+    State(state): State<AppState>,
+    Json(input): Json<UserPromptSubmitInput>,
+) -> Json<UserPromptSubmitOutput> {
+    let cwd = PathBuf::from(&input.common.cwd);
+    let session_id = input.common.session_id.clone();
+
+    let repo_root = match config::find_repo_root(&cwd) {
+        Ok(path) => path,
+        Err(_) => return Json(UserPromptSubmitOutput::allow_with_context(String::new())),
+    };
+    let config = match config::load_or_default(&repo_root) {
+        Ok(c) => c,
+        Err(_) => return Json(UserPromptSubmitOutput::allow_with_context(String::new())),
+    };
+
+    let directives = parse_prompt_directives(&input.prompt);
+    if directives.force_skip {
+        return Json(UserPromptSubmitOutput::allow_with_context(String::new()));
+    }
+
+    let sanitized_prompt = sanitize_prompt_for_query(&input.prompt);
+
+    // Ensure autosync is running for this repo.
+    let repo_root_str = repo_root.display().to_string();
+    state
+        .autosync
+        .ensure_repo_started(&repo_root_str, state.daemon_state.clone(), config.clone())
+        .await;
+
+    let request = QueryRequest {
+        repo_root: repo_root_str,
+        prompt: sanitized_prompt,
+        cwd: Some(cwd.display().to_string()),
+        retrieval_mode: None,
+        session_id: Some(session_id),
+    };
+
+    let response = match state.daemon_state.query(request, &config).await {
+        Ok(r) => r,
+        Err(_) => return Json(UserPromptSubmitOutput::allow_with_context(String::new())),
+    };
+
+    let skip_reason = evaluate_context_skip(&config, &directives, &response.diagnostics);
+    let context = if let Some(_skip) = skip_reason {
+        if response.diagnostics.intent == "runtime-config" {
+            build_runtime_guard_context(&response.snippets)
+        } else {
+            String::new()
+        }
+    } else {
+        response.context
+    };
+
+    Json(UserPromptSubmitOutput::allow_with_context(context))
+}
+
+/// HTTP hook endpoint for PostToolUse. Handles Write/Edit (incremental reindex)
+/// and Read/Glob (prefetch neighbors + feedback tracking).
+async fn hook_tool_use(
+    State(state): State<AppState>,
+    Json(input): Json<budi_core::hooks::PostToolUseInput>,
+) -> Json<serde_json::Value> {
+    let tool_name = &input.tool_name;
+    let is_write_edit = tool_name == "Write" || tool_name == "Edit";
+    let is_read = tool_name == "Read" || tool_name == "Glob";
+
+    if !is_write_edit && !is_read {
+        return Json(json!({}));
+    }
+
+    let file_path = input
+        .tool_input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if file_path.is_empty() {
+        return Json(json!({}));
+    }
+
+    let cwd = PathBuf::from(&input.common.cwd);
+    let session_id = input.common.session_id.clone();
+    let repo_root = match config::find_repo_root(&cwd) {
+        Ok(path) => path,
+        Err(_) => return Json(json!({})),
+    };
+    let config = match config::load_or_default(&repo_root) {
+        Ok(c) => c,
+        Err(_) => return Json(json!({})),
+    };
+    let repo_root_str = repo_root.display().to_string();
+    state
+        .autosync
+        .ensure_repo_started(&repo_root_str, state.daemon_state.clone(), config.clone())
+        .await;
+
+    if is_read {
+        let request = PrefetchRequest {
+            repo_root: repo_root_str,
+            file_path,
+            session_id,
+            limit: Some(5),
+        };
+        if let Ok(prefetch) = state
+            .daemon_state
+            .prefetch_neighbors(request, &config)
+            .await
+            && !prefetch.context.is_empty()
+        {
+            return Json(json!({ "systemMessage": prefetch.context }));
+        }
+    } else {
+        // Write/Edit: trigger incremental index update.
+        let request = UpdateRequest {
+            repo_root: repo_root_str,
+            changed_files: vec![file_path],
+        };
+        if let Ok(resp) = state.daemon_state.update(request, &config).await {
+            let msg = format!(
+                "budi indexed {} changed file(s), total chunks={}",
+                resp.changed_files, resp.indexed_chunks
+            );
+            return Json(json!({ "systemMessage": msg }));
+        }
+    }
+
+    Json(json!({}))
 }
 
 async fn query(

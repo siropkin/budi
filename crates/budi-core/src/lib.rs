@@ -5,6 +5,7 @@ pub mod hooks;
 pub mod index;
 mod index_scope;
 pub mod pre_filter;
+pub mod prompt_controls;
 pub mod project_map;
 pub mod reason_codes;
 pub mod repo_plugins;

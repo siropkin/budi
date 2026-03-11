@@ -15,8 +15,9 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "budi hook user-prompt-submit"
+            "type": "http",
+            "url": "http://127.0.0.1:7878/hook/prompt-submit",
+            "timeout": 30
           }
         ]
       }
@@ -26,9 +27,8 @@
         "matcher": "Write|Edit|Read|Glob",
         "hooks": [
           {
-            "type": "command",
-            "command": "budi hook post-tool-use",
-            "async": true,
+            "type": "http",
+            "url": "http://127.0.0.1:7878/hook/tool-use",
             "timeout": 30
           }
         ]

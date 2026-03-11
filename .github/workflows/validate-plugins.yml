@@ -142,8 +142,14 @@ jobs:
 
                   for hook in group["hooks"]:
                       hook_type = hook.get("type")
-                      if hook_type != "command":
-                          raise SystemExit(f"Only command hooks are allowed in budi-hooks plugin, got: {hook_type}")
+                      if hook_type not in ("command", "http"):
+                          raise SystemExit(f"Only command and http hooks are allowed in budi-hooks plugin, got: {hook_type}")
+
+                      if hook_type == "http":
+                          url = hook.get("url", "")
+                          if not url.startswith("http://127.0.0.1:"):
+                              raise SystemExit(f"HTTP hooks must target localhost, got: {url}")
+                          continue
 
                       command = hook.get("command", "")
                       if not command.strip():

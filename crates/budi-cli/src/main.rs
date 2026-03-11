@@ -36,7 +36,8 @@ mod retrieval_eval;
 #[cfg(test)]
 use prompt_controls::PromptDirectives;
 use prompt_controls::{
-    evaluate_context_skip, excerpt, parse_prompt_directives, sanitize_prompt_for_query,
+    build_runtime_guard_context, evaluate_context_skip, excerpt, parse_prompt_directives,
+    sanitize_prompt_for_query,
 };
 use retrieval_eval::{RetrievalEvalReport, load_retrieval_eval_report, run_retrieval_eval};
 
@@ -1389,69 +1390,6 @@ fn format_snippet_channels(item: &QueryResultItem) -> String {
     )
 }
 
-fn runtime_guard_is_non_prod_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.starts_with("test/")
-        || lower.starts_with("tests/")
-        || lower.contains("/test/")
-        || lower.contains("/tests/")
-        || lower.starts_with("examples/")
-        || lower.contains("/examples/")
-        || lower.starts_with("example/")
-        || lower.contains("/example/")
-        || lower.contains("/fixtures/")
-        || lower.contains("/fixture/")
-}
-
-fn build_runtime_guard_context(snippets: &[QueryResultItem]) -> String {
-    let mut selected = Vec::new();
-    let mut seen = HashSet::new();
-    for snippet in snippets {
-        let path = snippet.path.trim();
-        if path.is_empty() {
-            continue;
-        }
-        if runtime_guard_is_non_prod_path(path) {
-            continue;
-        }
-        // Only include snippets with explicit runtime-config signals.
-        let has_runtime_signal = snippet.reasons.iter().any(|r| {
-            r.starts_with("runtime-")
-                || r.starts_with("symbol-hit")
-                || r.starts_with("path-hit")
-                || r.starts_with("graph-hit")
-                || r.starts_with("lexical-hit")
-        });
-        if !has_runtime_signal {
-            continue;
-        }
-        if !seen.insert(path.to_string()) {
-            continue;
-        }
-        selected.push(path.to_string());
-        if selected.len() >= 5 {
-            break;
-        }
-    }
-    if selected.is_empty() {
-        return String::new();
-    }
-    let mut out = String::new();
-    out.push_str("[budi runtime guard]\n");
-    out.push_str("rules:\n");
-    out.push_str("- Use only the file paths listed below.\n");
-    out.push_str(
-        "- Prefer core source files; do not include tests/examples unless explicitly asked.\n",
-    );
-    out.push_str("- If unsure about function names, return file paths only.\n");
-    out.push_str("verified_runtime_paths:\n");
-    for path in selected {
-        out.push_str("- ");
-        out.push_str(&path);
-        out.push('\n');
-    }
-    out
-}
 
 fn persist_retrieval_eval_report(
     repo_root: &Path,
@@ -2438,6 +2376,9 @@ fn cmd_hook_session_start() -> Result<()> {
     let Ok(repo_root) = config::find_repo_root(&cwd) else {
         return Ok(());
     };
+    // Ensure daemon is running so HTTP hooks (UserPromptSubmit, PostToolUse) can reach it.
+    let config = config::load_or_default(&repo_root)?;
+    let _ = ensure_daemon_running(&repo_root, &config);
     let mut message = String::new();
     if let Some(map) = budi_core::project_map::read_project_map(&repo_root) {
         // Cap the map at ~3000 chars to stay within Claude's context budget.
@@ -2928,12 +2869,15 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
       }
     ]);
 
+    let daemon_url = config::BudiConfig::default().daemon_base_url();
+
     settings["hooks"]["UserPromptSubmit"] = json!([
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "budi hook user-prompt-submit"
+            "type": "http",
+            "url": format!("{}/hook/prompt-submit", daemon_url),
+            "timeout": 30
           }
         ]
       }
@@ -2944,9 +2888,8 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
         "matcher": "Write|Edit|Read|Glob",
         "hooks": [
           {
-            "type": "command",
-            "command": "budi hook post-tool-use",
-            "async": true,
+            "type": "http",
+            "url": format!("{}/hook/tool-use", daemon_url),
             "timeout": 30
           }
         ]
