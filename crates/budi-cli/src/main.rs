@@ -1390,7 +1390,6 @@ fn format_snippet_channels(item: &QueryResultItem) -> String {
     )
 }
 
-
 fn persist_retrieval_eval_report(
     repo_root: &Path,
     out_dir: Option<&Path>,
