@@ -124,6 +124,7 @@ struct TestInventoryEntry {
 
 // ── build_query_response ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_query_response(
     runtime: &RuntimeIndex,
     query: &str,
