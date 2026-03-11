@@ -533,6 +533,21 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-boost");
         }
 
+        // TestLookup: penalise non-test source files. "What tests cover Blueprint
+        // registration" should surface test files, not production source that mentions
+        // the concept incidentally. Non-test files like app.py or scaffold.py match
+        // "blueprint" lexically but provide no test coverage information. -0.20 combined
+        // with the +0.15 test-path-boost creates a 0.35 effective gap, pushing source
+        // files below test files in the ranking. Also helps when source files barely
+        // clear the floor — they now need stronger signal to survive.
+        if intent.kind == QueryIntentKind::TestLookup
+            && !is_test_path(&chunk.path)
+            && !is_inline_test_chunk(&chunk.text)
+        {
+            adjusted -= 0.20;
+            push_unique_reason(&mut reasons, "non-test-penalty");
+        }
+
         // TestLookup: demote mock/test-double files. Coverage queries ("what tests cover
         // the plan command") want actual test functions, not mock implementations. Mock
         // files can score high via lexical/symbol matches (they define the same symbols)
