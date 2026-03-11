@@ -2765,10 +2765,7 @@ fn cmd_statusline() -> Result<()> {
                         .get("phase")
                         .and_then(|v| v.as_str())
                         .unwrap_or("indexing");
-                    let pct = idx
-                        .get("percent")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?%");
+                    let pct = idx.get("percent").and_then(|v| v.as_str()).unwrap_or("?%");
                     format!(" \x1b[35m⟳ {} {}\x1b[0m", phase, pct)
                 } else {
                     String::new()

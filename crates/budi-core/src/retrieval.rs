@@ -2372,7 +2372,8 @@ fn is_stub_body(text: &str) -> bool {
         || trimmed_first.starts_with("data class ") // Kotlin
         || trimmed_first.starts_with("sealed class ") // Kotlin
         || trimmed_first.starts_with("object ") // Kotlin/Scala
-        || trimmed_first.starts_with("protocol ") // Swift
+        || trimmed_first.starts_with("protocol ")
+    // Swift
     {
         return false;
     }

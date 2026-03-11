@@ -1247,10 +1247,7 @@ impl DaemonState {
         // Find any actively indexing repo.
         for (repo_key, snap) in guard.iter() {
             if snap.active {
-                let repo_name = repo_key
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(repo_key);
+                let repo_name = repo_key.rsplit('/').next().unwrap_or(repo_key);
                 let pct = if snap.total_files > 0 {
                     snap.processed_files as f64 / snap.total_files as f64 * 100.0
                 } else {
