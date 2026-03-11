@@ -34,21 +34,21 @@ flowchart LR
 
 ## Latest A/B numbers
 
-Across 8 open-source repos (111 judged prompts), compared by an independent LLM judge:
+Across 8 open-source repos (129 judged prompts), compared by an independent LLM judge:
 
 - **3–32% lower cost** on most repos (up to +6% on repos where budi adds quality)
-- **91% regression-free** — same or better quality on 101/111 judged prompts
-- FastAPI: 100% non-regression with 11 quality wins; Django: 94%, −11% cost
-- Remaining 10 regressions concentrated in flow-trace anchoring and broad overview queries (actively being eliminated)
+- **89% regression-free** — same or better quality on 115/129 judged prompts
+- FastAPI: 100% non-regression with 11 quality wins; Terraform: 83%, −32% cost
+- Remaining 14 regressions are mild (Q −1) from HNSW variance on generic symbol names
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting the right context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
 ```mermaid
 pie showData
-    title "Efficiency outcomes (8 repos, 111 judged prompts)"
-    "same quality, lower cost" : 60
-    "better quality" : 31
-    "regression" : 10
+    title "Efficiency outcomes (8 repos, 129 judged prompts)"
+    "same quality, lower cost" : 67
+    "better quality" : 43
+    "regression" : 14
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
@@ -74,8 +74,7 @@ Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
 
 ```bash
 cd /path/to/your/repo
-budi init
-budi index --hard --progress
+budi init --index
 ```
 
 Then use Claude Code normally. `budi` runs silently in the background.
@@ -91,11 +90,10 @@ Then use Claude Code normally. `budi` runs silently in the background.
 ## Useful commands
 
 ```bash
-budi index
-budi index --hard --progress
 budi repo status
 budi repo search "payment validation"
 budi repo preview "why is the payment form failing validation?"
+budi index --hard --progress
 ```
 
 For troubleshooting:
