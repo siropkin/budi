@@ -1180,10 +1180,12 @@ pub fn build_query_response(
     // and card 2 is a longer alt-def (≥3x larger), swap them so the substantive
     // implementation is presented first. "Important info at START" improves LLM attention.
     if intent.kind == QueryIntentKind::SymbolDefinition && selection.snippets.len() >= 2 {
-        let card1_span =
-            selection.snippets[0].end_line.saturating_sub(selection.snippets[0].start_line);
-        let card2_span =
-            selection.snippets[1].end_line.saturating_sub(selection.snippets[1].start_line);
+        let card1_span = selection.snippets[0]
+            .end_line
+            .saturating_sub(selection.snippets[0].start_line);
+        let card2_span = selection.snippets[1]
+            .end_line
+            .saturating_sub(selection.snippets[1].start_line);
         let card2_is_alt_def = selection.snippets[1]
             .reasons
             .iter()
