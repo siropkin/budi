@@ -656,6 +656,16 @@ pub fn build_query_response(
                     adjusted += 0.30;
                     push_unique_reason(&mut reasons, "hint-match-boost");
                 }
+                // Path-relevance tiebreaker: when the query mentions a domain term
+                // (e.g. "URL resolution") and the chunk path contains it (e.g. urls/),
+                // add a small boost to prefer the contextually relevant definition.
+                // Sym-hint-seeded chunks bypass the path channel, so this is the only
+                // way domain context from the query influences their ranking.
+                let path_lower = chunk.path.to_ascii_lowercase();
+                if path_tokens.iter().any(|pt| path_lower.contains(pt.as_str())) {
+                    adjusted += 0.05;
+                    push_unique_reason(&mut reasons, "hint-path-relevance");
+                }
             }
         }
 
@@ -3955,8 +3965,6 @@ fn is_common_short_query_token(token: &str) -> bool {
             | "old"
             | "top"
             | "any"
-            | "url"
-            | "uri"
             | "get"
             | "set"
             | "run"
