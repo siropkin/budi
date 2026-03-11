@@ -16,6 +16,9 @@ pub struct QueryRequest {
     pub retrieval_mode: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When true, return all fused candidates with raw channel scores in diagnostics.
+    #[serde(default)]
+    pub dump_candidates: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +133,20 @@ pub struct QueryDiagnostics {
     pub snippet_ecosystems: Vec<String>,
     pub recommended_injection: bool,
     pub skip_reason: Option<String>,
+    /// All fused candidates with raw channel scores (only populated when dump_candidates=true).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<DiagnosticCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticCandidate {
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub fused_score: f32,
+    pub channel_scores: QueryChannelScores,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -239,6 +239,7 @@ impl DaemonState {
                     snippet_ecosystems: Vec::new(),
                     recommended_injection: false,
                     skip_reason: Some(SKIP_REASON_NON_CODE_INTENT.to_string()),
+                    candidates: Vec::new(),
                 },
             });
         }
@@ -270,6 +271,7 @@ impl DaemonState {
             active_file.as_deref(),
             retrieval_mode,
             config,
+            request.dump_candidates,
         )?;
         drop(runtime_guard);
         let t_retrieval_ms = t_start.elapsed().as_millis() as u64;

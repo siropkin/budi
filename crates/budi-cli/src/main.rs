@@ -2017,6 +2017,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             snippet_ecosystems: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(SKIP_REASON_FORCED_SKIP.to_string()),
+            candidates: Vec::new(),
         };
         log_hook_event(&repo_root, &config, || {
             json!({
@@ -3342,6 +3343,7 @@ fn send_query_request(
             cwd: cwd.map(|p| p.display().to_string()),
             retrieval_mode: retrieval_mode.map(str::to_string),
             session_id: session_id.map(str::to_string),
+            dump_candidates: false,
         })
         .send()
         .context("Failed to send query request")?
@@ -3649,6 +3651,7 @@ mod tests {
             snippet_ecosystems: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
+            candidates: Vec::new(),
         };
         let directives = PromptDirectives::default();
         let skip = evaluate_context_skip(&config, &directives, &diagnostics);
@@ -3678,6 +3681,7 @@ mod tests {
             snippet_ecosystems: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(budi_core::reason_codes::SKIP_REASON_LOW_CONFIDENCE.to_string()),
+            candidates: Vec::new(),
         };
         let directives = PromptDirectives {
             force_skip: false,
@@ -3707,6 +3711,7 @@ mod tests {
             snippet_ecosystems: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
+            candidates: Vec::new(),
         };
         let directives = PromptDirectives {
             force_skip: true,

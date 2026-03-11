@@ -12,7 +12,9 @@ use crate::repo_plugins::{
     detect_query_ecosystems, ecosystem_tags_for_chunk, extract_chunk_line_with_needle,
     find_symbol_chunk, inject_context_plugins, push_compact_evidence_line,
 };
-use crate::rpc::{QueryChannelScores, QueryDiagnostics, QueryResponse, QueryResultItem};
+use crate::rpc::{
+    DiagnosticCandidate, QueryChannelScores, QueryDiagnostics, QueryResponse, QueryResultItem,
+};
 use context::{SnippetSelectionState, build_context, path_diversity_bucket, snippet_fingerprint};
 
 mod context;
@@ -130,6 +132,7 @@ pub fn build_query_response(
     active_file: Option<&str>, // Repo-relative path of the last edited/read file.
     retrieval_mode: RetrievalMode,
     config: &BudiConfig,
+    dump_candidates: bool,
 ) -> Result<QueryResponse> {
     let kind = classify_intent(query);
     let intent = QueryIntent {
@@ -233,6 +236,29 @@ pub fn build_query_response(
     };
 
     let mut fused = fuse_channel_scores(&lexical, &vector, &symbol, &path, &graph, &intent);
+
+    // Snapshot raw fused candidates before boosts/demotions for diagnostic dump.
+    let diagnostic_candidates: Vec<DiagnosticCandidate> = if dump_candidates {
+        let mut candidates: Vec<_> = fused
+            .iter()
+            .filter_map(|(id, cs)| {
+                let chunk = runtime.chunk(*id)?;
+                Some(DiagnosticCandidate {
+                    path: chunk.path.clone(),
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    fused_score: cs.score,
+                    channel_scores: cs.channel_scores,
+                    symbol_hint: chunk.symbol_hint.clone(),
+                })
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.fused_score.partial_cmp(&a.fused_score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(100); // Top 100 is enough for analysis
+        candidates
+    } else {
+        Vec::new()
+    };
 
     // For TestLookup, inject inline-test chunks co-located with top results.
     // Problem: inline test blocks (e.g., Rust #[cfg(test)]) may not rank in
@@ -783,15 +809,18 @@ pub fn build_query_response(
             }
         }
 
-        // Pure-lexical demotion for FlowTrace and SymbolUsage. Chunks matching only
-        // on common-word lexical hits (e.g. "call", "return", "does", "root") with zero
-        // semantic/symbol/graph signal are usually noise. Real callers/callees should have
-        // at least some vector similarity or graph connection.
+        // Pure-lexical demotion for FlowTrace, SymbolUsage, and RuntimeConfig.
+        // Chunks matching only on common-word lexical hits (e.g. "call", "return",
+        // "config", "env") with zero semantic/symbol/graph signal are usually noise.
         // FlowTrace: "What functions does get_response call?" → `describe()` in migrations.
         // SymbolUsage: "What calls performSyncWorkOnRoot" → compiler/index.ts single line.
+        // RuntimeConfig: "ripgrep config file" → gitignore.rs (has "config" keyword but
+        //   zero vector similarity to actual config loading code).
         if matches!(
             intent.kind,
-            QueryIntentKind::FlowTrace | QueryIntentKind::SymbolUsage
+            QueryIntentKind::FlowTrace
+                | QueryIntentKind::SymbolUsage
+                | QueryIntentKind::RuntimeConfig
         ) && channel_scores.lexical > 0.0
             && channel_scores.vector == 0.0
             && channel_scores.symbol == 0.0
@@ -1502,6 +1531,7 @@ pub fn build_query_response(
         } else {
             None
         },
+        candidates: diagnostic_candidates,
     };
 
     let query_tokens = extract_query_proof_tokens(query);
@@ -5884,6 +5914,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert!(
@@ -5900,6 +5931,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         // Targeted query may or may not inject depending on HNSW scores,
@@ -5976,6 +6008,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert_eq!(
@@ -6043,6 +6076,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         let top = response.snippets.first().expect("top snippet");
@@ -6234,6 +6268,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert!(
@@ -6353,6 +6388,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert!(
@@ -6437,6 +6473,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         let first = response.snippets.first().expect("at least one snippet");
@@ -6532,6 +6569,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         let first = response.snippets.first().expect("at least one snippet");
@@ -6583,6 +6621,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert!(
@@ -6626,6 +6665,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert!(
@@ -6975,6 +7015,7 @@ it("renders", () => {})
             None,
             RetrievalMode::Hybrid,
             &config,
+            false,
         )
         .expect("query response");
         assert!(
