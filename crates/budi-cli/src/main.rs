@@ -2761,8 +2761,24 @@ fn cmd_statusline() -> Result<()> {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
 
+                // Check if indexing is active
+                let indexing = stats.get("indexing");
+                let idx_suffix = if let Some(idx) = indexing {
+                    let phase = idx
+                        .get("phase")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("indexing");
+                    let pct = idx
+                        .get("percent")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?%");
+                    format!(" \x1b[35m⟳ {} {}\x1b[0m", phase, pct)
+                } else {
+                    String::new()
+                };
+
                 if queries == 0 {
-                    println!("\x1b[36mbudi \x1b[32m✓\x1b[0m ready");
+                    println!("\x1b[36mbudi \x1b[32m✓\x1b[0m ready{}", idx_suffix);
                 } else {
                     let chars_k = chars as f64 / 1000.0;
                     let mut line = format!(
@@ -2773,6 +2789,7 @@ fn cmd_statusline() -> Result<()> {
                         let hit_pct = confirmed as f64 / total_reads as f64 * 100.0;
                         line.push_str(&format!(" · {:.0}% hits", hit_pct));
                     }
+                    line.push_str(&idx_suffix);
                     println!("{}", line);
                 }
             }

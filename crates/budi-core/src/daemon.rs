@@ -1241,6 +1241,33 @@ impl DaemonState {
         )
     }
 
+    /// Returns a compact summary of indexing state across all repos.
+    pub fn indexing_summary(&self) -> Option<serde_json::Value> {
+        let guard = self.progress_guard();
+        // Find any actively indexing repo.
+        for (repo_key, snap) in guard.iter() {
+            if snap.active {
+                let repo_name = repo_key
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(repo_key);
+                let pct = if snap.total_files > 0 {
+                    snap.processed_files as f64 / snap.total_files as f64 * 100.0
+                } else {
+                    0.0
+                };
+                return Some(serde_json::json!({
+                    "active": true,
+                    "repo": repo_name,
+                    "phase": snap.phase,
+                    "progress": format!("{}/{}", snap.processed_files, snap.total_files),
+                    "percent": format!("{:.0}%", pct),
+                }));
+            }
+        }
+        None
+    }
+
     /// Returns per-session stats for a given session_id, or None if the session doesn't exist.
     pub fn session_stats(&self, session_id: &str) -> Option<SessionStatsSnapshot> {
         let guard = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
