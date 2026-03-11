@@ -1054,14 +1054,22 @@ pub fn build_query_response(
         // Track when a wrong-symbol continuation is blocked so we can also drop
         // the noisy foreign card 2 instead of leaving it in place.
         let mut wrong_symbol_continuation_blocked = false;
+        // When card 1 is a short definition (≤10 lines, e.g. class preamble) with no
+        // card 2, always inject the adjacent continuation to give Claude the class body.
+        let mut short_def_append = false;
         let continuation = selection.snippets.first().and_then(|def_item| {
             let def_path = def_item.path.clone();
             let def_start = def_item.start_line;
             let def_score = def_item.score;
             let card2 = selection.snippets.get(1);
             let has_foreign_card2 = card2.is_some_and(|s| s.path != def_path);
-            if !has_foreign_card2 {
+            let is_short_def = def_item.end_line.saturating_sub(def_item.start_line) <= 10;
+            if !has_foreign_card2 && !is_short_def {
                 return None;
+            }
+            if !has_foreign_card2 && is_short_def {
+                // No card 2 — append continuation instead of replacing.
+                short_def_append = true;
             }
             // If card 2 has hint-match-boost, it's an alternative definition
             // of the same symbol from a different file (e.g. Flask.make_response in app.py
@@ -1082,7 +1090,10 @@ pub fn build_query_response(
             // needs `cont` to synthesize the implementation card regardless of its symbol_hint).
             // Example: if the adjacent chunk starts a different function, injecting it
             // pollutes the answer with unrelated implementation details.
-            if !card2_is_alt_def
+            // Exception: short class preambles — the continuation is naturally the class body
+            // (e.g. __init__) whose symbol_hint differs from the class name.
+            if !is_short_def
+                && !card2_is_alt_def
                 && !exact_match_symbol_tokens.is_empty()
                 && let Some(cont_sym) = cont.symbol_hint.as_deref()
             {
@@ -1122,9 +1133,14 @@ pub fn build_query_response(
             })
         });
         if let Some(cont_item) = continuation {
-            // Replace card 2 (foreign call site) with the continuation of the function body.
-            selection.snippets.truncate(1);
-            selection.snippets.push(cont_item);
+            if short_def_append {
+                // Short definition (class preamble) with no card 2: append continuation.
+                selection.snippets.push(cont_item);
+            } else {
+                // Replace card 2 (foreign call site) with the continuation of the function body.
+                selection.snippets.truncate(1);
+                selection.snippets.push(cont_item);
+            }
         } else if wrong_symbol_continuation_blocked {
             // The wrong-symbol continuation was blocked; the foreign card 2
             // is also noise (e.g. devtools type definition when querying for a WorkLoop fn).
@@ -2100,6 +2116,21 @@ fn is_go_test_helper_chunk(text: &str) -> bool {
 /// These are not useful definitions for SymbolDefinition queries — the real implementation
 /// lives elsewhere and Claude should find it instead of getting anchored on the stub.
 fn is_stub_body(text: &str) -> bool {
+    // Class/struct preamble chunks are NOT stubs — they're the start of large types.
+    let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed_first = first_line.trim();
+    if trimmed_first.starts_with("class ")
+        || trimmed_first.starts_with("struct ")
+        || trimmed_first.starts_with("pub struct ")
+        || trimmed_first.starts_with("pub(crate) struct ")
+        || trimmed_first.starts_with("interface ")
+        || trimmed_first.starts_with("pub trait ")
+        || trimmed_first.starts_with("trait ")
+        || trimmed_first.starts_with("enum ")
+        || trimmed_first.starts_with("pub enum ")
+    {
+        return false;
+    }
     let lower = text.to_ascii_lowercase();
     // Explicit stub markers across languages
     if lower.contains("not implemented")
@@ -6476,6 +6507,22 @@ it("renders", () => {})
 	return plan, diags
 }"#;
         assert!(!is_stub_body(text));
+    }
+
+    #[test]
+    fn is_stub_body_rejects_class_preamble() {
+        // Python class with docstring — class preamble, NOT a stub
+        assert!(!is_stub_body(
+            "class QuerySet(AltersData):\n    \"\"\"Represent a lazy database lookup for a set of objects.\"\"\""
+        ));
+        // Rust struct with fields
+        assert!(!is_stub_body(
+            "pub struct Config {\n    pub name: String,\n}"
+        ));
+        // Bare class line
+        assert!(!is_stub_body("class Engine:\n    pass"));
+        // Interface
+        assert!(!is_stub_body("interface Resolver {\n}"));
     }
 
     #[test]
