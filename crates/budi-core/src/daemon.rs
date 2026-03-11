@@ -34,7 +34,7 @@ struct SessionState {
     active_file: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DaemonState {
     repos: Arc<RwLock<HashMap<String, Arc<Mutex<RuntimeIndex>>>>>,
     load_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -46,6 +46,28 @@ pub struct DaemonState {
     update_metrics: Arc<StdMutex<HashMap<String, UpdateRetryMetrics>>>,
     job_counter: Arc<StdMutex<u64>>,
     sessions: Arc<StdMutex<HashMap<String, SessionState>>>,
+    /// Global semaphore limiting concurrent index builds across all repos.
+    /// Embedding uses ~6-10GB of memory on Apple Silicon, so running multiple
+    /// index builds simultaneously causes OOM crashes.
+    global_index_semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self {
+            repos: Default::default(),
+            load_locks: Default::default(),
+            index_locks: Default::default(),
+            update_locks: Default::default(),
+            queued_updates: Default::default(),
+            queued_reconciles: Default::default(),
+            progress: Default::default(),
+            update_metrics: Default::default(),
+            job_counter: Default::default(),
+            sessions: Default::default(),
+            global_index_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -690,6 +712,9 @@ impl DaemonState {
     ) {
         let repo_key = request.repo_root.clone();
         let hard = request.hard;
+        // Acquire the global semaphore to prevent multiple repos from being
+        // indexed simultaneously, which causes OOM from ONNX embedding memory.
+        let _global_permit = self.global_index_semaphore.acquire().await;
         self.mark_progress_running(&repo_key, hard, &job_id);
 
         let build_options = index::IndexBuildOptions {
