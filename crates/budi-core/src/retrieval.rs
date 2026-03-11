@@ -1231,6 +1231,10 @@ pub fn build_query_response(
     // Card 2 is a different definition in an unrelated domain (e.g. template/base.py:resolve
     // when the query is about URL resolution). Drop it — one focused card is better than
     // one relevant + one noisy.
+    // Guard: only prune when cards are from DIFFERENT path-diversity buckets (different
+    // high-level directories). Same-bucket cards are likely related definitions — e.g.
+    // Flask's Scaffold.register_blueprint (sansio/blueprints.py) and App.register_blueprint
+    // (app.py) are both in src/flask/ and the override is the primary implementation.
     if intent.kind == QueryIntentKind::SymbolDefinition && selection.snippets.len() >= 2 {
         let card1_has_path_rel = selection.snippets[0]
             .reasons
@@ -1244,7 +1248,9 @@ pub fn build_query_response(
             .reasons
             .iter()
             .any(|r| r == "hint-path-relevance");
-        if card1_has_path_rel && card2_has_hint_boost && !card2_has_path_rel {
+        let different_buckets = context::path_diversity_bucket(&selection.snippets[0].path)
+            != context::path_diversity_bucket(&selection.snippets[1].path);
+        if card1_has_path_rel && card2_has_hint_boost && !card2_has_path_rel && different_buckets {
             selection.snippets.truncate(1);
         }
     }
