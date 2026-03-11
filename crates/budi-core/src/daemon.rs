@@ -34,6 +34,17 @@ struct SessionState {
     active_file: Option<String>,
 }
 
+/// Lightweight query counters for visibility into daemon activity.
+/// Reset on daemon restart (not persisted).
+#[derive(Default)]
+pub struct QueryStats {
+    pub queries: u64,
+    pub injections: u64,
+    pub skips: u64,
+    pub chars_injected: u64,
+    pub prefetches: u64,
+}
+
 #[derive(Clone)]
 pub struct DaemonState {
     repos: Arc<RwLock<HashMap<String, Arc<Mutex<RuntimeIndex>>>>>,
@@ -46,6 +57,7 @@ pub struct DaemonState {
     update_metrics: Arc<StdMutex<HashMap<String, UpdateRetryMetrics>>>,
     job_counter: Arc<StdMutex<u64>>,
     sessions: Arc<StdMutex<HashMap<String, SessionState>>>,
+    query_stats: Arc<StdMutex<QueryStats>>,
     /// Global semaphore limiting concurrent index builds across all repos.
     /// Embedding uses ~6-10GB of memory on Apple Silicon, so running multiple
     /// index builds simultaneously causes OOM crashes.
@@ -65,6 +77,7 @@ impl Default for DaemonState {
             update_metrics: Default::default(),
             job_counter: Default::default(),
             sessions: Default::default(),
+            query_stats: Default::default(),
             global_index_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
@@ -332,6 +345,18 @@ impl DaemonState {
         };
         response.call_graph_summary = call_graph;
 
+        // Update query stats.
+        {
+            let mut stats = self.query_stats.lock().unwrap();
+            stats.queries += 1;
+            if should_inject {
+                stats.injections += 1;
+                stats.chars_injected += response.context.len() as u64;
+            } else {
+                stats.skips += 1;
+            }
+        }
+
         // Record injected snippets in session state.
         if should_inject {
             if let Some(ref sid) = request.session_id {
@@ -400,6 +425,12 @@ impl DaemonState {
         drop(runtime_guard);
 
         let neighbor_paths: Vec<String> = snippets.iter().map(|s| s.path.clone()).collect();
+
+        // Update prefetch stats.
+        {
+            let mut stats = self.query_stats.lock().unwrap();
+            stats.prefetches += 1;
+        }
 
         // Record the source file and injected neighbors in the session.
         self.record_session_path(&request.session_id, &request.file_path);
@@ -1135,6 +1166,18 @@ impl DaemonState {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    /// Returns a snapshot of query activity counters.
+    pub fn query_stats_snapshot(&self) -> (u64, u64, u64, u64, u64) {
+        let stats = self.query_stats.lock().unwrap();
+        (
+            stats.queries,
+            stats.injections,
+            stats.skips,
+            stats.chars_injected,
+            stats.prefetches,
+        )
     }
 
     fn sessions_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionState>> {

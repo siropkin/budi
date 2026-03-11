@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
         .route("/update", post(update_repo))
         .route("/status", post(status_repo))
         .route("/prefetch-neighbors", post(prefetch_neighbors))
+        .route("/stats", get(stats))
         .with_state(app_state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -182,6 +183,19 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "watch_events_accepted": watch_events_accepted,
         "watch_events_dropped": watch_events_dropped,
         "watch_events_by_repo": watcher_events,
+    }))
+}
+
+async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (queries, injections, skips, chars_injected, prefetches) =
+        state.daemon_state.query_stats_snapshot();
+    Json(json!({
+        "queries": queries,
+        "injections": injections,
+        "skips": skips,
+        "chars_injected": chars_injected,
+        "prefetches": prefetches,
+        "injection_rate": if queries > 0 { format!("{:.0}%", injections as f64 / queries as f64 * 100.0) } else { "n/a".to_string() },
     }))
 }
 

@@ -1470,7 +1470,7 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
     let index_db_bytes = fs::metadata(&index_db_path).map(|m| m.len()).unwrap_or(0);
 
     if json_output {
-        let payload = json!({
+        let mut payload = json!({
             "repo_root": repo_root.display().to_string(),
             "daemon_healthy": daemon_healthy,
             "hooks_detected": hooks_detected,
@@ -1488,6 +1488,9 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
             "tantivy_dir": tantivy_path.display().to_string(),
             "tantivy_exists": tantivy_path.exists(),
         });
+        if daemon_healthy && let Some(stats) = fetch_daemon_stats(&config) {
+            payload["daemon_stats"] = stats;
+        }
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
@@ -1514,6 +1517,43 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
         tantivy_path.display(),
         tantivy_path.exists()
     );
+
+    // Show daemon query activity stats if available.
+    if daemon_healthy && let Some(stats) = fetch_daemon_stats(&config) {
+        println!("\n-- daemon activity (since last restart) --");
+        println!(
+            "queries: {}",
+            stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0)
+        );
+        println!(
+            "injections: {}",
+            stats
+                .get("injections")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
+        println!(
+            "skips: {}",
+            stats.get("skips").and_then(|v| v.as_u64()).unwrap_or(0)
+        );
+        println!(
+            "chars injected: {}",
+            stats
+                .get("chars_injected")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
+        println!(
+            "prefetches: {}",
+            stats
+                .get("prefetches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
+        if let Some(rate) = stats.get("injection_rate").and_then(|v| v.as_str()) {
+            println!("injection rate: {}", rate);
+        }
+    }
     Ok(())
 }
 
@@ -2770,6 +2810,16 @@ where
             let _ = file.write_all(&serialized);
         }
     }
+}
+
+fn fetch_daemon_stats(config: &BudiConfig) -> Option<serde_json::Value> {
+    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
+    let url = format!("{}/stats", config.daemon_base_url());
+    client
+        .get(url)
+        .send()
+        .ok()
+        .and_then(|r| r.json::<serde_json::Value>().ok())
 }
 
 fn daemon_health(config: &BudiConfig) -> bool {
