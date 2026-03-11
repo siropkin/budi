@@ -3,6 +3,7 @@ members = [
     "crates/budi-cli",
     "crates/budi-core",
     "crates/budi-daemon",
+    "crates/budi-mcp",
 ]
 resolver = "2"
 
