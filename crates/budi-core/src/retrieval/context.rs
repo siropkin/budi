@@ -201,7 +201,34 @@ fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> St
     out
 }
 
+/// Returns true for decorator/attribute lines that should be skipped when picking an anchor.
+/// Covers Python decorators (@foo), Rust attributes (#[foo]), Java/TS annotations (@Override).
+fn is_decorator_or_attribute(trimmed: &str) -> bool {
+    // Python decorators: @foo, @foo.bar, @foo(args)
+    if trimmed.starts_with('@') {
+        return true;
+    }
+    // Rust outer attributes: #[derive(...)], #[cfg(...)]
+    if trimmed.starts_with("#[") {
+        return true;
+    }
+    false
+}
+
 fn extract_anchor_line(text: &str) -> String {
+    for raw_line in text.lines() {
+        let line = sanitize_evidence_line(raw_line);
+        if line.is_empty() || is_comment_only_line(line.as_str()) {
+            continue;
+        }
+        // Skip decorator/attribute lines — prefer the function/class definition below
+        let trimmed = line.trim();
+        if is_decorator_or_attribute(trimmed) {
+            continue;
+        }
+        return line;
+    }
+    // Fallback: return the first non-empty non-comment line even if it's a decorator
     for raw_line in text.lines() {
         let line = sanitize_evidence_line(raw_line);
         if line.is_empty() || is_comment_only_line(line.as_str()) {
@@ -927,5 +954,44 @@ mod tests {
         let a = snippet_fingerprint("fn foo() {}");
         let b = snippet_fingerprint("fn bar() {}");
         assert_ne!(a, b);
+    }
+
+    // ── extract_anchor_line ──────────────────────────────────────────────────
+
+    #[test]
+    fn anchor_skips_python_decorator() {
+        let text = "@setupmethod\ndef register_blueprint(self, blueprint):\n    pass";
+        let anchor = extract_anchor_line(text);
+        assert!(
+            anchor.contains("def register_blueprint"),
+            "expected function def, got: {anchor}"
+        );
+    }
+
+    #[test]
+    fn anchor_skips_decorator_with_args() {
+        let text = "@app.route(\"/foo\")\ndef index():\n    return 'hello'";
+        let anchor = extract_anchor_line(text);
+        assert!(
+            anchor.contains("def index"),
+            "expected function def, got: {anchor}"
+        );
+    }
+
+    #[test]
+    fn anchor_skips_rust_attribute() {
+        let text = "#[derive(Debug, Clone)]\npub struct Config {\n    name: String,\n}";
+        let anchor = extract_anchor_line(text);
+        assert!(
+            anchor.contains("pub struct Config"),
+            "expected struct def, got: {anchor}"
+        );
+    }
+
+    #[test]
+    fn anchor_falls_back_to_decorator_if_nothing_else() {
+        let text = "@decorator_only";
+        let anchor = extract_anchor_line(text);
+        assert_eq!(anchor, "@decorator_only");
     }
 }
