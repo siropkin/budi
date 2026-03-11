@@ -886,19 +886,33 @@ pub fn build_query_response(
     // is harder to distinguish from valid results without over-skipping.
     let sym_use_low_confidence_skip = intent.kind == QueryIntentKind::SymbolUsage
         && scored.first().is_some_and(|c| c.score < 0.28);
+    // SymbolUsage thin-caller skip: when the top non-definition card spans a
+    // very short file (start_line <= 2, end_line <= 15), the caller is likely a
+    // boilerplate entry point (__main__.py, main.rs wrapper). Such trivial call
+    // sites anchor Claude on the obvious answer instead of exploring richer callers.
+    // Django P8: __main__.py:1-10 calls execute_from_command_line (Q 9→5).
+    let sym_use_thin_caller_skip = intent.kind == QueryIntentKind::SymbolUsage
+        && scored.first().is_some_and(|c| {
+            !c.reasons.iter().any(|r| r == "sym-usage-def-demote")
+                && runtime.chunk(c.id).is_some_and(|chunk| {
+                    chunk.start_line <= 2 && chunk.end_line <= 15
+                })
+        });
     let ci_skip = ci_skip
         || env_listing_skip
         || lifecycle_overview_skip
         || test_coverage_skip
         || entry_points_skip
         || module_layout_skip
-        || sym_use_low_confidence_skip;
+        || sym_use_low_confidence_skip
+        || sym_use_thin_caller_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
         || test_coverage_skip
         || entry_points_skip
         || module_layout_skip
         || sym_use_low_confidence_skip
+        || sym_use_thin_caller_skip
     {
         f32::MAX
     } else if ci_skip {
