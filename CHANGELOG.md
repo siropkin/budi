@@ -2,6 +2,41 @@
 
 All notable changes to budi are documented here.
 
+## [3.2.0] — Smarter Indexing & Hooks
+
+HTTP hooks, BM25 identifier splitting, 5 new language grammars, and incremental index updates.
+
+### New features
+
+- **HTTP hooks**: UserPromptSubmit and PostToolUse hooks now use HTTP instead of CLI subprocesses, eliminating ~50-100ms per-prompt overhead
+- **BM25 identifier splitting**: camelCase/PascalCase/snake_case identifiers split into lowercase words for better natural-language matching (e.g. "LiveVideo" → "live video")
+- **Cross-encoder reranker** (opt-in): ms-marco-MiniLM-L-6-v2 ONNX int8 reranker, disabled by default. Config: `reranker_enabled`, `reranker_alpha`
+- **Incremental index updates**: `apply_delta()` inserts new embeddings into existing HNSW graph instead of full rebuild (2.5x faster for single-file changes)
+- **Git worktree support**: All worktrees share one index directory
+- **5 new language grammars**: Ruby, Kotlin, Swift, Scala, PHP now have AST-aware chunking (13 languages total)
+- **Local budiignore**: Per-repo `budiignore.local` stored in budi's data dir (no repo changes needed)
+- **Status line**: `budi statusline` shows live stats in Claude Code status bar
+
+### Retrieval improvements
+
+- i18n `defineMessages()` demotion (-0.25) for React monorepos
+- ESLint plugin path penalty extended
+- TypeScript interface/struct/enum proof lines now extract property names
+- Daemon hook error logging for silent failures
+
+### Fixes
+
+- Status line alignment with Claude Code (padding 1 → 0)
+- Doctor no longer shows `[!!]` for optional config file
+- Removed unused Ollama install from install.sh
+- Fixed `embedding_batch_size` default in docs (96 → 32)
+
+### Benchmark state
+
+- 91% non-regression rate across 131 judged prompts (8 repos)
+- BM25 identifier splitting validated: no new regressions, 26-37% cost savings on focused sweep
+- Cross-encoder reranker evaluated at alpha=0.5: inflates scores but doesn't reliably improve rankings (needs code-aware base model)
+
 ## [3.1.0] — Polish & Precision
 
 Post-v3.0.0 quality improvements, new features, and better project maps.

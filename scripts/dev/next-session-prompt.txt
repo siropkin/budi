@@ -1,39 +1,54 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (post-v3.1.0, 2026-03-11)
+## Current state (v3.2.0, 2026-03-11)
 
-- Branch: main, CI green, all 292 tests pass (267 budi-core + 21 budi-cli + 4 budi-daemon)
+- Branch: main, CI green (all checks pass), all 307 tests pass (282 budi-core + 21 budi-cli + 4 budi-daemon)
 - Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (freshly copied from release build)
 - 0 clippy warnings
-- v3.1.0 released + 10 post-release commits on main
-- 18 repos in ~/.local/share/budi/repos/ (cleaned from 128)
+- v3.2.0 released (41 commits since v3.1.0)
+- All 8 benchmark repos freshly re-indexed with BM25 identifier splitting
+- Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 
-## What was done in the last session
+## What was done in this session (session 7, 2026-03-11)
 
-All committed and pushed to main, CI green:
-1. Indexing robustness (#37): incremental HNSW delta updates (2.5x faster), git worktree index sharing, timing instrumentation (bb2e707 + c0db6d6)
-2. README overhaul (#38): restructured following top GitHub repo patterns — bold-noun feature bullets, comparison anchor tagline, mermaid charts removed, 171→112 lines (9e53e87)
-3. Status line alignment (#40): padding 1→0 so budi aligns with Claude Code's built-in lines (5fef8f3)
-4. Doctor UX fix: optional config.toml no longer shows [!!], shows "using defaults" instead (5e11a11)
-5. Install docs fix: README curl-pipe-to-bash didn't work, fixed to clone-then-run (f4d98d6)
-6. MCP docs: added MCP server section to docs/configuration.md
-7. Repo hygiene: cleaned 110 stale test repos (128→18)
+### 1. Reranker full evaluation (alpha=0.5, Flask 18 prompts) — DONE
+Compared retrieval results on all 18 Flask prompts with and without cross-encoder reranker at alpha=0.5:
+- **Score inflation**: Reranker inflates top scores by +0.15-0.25 (e.g. P3: 0.76→0.92, P10: 0.46→0.71)
+- **Ranking changes on 5/18 prompts**: P4 (added card 2), P6 (scaffold promoted), P7 (test file above floor), P8 (REGRESSION: definition over callers), P18 (order swapped)
+- **P8 regression**: For "What calls dispatch_request", reranker promotes the dispatch_request DEFINITION (score 0.59) above actual callers (0.36 without reranker). Cross-encoder can't distinguish definitions from call sites.
+- **Conclusion**: Fine-tuned model (AP 0.62) lacks discriminative power. Needs code-aware base model (CodeBERT/UniXcoder) or better training data. Reranker remains disabled by default.
+
+### 2. HNSW non-determinism root cause — FOUND (no fix yet)
+- fastembed uses `available_parallelism()` (all CPUs) as ONNX `intra_threads`, causing non-deterministic floating-point results
+- Found in `/Users/ivan.seredkin/.cargo/registry/src/.../fastembed-5.11.0/src/text_embedding/impl.rs`: `let threads = available_parallelism()?.get(); .with_intra_threads(threads)?`
+- fastembed's `InitOptions` doesn't expose thread count control
+- Fix requires either forking fastembed or finding an alternative approach
+
+### 3. v3.2.0 release — DONE
+Bumped version, wrote changelog, built release, installed binaries.
+
+### 4. Stale test repo cleanup — DONE
+Cleaned 30 stale test repos (45→15 entries).
 
 ## Priority queue for next session
 
-### 1. Demo GIF/asciicast for README — QUICK WIN
-README has a placeholder `<!-- TODO: Add demo GIF/asciicast -->`. Record a terminal demo showing budi in action: init, query, injection, status line. Tools: asciinema or vhs (charmbracelet/vhs).
+### 1. Try CodeBERT as reranker base — HIGH
+The ms-marco-MiniLM-L-6-v2 AP only improved +3.6% after fine-tuning. A code-aware base model (CodeBERT, UniXcoder, CodeSage) should achieve much higher AP since the base representations already understand code structure. The fine-tuning pipeline is ready (`scripts/dev/reranker_finetune.py`).
 
-### 2. Verkada-Web real-world validation (#39) — MEDIUM PRIORITY
-Install latest budi on a large production TS monorepo. Index, use for real dev work, collect stats (injection rate, accuracy, read hit rate, cost). The ultimate product readiness test. Do this now that indexing robustness (#37) is done.
+### 2. nomic-embed-code evaluation — HIGH
+Apache-2.0, outperforms voyage-code-3 on CodeSearchNet. GGUF Q4_K_M ~4GB. Better embeddings would improve vector channel quality across all repos. Investigate integration path (ONNX? ggml?).
 
-### 3. Lightweight reranker (#32) — STRATEGIC
-Small cross-encoder over top-N candidates could replace many hand-tuned score floors. 131-prompt benchmark dataset = ready-made eval set. Research: ms-marco-MiniLM-L-6-v2 (80MB ONNX) or code-specific alternatives.
+### 3. Train retrieval weights from benchmark data (#33) — MEDIUM
+131 labeled prompts as training set for `weights_for_intent()`. Would need to build tooling to capture per-candidate channel scores during retrieval.
 
-## Other items still on the backlog
-- HTTP hooks migration (eliminate CLI subprocess overhead)
-- nomic-embed-code (7B) evaluation (better local embeddings)
+### 4. HNSW cold-cache warmup — MEDIUM
+Mitigation for embedding non-determinism: run a warmup query on daemon startup.
+
+### 5. Full 8-repo revalidation — LOW
+Run full benchmarks on all 8 repos to update the plan's baseline numbers.
+
+## Other items on the backlog
 - Benchmark against Augment Context Engine MCP
-- Impact analysis / git-blame indexing
-- Train retrieval weights from 131-prompt benchmark data
+- Impact analysis / git-blame indexing (#34)
+- Verkada-Web daily-driver usage (collect real stats)
