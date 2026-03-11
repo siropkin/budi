@@ -955,6 +955,22 @@ pub fn build_query_response(
                     .chunk(c.id)
                     .is_some_and(|chunk| chunk.start_line <= 2 && chunk.end_line <= 15)
         });
+    // FlowTrace callee-query skip: "What functions does X call and what does each return?"
+    // When a thin delegation function is found (≤25 lines), the injection shows only the
+    // wrapper — Claude anchors on 1-2 direct calls instead of exploring transitive callees.
+    // React P7: reconcileChildFibers (77 lines, delegates to Impl). Django P7: get_response
+    // (14 lines, delegates to _middleware_chain). Both Q -2/-3 persistent regressions.
+    let flowtrace_callee_skip = intent.kind == QueryIntentKind::FlowTrace
+        && {
+            let lq = query.to_lowercase();
+            (lq.contains("what functions does") || lq.contains("what does"))
+                && (lq.contains("call") && lq.contains("return"))
+        }
+        && scored.first().is_some_and(|c| {
+            runtime
+                .chunk(c.id)
+                .is_some_and(|chunk| chunk.end_line.saturating_sub(chunk.start_line) <= 80)
+        });
     let ci_skip = ci_skip
         || env_listing_skip
         || lifecycle_overview_skip
@@ -962,7 +978,8 @@ pub fn build_query_response(
         || entry_points_skip
         || module_layout_skip
         || sym_use_low_confidence_skip
-        || sym_use_thin_caller_skip;
+        || sym_use_thin_caller_skip
+        || flowtrace_callee_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
         || test_coverage_skip
@@ -970,6 +987,7 @@ pub fn build_query_response(
         || module_layout_skip
         || sym_use_low_confidence_skip
         || sym_use_thin_caller_skip
+        || flowtrace_callee_skip
     {
         f32::MAX
     } else if ci_skip {
