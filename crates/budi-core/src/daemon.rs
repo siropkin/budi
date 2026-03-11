@@ -1509,6 +1509,44 @@ impl DaemonState {
                     scoped_changed_files.len()
                 );
             }
+
+            // Use incremental delta when we have an existing runtime and either:
+            // - The update was from a file hint (PostToolUse hooks), or
+            // - A reconcile found only a small number of changed files (< 5% of total)
+            // This avoids rebuilding the HNSW graph from scratch on every update.
+            let existing_runtime = { self.repos.read().await.get(&repo_key).cloned() };
+            let small_reconcile = reconcile_requested
+                && workspace.report.changed_files <= workspace.report.indexed_files / 20;
+            if (!reconcile_requested || small_reconcile) && let Some(runtime_arc) = existing_runtime
+            {
+                let mut runtime_guard = runtime_arc.lock().await;
+                let delta_state = workspace.state.clone();
+                let delta_paths = workspace.changed_paths.clone();
+                match runtime_guard.apply_delta(repo_root, delta_state, &delta_paths) {
+                    Ok(needs_rebuild) => {
+                        drop(runtime_guard);
+                        self.bump_updates_applied(&repo_key, 1);
+                        if needs_rebuild {
+                            tracing::info!(
+                                "HNSW ghost threshold exceeded for {}, scheduling full rebuild",
+                                repo_key
+                            );
+                            self.queue_reconcile_repo(&repo_key).await;
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Incremental delta failed for {}, falling back to full rebuild: {:#}",
+                            repo_key,
+                            err
+                        );
+                        drop(runtime_guard);
+                        // Fall through to full rebuild below.
+                    }
+                }
+            }
+
             let runtime = match RuntimeIndex::from_state(repo_root, workspace.state) {
                 Ok(runtime) => runtime,
                 Err(err) => {

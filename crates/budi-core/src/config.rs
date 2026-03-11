@@ -191,6 +191,42 @@ pub fn find_repo_root(start: &Path) -> Result<PathBuf> {
     }
 }
 
+/// For git worktrees, resolve to the main repo root for shared index storage.
+/// Returns the main repo root if in a worktree, otherwise returns the input path.
+/// This ensures all worktrees of the same repo share a single index.
+pub fn resolve_storage_root(repo_root: &Path) -> PathBuf {
+    let git_path = repo_root.join(".git");
+    if git_path.is_file()
+        && let Some(main_root) = resolve_worktree_main_root(&git_path)
+    {
+        return main_root;
+    }
+    repo_root.to_path_buf()
+}
+
+/// Given a `.git` file (as found in worktrees), resolve the main repo root.
+/// The file contains `gitdir: /path/to/main/.git/worktrees/<name>`.
+fn resolve_worktree_main_root(git_file: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(git_file).ok()?;
+    let gitdir = content.strip_prefix("gitdir: ")?.trim();
+    let gitdir_path = if Path::new(gitdir).is_absolute() {
+        PathBuf::from(gitdir)
+    } else {
+        git_file.parent()?.join(gitdir)
+    };
+    // Expected: /path/to/main/.git/worktrees/<name>
+    // Walk up to find the .git directory, then its parent is the main repo root.
+    let mut candidate = gitdir_path;
+    loop {
+        if candidate.file_name().map(|n| n == ".git").unwrap_or(false) && candidate.is_dir() {
+            return candidate.parent().map(|p| p.to_path_buf());
+        }
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
 pub fn budi_home_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = env::var(BUDI_HOME_ENV) {
         return Ok(PathBuf::from(override_dir));
@@ -342,7 +378,10 @@ pub fn save(repo_root: &Path, config: &BudiConfig) -> Result<()> {
 }
 
 fn repo_storage_id(repo_root: &Path) -> String {
-    let canonical = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    // Resolve worktree → main repo root so all worktrees share one index directory.
+    let storage_root = resolve_storage_root(repo_root);
+    let canonical =
+        fs::canonicalize(&storage_root).unwrap_or_else(|_| storage_root.to_path_buf());
     let normalized = canonical.to_string_lossy().replace('\\', "/");
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());
@@ -352,7 +391,7 @@ fn repo_storage_id(repo_root: &Path) -> String {
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
-    let mut slug = repo_root
+    let mut slug = storage_root
         .file_name()
         .and_then(|v| v.to_str())
         .unwrap_or("repo")
@@ -386,6 +425,36 @@ mod tests {
         let hash_part = id.rsplit('-').next().unwrap_or_default();
         assert_eq!(hash_part.len(), 12);
         assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn resolve_storage_root_returns_self_for_normal_repo() {
+        let repo = Path::new("/tmp/normal-repo");
+        // No .git file → returns self
+        assert_eq!(resolve_storage_root(repo), repo);
+    }
+
+    #[test]
+    fn resolve_worktree_main_root_parses_gitdir() {
+        let tmp = std::env::temp_dir().join("budi-worktree-test");
+        let main_root = tmp.join("main-repo");
+        let main_git = main_root.join(".git");
+        let wt_dir = main_git.join("worktrees").join("feature-branch");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let wt_root = tmp.join("feature-branch");
+        std::fs::create_dir_all(&wt_root).unwrap();
+        let wt_git_file = wt_root.join(".git");
+        std::fs::write(&wt_git_file, format!("gitdir: {}", wt_dir.display())).unwrap();
+
+        let resolved = resolve_storage_root(&wt_root);
+        assert_eq!(
+            std::fs::canonicalize(&resolved).unwrap(),
+            std::fs::canonicalize(&main_root).unwrap(),
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -77,6 +77,10 @@ pub struct RuntimeIndex {
     pub state: RepoIndexState,
     id_to_chunk: HashMap<u64, ChunkRecord>,
     hnsw: Option<Hnsw<'static, f32, DistCosine>>,
+    /// Number of stale ("ghost") entries in the HNSW graph from incremental updates.
+    /// These are chunk IDs no longer in `id_to_chunk` but still in the HNSW graph.
+    /// Filtered at query time. A full rebuild resets this to zero.
+    hnsw_ghost_count: usize,
     tantivy: TantivyBundle,
     symbol_to_chunk_ids: HashMap<String, Vec<u64>>,
     symbol_family_to_tokens: FamilyTokenLookup,
@@ -94,6 +98,7 @@ pub struct RuntimeIndex {
 
 impl RuntimeIndex {
     pub fn from_state(repo_root: &Path, state: RepoIndexState) -> Result<Self> {
+        let t_runtime = Instant::now();
         let mut id_to_chunk = HashMap::new();
         let mut chunk_to_ecosystems = HashMap::new();
         for chunk in &state.chunks {
@@ -104,8 +109,13 @@ impl RuntimeIndex {
             );
         }
         let repo_ecosystems = detect_repo_ecosystems(repo_root, &state.files);
+        let t_hnsw = Instant::now();
         let hnsw = build_hnsw(&state.chunks)?;
+        let hnsw_ms = t_hnsw.elapsed().as_millis();
+        let t_tantivy = Instant::now();
         let tantivy = TantivyBundle::open_or_rebuild(repo_root, &state.chunks)?;
+        let tantivy_ms = t_tantivy.elapsed().as_millis();
+        let t_signals = Instant::now();
         let (
             symbol_to_chunk_ids,
             symbol_family_to_tokens,
@@ -117,10 +127,20 @@ impl RuntimeIndex {
             doc_like_chunk_ids,
             chunk_to_graph_tokens,
         ) = build_retrieval_signal_indexes(repo_root, &state.chunks);
+        let signals_ms = t_signals.elapsed().as_millis();
+        info!(
+            "RuntimeIndex::from_state took {:?} (chunks={}, hnsw={}ms, tantivy={}ms, signals={}ms)",
+            t_runtime.elapsed(),
+            state.chunks.len(),
+            hnsw_ms,
+            tantivy_ms,
+            signals_ms,
+        );
         Ok(Self {
             state,
             id_to_chunk,
             hnsw,
+            hnsw_ghost_count: 0,
             tantivy,
             symbol_to_chunk_ids,
             symbol_family_to_tokens,
@@ -134,6 +154,107 @@ impl RuntimeIndex {
             chunk_to_ecosystems,
             repo_ecosystems,
         })
+    }
+
+    /// Apply an incremental update without rebuilding the HNSW graph from scratch.
+    ///
+    /// Old chunk IDs from changed paths become "ghosts" in the HNSW graph — still present
+    /// in the graph but removed from `id_to_chunk`, so they're filtered at query time.
+    /// Signal indexes are rebuilt fully (fast enough: ~300ms for 7K chunks).
+    /// Tantivy is updated via delta.
+    ///
+    /// Returns `true` if the HNSW ghost ratio exceeds the threshold and a full rebuild
+    /// should be scheduled.
+    pub fn apply_delta(
+        &mut self,
+        repo_root: &Path,
+        new_state: RepoIndexState,
+        changed_paths: &HashSet<String>,
+    ) -> Result<bool> {
+        let t_delta = Instant::now();
+
+        // Count old chunks being replaced (these become HNSW ghosts).
+        let old_ghost_count: usize = self
+            .state
+            .chunks
+            .iter()
+            .filter(|c| changed_paths.contains(&c.path))
+            .count();
+
+        // Collect new chunks for changed paths.
+        let new_chunks_for_hnsw: Vec<(Vec<f32>, u64)> = new_state
+            .chunks
+            .iter()
+            .filter(|c| changed_paths.contains(&c.path) && !c.embedding.is_empty())
+            .map(|c| (c.embedding.clone(), c.id))
+            .collect();
+
+        // Update id_to_chunk: rebuild from new state (authoritative).
+        self.id_to_chunk.clear();
+        self.chunk_to_ecosystems.clear();
+        for chunk in &new_state.chunks {
+            self.id_to_chunk.insert(chunk.id, chunk.clone());
+            self.chunk_to_ecosystems.insert(
+                chunk.id,
+                ecosystem_tags_for_chunk(&chunk.path, &chunk.language, &chunk.text),
+            );
+        }
+
+        // Insert new embeddings into existing HNSW (old entries become ghosts).
+        let hnsw_inserted = new_chunks_for_hnsw.len();
+        if let Some(hnsw) = &mut self.hnsw {
+            for (embedding, id) in &new_chunks_for_hnsw {
+                hnsw.insert((embedding.as_slice(), *id as usize));
+            }
+        }
+        self.hnsw_ghost_count += old_ghost_count;
+
+        // Apply tantivy delta.
+        let t_tantivy = Instant::now();
+        TantivyBundle::apply_delta(repo_root, &new_state.chunks, changed_paths)?;
+        self.tantivy = TantivyBundle::open_or_rebuild(repo_root, &new_state.chunks)?;
+        let tantivy_ms = t_tantivy.elapsed().as_millis();
+
+        // Rebuild signal indexes (simpler than incremental, fast enough).
+        let t_signals = Instant::now();
+        let (s2c, sf2t, sfp2f, pt2c, gt2c, gf2t, gfp2f, dlc, c2gt) =
+            build_retrieval_signal_indexes(repo_root, &new_state.chunks);
+        self.symbol_to_chunk_ids = s2c;
+        self.symbol_family_to_tokens = sf2t;
+        self.symbol_family_prefix_to_families = sfp2f;
+        self.path_token_to_chunk_ids = pt2c;
+        self.graph_token_to_chunk_ids = gt2c;
+        self.graph_family_to_tokens = gf2t;
+        self.graph_family_prefix_to_families = gfp2f;
+        self.doc_like_chunk_ids = dlc;
+        self.chunk_to_graph_tokens = c2gt;
+        let signals_ms = t_signals.elapsed().as_millis();
+
+        self.repo_ecosystems = detect_repo_ecosystems(repo_root, &new_state.files);
+        self.state = new_state;
+
+        // Check if ghosts exceed 10% of total — caller should schedule a full rebuild.
+        let total = self.state.chunks.len();
+        let needs_rebuild = total > 0 && self.hnsw_ghost_count > total / 10;
+
+        info!(
+            "RuntimeIndex::apply_delta took {:?} (changed_paths={}, hnsw_inserted={}, ghosts={}/{}, tantivy={}ms, signals={}ms, needs_rebuild={})",
+            t_delta.elapsed(),
+            changed_paths.len(),
+            hnsw_inserted,
+            self.hnsw_ghost_count,
+            total,
+            tantivy_ms,
+            signals_ms,
+            needs_rebuild,
+        );
+
+        Ok(needs_rebuild)
+    }
+
+    /// Returns the number of HNSW ghost entries (stale IDs from incremental updates).
+    pub fn hnsw_ghost_count(&self) -> usize {
+        self.hnsw_ghost_count
     }
 
     pub fn chunk(&self, id: u64) -> Option<&ChunkRecord> {
@@ -163,19 +284,31 @@ impl RuntimeIndex {
         let Some(index) = &self.hnsw else {
             return Vec::new();
         };
+        // Request extra results to compensate for ghost entries from incremental updates.
+        let effective_limit = if self.hnsw_ghost_count > 0 {
+            limit + self.hnsw_ghost_count.min(limit)
+        } else {
+            limit
+        };
         // Higher ef_search = more deterministic results at the cost of slightly
         // more search time. With typical index sizes (2k–17k chunks) and ~10ms
         // retrieval budget, 200 is well within budget and reduces HNSW variance.
-        let ef_search = limit.max(200);
-        let neighbors = index.search(query_embedding, limit, ef_search);
-        neighbors
+        let ef_search = effective_limit.max(200);
+        let neighbors = index.search(query_embedding, effective_limit, ef_search);
+        let mut results: Vec<(u64, f32)> = neighbors
             .into_iter()
-            .map(|n| {
-                // hnsw_rs distance is cosine-distance style. Convert to score where higher is better.
+            .filter_map(|n| {
+                let id = n.d_id as u64;
+                // Filter out ghost entries (old chunk IDs removed during incremental updates).
+                if self.hnsw_ghost_count > 0 && !self.id_to_chunk.contains_key(&id) {
+                    return None;
+                }
                 let score = 1.0f32 - n.distance;
-                (n.d_id as u64, score)
+                Some((id, score))
             })
-            .collect()
+            .collect();
+        results.truncate(limit);
+        results
     }
 
     pub fn search_symbol_tokens(&self, query_tokens: &[String], limit: usize) -> Vec<(u64, f32)> {
@@ -266,6 +399,8 @@ impl RuntimeIndex {
 pub struct IndexWorkspace {
     pub state: RepoIndexState,
     pub report: IndexBuildReport,
+    /// The set of file paths that were actually re-chunked in this build.
+    pub changed_paths: HashSet<String>,
 }
 
 type RetrievalSignalIndexes = (
@@ -345,6 +480,8 @@ pub fn build_or_update(
     options: Option<&IndexBuildOptions>,
     mut progress_cb: Option<&mut dyn FnMut(IndexBuildProgress)>,
 ) -> Result<IndexWorkspace> {
+    let t_total = Instant::now();
+    let t_phase = Instant::now();
     let previous = load_state(repo_root)?.unwrap_or_default();
     let previous_files_by_path: HashMap<String, FileRecord> = previous
         .files
@@ -385,6 +522,14 @@ pub fn build_or_update(
             options,
         )?
     };
+    info!(
+        "Index phase: discovery took {:?} (files={}, hard={}, metadata_delta={})",
+        t_phase.elapsed(),
+        current_files.len(),
+        hard,
+        use_metadata_delta,
+    );
+    let t_phase = Instant::now();
     let mut current_files = current_files;
     let mut current_hashes = current_hashes;
     let mut limit_reached = false;
@@ -631,6 +776,13 @@ pub fn build_or_update(
         }
     }
 
+    info!(
+        "Index phase: chunking+embedding took {:?} (pending={}, missing_queue={})",
+        t_phase.elapsed(),
+        pending_chunks.len(),
+        missing_embedding_queue.len(),
+    );
+    let t_phase = Instant::now();
     // Free previous-state maps after the file loop — no longer referenced.
     drop(previous_chunks_by_path);
     drop(previous_hashes);
@@ -781,6 +933,14 @@ pub fn build_or_update(
     drop(embedder);
     drop(embedding_cache);
     drop(previous_embeddings_by_fingerprint);
+    info!(
+        "Index phase: finalize+reconcile took {:?} (chunks={}, embedded={}, missing={})",
+        t_phase.elapsed(),
+        chunks.len(),
+        embedded_chunks,
+        missing_embeddings,
+    );
+    let t_phase = Instant::now();
 
     chunks.sort_by(|a, b| (&a.path, a.start_line).cmp(&(&b.path, b.start_line)));
 
@@ -842,6 +1002,20 @@ pub fn build_or_update(
         }
     }
 
+    info!(
+        "Index phase: save+tantivy took {:?} (hard={}, changed={})",
+        t_phase.elapsed(),
+        hard,
+        changed_files,
+    );
+    info!(
+        "Index total: {:?} (files={}, chunks={}, embedded={}, changed={})",
+        t_total.elapsed(),
+        state.files.len(),
+        state.chunks.len(),
+        embedded_chunks,
+        changed_files,
+    );
     let report = IndexBuildReport {
         indexed_files: state.files.len(),
         indexed_chunks: state.chunks.len(),
@@ -863,7 +1037,11 @@ pub fn build_or_update(
             done: true,
         },
     );
-    Ok(IndexWorkspace { state, report })
+    Ok(IndexWorkspace {
+        state,
+        report,
+        changed_paths: changed_set,
+    })
 }
 
 pub fn load_state(repo_root: &Path) -> Result<Option<RepoIndexState>> {
