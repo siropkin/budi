@@ -334,7 +334,24 @@ fn extract_proof_lines(
         }
     }
 
-    // Priority 4: any non-empty, non-comment, non-anchor, non-low-value lines
+    // Priority 4: for interface/type/struct definitions, property declarations
+    // ARE the content — pick them as proof lines instead of filtering them out.
+    if is_type_definition_anchor(anchor) {
+        for raw_line in text.lines() {
+            if picked.len() >= max_lines {
+                break;
+            }
+            let line = sanitize_evidence_line(raw_line);
+            if line.is_empty() || is_comment_only_line(line.as_str()) || is_anchor_dup(&line) {
+                continue;
+            }
+            if is_param_or_field_decl(line.trim()) && seen.insert(line.clone()) {
+                picked.push(line);
+            }
+        }
+    }
+
+    // Priority 5: any non-empty, non-comment, non-anchor, non-low-value lines
     for raw_line in text.lines() {
         if picked.len() >= max_lines {
             break;
@@ -569,6 +586,22 @@ fn has_call_expression(line: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Returns true when the anchor line indicates a type/interface/struct/enum definition.
+/// For these, property declarations are the actual content and should be used as proof lines.
+fn is_type_definition_anchor(anchor: &str) -> bool {
+    let lower = anchor.trim().to_ascii_lowercase();
+    lower.starts_with("interface ")
+        || lower.starts_with("export interface ")
+        || lower.starts_with("type ")
+        || lower.starts_with("export type ")
+        || lower.starts_with("struct ")
+        || lower.starts_with("pub struct ")
+        || lower.starts_with("pub(crate) struct ")
+        || lower.starts_with("enum ")
+        || lower.starts_with("pub enum ")
+        || lower.starts_with("pub(crate) enum ")
 }
 
 fn is_comment_only_line(line: &str) -> bool {
@@ -986,6 +1019,60 @@ mod tests {
             anchor.contains("pub struct Config"),
             "expected struct def, got: {anchor}"
         );
+    }
+
+    // ── type definition proof lines ─────────────────────────────────────────
+
+    #[test]
+    fn interface_properties_used_as_proof_lines() {
+        let text = "export interface FastifyRequestType<Params = unknown> {\n\
+                     params: Params,\n\
+                     query: Querystring,\n\
+                     headers: Headers,\n\
+                     body: Body\n\
+                     }";
+        let anchor = "export interface FastifyRequestType<Params = unknown> {";
+        let proof = extract_proof_lines(text, 3, anchor, &[]);
+        assert!(
+            !proof.is_empty(),
+            "interface should have proof lines, got empty"
+        );
+        assert!(
+            proof.iter().any(|l| l.contains("params: Params")),
+            "should include property: {:?}",
+            proof
+        );
+    }
+
+    #[test]
+    fn struct_fields_used_as_proof_lines() {
+        let text = "pub struct Config {\n\
+                     name: String,\n\
+                     path: PathBuf,\n\
+                     verbose: bool,\n\
+                     }";
+        let anchor = "pub struct Config {";
+        let proof = extract_proof_lines(text, 3, anchor, &[]);
+        assert!(
+            proof.iter().any(|l| l.contains("name: String")),
+            "should include struct field: {:?}",
+            proof
+        );
+    }
+
+    #[test]
+    fn type_definition_anchor_detection() {
+        assert!(is_type_definition_anchor("interface Foo {"));
+        assert!(is_type_definition_anchor("export interface Bar<T> {"));
+        assert!(is_type_definition_anchor("type Props = {"));
+        assert!(is_type_definition_anchor("export type Config = {"));
+        assert!(is_type_definition_anchor("struct Config {"));
+        assert!(is_type_definition_anchor("pub struct Config {"));
+        assert!(is_type_definition_anchor("enum Color {"));
+        // Non-type anchors
+        assert!(!is_type_definition_anchor("fn foo() {"));
+        assert!(!is_type_definition_anchor("def bar():"));
+        assert!(!is_type_definition_anchor("class MyClass {"));
     }
 
     #[test]
