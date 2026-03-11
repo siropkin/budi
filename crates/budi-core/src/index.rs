@@ -163,7 +163,10 @@ impl RuntimeIndex {
         let Some(index) = &self.hnsw else {
             return Vec::new();
         };
-        let ef_search = limit.max(32);
+        // Higher ef_search = more deterministic results at the cost of slightly
+        // more search time. With typical index sizes (2k–17k chunks) and ~10ms
+        // retrieval budget, 200 is well within budget and reduces HNSW variance.
+        let ef_search = limit.max(200);
         let neighbors = index.search(query_embedding, limit, ef_search);
         neighbors
             .into_iter()
