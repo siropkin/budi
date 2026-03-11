@@ -37,18 +37,18 @@ flowchart LR
 Across 8 open-source repos (128 judged prompts), compared by an independent LLM judge:
 
 - **3–32% lower cost** on most repos (up to +6% on repos where budi adds quality)
-- **92% regression-free** — same or better quality on 118/128 judged prompts
-- FastAPI: 100% non-regression with 11 quality wins; Flask: 94–100%; Terraform: 94%, −27% cost
-- Remaining 10 regressions are mild (Q −1) from HNSW variance on generic symbol names
+- **~91% regression-free** — same or better quality on ~116/128 judged prompts
+- FastAPI: 100% non-regression with 11 quality wins; Flask: 94%; Terraform: 89–94%, −27% cost
+- Remaining regressions are mild (Q −1) from HNSW variance
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting the right context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
 ```mermaid
 pie showData
     title "Efficiency outcomes (8 repos, 128 judged prompts)"
-    "same quality, lower cost" : 62
-    "better quality" : 56
-    "regression" : 10
+    "same quality, lower cost" : 58
+    "better quality" : 58
+    "regression" : 12
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
