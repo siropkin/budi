@@ -54,9 +54,12 @@
 
 ## Project Map
 
-- After each full index job, `generate_project_map()` writes local `.claude/budi-project-map.md` into the repo with a high-level file-tree summary grouped by directory.
+- After each full index job, `generate_project_map()` writes local `.claude/budi-project-map.md` into the repo.
+- Contains: entry points (depth-sorted), top files by chunk count, top symbols by call graph centrality (reference count), directory overview.
+- Symbols ranked by `caller_count()` with directory diversity cap (max 5 per top-level dir) and generic symbol filter (~80 common names excluded).
+- Test, devtools, build/config, fixture, and script paths are excluded from all sections.
 - The project map is generated state, so `.claude/` is treated as local-only rather than tracked documentation.
-- `budi hook session-start` reads this file and outputs it as an `AsyncSystemMessageOutput`, injecting it into the Claude Code system prompt at session start.
+- `budi hook session-start` reads this file (capped at 3000 chars) and outputs it as an `AsyncSystemMessageOutput`, injecting it into the Claude Code system prompt at session start.
 
 ## Call Graph / Structural Oracle
 
@@ -124,7 +127,8 @@ When these patterns fire, injection is skipped entirely. Additionally, when a sy
 
 - `min_selection_score(candidates, intent)` returns a per-intent floor:
   - FlowTrace: max(top×0.40, 0.25), SymbolDefinition: max(top×0.40, 0.30), SymbolUsage: max(top×0.40, 0.22), TestLookup: max(top×0.40, 0.22), RuntimeConfig: 0.40 when top≥0.60 else max(top×0.40, 0.18), Architecture: 0.40 when top≥0.60 else max(top×0.40, 0.30)
-- `is_test_path(path)` — detects `/test`, `/spec`, `__tests__/`, `__spec__/` — used for `+0.15` test-path boost on TestLookup queries.
+- `is_test_path(path)` — detects `/test`, `/spec`, `__tests__/`, `__spec__/`, Go `_test.go`, mock files — used for `+0.15` test-path boost on TestLookup queries and `-0.15` to `-0.40` penalties on other intents.
+- `is_devtools_path(path)` — detects devtools/noop-renderer directories — applies `-0.30` penalty across all intent types.
 - **Hint-match boost**: `+0.30` when intent is SymbolDefinition and the chunk's `symbol_hint` exactly matches a query token, surfacing the definition chunk over reference noise.
 - `dominant_symbol_hint(lines)` — picks the symbol spanning the most lines in a window, preventing short local functions from stealing the hint from the dominant definition.
 - `truncate_to(s, max)` — UTF-8 safe: walks back to the nearest char boundary rather than slicing at a byte offset.
