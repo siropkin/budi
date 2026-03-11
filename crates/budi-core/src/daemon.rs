@@ -32,6 +32,9 @@ struct SessionState {
     /// The repo-relative path of the file Claude most recently edited/read.
     /// Used to boost chunks from that exact file in the next query.
     active_file: Option<String>,
+    /// Repo-relative file paths that were injected in this session.
+    /// Used for post-injection feedback: track which files Claude reads after injection.
+    injected_files: HashSet<String>,
 }
 
 /// Lightweight query counters for visibility into daemon activity.
@@ -43,6 +46,10 @@ pub struct QueryStats {
     pub skips: u64,
     pub chars_injected: u64,
     pub prefetches: u64,
+    /// Files Claude read that budi had already injected (confirms injection was useful).
+    pub confirmed_reads: u64,
+    /// Total file reads tracked for this stat window.
+    pub total_reads: u64,
 }
 
 #[derive(Clone)]
@@ -399,6 +406,23 @@ impl DaemonState {
         request: PrefetchRequest,
         config: &BudiConfig,
     ) -> Result<PrefetchResponse> {
+        // Track post-injection feedback: did Claude read a file budi already injected?
+        let file_path_rel_early =
+            strip_repo_root_prefix(&request.file_path, &request.repo_root).to_string();
+        {
+            let mut stats = self.query_stats.lock().unwrap();
+            stats.total_reads += 1;
+        }
+        {
+            let guard = self.sessions_guard();
+            if let Some(session) = guard.get(&request.session_id)
+                && session.injected_files.contains(&file_path_rel_early)
+            {
+                let mut stats = self.query_stats.lock().unwrap();
+                stats.confirmed_reads += 1;
+            }
+        }
+
         // Skip if this file was already prefetched this session.
         if self.session_has_path(&request.session_id, &request.file_path) {
             return Ok(PrefetchResponse {
@@ -1169,7 +1193,7 @@ impl DaemonState {
     }
 
     /// Returns a snapshot of query activity counters.
-    pub fn query_stats_snapshot(&self) -> (u64, u64, u64, u64, u64) {
+    pub fn query_stats_snapshot(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
         let stats = self.query_stats.lock().unwrap();
         (
             stats.queries,
@@ -1177,6 +1201,8 @@ impl DaemonState {
             stats.skips,
             stats.chars_injected,
             stats.prefetches,
+            stats.confirmed_reads,
+            stats.total_reads,
         )
     }
 
@@ -1209,6 +1235,7 @@ impl DaemonState {
             session
                 .injected_keys
                 .insert(format!("{}:{}", s.path, s.start_line));
+            session.injected_files.insert(s.path.clone());
         }
         // Lazy TTL cleanup: remove inactive sessions.
         guard.retain(|_, v| {

@@ -187,7 +187,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
 }
 
 async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let (queries, injections, skips, chars_injected, prefetches) =
+    let (queries, injections, skips, chars_injected, prefetches, confirmed_reads, total_reads) =
         state.daemon_state.query_stats_snapshot();
     Json(json!({
         "queries": queries,
@@ -196,6 +196,9 @@ async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "chars_injected": chars_injected,
         "prefetches": prefetches,
         "injection_rate": if queries > 0 { format!("{:.0}%", injections as f64 / queries as f64 * 100.0) } else { "n/a".to_string() },
+        "confirmed_reads": confirmed_reads,
+        "total_reads": total_reads,
+        "read_hit_rate": if total_reads > 0 { format!("{:.0}%", confirmed_reads as f64 / total_reads as f64 * 100.0) } else { "n/a".to_string() },
     }))
 }
 

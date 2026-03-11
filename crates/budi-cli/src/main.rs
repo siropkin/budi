@@ -1553,6 +1553,20 @@ fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
         if let Some(rate) = stats.get("injection_rate").and_then(|v| v.as_str()) {
             println!("injection rate: {}", rate);
         }
+        let confirmed = stats
+            .get("confirmed_reads")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let total = stats
+            .get("total_reads")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if total > 0 {
+            println!("file reads: {} total, {} confirmed by budi", total, confirmed);
+            if let Some(rate) = stats.get("read_hit_rate").and_then(|v| v.as_str()) {
+                println!("read hit rate: {}", rate);
+            }
+        }
     }
     Ok(())
 }
