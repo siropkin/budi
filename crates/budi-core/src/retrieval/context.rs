@@ -11,6 +11,8 @@ struct MergedCard<'a> {
     merged_end: usize,
     /// Anchor lines from secondary (lower-scored) same-file snippets.
     extra_anchors: Vec<String>,
+    /// Full texts of secondary snippets for proof line extraction.
+    extra_texts: Vec<&'a str>,
 }
 
 /// Group snippets by file path. Same-file snippets are merged into one card:
@@ -38,6 +40,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                 if anchor != "(empty)" {
                     card.extra_anchors.push(anchor);
                 }
+                card.extra_texts.push(&snippet.text);
             } else {
                 // Span would be too large — create a separate card.
                 cards.push(MergedCard {
@@ -45,6 +48,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                     merged_start: snippet.start_line,
                     merged_end: snippet.end_line,
                     extra_anchors: Vec::new(),
+                    extra_texts: Vec::new(),
                 });
             }
         } else {
@@ -54,6 +58,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                 merged_start: snippet.start_line,
                 merged_end: snippet.end_line,
                 extra_anchors: Vec::new(),
+                extra_texts: Vec::new(),
             });
         }
     }
@@ -151,6 +156,27 @@ fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> St
         let sanitized = sanitize_evidence_line(extra);
         if !sanitized.is_empty() && !proof_lines.contains(&sanitized) {
             proof_lines.push(sanitized);
+        }
+    }
+
+    // Extract proof from secondary snippet texts (e.g. continuation body after a preamble).
+    // This fills remaining proof slots with content from merged chunks.
+    if proof_lines.len() < max_proof && !card_data.extra_texts.is_empty() {
+        for extra_text in &card_data.extra_texts {
+            let extra_proof = extract_proof_lines(
+                extra_text,
+                max_proof - proof_lines.len(),
+                &anchor,
+                query_tokens,
+            );
+            for line in extra_proof {
+                if proof_lines.len() >= max_proof {
+                    break;
+                }
+                if !proof_lines.contains(&line) {
+                    proof_lines.push(line);
+                }
+            }
         }
     }
 
