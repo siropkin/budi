@@ -76,7 +76,11 @@ pub struct QueryResultItem {
     #[serde(default)]
     pub channel_scores: QueryChannelScores,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "slm_relevance_note")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "slm_relevance_note"
+    )]
     pub context_note: Option<String>,
 }
 

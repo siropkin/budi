@@ -98,5 +98,4 @@ mod tests {
             "skip:runtime-intent-abstain"
         );
     }
-
 }
