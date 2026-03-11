@@ -2050,9 +2050,7 @@ fn is_stub_body(text: &str) -> bool {
         .map(str::trim)
         .filter(|l| !l.is_empty() && *l != "{" && *l != "}" && *l != ")")
         .collect();
-    if non_blank.len() <= 6
-        && (lower.contains("unsupported") || lower.contains("not supported"))
-    {
+    if non_blank.len() <= 6 && (lower.contains("unsupported") || lower.contains("not supported")) {
         return true;
     }
     false
