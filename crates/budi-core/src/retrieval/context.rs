@@ -187,7 +187,7 @@ fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> St
         card_data.merged_start, card_data.merged_end
     ));
     out.push_str(&format!("  anchor: {}\n", anchor));
-    if let Some(note) = &snippet.slm_relevance_note {
+    if let Some(note) = &snippet.context_note {
         out.push_str(&format!("  relevance: {}\n", note));
     }
     out.push_str("  proof:\n");
@@ -608,7 +608,7 @@ mod tests {
             reasons: vec!["lexical-hit".to_string()],
             channel_scores: QueryChannelScores::default(),
             text: text.to_string(),
-            slm_relevance_note: None,
+            context_note: None,
         }
     }
 

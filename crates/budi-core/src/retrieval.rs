@@ -1224,7 +1224,7 @@ pub fn build_query_response(
                 ],
                 channel_scores: QueryChannelScores::default(),
                 text: cont.text.clone(),
-                slm_relevance_note: None,
+                context_note: None,
             })
         });
         if let Some(cont_item) = continuation {
@@ -1260,7 +1260,7 @@ pub fn build_query_response(
                         reasons: vec!["extended-continuation".to_string()],
                         channel_scores: QueryChannelScores::default(),
                         text: cont2.text.clone(),
-                        slm_relevance_note: None,
+                        context_note: None,
                     });
                 }
             }
@@ -1380,7 +1380,7 @@ pub fn build_query_response(
                 reasons: vec!["config-continuation".to_string()],
                 channel_scores: QueryChannelScores::default(),
                 text: cont.text.clone(),
-                slm_relevance_note: None,
+                context_note: None,
             })
         });
         if let Some(cont_item) = rtcfg_continuation {
@@ -1678,7 +1678,7 @@ fn build_symbol_definition_first_steps_card(
         reasons: vec!["wrapper-implementation-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
         text: text_lines.join("\n"),
-        slm_relevance_note: Some("same-file first steps summary".to_string()),
+        context_note: Some("same-file first steps summary".to_string()),
     })
 }
 
@@ -1812,7 +1812,7 @@ fn build_web_request_flow_chain_card(
         reasons: vec!["web-request-flow-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
         text,
-        slm_relevance_note: Some("request-to-view chain summary".to_string()),
+        context_note: Some("request-to-view chain summary".to_string()),
     })
 }
 
@@ -1930,7 +1930,7 @@ fn maybe_inject_symbol_definition_delegate_pack(
         reasons: vec!["delegated-definition".to_string()],
         channel_scores: QueryChannelScores::default(),
         text: callee_chunk.text.clone(),
-        slm_relevance_note: None,
+        context_note: None,
     };
     selection.snippets.clear();
     selection.snippets.push(delegator_item);
@@ -2004,7 +2004,7 @@ fn query_result_item_from_scored(
         reasons: candidate.reasons.clone(),
         channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
-        slm_relevance_note: None,
+        context_note: None,
     })
 }
 
@@ -2713,7 +2713,7 @@ fn build_test_file_inventory_card(
         reasons: vec!["test-file-inventory".to_string()],
         channel_scores: QueryChannelScores::default(),
         text: lines.join("\n"),
-        slm_relevance_note: Some("same-file test coverage inventory".to_string()),
+        context_note: Some("same-file test coverage inventory".to_string()),
     })
 }
 
@@ -3074,7 +3074,7 @@ pub fn prefetch_neighbors_for_file(
                 ..Default::default()
             },
             text: chunk.text.clone(),
-            slm_relevance_note: None,
+            context_note: None,
         });
     }
 
@@ -3210,7 +3210,7 @@ fn try_push_scored_chunk(
         reasons: candidate.reasons.clone(),
         channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
-        slm_relevance_note: None,
+        context_note: None,
     });
     selection.selected_chunk_ids.push(candidate.id);
     *selection
@@ -4958,7 +4958,7 @@ mod tests {
             reasons: vec![],
             channel_scores: Default::default(),
             text: String::new(),
-            slm_relevance_note: None,
+            context_note: None,
         });
         // The overlapping check logic
         let path = "src/ReactFiberCommitWork.js";
@@ -5377,7 +5377,7 @@ it("renders", () => {})
             reasons: vec!["hint-match-boost".to_string()],
             channel_scores: QueryChannelScores::default(),
             text: "func (c *Context) Plan(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, tfdiags.Diagnostics) {\n    plan, _, diags := c.PlanAndEval(config, prevRunState, opts)\n    return plan, diags\n}".to_string(),
-            slm_relevance_note: None,
+            context_note: None,
         };
         let continuation = ChunkRecord {
             id: 1,
@@ -5413,7 +5413,7 @@ it("renders", () => {})
         assert!(card.text.contains("defer c.acquireRun(\"plan\")()"));
         assert!(card.text.contains("var diags tfdiags.Diagnostics"));
         assert_eq!(
-            card.slm_relevance_note.as_deref(),
+            card.context_note.as_deref(),
             Some("same-file first steps summary")
         );
     }
@@ -5489,7 +5489,7 @@ it("renders", () => {})
         );
         assert!(card.text.contains("dispatch_request@968: return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)"));
         assert_eq!(
-            card.slm_relevance_note.as_deref(),
+            card.context_note.as_deref(),
             Some("request-to-view chain summary")
         );
     }
@@ -5505,7 +5505,7 @@ it("renders", () => {})
             reasons: vec!["hint-match-boost".to_string()],
             channel_scores: QueryChannelScores::default(),
             text: "def make_response(*args):\n    response = current_app.make_response(args)\n    response.headers['X-Test'] = '1'\n    return response\n".to_string(),
-            slm_relevance_note: None,
+            context_note: None,
         };
         let continuation = ChunkRecord {
             id: 2,
@@ -6045,7 +6045,7 @@ it("renders", () => {})
             card.text
         );
         assert_eq!(
-            card.slm_relevance_note.as_deref(),
+            card.context_note.as_deref(),
             Some("React effect lifecycle summary")
         );
     }

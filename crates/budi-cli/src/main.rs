@@ -3618,7 +3618,7 @@ mod tests {
                 reasons: vec!["runtime-env-api-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "from_envvar".to_string(),
-                slm_relevance_note: None,
+                context_note: None,
             },
             QueryResultItem {
                 path: "tests/test_config.py".to_string(),
@@ -3629,7 +3629,7 @@ mod tests {
                 reasons: vec!["runtime-config-support-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "test".to_string(),
-                slm_relevance_note: None,
+                context_note: None,
             },
             QueryResultItem {
                 path: "examples/tutorial/flaskr/__init__.py".to_string(),
@@ -3640,7 +3640,7 @@ mod tests {
                 reasons: vec!["runtime-config-path-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "example".to_string(),
-                slm_relevance_note: None,
+                context_note: None,
             },
             QueryResultItem {
                 path: "src/flask/cli.py".to_string(),
@@ -3651,7 +3651,7 @@ mod tests {
                 reasons: vec!["runtime-config-support-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "load_dotenv".to_string(),
-                slm_relevance_note: None,
+                context_note: None,
             },
             QueryResultItem {
                 path: "src/flask/app.py".to_string(),
@@ -3662,7 +3662,7 @@ mod tests {
                 reasons: vec!["semantic-hit".to_string()],
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "app".to_string(),
-                slm_relevance_note: None,
+                context_note: None,
             },
         ];
 
@@ -3686,7 +3686,7 @@ mod tests {
             reasons: vec!["semantic-hit".to_string()],
             channel_scores: budi_core::rpc::QueryChannelScores::default(),
             text: "app".to_string(),
-            slm_relevance_note: None,
+            context_note: None,
         }];
         let context = build_runtime_guard_context(&snippets);
         assert!(context.is_empty());

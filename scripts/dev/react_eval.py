@@ -47,7 +47,7 @@ class SnippetResult:
     start_line: int
     end_line: int
     score: float
-    slm_relevance_note: Optional[str] = None
+    context_note: Optional[str] = None
 
 @dataclass
 class EvalResult:
@@ -98,7 +98,7 @@ def judge_snippets(prompt: str, snippets: list[SnippetResult], api_key: str) -> 
 
     snippets_text = "\n\n".join(
         f"[{i+1}] {s.path}:{s.start_line}-{s.end_line}\n"
-        + (f"  SLM note: {s.slm_relevance_note}" if s.slm_relevance_note else "  (no SLM note)")
+        + (f"  SLM note: {s.context_note}" if s.context_note else "  (no SLM note)")
         for i, s in enumerate(snippets[:5])
     )
     if not snippets_text:
@@ -155,7 +155,7 @@ def run_eval(repo_root: Path, use_judge: bool, api_key: Optional[str]) -> list[E
                     start_line=s.get("start_line", 0),
                     end_line=s.get("end_line", 0),
                     score=float(s.get("score", 0.0)),
-                    slm_relevance_note=s.get("slm_relevance_note"),
+                    context_note=s.get("context_note"),
                 )
                 for s in data.get("snippets", [])[:5]
             ]

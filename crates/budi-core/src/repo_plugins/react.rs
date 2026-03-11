@@ -251,6 +251,6 @@ pub(crate) fn build_react_effect_lifecycle_card(
         reasons: vec!["react-effect-lifecycle-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
         text: text_lines.join("\n"),
-        slm_relevance_note: Some("React effect lifecycle summary".to_string()),
+        context_note: Some("React effect lifecycle summary".to_string()),
     })
 }

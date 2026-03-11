@@ -228,7 +228,7 @@ fn build_nextjs_app_router_card(runtime: &RuntimeIndex, score: f32) -> Option<Qu
         reasons: vec!["nextjs-app-router-pack".to_string()],
         channel_scores: QueryChannelScores::default(),
         text: text_lines.join("\n"),
-        slm_relevance_note: Some("Next.js app-router boundary summary".to_string()),
+        context_note: Some("Next.js app-router boundary summary".to_string()),
     })
 }
 

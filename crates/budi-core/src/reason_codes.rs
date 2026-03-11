@@ -1,11 +1,6 @@
 pub const SKIP_REASON_FORCED_SKIP: &str = "forced_skip";
 pub const SKIP_REASON_NON_CODE_INTENT: &str = "non-code-intent";
 pub const SKIP_REASON_LOW_CONFIDENCE: &str = "low-confidence";
-pub const SKIP_REASON_SLM_NON_CODE: &str = "slm-non-code";
-pub const SKIP_REASON_SLM_LOW_QUALITY: &str = "slm-low-quality";
-pub const SKIP_REASON_SLM_TIMEOUT: &str = "slm-timeout";
-pub const SKIP_REASON_JUDGE_UNAVAILABLE: &str = "judge-unavailable";
-pub const SKIP_REASON_JUDGE_PARSE_ERROR: &str = "judge-parse-error";
 
 pub const HOOK_REASON_SKIP_PREFIX: &str = "skip:";
 pub const HOOK_REASON_OK: &str = "ok";
@@ -25,9 +20,6 @@ pub enum SkipReasonKind {
     ForcedSkip,
     NonCodeIntent,
     LowConfidence,
-    SLMNonCode,
-    SLMLowQuality,
-    SLMTimeout,
     Other,
 }
 
@@ -45,15 +37,6 @@ pub fn classify_skip_reason(raw: &str) -> SkipReasonKind {
     if value.starts_with(SKIP_REASON_LOW_CONFIDENCE) {
         return SkipReasonKind::LowConfidence;
     }
-    if value == SKIP_REASON_SLM_NON_CODE {
-        return SkipReasonKind::SLMNonCode;
-    }
-    if value.starts_with(SKIP_REASON_SLM_LOW_QUALITY) {
-        return SkipReasonKind::SLMLowQuality;
-    }
-    if value == SKIP_REASON_SLM_TIMEOUT {
-        return SkipReasonKind::SLMTimeout;
-    }
     SkipReasonKind::Other
 }
 
@@ -66,19 +49,12 @@ pub fn normalize_skip_reason(raw: &str) -> String {
         SkipReasonKind::ForcedSkip => SKIP_REASON_FORCED_SKIP.to_string(),
         SkipReasonKind::NonCodeIntent => SKIP_REASON_NON_CODE_INTENT.to_string(),
         SkipReasonKind::LowConfidence => SKIP_REASON_LOW_CONFIDENCE.to_string(),
-        SkipReasonKind::SLMNonCode => SKIP_REASON_SLM_NON_CODE.to_string(),
-        SkipReasonKind::SLMLowQuality => SKIP_REASON_SLM_LOW_QUALITY.to_string(),
-        SkipReasonKind::SLMTimeout => SKIP_REASON_SLM_TIMEOUT.to_string(),
         SkipReasonKind::Other => value.to_string(),
     }
 }
 
 pub fn format_low_confidence_skip_reason(confidence: f32) -> String {
     format!("{SKIP_REASON_LOW_CONFIDENCE}:{confidence:.3}")
-}
-
-pub fn format_slm_low_quality_reason(score: f32) -> String {
-    format!("{SKIP_REASON_SLM_LOW_QUALITY}:{score:.1}")
 }
 
 pub fn format_skip_hook_reason(skip_reason: &str) -> String {
@@ -123,19 +99,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn slm_non_code_reason_normalizes() {
-        assert_eq!(
-            normalize_skip_reason(SKIP_REASON_SLM_NON_CODE),
-            SKIP_REASON_SLM_NON_CODE
-        );
-    }
-
-    #[test]
-    fn slm_low_quality_reason_with_score_normalizes() {
-        assert_eq!(
-            normalize_skip_reason("slm-low-quality:4.5"),
-            SKIP_REASON_SLM_LOW_QUALITY
-        );
-    }
 }

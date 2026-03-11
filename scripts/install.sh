@@ -14,7 +14,6 @@ SKIP_BUILD=0
 FORCE=0
 NO_PATH_WARN=0
 FROM_RELEASE=0
-SKIP_OLLAMA=0
 
 usage() {
   cat <<'EOF'
@@ -33,7 +32,6 @@ Options:
   --skip-build            Skip build step and only copy existing binaries
   --force                 Overwrite existing binaries without backup
   --no-path-warn          Suppress PATH guidance output
-  --skip-ollama           (deprecated, no-op)
   -h, --help              Show this help
 
 Environment overrides:
@@ -107,11 +105,6 @@ ensure_cargo() {
   command -v cargo >/dev/null 2>&1 || fail "cargo still unavailable after rustup install"
 }
 
-ensure_ollama() {
-  # No-op: Ollama is no longer used by budi.
-  # Flag kept for backward compatibility.
-  :
-}
 
 install_binaries_from_dir() {
   local src_dir="$1"
@@ -225,10 +218,6 @@ parse_args() {
         NO_PATH_WARN=1
         shift
         ;;
-      --skip-ollama)
-        SKIP_OLLAMA=1
-        shift
-        ;;
       -h|--help)
         usage
         exit 0
@@ -275,7 +264,6 @@ main() {
   fi
 
   verify_binaries
-  ensure_ollama
 
   if [[ ":$PATH:" != *":$BIN_DIR:"* && "$NO_PATH_WARN" -eq 0 ]]; then
     cat <<EOF
