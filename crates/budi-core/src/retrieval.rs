@@ -750,20 +750,22 @@ pub fn build_query_response(
             }
         }
 
-        // FlowTrace — pure-lexical demotion. Chunks matching only on common-word
-        // lexical hits (e.g. "call", "return", "does") with zero semantic/symbol/graph
-        // signal are usually irrelevant noise for flow-trace queries. For instance,
-        // "What functions does get_response call?" matches `describe()` in migrations
-        // and `adapt_timefield_value()` in backends purely on lexical overlap.
-        // A -0.10 penalty pushes these below anchored/semantic matches.
-        if intent.kind == QueryIntentKind::FlowTrace
-            && channel_scores.lexical > 0.0
+        // Pure-lexical demotion for FlowTrace and SymbolUsage. Chunks matching only
+        // on common-word lexical hits (e.g. "call", "return", "does", "root") with zero
+        // semantic/symbol/graph signal are usually noise. Real callers/callees should have
+        // at least some vector similarity or graph connection.
+        // FlowTrace: "What functions does get_response call?" → `describe()` in migrations.
+        // SymbolUsage: "What calls performSyncWorkOnRoot" → compiler/index.ts single line.
+        if matches!(
+            intent.kind,
+            QueryIntentKind::FlowTrace | QueryIntentKind::SymbolUsage
+        ) && channel_scores.lexical > 0.0
             && channel_scores.vector == 0.0
             && channel_scores.symbol == 0.0
             && channel_scores.graph == 0.0
         {
             adjusted -= 0.10;
-            push_unique_reason(&mut reasons, "flowtrace-lexical-only-demote");
+            push_unique_reason(&mut reasons, "lexical-only-demote");
         }
 
         // FlowTrace — definition anchor for named function targets.
