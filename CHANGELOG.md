@@ -22,6 +22,7 @@ Post-v3.0.0 quality improvements, new features, and better project maps.
 - Class preamble continuation for short definitions (e.g. Python `__init__`)
 - PascalCase-aware hint-match-boost for class/type definitions
 - Concurrent indexing guard (global semaphore prevents OOM)
+- HNSW ef_search increased from 32 to 200 for more deterministic vector search
 
 ### Project map quality
 
@@ -40,7 +41,7 @@ Post-v3.0.0 quality improvements, new features, and better project maps.
 
 ### Benchmark state
 
-- 91% non-regression rate across 128 judged prompts (8 repos)
+- 91% non-regression rate across 131 judged prompts (8 repos)
 - React: 16/18 (89%), 11 wins, -10% cost
 - Flask: 17/18 (94%), Django: 15/18 (83%), Terraform: 16/18 (89%)
 
