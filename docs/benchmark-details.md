@@ -4,8 +4,8 @@ This report is a reproducible, fully public A/B benchmark of `budi` with exact r
 session-level hook evidence, responses, and judge rationales.
 
 - Generated (UTC): 2026-03-04T15:58:25.542496+00:00
-- Source runner: `scripts/ab_benchmark_runner.py`
-- Report generator: `scripts/generate_public_benchmark_details.py`
+- Source runner: `scripts/dev/ab_benchmark_runner.py`
+- Report generator: `scripts/dev/generate_public_benchmark_details.py`
 - Prompt-set fingerprint: `6c3ac7531b6aadddb020036fbbca250e548d3c10e2273e7497525310a3dc963f`
 - Cases: 9 (3 repos x 3 prompts)
 
