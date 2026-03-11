@@ -25,8 +25,12 @@ fn is_non_source_path(path: &str) -> bool {
 
 /// True if the symbol name is too generic to be informative in a project map.
 fn is_generic_symbol(sym: &str) -> bool {
-    // Short names are almost always too generic.
+    // Short names are almost always too generic (e.g., get, set, run, new, add).
+    // But keep 4-char names if they start with uppercase (likely meaningful types: Addr, Apps).
     if sym.len() <= 3 {
+        return true;
+    }
+    if sym.len() == 4 && !sym.starts_with(char::is_uppercase) {
         return true;
     }
     matches!(
