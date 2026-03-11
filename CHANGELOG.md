@@ -2,6 +2,48 @@
 
 All notable changes to budi are documented here.
 
+## [3.1.0] — Polish & Precision
+
+Post-v3.0.0 quality improvements, new features, and better project maps.
+
+### New features
+
+- **Session-end summary**: Stop hook prints injection rate and read hit rate to stderr
+- **MCP server** (`budi-mcp`): Thin stdio MCP server for Cursor, Zed, Windsurf, and other editors
+- **Post-injection feedback**: Tracks which files Claude reads that budi already injected (read hit rate)
+- **Activity summary in `budi doctor`**: Shows queries, injections, and read hit rate
+
+### Retrieval improvements
+
+- Devtools-path penalty now applies to all intent types (was Architecture-only)
+- Build-infra path penalty (-0.20) for rollup/webpack/jest/babel configs
+- SymbolUsage no-call-site skip for wrong-direction retrieval
+- FlowTrace callee-query skip for thin delegation functions
+- Class preamble continuation for short definitions (e.g. Python `__init__`)
+- PascalCase-aware hint-match-boost for class/type definitions
+- Concurrent indexing guard (global semaphore prevents OOM)
+
+### Project map quality
+
+- Symbols ranked by call graph centrality (reference count) instead of first-encountered
+- Directory diversity cap (max 5 symbols per top-level directory)
+- Entry points sorted by path depth (shallowest first)
+- Expanded generic symbol filter (~80 common names excluded)
+- Fixture, script, and devtools paths excluded from all project map sections
+
+### Fixes
+
+- Plugin PostToolUse matcher now includes Read|Glob (was Write|Edit only)
+- Fixed stale React P5 benchmark prompt (function renamed in React repo)
+- Fixed class preamble stub-body false positive
+- Fixed sym-def path-relevance pruning with path-diversity guard
+
+### Benchmark state
+
+- 91% non-regression rate across 128 judged prompts (8 repos)
+- React: 16/18 (89%), 11 wins, -10% cost
+- Flask: 17/18 (94%), Django: 15/18 (83%), Terraform: 16/18 (89%)
+
 ## [3.0.0] — The Context Buster
 
 budi v3.0.0 is the first version designed as a general-purpose context booster for Claude Code —
