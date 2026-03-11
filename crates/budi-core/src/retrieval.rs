@@ -918,6 +918,18 @@ pub fn build_query_response(
                 && contains_any(&lq, &["order", "sequence", "when a", "execution"])
                 && contains_any(&lq, &["mount", "unmount", "component", "effect", "hook"])
         };
+    // Broad request-pipeline FlowTrace queries ("trace the call chain from an HTTP request
+    // to the view function") with low top scores produce unrelated matches (admin views,
+    // context processors, decorators) because "request" and "view" are ubiquitous tokens.
+    // Skip when top < 0.50 — Claude already knows the framework's request pipeline.
+    let flowtrace_pipeline_skip = intent.kind == QueryIntentKind::FlowTrace
+        && scored.first().is_some_and(|c| c.score < 0.50)
+        && {
+            let lq = query.to_lowercase();
+            lq.contains("call chain")
+                || lq.contains("request pipeline")
+                || (lq.contains("trace") && lq.contains("request") && lq.contains("view"))
+        };
     // Broad test-coverage inventory queries ("what tests cover X and where do they
     // live") need Claude to explore the repo widely. Injecting 2-3 partial test file
     // fragments anchors Claude on those snippets instead of finding the complete test
@@ -974,6 +986,7 @@ pub fn build_query_response(
     let ci_skip = ci_skip
         || env_listing_skip
         || lifecycle_overview_skip
+        || flowtrace_pipeline_skip
         || test_coverage_skip
         || entry_points_skip
         || module_layout_skip
@@ -982,6 +995,7 @@ pub fn build_query_response(
         || flowtrace_callee_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
+        || flowtrace_pipeline_skip
         || test_coverage_skip
         || entry_points_skip
         || module_layout_skip
@@ -1192,6 +1206,30 @@ pub fn build_query_response(
             .any(|r| r == "hint-match-boost");
         if card1_span <= 5 && card2_is_alt_def && card2_span >= card1_span * 3 {
             selection.snippets.swap(0, 1);
+        }
+    }
+
+    // Path-relevance card pruning: when sym-def has 2 cards, both with hint-match-boost,
+    // and card 1 has hint-path-relevance but card 2 does NOT, the query contains domain
+    // keywords (e.g. "URL resolution") that disambiguate which definition is wanted.
+    // Card 2 is a different definition in an unrelated domain (e.g. template/base.py:resolve
+    // when the query is about URL resolution). Drop it — one focused card is better than
+    // one relevant + one noisy.
+    if intent.kind == QueryIntentKind::SymbolDefinition && selection.snippets.len() >= 2 {
+        let card1_has_path_rel = selection.snippets[0]
+            .reasons
+            .iter()
+            .any(|r| r == "hint-path-relevance");
+        let card2_has_hint_boost = selection.snippets[1]
+            .reasons
+            .iter()
+            .any(|r| r == "hint-match-boost" || r == "hint-match-boost-weak");
+        let card2_has_path_rel = selection.snippets[1]
+            .reasons
+            .iter()
+            .any(|r| r == "hint-path-relevance");
+        if card1_has_path_rel && card2_has_hint_boost && !card2_has_path_rel {
+            selection.snippets.truncate(1);
         }
     }
 
@@ -6599,5 +6637,48 @@ it("renders", () => {})
         assert!(!is_pascal_case("SESSION")); // ALL_CAPS
         assert!(!is_pascal_case("Where")); // stop word
         assert!(!is_pascal_case("ab")); // too short
+    }
+
+    #[test]
+    fn flowtrace_pipeline_skip_blocks_broad_request_trace() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("budi-flowtrace-pipeline-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("temp repo root");
+        let state = RepoIndexState {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            files: Vec::new(),
+            chunks: vec![ChunkRecord {
+                id: 1,
+                path: "django/contrib/auth/admin.py".to_string(),
+                start_line: 113,
+                end_line: 119,
+                language: "python".to_string(),
+                symbol_hint: Some("add_view".to_string()),
+                text: "@method_decorator([sensitive_post_parameters(), csrf_protect])\ndef add_view(self, request, form_url=\"\", extra_context=None):\n    if request.method in (\"GET\", \"HEAD\"):\n        return self._add_view(request, form_url, extra_context)\n".to_string(),
+                embedding: Vec::new(),
+            }],
+            updated_at_ts: 0,
+        };
+        let runtime = RuntimeIndex::from_state(&repo_root, state).expect("runtime");
+        let config = BudiConfig::default();
+        let response = build_query_response(
+            &runtime,
+            "Trace the call chain from an incoming HTTP request to the view function — what functions does it pass through?",
+            None,
+            None,
+            None,
+            RetrievalMode::Hybrid,
+            &config,
+        )
+        .expect("query response");
+        assert!(
+            response.snippets.is_empty(),
+            "expected pipeline-skip to block injection, got: {:?}",
+            response.snippets
+        );
+        let _ = fs::remove_dir_all(&repo_root);
     }
 }
