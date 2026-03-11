@@ -646,8 +646,7 @@ pub fn build_query_response(
             let exact_match = exact_match_symbol_tokens.iter().any(|t| t == &hint_lower);
             if !hint_lower.is_empty() && !is_generic_symbol_hint(hint) && exact_match {
                 let query_has_pascal = query_pascal_tokens.contains(&hint_lower);
-                let hint_is_lowercase =
-                    hint.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+                let hint_is_lowercase = hint.chars().next().is_some_and(|c| c.is_ascii_lowercase());
                 if query_has_pascal && hint_is_lowercase {
                     // Property/method with same name as a class — reduced boost.
                     adjusted += 0.10;
@@ -662,7 +661,10 @@ pub fn build_query_response(
                 // Sym-hint-seeded chunks bypass the path channel, so this is the only
                 // way domain context from the query influences their ranking.
                 let path_lower = chunk.path.to_ascii_lowercase();
-                if path_tokens.iter().any(|pt| path_lower.contains(pt.as_str())) {
+                if path_tokens
+                    .iter()
+                    .any(|pt| path_lower.contains(pt.as_str()))
+                {
                     adjusted += 0.05;
                     push_unique_reason(&mut reasons, "hint-path-relevance");
                 }
@@ -3593,11 +3595,7 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
 
 /// Detect "the X function/method/class/..." patterns in natural language queries.
 /// Captures bare identifiers like "resolve" that have no camelCase/underscore signal.
-fn extract_named_symbol_from_prose(
-    query: &str,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
+fn extract_named_symbol_from_prose(query: &str, out: &mut Vec<String>, seen: &mut HashSet<String>) {
     const CODE_NOUNS: &[&str] = &[
         "function",
         "method",
@@ -3628,7 +3626,9 @@ fn extract_named_symbol_from_prose(
                 && prev_lower != "that"
                 && prev_lower != "a"
                 && prev_lower != "an"
-                && prev_lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && prev_lower
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && seen.insert(prev_lower.clone())
             {
                 out.push(prev_lower);
@@ -3730,9 +3730,8 @@ fn extract_query_pascal_tokens(query: &str) -> HashSet<String> {
 fn is_pascal_case(token: &str) -> bool {
     const STOP: &[&str] = &[
         "where", "what", "which", "when", "why", "how", "describe", "trace", "show", "list",
-        "explain", "tell", "give", "does", "the", "and", "but", "from", "with", "this",
-        "that", "they", "there", "their", "into", "would", "could", "should", "also",
-        "walk", "here",
+        "explain", "tell", "give", "does", "the", "and", "but", "from", "with", "this", "that",
+        "they", "there", "their", "into", "would", "could", "should", "also", "walk", "here",
     ];
     if token.len() < 3 || token.len() > 64 {
         return false;
@@ -4649,9 +4648,7 @@ mod tests {
 
     #[test]
     fn named_symbol_from_prose_modelbase_metaclass() {
-        let tokens = extract_query_symbol_tokens(
-            "Where is the ModelBase metaclass defined?",
-        );
+        let tokens = extract_query_symbol_tokens("Where is the ModelBase metaclass defined?");
         // "ModelBase" should be found by TitleCase detection AND by "X metaclass" pattern
         assert!(tokens.contains(&"modelbase".to_string()));
     }
@@ -4665,9 +4662,7 @@ mod tests {
 
     #[test]
     fn named_symbol_from_prose_handler_class() {
-        let tokens = extract_query_symbol_tokens(
-            "Where is the handler class defined?",
-        );
+        let tokens = extract_query_symbol_tokens("Where is the handler class defined?");
         assert!(
             tokens.contains(&"handler".to_string()),
             "expected 'handler' from 'the handler class', got: {:?}",
@@ -6510,9 +6505,9 @@ it("renders", () => {})
         assert!(is_pascal_case("Engine"));
         assert!(is_pascal_case("Context"));
         assert!(is_pascal_case("RuntimeConfig"));
-        assert!(!is_pascal_case("session"));   // lowercase
-        assert!(!is_pascal_case("SESSION"));   // ALL_CAPS
-        assert!(!is_pascal_case("Where"));     // stop word
-        assert!(!is_pascal_case("ab"));        // too short
+        assert!(!is_pascal_case("session")); // lowercase
+        assert!(!is_pascal_case("SESSION")); // ALL_CAPS
+        assert!(!is_pascal_case("Where")); // stop word
+        assert!(!is_pascal_case("ab")); // too short
     }
 }

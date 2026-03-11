@@ -1,0 +1,74 @@
+Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
+Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
+
+## Current state (v3.0.0, 2026-03-11)
+
+- Branch: main, CI green, all 256 tests pass, release workflow green
+- v3.0.0 just shipped: https://github.com/siropkin/budi/releases/tag/v3.0.0
+- Installed: ~/.local/bin/budi + budi-daemon (v3.0.0)
+- 0 clippy warnings, 0 TODOs/FIXMEs
+
+## Latest benchmark results (v3.0.0 = v2.64.0 code, validated 2026-03-11)
+
+| Benchmark | Runs | Range | Cost | Notes |
+|-----------|------|-------|------|-------|
+| React (18) | 3 | 14-16/18 (78-89%) | −15% | P7 flow-trace, P8 sym-use mild |
+| Flask (18) | 3 | 14-15/18 (78-83%) | −15% | P15 sym-use (HNSW miss) |
+| Django (18) | 3 | 14-15/18 (78-83%) | −6% to −20% | P4/P14 sym-def (generic names) |
+| Ripgrep (16) | 1 | 13/16 (81%) | −7% | **STALE** (v2.60.0) — revalidate! |
+| Terraform (18) | 1 | 15/18 (83%) | −32% | **STALE** (v2.61.0) — revalidate! |
+| FastAPI (18) | 1 | 18/18 (100%) | +6% | none |
+| Fastify (18) | 1 | 17/18 (94%) | −8% | P14 only |
+| Express (5) | 1 | 4/5 (80%) | −21% | P4 only |
+| **Total** | | **~115/129 (89%)** | varies | **0 severe, all mild Q−1** |
+
+## This session: THREE parallel tracks (do ALL, don't stop after one)
+
+### Track 1: Competitive Research Deep Dive
+
+Do thorough web research (2-4 searches per topic, keep only actionable ideas):
+
+1. **Context engineering for LLM coding agents (2025-2026)**: compression/condensation techniques, context management in production agents, papers/posts/HN
+2. **Context rot / pollution latest findings**: irrelevant context degradation, optimal utilization ratios, position effects
+3. **Competitor analysis** — actually inspect these tools' code/approach:
+   - `context-mode` (npm, PreToolUse hooks, output interception, sandbox tools, `/ctx-stats`)
+   - `claude-context-local` (MCP, local EmbeddingGemma, semantic search)
+   - `GitNexus` (AST + knowledge graph, dependency/impact analysis, enriches native tools)
+   - `Claude-Mem` (PostToolUse hooks, AI-compressed cross-session memory)
+   - For each: what does budi do better? what could budi learn?
+4. **Code retrieval state of the art**: how Cursor/Windsurf/Cody do retrieval, new embedding models, hybrid search innovations
+5. **Claude Code hooks ecosystem**: other hook-based tools, patterns we're missing
+
+Key competitive insight from user: "Context bloat is the biggest hidden cost when using Claude Code. If you let it read massive dirs or leave Auto-Compact on, it eats through tokens and loses its train of thought." This validates budi's core thesis.
+
+### Track 2: Wild-Repo Validation
+
+Test budi v3.0.0 on repos we have NEVER benchmarked. This validates the "repo-agnostic" claim.
+
+Pick 5 repos (prioritize language/framework/size diversity):
+- Next.js (TS, monorepo), Gin (Go, small), SQLAlchemy (Python, ORM), Axum (Rust, small), Vue (TS/JS), Spring Boot (Java), Neovim (C — no grammar!)
+
+For each:
+1. Clone to `/Users/ivan.seredkin/_projects/public-budi-bench/<name>`
+2. `budi init --index` — note timing, chunk count, errors
+3. 5 ad-hoc `budi repo preview "<prompt>"` across intents (sym-def, sym-use, flow-trace, arch, rt-config)
+4. Document: what works, what fails, crashes, wrong injections
+
+If you find bugs, fix them, validate, commit. If enough fixes accumulate, bump to v3.0.1.
+
+### Track 3: Stale Benchmark Revalidation
+
+Launch these in background:
+- Ripgrep: `python3 scripts/dev/ab_benchmark_runner.py --repo-root /Users/ivan.seredkin/_projects/ripgrep --prompts-file scripts/dev/benchmarks/ripgrep-v1.prompts.json --parallel 1 --judge-timeout-sec 300`
+- Terraform: `python3 scripts/dev/ab_benchmark_runner.py --repo-root /Users/ivan.seredkin/_projects/public-budi-bench/terraform --prompts-file scripts/dev/benchmarks/terraform-v1.prompts.json --parallel 1 --judge-timeout-sec 300`
+
+Update benchmark state in plan and MEMORY.md with results.
+
+## Rules
+
+- Do not wait for my confirmation unless blocked or risky
+- Do all three tracks, don't stop after one
+- Commit and push validated changes
+- Update the improvement loop plan with findings
+- For web research, keep it lean: 2-4 searches per topic, only actionable ideas
+- Brief status updates at track transitions
