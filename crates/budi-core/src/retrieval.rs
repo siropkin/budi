@@ -801,6 +801,15 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "vector-only-demote");
         }
 
+        // SymbolUsage — single-line chunk demotion. A 1-line chunk is typically
+        // a variable declaration (`let scheduleCallback;`), import, or re-export —
+        // not a meaningful call site. Real callers have surrounding context.
+        // -0.15 pushes single-line chunks below multi-line callers.
+        if intent.kind == QueryIntentKind::SymbolUsage && chunk.start_line == chunk.end_line {
+            adjusted -= 0.15;
+            push_unique_reason(&mut reasons, "single-line-demote");
+        }
+
         // FlowTrace — definition anchor for named function targets.
         // "What does reconcileChildFibers call" or "What functions does get_response call"
         // queries name a specific function. Boost its definition chunk (+0.10) to keep it
