@@ -23,7 +23,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit",
+        "matcher": "Write|Edit|Read|Glob",
         "hooks": [
           {
             "type": "command",

@@ -4,8 +4,8 @@
 
 - `SessionStart` -> `budi hook session-start` (injects project map and recently-relevant files)
 - `UserPromptSubmit` -> `budi hook user-prompt-submit` (injects relevant code context)
-- `PostToolUse` (`Write|Edit`) -> `budi hook post-tool-use` (triggers incremental re-indexing)
-- `Stop` -> `budi hook session-end` (logs session stats when debug_io is enabled)
+- `PostToolUse` (`Write|Edit|Read|Glob`) -> `budi hook post-tool-use` (incremental re-indexing on writes, graph neighbor prefetch on reads)
+- `Stop` -> `budi hook session-end` (prints session summary with injection rate and read hit rate)
 
 This keeps prompt context injection, post-edit indexing, and session lifecycle behavior
 consistent across repos and teams.
