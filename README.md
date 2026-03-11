@@ -9,7 +9,9 @@
 
 `budi` indexes your repo locally and pre-injects the right code snippets before Claude starts searching. Faster answers, fewer wasted tool calls, 3-32% lower cost.
 
-<!-- TODO: Add demo GIF/asciicast here showing budi in action -->
+<p align="center">
+  <img src="assets/demo.gif" alt="budi demo — init, index, and preview on Flask" width="700">
+</p>
 
 ## How it works
 
