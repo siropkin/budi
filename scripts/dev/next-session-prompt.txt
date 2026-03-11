@@ -6,49 +6,61 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Branch: main, CI green (all checks pass), all 307 tests pass (282 budi-core + 21 budi-cli + 4 budi-daemon)
 - Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (freshly copied from release build)
 - 0 clippy warnings
-- v3.2.0 released (41 commits since v3.1.0)
+- v3.2.0 released (41 commits since v3.1.0), GitHub release created
 - All 8 benchmark repos freshly re-indexed with BM25 identifier splitting
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 
 ## What was done in this session (session 7, 2026-03-11)
 
 ### 1. Reranker full evaluation (alpha=0.5, Flask 18 prompts) — DONE
-Compared retrieval results on all 18 Flask prompts with and without cross-encoder reranker at alpha=0.5:
-- **Score inflation**: Reranker inflates top scores by +0.15-0.25 (e.g. P3: 0.76→0.92, P10: 0.46→0.71)
-- **Ranking changes on 5/18 prompts**: P4 (added card 2), P6 (scaffold promoted), P7 (test file above floor), P8 (REGRESSION: definition over callers), P18 (order swapped)
-- **P8 regression**: For "What calls dispatch_request", reranker promotes the dispatch_request DEFINITION (score 0.59) above actual callers (0.36 without reranker). Cross-encoder can't distinguish definitions from call sites.
-- **Conclusion**: Fine-tuned model (AP 0.62) lacks discriminative power. Needs code-aware base model (CodeBERT/UniXcoder) or better training data. Reranker remains disabled by default.
+- Score inflation: +0.15-0.25 across the board
+- Ranking changes on 5/18 prompts, but mixed: P8 is a regression (definition over callers in sym-use)
+- **Conclusion**: Fine-tuned model (AP 0.62) lacks discriminative power. Keep disabled.
 
-### 2. HNSW non-determinism root cause — FOUND (no fix yet)
-- fastembed uses `available_parallelism()` (all CPUs) as ONNX `intra_threads`, causing non-deterministic floating-point results
-- Found in `/Users/ivan.seredkin/.cargo/registry/src/.../fastembed-5.11.0/src/text_embedding/impl.rs`: `let threads = available_parallelism()?.get(); .with_intra_threads(threads)?`
-- fastembed's `InitOptions` doesn't expose thread count control
-- Fix requires either forking fastembed or finding an alternative approach
+### 2. Reranker base model experiments — DONE
+| Model | Params | Baseline AP | Fine-tuned AP | Change |
+|-------|--------|-------------|---------------|--------|
+| ms-marco-MiniLM-L-6-v2 | 22M | 0.5859 | **0.6219** | +0.036 |
+| UniXcoder | 125M | 0.4425 | 0.3184 | -0.124 |
+| CodeBERT | 125M | 0.3337 | 0.3799 | +0.046 |
+- **Conclusion**: ms-marco wins because pre-trained cross-encoder head > code-aware representations with 951 training pairs. Need much more data or a pre-trained code cross-encoder.
 
-### 3. v3.2.0 release — DONE
-Bumped version, wrote changelog, built release, installed binaries.
+### 3. HNSW non-determinism root cause — FOUND
+- fastembed uses `available_parallelism()` as ONNX `intra_threads`
+- InitOptions doesn't expose thread count. Fix requires forking fastembed.
 
-### 4. Stale test repo cleanup — DONE
-Cleaned 30 stale test repos (45→15 entries).
+### 4. Embedding model research — DONE
+- fastembed supports nomic-embed-text-v1/v1.5 but NOT nomic-embed-code (7B, too large)
+- Switching to nomic-text-v1.5 (768 dim) would double storage and require full re-index
+- Not worth it: current AllMiniLML6V2 + 5-channel fusion achieves 91%
+
+### 5. v3.2.0 release — DONE
+- Version bump, changelog, GitHub release, CI green
+
+### 6. Stale test repo cleanup — DONE (45→15 entries)
+
+## Key insight from this session
+
+**The heuristic pipeline is the right approach.** The reranker and embedding research both show that the hand-tuned 5-channel fusion + intent-aware score floors + skip patterns is hard to beat with ML approaches at budi's data scale (951 pairs). The remaining regressions (9%) are structural (thin wrappers, HNSW variance, LLM variance) — not solvable by better scoring.
 
 ## Priority queue for next session
 
-### 1. Try CodeBERT as reranker base — HIGH
-The ms-marco-MiniLM-L-6-v2 AP only improved +3.6% after fine-tuning. A code-aware base model (CodeBERT, UniXcoder, CodeSage) should achieve much higher AP since the base representations already understand code structure. The fine-tuning pipeline is ready (`scripts/dev/reranker_finetune.py`).
+### 1. More reranker training data — MEDIUM
+Generate synthetic (query, code, relevance) training data using Claude to label code chunks. Target 5-10K pairs to overcome the data scarcity that makes the reranker useless. This is the only path to a useful reranker.
 
-### 2. nomic-embed-code evaluation — HIGH
-Apache-2.0, outperforms voyage-code-3 on CodeSearchNet. GGUF Q4_K_M ~4GB. Better embeddings would improve vector channel quality across all repos. Investigate integration path (ONNX? ggml?).
+### 2. HNSW cold-cache warmup — MEDIUM
+Mitigation: run a dummy warmup query on daemon startup to prime HNSW.
 
 ### 3. Train retrieval weights from benchmark data (#33) — MEDIUM
-131 labeled prompts as training set for `weights_for_intent()`. Would need to build tooling to capture per-candidate channel scores during retrieval.
+Build tooling to capture per-candidate channel scores during retrieval. Grid search over 30 weight parameters (5 channels × 6 intents).
 
-### 4. HNSW cold-cache warmup — MEDIUM
-Mitigation for embedding non-determinism: run a warmup query on daemon startup.
+### 4. Full 8-repo revalidation — LOW
+Run full benchmarks to update baseline numbers.
 
-### 5. Full 8-repo revalidation — LOW
-Run full benchmarks on all 8 repos to update the plan's baseline numbers.
+### 5. Verkada-Web daily-driver usage — LOW
+Use budi for actual development work, collect real stats.
 
 ## Other items on the backlog
 - Benchmark against Augment Context Engine MCP
 - Impact analysis / git-blame indexing (#34)
-- Verkada-Web daily-driver usage (collect real stats)
+- Pre-trained code cross-encoder (if one becomes available on HuggingFace)
