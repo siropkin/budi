@@ -878,14 +878,21 @@ pub fn build_query_response(
         && scored
             .first()
             .is_some_and(|c| c.reasons.iter().any(|r| r == "test-subject-file-seed"));
-    // Low-confidence SymbolUsage skip: when top < 0.28, no callers scored high
-    // enough to be useful. Injecting marginal results (examples, struct defs at
-    // 0.23-0.24) anchors Claude on irrelevant code. Ripgrep P9 sometimes has
-    // top=0.24 (simplegrep.rs example), which this catches. When HNSW gives
-    // top=0.40 (hiargs.rs Paths struct), the regression persists but that case
-    // is harder to distinguish from valid results without over-skipping.
+    // Low-confidence SymbolUsage skip: when the top candidate scored too low,
+    // injecting marginal results anchors Claude on irrelevant code.
+    // Two tiers:
+    //   - No symbol/graph signal (purely lexical/vector): threshold 0.35
+    //     Generic words like "setup" match many files but none via the symbol
+    //     index, so lexical-only results at 0.29-0.34 are usually noise.
+    //   - Has symbol/graph signal: threshold 0.28
+    //     The symbol index confirmed the function name exists, so lower scores
+    //     can still be relevant callers.
     let sym_use_low_confidence_skip = intent.kind == QueryIntentKind::SymbolUsage
-        && scored.first().is_some_and(|c| c.score < 0.28);
+        && scored.first().is_some_and(|c| {
+            let no_symbol_signal = c.channel_scores.symbol == 0.0 && c.channel_scores.graph == 0.0;
+            let threshold = if no_symbol_signal { 0.35 } else { 0.28 };
+            c.score < threshold
+        });
     // SymbolUsage thin-caller skip: when the top non-definition card spans a
     // very short file (start_line <= 2, end_line <= 15), the caller is likely a
     // boilerplate entry point (__main__.py, main.rs wrapper). Such trivial call
