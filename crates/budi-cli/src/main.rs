@@ -2731,8 +2731,27 @@ fn emit_hook_response(output: UserPromptSubmitOutput) -> Result<()> {
 }
 
 fn cmd_statusline() -> Result<()> {
-    // Drain stdin (Claude Code pipes session JSON, avoid broken pipe)
-    let _ = io::stdin().read_to_string(&mut String::new());
+    // Read stdin — Claude Code pipes session JSON with cwd info
+    let mut input = String::new();
+    let _ = io::stdin().read_to_string(&mut input);
+
+    // Extract cwd from session JSON to check if this repo has budi
+    let cwd = serde_json::from_str::<Value>(&input)
+        .ok()
+        .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()));
+
+    // Check if budi is set up for this repo
+    let repo_initialized = cwd
+        .as_deref()
+        .and_then(|c| config::find_repo_root(Path::new(c)).ok())
+        .is_some_and(|root| root.join(".claude/settings.local.json").exists());
+
+    if !repo_initialized {
+        // budi is not set up for this project
+        println!("\x1b[36mbudi \x1b[90m· not set up\x1b[0m");
+        return Ok(());
+    }
 
     let client = daemon_client_with_timeout(Duration::from_millis(200));
     let url = format!(
@@ -2799,7 +2818,8 @@ fn cmd_statusline() -> Result<()> {
             }
         }
         _ => {
-            println!("\x1b[36mbudi \x1b[90m○\x1b[0m");
+            // Daemon is not running
+            println!("\x1b[36mbudi \x1b[90m· off\x1b[0m");
         }
     }
     Ok(())
