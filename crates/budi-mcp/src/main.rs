@@ -195,6 +195,12 @@ impl BudiMcpServer {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Handle --version before anything else (no tracing, no tokio needed).
+    if env::args().any(|a| a == "--version") {
+        println!("budi-mcp {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)

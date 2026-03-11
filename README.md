@@ -34,21 +34,21 @@ flowchart LR
 
 ## Latest A/B numbers
 
-Across 8 open-source repos (129 judged prompts), compared by an independent LLM judge:
+Across 8 open-source repos (128 judged prompts), compared by an independent LLM judge:
 
 - **3–32% lower cost** on most repos (up to +6% on repos where budi adds quality)
-- **89% regression-free** — same or better quality on 115/129 judged prompts
-- FastAPI: 100% non-regression with 11 quality wins; Terraform: 83%, −32% cost
-- Remaining 14 regressions are mild (Q −1) from HNSW variance on generic symbol names
+- **92% regression-free** — same or better quality on 118/128 judged prompts
+- FastAPI: 100% non-regression with 11 quality wins; Flask: 94–100%; Terraform: 94%, −27% cost
+- Remaining 10 regressions are mild (Q −1) from HNSW variance on generic symbol names
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting the right context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
 ```mermaid
 pie showData
-    title "Efficiency outcomes (8 repos, 129 judged prompts)"
-    "same quality, lower cost" : 67
-    "better quality" : 43
-    "regression" : 14
+    title "Efficiency outcomes (8 repos, 128 judged prompts)"
+    "same quality, lower cost" : 62
+    "better quality" : 56
+    "regression" : 10
 ```
 
 Full methodology, prompts, and per-prompt evidence live in `docs/benchmark.md`.
@@ -118,6 +118,32 @@ Force context injection for one prompt:
 @forcebudi your prompt here
 ```
 
+## MCP server (Cursor, Zed, and other editors)
+
+`budi` also ships an MCP server (`budi-mcp`) that exposes retrieval over the standard [Model Context Protocol](https://modelcontextprotocol.io/). This makes `budi` usable in any editor that supports MCP: Cursor, Zed, Windsurf, and more.
+
+Add to your editor's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "budi": {
+      "command": "budi-mcp",
+      "env": {
+        "BUDI_DAEMON_URL": "http://127.0.0.1:7878"
+      }
+    }
+  }
+}
+```
+
+The MCP server exposes two tools:
+
+- `budi_search` — search the indexed codebase for code relevant to a question
+- `budi_status` — check if a repository is indexed and ready
+
+Requirements: the `budi-daemon` must be running (`budi init --index` starts it automatically).
+
 ## Docs
 
 - Benchmark methodology: `docs/benchmark.md`
@@ -133,7 +159,7 @@ Force context injection for one prompt:
 | **Approach** | Pre-injects code before Claude searches | Compresses tool output after Claude searches | Semantic search via MCP (on demand) | Knowledge graph + MCP |
 | **Integration** | Claude Code hooks (automatic) | Claude Code hooks (intercept) | MCP tools (explicit) | MCP + hooks |
 | **Retrieval** | 5-channel (lexical, vector, symbol, path, graph) with intent routing | BM25 with 4-layer fallback | FAISS vector search | BM25 + semantic + RRF |
-| **A/B validated** | 8 repos, 111 prompts, 91% non-regression | No | No | No |
+| **A/B validated** | 8 repos, 128 prompts, 92% non-regression | No | No | No |
 | **Language** | Rust (single binary) | TypeScript (npm) | Python | TypeScript |
 | **Privacy** | 100% local | 100% local | 100% local | 100% local |
 

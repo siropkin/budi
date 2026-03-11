@@ -139,7 +139,8 @@ jobs:
             --locked \
             --target "${{ matrix.target }}" \
             --bin budi \
-            --bin budi-daemon
+            --bin budi-daemon \
+            --bin budi-mcp
 
       - name: Package tarball
         shell: bash
@@ -155,6 +156,7 @@ jobs:
           mkdir -p "${stage_dir}"
           cp "target/${target}/release/budi" "${stage_dir}/"
           cp "target/${target}/release/budi-daemon" "${stage_dir}/"
+          cp "target/${target}/release/budi-mcp" "${stage_dir}/"
           cp README.md "${stage_dir}/"
 
           tarball="${package}.tar.gz"

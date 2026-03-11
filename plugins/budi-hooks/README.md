@@ -2,11 +2,13 @@
 
 `budi-hooks` packages the core `budi` hook automation for Claude Code:
 
-- `UserPromptSubmit` -> `budi hook user-prompt-submit`
-- `PostToolUse` (`Write|Edit`) -> `budi hook post-tool-use`
+- `SessionStart` -> `budi hook session-start` (injects project map and recently-relevant files)
+- `UserPromptSubmit` -> `budi hook user-prompt-submit` (injects relevant code context)
+- `PostToolUse` (`Write|Edit`) -> `budi hook post-tool-use` (triggers incremental re-indexing)
+- `Stop` -> `budi hook session-end` (logs session stats when debug_io is enabled)
 
-This keeps prompt context injection and post-edit indexing behavior consistent
-across repos and teams.
+This keeps prompt context injection, post-edit indexing, and session lifecycle behavior
+consistent across repos and teams.
 
 ## Requirements
 

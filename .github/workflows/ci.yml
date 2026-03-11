@@ -48,3 +48,4 @@ jobs:
         run: |
           ./target/release/budi --version
           ./target/release/budi-daemon --version
+          ./target/release/budi-mcp --version

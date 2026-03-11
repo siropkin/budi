@@ -1,6 +1,16 @@
 {
-  "description": "budi hook automation for prompt augmentation and post-edit indexing.",
+  "description": "budi hook automation for prompt augmentation, post-edit indexing, and session context.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "budi hook session-start"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -20,6 +30,16 @@
             "command": "budi hook post-tool-use",
             "async": true,
             "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "budi hook session-end"
           }
         ]
       }
