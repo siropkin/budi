@@ -2053,6 +2053,29 @@ fn is_stub_body(text: &str) -> bool {
     if non_blank.len() <= 6 && (lower.contains("unsupported") || lower.contains("not supported")) {
         return true;
     }
+    // Empty function body: signature + nothing meaningful in the body.
+    // e.g. `func (v *QueryOperationJSON) Plan(plan *plans.Plan, schemas *terraform.Schemas) {}`
+    // or a `pass` statement in Python.
+    // Count non-blank lines after stripping braces — if only 1-2 lines (the signature),
+    // the function has no implementation.
+    if non_blank.len() <= 2 {
+        return true;
+    }
+    // 3 lines: signature + single trivial body line (pass, return, return nil, etc.)
+    if non_blank.len() == 3 {
+        let body_line = non_blank
+            .last()
+            .map(|l| l.trim_end_matches(|c: char| c == ';' || c == ',').trim())
+            .unwrap_or("");
+        if body_line == "pass"
+            || body_line == "return"
+            || body_line == "return nil"
+            || body_line == "return nil, nil"
+            || body_line == "return None"
+        {
+            return true;
+        }
+    }
     false
 }
 
@@ -6186,6 +6209,22 @@ it("renders", () => {})
 	return resp
 }"#;
         assert!(is_stub_body(text));
+    }
+
+    #[test]
+    fn is_stub_body_detects_empty_function() {
+        // Go empty function body
+        assert!(is_stub_body(
+            "func (v *QueryOperationJSON) Plan(plan *plans.Plan, schemas *terraform.Schemas) {\n}"
+        ));
+        // Single-line empty
+        assert!(is_stub_body("def noop(self): pass"));
+    }
+
+    #[test]
+    fn is_stub_body_detects_trivial_return() {
+        assert!(is_stub_body("func foo() error {\n    return nil\n}"));
+        assert!(is_stub_body("def noop(self):\n    pass\n"));
     }
 
     #[test]
