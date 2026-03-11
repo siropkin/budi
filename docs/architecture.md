@@ -116,8 +116,9 @@
 
 Certain broad/overview queries are better served by Claude exploring on its own than by injecting a few code snippets that anchor it to a narrow subset:
 
+- **Entry-points Architecture queries** (unconditional): "entry points", "crate responsibilities"
+- **Module-layout Architecture queries** (unconditional): "module layout", "directory structure", "codebase structure"
 - **Design/test-gen Architecture queries** (top < 0.55): "would you add", "I want to implement", etc.
-- **Module-layout Architecture queries** (top < 0.55): "module layout", "directory structure", "codebase structure"
 - **Env-var listing RuntimeConfig queries**: "which env vars", "what env vars"
 - **Lifecycle-overview FlowTrace queries** (top < 0.55): "lifecycle hook execution order", "cleanup order for effects"
 
