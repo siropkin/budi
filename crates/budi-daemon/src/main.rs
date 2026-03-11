@@ -289,6 +289,7 @@ async fn hook_prompt_submit(
         cwd: Some(cwd.display().to_string()),
         retrieval_mode: None,
         session_id: Some(session_id),
+        dump_candidates: false,
     };
 
     let response = match state.daemon_state.query(request, &config).await {
