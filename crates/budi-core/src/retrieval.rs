@@ -3237,6 +3237,7 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
             "call chain",
             "calls internally",
             "trace the",
+            "trace from",
             "execution order",
             "cleanup order",
             "cleanup sequence",
@@ -4226,6 +4227,10 @@ mod tests {
         );
         assert_eq!(
             classify_intent("trace the call chain of commitRoot"),
+            QueryIntentKind::FlowTrace
+        );
+        assert_eq!(
+            classify_intent("trace from app creation to config loading"),
             QueryIntentKind::FlowTrace
         );
         assert_eq!(
