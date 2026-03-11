@@ -30,6 +30,19 @@ fn looks_like_symbol(line: &str) -> bool {
         || trimmed.starts_with("type ")
         || trimmed.starts_with("def ")
         || trimmed.starts_with("async def ")
+        // Kotlin
+        || trimmed.starts_with("fun ")
+        || trimmed.starts_with("open fun ")
+        || trimmed.starts_with("override fun ")
+        || trimmed.starts_with("private fun ")
+        || trimmed.starts_with("internal fun ")
+        || trimmed.starts_with("data class ")
+        || trimmed.starts_with("sealed class ")
+        || trimmed.starts_with("object ")
+        // Ruby
+        || trimmed.starts_with("module ")
+        // Swift
+        || trimmed.starts_with("protocol ")
         // JS/TS bare and exported forms
         || trimmed.starts_with("function ")
         || trimmed.starts_with("async function ")
@@ -87,6 +100,29 @@ const SYMBOL_KEYWORDS: &[&str] = &[
     "override",
     "inline",
     "func",
+    // Ruby
+    "module",
+    "end",
+    // Kotlin/Scala
+    "fun",
+    "object",
+    "companion",
+    "data",
+    "sealed",
+    "open",
+    "internal",
+    "val",
+    "var",
+    "case",
+    "trait",
+    // Swift
+    "protocol",
+    "extension",
+    "mutating",
+    "init",
+    "deinit",
+    "subscript",
+    "actor",
 ];
 
 fn symbol_from_line(line: &str) -> Option<String> {
@@ -144,6 +180,11 @@ enum AstLanguageKind {
     Java,
     Cpp,
     CSharp,
+    Ruby,
+    Kotlin,
+    Swift,
+    Scala,
+    Php,
 }
 
 impl AstLanguageKind {
@@ -157,6 +198,11 @@ impl AstLanguageKind {
             AstLanguageKind::Java => "java",
             AstLanguageKind::Cpp => "cpp",
             AstLanguageKind::CSharp => "csharp",
+            AstLanguageKind::Ruby => "ruby",
+            AstLanguageKind::Kotlin => "kotlin",
+            AstLanguageKind::Swift => "swift",
+            AstLanguageKind::Scala => "scala",
+            AstLanguageKind::Php => "php",
         }
     }
 }
@@ -178,6 +224,10 @@ pub fn language_label_for_path(file_path: &str) -> String {
         "shell".to_string()
     } else if lower.ends_with(".sql") {
         "sql".to_string()
+    } else if lower.ends_with(".graphql") || lower.ends_with(".gql") {
+        "graphql".to_string()
+    } else if lower.ends_with(".proto") {
+        "protobuf".to_string()
     } else {
         "unknown".to_string()
     }
@@ -246,6 +296,24 @@ fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)>
         || lower.ends_with(".hxx")
     {
         return Some((AstLanguageKind::Cpp, tree_sitter_cpp::LANGUAGE.into()));
+    }
+    if lower.ends_with(".rb") {
+        return Some((AstLanguageKind::Ruby, tree_sitter_ruby::LANGUAGE.into()));
+    }
+    if lower.ends_with(".kt") || lower.ends_with(".kts") {
+        return Some((
+            AstLanguageKind::Kotlin,
+            tree_sitter_kotlin_ng::LANGUAGE.into(),
+        ));
+    }
+    if lower.ends_with(".swift") {
+        return Some((AstLanguageKind::Swift, tree_sitter_swift::LANGUAGE.into()));
+    }
+    if lower.ends_with(".scala") || lower.ends_with(".sc") {
+        return Some((AstLanguageKind::Scala, tree_sitter_scala::LANGUAGE.into()));
+    }
+    if lower.ends_with(".php") {
+        return Some((AstLanguageKind::Php, tree_sitter_php::LANGUAGE_PHP.into()));
     }
     None
 }
@@ -323,6 +391,37 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
                 | "method_declaration"
                 | "constructor_declaration"
                 | "field_declaration"
+        ),
+        AstLanguageKind::Ruby => matches!(kind, "method" | "singleton_method" | "class" | "module"),
+        AstLanguageKind::Kotlin => matches!(
+            kind,
+            "function_declaration" | "class_declaration" | "object_declaration"
+        ),
+        AstLanguageKind::Swift => matches!(
+            kind,
+            "function_declaration"
+                | "class_declaration"
+                | "protocol_declaration"
+                | "init_declaration"
+                | "deinit_declaration"
+                | "subscript_declaration"
+        ),
+        AstLanguageKind::Scala => matches!(
+            kind,
+            "function_definition"
+                | "class_definition"
+                | "object_definition"
+                | "trait_definition"
+                | "enum_definition"
+        ),
+        AstLanguageKind::Php => matches!(
+            kind,
+            "function_definition"
+                | "class_declaration"
+                | "method_declaration"
+                | "interface_declaration"
+                | "trait_declaration"
+                | "enum_declaration"
         ),
     }
 }
@@ -502,7 +601,12 @@ fn append_node_chunks(out: &mut Vec<Chunk>, node: Node<'_>, context: &NodeChunki
             // just 1-2 lines of export/function boilerplate.
             if matches!(
                 context.language_kind,
-                AstLanguageKind::Python | AstLanguageKind::Java
+                AstLanguageKind::Python
+                    | AstLanguageKind::Java
+                    | AstLanguageKind::Ruby
+                    | AstLanguageKind::Kotlin
+                    | AstLanguageKind::Scala
+                    | AstLanguageKind::Php
             ) {
                 let first_child_start = boundary_children[0].start_position().row + 1;
                 let preamble_start = start_line.saturating_sub(1);
@@ -1127,6 +1231,184 @@ type Plan struct {
         assert!(
             hints.contains(&"Plan"),
             "expected Plan hint, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn ast_chunking_splits_ruby_methods() {
+        let content = r#"
+class UserController
+  def index
+    @users = User.all
+    render json: @users
+  end
+
+  def show
+    @user = User.find(params[:id])
+    render json: @user
+  end
+end
+"#;
+        let chunks = chunk_text("user_controller.rb", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks.iter().all(|c| c.language == "ruby"),
+            "expected ruby language label"
+        );
+        assert!(
+            chunks.iter().any(|c| c.text.contains("def index")),
+            "expected index method chunk"
+        );
+    }
+
+    #[test]
+    fn ast_chunking_splits_kotlin_functions() {
+        let content = r#"
+class UserService {
+    fun findUser(id: Long): User {
+        return userRepository.findById(id)
+    }
+
+    fun createUser(name: String): User {
+        return userRepository.save(User(name = name))
+    }
+}
+"#;
+        let chunks = chunk_text("UserService.kt", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks.iter().all(|c| c.language == "kotlin"),
+            "expected kotlin language label"
+        );
+        assert!(
+            chunks.iter().any(|c| c.text.contains("findUser")),
+            "expected findUser in chunks"
+        );
+    }
+
+    #[test]
+    fn ast_chunking_splits_swift_functions() {
+        let content = r#"
+class ViewModel {
+    func fetchData() {
+        let url = URL(string: "https://api.example.com")!
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data = data else { return }
+            print(data)
+        }.resume()
+    }
+
+    func clearCache() {
+        cache.removeAll()
+    }
+}
+"#;
+        let chunks = chunk_text("ViewModel.swift", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks.iter().all(|c| c.language == "swift"),
+            "expected swift language label"
+        );
+        assert!(
+            chunks.iter().any(|c| c.text.contains("fetchData")),
+            "expected fetchData in chunks"
+        );
+    }
+
+    #[test]
+    fn ast_chunking_splits_scala_definitions() {
+        let content = r#"
+object UserRoutes {
+  def routes: Route = pathPrefix("users") {
+    get {
+      complete("ok")
+    }
+  }
+}
+
+trait UserRepository {
+  def findById(id: Long): Option[User]
+  def save(user: User): User
+}
+"#;
+        let chunks = chunk_text("UserRoutes.scala", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks.iter().all(|c| c.language == "scala"),
+            "expected scala language label"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.contains("UserRoutes") || c.text.contains("UserRepository")),
+            "expected Scala definitions in chunks"
+        );
+    }
+
+    #[test]
+    fn kotlin_function_gets_symbol_hint() {
+        let content = r#"
+fun calculateTotal(items: List<Item>): Double {
+    return items.sumOf { it.price }
+}
+"#;
+        let chunks = chunk_text("utils.kt", content, 80, 20);
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"calculateTotal"),
+            "expected calculateTotal hint, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn ruby_method_gets_symbol_hint() {
+        let content = r#"
+def process_payment(amount)
+  charge = Stripe::Charge.create(amount: amount)
+  charge.status
+end
+"#;
+        let chunks = chunk_text("payments.rb", content, 80, 20);
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"process_payment"),
+            "expected process_payment hint, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn ast_chunking_splits_php_functions() {
+        let content = r#"<?php
+
+function getUsers(): array {
+    return User::all();
+}
+
+class UserController {
+    public function index(): Response {
+        return response()->json(getUsers());
+    }
+
+    public function show(int $id): Response {
+        return response()->json(User::find($id));
+    }
+}
+"#;
+        let chunks = chunk_text("UserController.php", content, 80, 20);
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks.iter().all(|c| c.language == "php"),
+            "expected php language label"
+        );
+        assert!(
+            chunks.iter().any(|c| c.text.contains("getUsers")),
+            "expected getUsers in chunks"
         );
     }
 }
