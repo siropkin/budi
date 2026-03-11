@@ -380,8 +380,7 @@ pub fn save(repo_root: &Path, config: &BudiConfig) -> Result<()> {
 fn repo_storage_id(repo_root: &Path) -> String {
     // Resolve worktree → main repo root so all worktrees share one index directory.
     let storage_root = resolve_storage_root(repo_root);
-    let canonical =
-        fs::canonicalize(&storage_root).unwrap_or_else(|_| storage_root.to_path_buf());
+    let canonical = fs::canonicalize(&storage_root).unwrap_or_else(|_| storage_root.to_path_buf());
     let normalized = canonical.to_string_lossy().replace('\\', "/");
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());

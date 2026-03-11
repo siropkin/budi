@@ -1,64 +1,45 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (post-EQ, 2026-03-11)
+## Current state (post-v3.1.0, 2026-03-11)
 
-- Branch: main, CI green, all 274 tests pass
-- Installed: ~/.local/bin/budi + budi-daemon (latest release binary)
+- Branch: main, CI green, all 290 tests pass (265 budi-core + 21 budi-cli + 4 budi-daemon)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp
 - 0 clippy warnings
+- v3.1.0 released + 6 post-release commits on main
 
-## Changes made this session
+## What was done in the last session
 
-Previous sessions (already committed):
-1. **Phase EN** (9b7e0b7): Skip decorator/attribute lines in anchor extraction
-2. **Phase EO** (d180942): TestLookup non-test penalty (-0.20)
-3. **Phase EP** (6292114): SymbolUsage single-line chunk demotion (-0.15)
-4. **Stats endpoint** (99006bd): /stats endpoint + daemon query stats
-5. **Docs** (a672944): Benchmark docs v3.0.0
+All committed and pushed to main, CI green:
+1. 5 new language grammars: Ruby, Kotlin, Swift, Scala, PHP — 13 AST languages total (d9cdc88)
+2. Definition boundary detection for new languages in retrieval pipeline (012176d)
+3. Status line for Claude Code: `budi statusline` command shows live stats (d2b1210)
+4. Indexing progress in status line: purple ⟳ indicator during active builds (e8e9a5b)
+5. Auto-install status line on `budi init`, simplified display (a96475f)
+6. Web research: Augment Context Engine MCP (GA), HTTP hooks, nomic-embed-code (7B)
 
-Current session (uncommitted):
-6. **Phase EQ**: Extended continuation for long function bodies. When first
-   continuation chunk is ≥60 lines, add one more adjacent chunk if it doesn't
-   start a new definition. Helps mega-functions like Django ModelBase.__new__
-   (294 lines) get more coverage. Also extracted `chunk_starts_new_definition()`
-   helper with comprehensive language patterns.
+## Priority queue for next session
 
-## Django benchmark running
+### 1. Indexing robustness and performance (#37) — HIGH PRIORITY
+The indexing pipeline needs a focused research + optimization pass:
+- **Speed**: Profile hot paths, target <60s for 1000+ file repos
+- **Lazy/incremental**: Only re-chunk changed files, soft re-index as default
+- **Dirty file support**: Index uncommitted/unstaged changes (developers work on dirty files)
+- **Git worktree support**: Share base index across worktrees, only re-index diffs — NO full re-index
+- **Index size**: Audit SQLite + HNSW + embedding cache disk usage
+- **Non-blocking**: Verify no deadlocks between index writes and queries, stress test
+- **Research first**: Look at Augment Context Engine, GitNexus, Sourcegraph approaches
 
-Full Django benchmark validating Phase EQ extended continuation. Check:
-/Users/ivan.seredkin/.local/share/budi/repos/django-5aa3284b6f91/benchmarks/
+Start with research and profiling, then implement. This is the biggest technical risk for adoption on large real-world repos.
 
-Django P3 focused results: Q 9→8 (run1), Q 9→7 (run2). Mild improvement from
-previous Q 9→7 baseline. This regression is likely irreducible — 294-line function
-is too large for chunk-based approach.
+### 2. README overhaul (#38) — MEDIUM PRIORITY
+Research top GitHub READMEs, replace mermaid charts with GIF/asciicast, better "why budi", keep concise.
 
-## Latest benchmark results (pre-EQ)
+### 3. Verkada-Web real-world validation (#39) — AFTER #37
+Install on a large TS monorepo, collect stats over multiple sessions, analyze. Do this after indexing is robust.
 
-| Benchmark | Result | Cost | Notes |
-|-----------|--------|------|-------|
-| Django (18) | **15/18** (83%) adj | −10% | P3/P4/P14 real regressions, P2/P12/P15 ctx=0 |
-| React (18) | 16/18 (89%) | −6% | Stable |
-| Flask (18) | ~14-15/18 | −15% | Last complete run is old (v2.29.0) |
-| Terraform (18) | 17/18 (94%) | −23% | Best ever |
-| Ripgrep (15) | 13/15 (87%) | −10% | Stable |
-| FastAPI (18) | 18/18 (100%) | +6% | Stable |
-| Fastify (18) | 17/18 (94%) | −8% | Stable |
-| Express (5) | 4/5 (80%) | −21% | Stable |
-
-## Remaining mild regressions
-
-- React: P8 (sym-use HNSW variance), P9 (lifecycle ctx=0)
-- Django: P3 (ModelBase 294-line, irreducible), P4 (get_resolver mild), P14 (resolve mild)
-- Flask: P6 (flow-trace persistent), P13 (register_blueprint mild)
-- Terraform: P5 (Plan thin wrapper Q 9→7)
-
-## Suggested next steps
-
-1. Check Django benchmark results when complete
-2. If safe, commit Phase EQ
-3. Consider medium-priority strategic work:
-   - MCP server (makes budi usable in Cursor/Zed)
-   - Plugin packaging (better UX for Claude Code)
-   - Lightweight reranker (replace hand-tuned score floors)
-   - Post-injection feedback (track which chunks Claude uses)
-4. Or continue regression investigation: Flask full revalidation needed
+## Other items still on the backlog
+- HTTP hooks migration (eliminate CLI subprocess overhead)
+- nomic-embed-code (7B) evaluation (better local embeddings)
+- Benchmark against Augment Context Engine MCP
+- Impact analysis / git-blame indexing

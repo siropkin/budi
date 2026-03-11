@@ -1517,7 +1517,8 @@ impl DaemonState {
             let existing_runtime = { self.repos.read().await.get(&repo_key).cloned() };
             let small_reconcile = reconcile_requested
                 && workspace.report.changed_files <= workspace.report.indexed_files / 20;
-            if (!reconcile_requested || small_reconcile) && let Some(runtime_arc) = existing_runtime
+            if (!reconcile_requested || small_reconcile)
+                && let Some(runtime_arc) = existing_runtime
             {
                 let mut runtime_guard = runtime_arc.lock().await;
                 let delta_state = workspace.state.clone();

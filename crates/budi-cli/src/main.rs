@@ -2739,7 +2739,11 @@ fn cmd_statusline() -> Result<()> {
     let cwd = serde_json::from_str::<Value>(&input)
         .ok()
         .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()));
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        });
 
     // Check if budi is set up for this repo
     let repo_initialized = cwd
