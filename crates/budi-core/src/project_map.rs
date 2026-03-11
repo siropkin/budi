@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -11,6 +11,60 @@ use crate::retrieval::{is_devtools_path, is_test_path};
 const MAX_ENTRY_POINTS: usize = 10;
 const MAX_HOTSPOT_FILES: usize = 10;
 const MAX_SYMBOLS: usize = 20;
+
+/// True if the path is in a fixture, example, script, or type-definition directory.
+fn is_non_source_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("fixtures/")
+        || lower.starts_with("examples/")
+        || lower.starts_with("scripts/")
+        || lower.starts_with("flow-typed/")
+        || lower.starts_with("__mocks__/")
+        || lower.contains("/__mocks__/")
+}
+
+/// True if the symbol name is too generic to be informative in a project map.
+fn is_generic_symbol(sym: &str) -> bool {
+    // Short names are almost always too generic.
+    if sym.len() <= 3 {
+        return true;
+    }
+    matches!(
+        sym.to_ascii_lowercase().as_str(),
+        "error"
+            | "push"
+            | "render"
+            | "props"
+            | "state"
+            | "event"
+            | "node"
+            | "container"
+            | "store"
+            | "module"
+            | "expect"
+            | "jest"
+            | "describe"
+            | "test"
+            | "main"
+            | "init"
+            | "setup"
+            | "config"
+            | "utils"
+            | "helpers"
+            | "default"
+            | "index"
+            | "page"
+            | "root"
+            | "data"
+            | "item"
+            | "list"
+            | "view"
+            | "model"
+            | "type"
+            | "value"
+            | "result"
+    )
+}
 
 /// True if the path looks like a build/config/tooling file (not production source).
 fn is_build_or_config_path(path: &str) -> bool {
@@ -47,47 +101,84 @@ pub fn generate_project_map(runtime: &RuntimeIndex) -> String {
         *chunks_per_file.entry(chunk.path.as_str()).or_insert(0) += 1;
     }
 
-    // Entry points by basename heuristic — exclude test/devtools paths
+    // Entry points by basename heuristic — exclude test/devtools/fixture paths.
+    // Sort by path depth (shallowest first) to prioritize top-level entry points.
     let mut entry_points: Vec<&str> = chunks_per_file
         .keys()
         .copied()
-        .filter(|path| is_entry_point(path) && !is_test_path(path) && !is_devtools_path(path))
+        .filter(|path| {
+            is_entry_point(path)
+                && !is_test_path(path)
+                && !is_devtools_path(path)
+                && !is_non_source_path(path)
+        })
         .collect();
-    entry_points.sort();
+    entry_points.sort_by(|a, b| {
+        let depth_a = a.matches('/').count();
+        let depth_b = b.matches('/').count();
+        depth_a.cmp(&depth_b).then(a.cmp(b))
+    });
     entry_points.truncate(MAX_ENTRY_POINTS);
 
-    // Top files by chunk count — exclude test/devtools/config files
+    // Top files by chunk count — exclude test/devtools/config/build/fixture files
     let mut hotspots: Vec<(&str, usize)> = chunks_per_file
         .iter()
-        .filter(|(p, _)| !is_test_path(p) && !is_devtools_path(p))
+        .filter(|(p, _)| {
+            !is_test_path(p)
+                && !is_devtools_path(p)
+                && !is_build_or_config_path(p)
+                && !is_non_source_path(p)
+        })
         .map(|(p, c)| (*p, *c))
         .collect();
     hotspots.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     hotspots.truncate(MAX_HOTSPOT_FILES);
 
-    // Top symbols from symbol_hint fields — skip test/devtools/config files
-    let mut seen_symbols: HashSet<&str> = HashSet::new();
-    let mut symbol_entries: Vec<(&str, &str, usize)> = Vec::new();
+    // Top symbols ranked by call graph centrality (how many chunks reference them).
+    // This surfaces the most-connected functions rather than just the first N encountered.
+    let mut symbol_map: HashMap<&str, (&str, usize)> = HashMap::new();
     for chunk in chunks {
         if is_test_path(&chunk.path)
             || is_devtools_path(&chunk.path)
             || is_build_or_config_path(&chunk.path)
+            || is_non_source_path(&chunk.path)
         {
             continue;
         }
         if let Some(sym) = &chunk.symbol_hint {
             let sym = sym.trim();
-            if !sym.is_empty() && seen_symbols.insert(sym) {
-                symbol_entries.push((sym, chunk.path.as_str(), chunk.start_line));
+            if !sym.is_empty() && !is_generic_symbol(sym) && !symbol_map.contains_key(sym) {
+                symbol_map.insert(sym, (chunk.path.as_str(), chunk.start_line));
             }
         }
     }
+    let mut symbol_entries: Vec<(&str, &str, usize, usize)> = symbol_map
+        .into_iter()
+        .map(|(sym, (path, line))| {
+            let callers = runtime.caller_count(&sym.to_ascii_lowercase());
+            (sym, path, line, callers)
+        })
+        .collect();
+    // Sort by caller count descending, then alphabetically for ties.
+    symbol_entries.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(b.0)));
+    // Enforce directory diversity: max 5 symbols per top-level directory.
+    let mut dir_counts: HashMap<String, usize> = HashMap::new();
+    symbol_entries.retain(|(_, path, _, _)| {
+        let dir = top_dir(path);
+        let count = dir_counts.entry(dir).or_insert(0);
+        *count += 1;
+        *count <= 5
+    });
     symbol_entries.truncate(MAX_SYMBOLS);
 
-    // Directory overview (count unique files per top-level dir)
+    // Directory overview (count unique files per top-level dir, only real dirs)
     let mut dir_file_counts: BTreeMap<String, usize> = BTreeMap::new();
     for path in chunks_per_file.keys() {
         let dir = top_dir(path);
+        // Skip root-level files (no directory component)
+        if dir == "." || dir.contains('.') {
+            continue;
+        }
         *dir_file_counts.entry(dir).or_insert(0) += 1;
     }
 
@@ -108,8 +199,12 @@ pub fn generate_project_map(runtime: &RuntimeIndex) -> String {
     }
 
     out.push_str("\n## Top Symbols\n");
-    for (sym, path, line) in &symbol_entries {
-        out.push_str(&format!("- {sym} ({path}:{line})\n"));
+    for (sym, path, line, callers) in &symbol_entries {
+        if *callers > 0 {
+            out.push_str(&format!("- {sym} ({path}:{line}, {callers} refs)\n"));
+        } else {
+            out.push_str(&format!("- {sym} ({path}:{line})\n"));
+        }
     }
 
     out.push_str("\n## Directory Overview\n");

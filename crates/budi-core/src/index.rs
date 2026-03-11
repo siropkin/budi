@@ -237,6 +237,14 @@ impl RuntimeIndex {
             .collect()
     }
 
+    /// Returns the number of distinct chunks that reference `symbol` in the call graph.
+    pub fn caller_count(&self, symbol: &str) -> usize {
+        self.graph_token_to_chunk_ids
+            .get(symbol)
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+    }
+
     /// Returns callee symbol names that `chunk_id` calls.
     pub fn callees_of(&self, chunk_id: u64) -> Vec<String> {
         let Some(tokens) = self.chunk_to_graph_tokens.get(&chunk_id) else {
