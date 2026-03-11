@@ -259,17 +259,39 @@ fn extract_proof_lines(
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if fixed_needles.iter().any(|needle| lower.contains(needle)) && seen.insert(line.clone()) {
+        if fixed_needles
+            .iter()
+            .any(|needle| needle_matches(&lower, needle))
+            && seen.insert(line.clone())
+        {
             picked.push(line);
         }
     }
-    // Fill with any non-empty, non-comment, non-anchor lines
+    // Priority 3: lines containing function call expressions (high signal for flow).
     for raw_line in text.lines() {
         if picked.len() >= max_lines {
             break;
         }
         let line = sanitize_evidence_line(raw_line);
         if line.is_empty() || is_comment_only_line(line.as_str()) || is_anchor_dup(&line) {
+            continue;
+        }
+        if has_call_expression(&line) && seen.insert(line.clone()) {
+            picked.push(line);
+        }
+    }
+
+    // Priority 4: any non-empty, non-comment, non-anchor, non-low-value lines
+    for raw_line in text.lines() {
+        if picked.len() >= max_lines {
+            break;
+        }
+        let line = sanitize_evidence_line(raw_line);
+        if line.is_empty()
+            || is_comment_only_line(line.as_str())
+            || is_anchor_dup(&line)
+            || is_low_value_proof_line(&line)
+        {
             continue;
         }
         if seen.insert(line.clone()) {
@@ -329,8 +351,156 @@ fn contains_at_word_boundary(haystack: &str, needle: &str) -> bool {
     false
 }
 
+/// Match a fixed needle against a line. Needles containing punctuation (like
+/// "listen(", "call(") use plain substring matching. Pure-word needles (like
+/// "return", "route") use word-boundary matching to avoid false positives
+/// (e.g., "return" should not match inside "returnFiber").
+fn needle_matches(haystack: &str, needle: &str) -> bool {
+    // If needle contains non-identifier chars, it's specific enough for substring match.
+    if needle.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_') {
+        return haystack.contains(needle);
+    }
+    contains_at_word_boundary(haystack, needle)
+}
+
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Detect lines that are low-value as proof: parameter/field declarations,
+/// bare braces, import-only lines. These waste context tokens without
+/// helping Claude understand code flow or structure.
+fn is_low_value_proof_line(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Bare braces / structural punctuation
+    if matches!(
+        trimmed,
+        "{" | "}" | "};" | "})" | "});" | "}," | ");" | ")," | "(" | ")" | "[]" | "[" | "]"
+            | ") {" | ") =>" | "} else {" | "} else"
+    ) {
+        return true;
+    }
+
+    // Parameter / field declaration: `identifier: Type,` or `identifier?: Type;`
+    // Matches patterns like: `returnFiber: Fiber,`  `name?: string;`  `config: &Config,`
+    if is_param_or_field_decl(trimmed) {
+        return true;
+    }
+
+    // Bare argument on its own line: `workInProgress,` or `null,` or `element`
+    // (single identifier/keyword, optionally followed by comma/semicolon)
+    let bare = trimmed.trim_end_matches([',', ';']);
+    if !bare.is_empty()
+        && bare
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && bare.len() <= 30
+        && !matches!(
+            bare,
+            "return" | "break" | "continue" | "pass" | "throw" | "yield"
+        )
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Heuristic: line looks like `word: Type,` or `word?: Type;` — a parameter or field declaration.
+fn is_param_or_field_decl(line: &str) -> bool {
+    // Must contain a colon (type annotation marker)
+    let Some(colon_pos) = line.find(':') else {
+        return false;
+    };
+
+    let before_colon = line[..colon_pos].trim();
+    let after_colon = line[colon_pos + 1..].trim();
+
+    // Before colon: should be a simple identifier (possibly with ? or &)
+    // Filter out things like `if (x:`, `case "foo":`, `url: "https://..."`
+    if before_colon.is_empty() || after_colon.is_empty() {
+        return false;
+    }
+
+    // If before colon contains parens, operators, or quotes, it's not a param
+    if before_colon.contains(['(', ')', '"', '\'', '=', '+', '<', '>', '{', '}']) {
+        return false;
+    }
+
+    // After colon: should be a type (ends with , or ; or nothing)
+    // If it contains `(` it's likely a function call like `foo: bar()` — not a param
+    if after_colon.contains('(') {
+        return false;
+    }
+
+    // After colon should not be a string literal or number (those are assignments, not types)
+    if after_colon.starts_with('"')
+        || after_colon.starts_with('\'')
+        || after_colon.starts_with('0')
+        || after_colon.starts_with(|c: char| c.is_ascii_digit())
+    {
+        return false;
+    }
+
+    // If the line starts with common keywords, it's not just a param
+    let lower = before_colon.to_ascii_lowercase();
+    let lower_trimmed = lower.trim_start_matches(['&', '*']);
+    if matches!(
+        lower_trimmed,
+        "return" | "let" | "const" | "var" | "if" | "else" | "for" | "while" | "case" | "pub"
+    ) {
+        return false;
+    }
+
+    // Should look like an identifier: alphanumeric + _?& only
+    let ident_part = before_colon
+        .trim_start_matches(['&', '*', ' '])
+        .trim_end_matches('?');
+    ident_part
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !ident_part.is_empty()
+}
+
+/// Detect lines containing function call expressions (high signal for flow-trace).
+/// Matches `foo(`, `bar.baz(`, `self.method(` patterns but excludes bare declarations
+/// like `fn foo(` or `def foo(` or `function foo(`.
+fn has_call_expression(line: &str) -> bool {
+    let trimmed = line.trim();
+    // Must contain a `(` to be a call
+    if !trimmed.contains('(') {
+        return false;
+    }
+    // Exclude function/method declarations
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("fn ")
+        || lower.starts_with("def ")
+        || lower.starts_with("func ")
+        || lower.starts_with("function ")
+        || lower.starts_with("async fn ")
+        || lower.starts_with("async def ")
+        || lower.starts_with("async function ")
+        || lower.starts_with("pub fn ")
+        || lower.starts_with("pub async fn ")
+        || lower.starts_with("pub(crate) fn ")
+        || lower.starts_with("pub(super) fn ")
+        || lower.starts_with("export function ")
+        || lower.starts_with("export async function ")
+        || lower.starts_with("export default function ")
+    {
+        return false;
+    }
+    // Exclude class/interface/type/struct declarations
+    if lower.starts_with("class ")
+        || lower.starts_with("interface ")
+        || lower.starts_with("type ")
+        || lower.starts_with("struct ")
+        || lower.starts_with("enum ")
+    {
+        return false;
+    }
+    true
 }
 
 fn is_comment_only_line(line: &str) -> bool {
@@ -558,6 +728,101 @@ mod tests {
             "const x = reconcilechildfibersimpl(",
             "reconcilechildfibers"
         ));
+    }
+
+    // ── low-value proof line filtering ──────────────────────────────────────
+
+    #[test]
+    fn low_value_filters_bare_braces() {
+        assert!(is_low_value_proof_line("{"));
+        assert!(is_low_value_proof_line("}"));
+        assert!(is_low_value_proof_line("};"));
+        assert!(is_low_value_proof_line("})"));
+        assert!(is_low_value_proof_line("},"));
+    }
+
+    #[test]
+    fn low_value_filters_param_declarations() {
+        // JS/Flow/TS parameter declarations
+        assert!(is_low_value_proof_line("returnFiber: Fiber,"));
+        assert!(is_low_value_proof_line("currentFirstChild: Fiber | null,"));
+        assert!(is_low_value_proof_line("element: ReactElement,"));
+        assert!(is_low_value_proof_line("name?: string;"));
+        // Rust parameter declarations
+        assert!(is_low_value_proof_line("config: &BudiConfig,"));
+        assert!(is_low_value_proof_line("path: PathBuf,"));
+    }
+
+    #[test]
+    fn low_value_keeps_meaningful_lines() {
+        // Function calls with colons (e.g., Python kwargs, ternary)
+        assert!(!is_low_value_proof_line("result: bar()"));
+        // Assignments
+        assert!(!is_low_value_proof_line("let config: Config = load();"));
+        // Return statements
+        assert!(!is_low_value_proof_line("return fiber;"));
+        // Conditionals
+        assert!(!is_low_value_proof_line("if (fiber.tag === HostComponent) {"));
+        // String values (config lines)
+        assert!(!is_low_value_proof_line("name: \"flask\","));
+        // Regular code
+        assert!(!is_low_value_proof_line("reconcileChildFibers(fiber, child);"));
+    }
+
+    // ── call expression detection ─────────────────────────────────────────────
+
+    #[test]
+    fn call_expression_detects_calls() {
+        assert!(has_call_expression("reconcileChildFibers(fiber, child);"));
+        assert!(has_call_expression("self.dispatch(request)"));
+        assert!(has_call_expression("let result = process(data);"));
+        assert!(has_call_expression("return compute(x, y);"));
+    }
+
+    #[test]
+    fn call_expression_rejects_declarations() {
+        assert!(!has_call_expression("fn foo(bar: i32) {"));
+        assert!(!has_call_expression("def handle_request(self, request):"));
+        assert!(!has_call_expression("function reconcileChildFibers(returnFiber) {"));
+        assert!(!has_call_expression("pub fn query(&self) -> Result<()> {"));
+        assert!(!has_call_expression("class MyComponent(Component):"));
+    }
+
+    #[test]
+    fn call_expression_rejects_non_calls() {
+        assert!(!has_call_expression("let x = 42;"));
+        assert!(!has_call_expression("return fiber;"));
+        assert!(!has_call_expression("config: &BudiConfig,"));
+    }
+
+    // ── proof line quality integration ────────────────────────────────────────
+
+    #[test]
+    fn proof_lines_prefer_calls_over_params() {
+        let text = "fn reconcileChildFibers(returnFiber: Fiber, currentFirstChild: Fiber | null) {\n\
+                     returnFiber: Fiber,\n\
+                     currentFirstChild: Fiber | null,\n\
+                     deleteChild(returnFiber, currentFirstChild);\n\
+                     placeSingleChild(newFiber);\n\
+                     return newFiber;\n";
+        let anchor = "fn reconcileChildFibers(returnFiber: Fiber, currentFirstChild: Fiber | null) {";
+        let proof = extract_proof_lines(text, 3, anchor, &[]);
+        // Should pick call expressions and return, not parameter declarations
+        assert!(
+            proof.iter().any(|l| l.contains("deleteChild")),
+            "should include deleteChild call: {:?}",
+            proof
+        );
+        assert!(
+            proof.iter().any(|l| l.contains("placeSingleChild")),
+            "should include placeSingleChild call: {:?}",
+            proof
+        );
+        assert!(
+            !proof.iter().any(|l| l.contains("returnFiber: Fiber,")),
+            "should NOT include param declaration: {:?}",
+            proof
+        );
     }
 
     // ── path_diversity_bucket ────────────────────────────────────────────────
