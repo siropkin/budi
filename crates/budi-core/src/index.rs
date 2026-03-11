@@ -3880,11 +3880,27 @@ impl TantivyBundle {
             writer.add_document(doc!(
                 id_field => chunk.id,
                 path_field => chunk.path.clone(),
-                text_field => chunk.text.clone(),
+                text_field => Self::bm25_text(chunk),
             ))?;
         }
         writer.commit()?;
         Ok(())
+    }
+
+    /// Build the text indexed by Tantivy for a chunk. Appends split forms of
+    /// camelCase/PascalCase/snake_case identifiers from `symbol_hint` so that
+    /// natural-language queries like "live video" can match a chunk whose
+    /// dominant symbol is `LiveVideo`.
+    fn bm25_text(chunk: &ChunkRecord) -> String {
+        let Some(hint) = chunk.symbol_hint.as_deref() else {
+            return chunk.text.clone();
+        };
+        let split = split_identifier(hint);
+        if split.is_empty() || (split.len() == 1 && split[0].eq_ignore_ascii_case(hint)) {
+            return chunk.text.clone();
+        }
+        // Append split words once so BM25 can match them. Keep original text first.
+        format!("{}\n{}", chunk.text, split.join(" "))
     }
 
     fn apply_delta(
@@ -3921,7 +3937,7 @@ impl TantivyBundle {
             writer.add_document(doc!(
                 bundle.id_field => chunk.id,
                 bundle.path_field => chunk.path.clone(),
-                bundle.text_field => chunk.text.clone(),
+                bundle.text_field => Self::bm25_text(chunk),
             ))?;
         }
         writer.commit()?;
@@ -3988,6 +4004,60 @@ fn sanitize_tantivy_query(query: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Split a camelCase, PascalCase, or snake_case identifier into lowercase words.
+///
+/// Examples:
+///   "LiveVideo" → ["live", "video"]
+///   "handleException" → ["handle", "exception"]
+///   "get_response" → ["get", "response"]
+///   "BaseHTTPMiddleware" → ["base", "http", "middleware"]
+///   "XMLParser" → ["xml", "parser"]
+pub fn split_identifier(ident: &str) -> Vec<String> {
+    if ident.is_empty() {
+        return Vec::new();
+    }
+    // snake_case: split on underscores
+    if ident.contains('_') {
+        return ident
+            .split('_')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+    }
+    // camelCase / PascalCase: split on case transitions
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = ident.chars().collect();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if !c.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current).to_ascii_lowercase());
+            }
+            continue;
+        }
+        if c.is_ascii_uppercase() {
+            // Split before an uppercase char if:
+            // (a) previous char was lowercase (camelCase boundary), OR
+            // (b) previous char was uppercase AND next char is lowercase (acronym end: HTTPMiddleware → HTTP + Middleware)
+            let prev_lower = i > 0 && chars[i - 1].is_ascii_lowercase();
+            let acronym_end = i > 0
+                && chars[i - 1].is_ascii_uppercase()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_lowercase();
+            if !current.is_empty() && (prev_lower || acronym_end) {
+                words.push(std::mem::take(&mut current).to_ascii_lowercase());
+            }
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        words.push(current.to_ascii_lowercase());
+    }
+    words
 }
 
 pub fn embed_query(repo_root: &Path, query: &str) -> Result<Option<Vec<f32>>> {
@@ -4878,5 +4948,79 @@ mod tests {
         assert_eq!(chunks[0].embedding.len(), 3);
         assert!(chunks[1].embedding.is_empty());
         assert!(chunks[2].embedding.is_empty());
+    }
+
+    #[test]
+    fn split_identifier_pascal_case() {
+        assert_eq!(split_identifier("LiveVideo"), vec!["live", "video"]);
+        assert_eq!(
+            split_identifier("BaseHTTPMiddleware"),
+            vec!["base", "http", "middleware"]
+        );
+        assert_eq!(split_identifier("XMLParser"), vec!["xml", "parser"]);
+    }
+
+    #[test]
+    fn split_identifier_camel_case() {
+        assert_eq!(
+            split_identifier("handleException"),
+            vec!["handle", "exception"]
+        );
+        assert_eq!(
+            split_identifier("reconcileChildFibers"),
+            vec!["reconcile", "child", "fibers"]
+        );
+    }
+
+    #[test]
+    fn split_identifier_snake_case() {
+        assert_eq!(split_identifier("get_response"), vec!["get", "response"]);
+        assert_eq!(
+            split_identifier("dispatch_request"),
+            vec!["dispatch", "request"]
+        );
+    }
+
+    #[test]
+    fn split_identifier_single_word() {
+        assert_eq!(split_identifier("route"), vec!["route"]);
+        assert_eq!(split_identifier("Flask"), vec!["flask"]);
+    }
+
+    #[test]
+    fn split_identifier_empty() {
+        assert!(split_identifier("").is_empty());
+    }
+
+    #[test]
+    fn bm25_text_appends_split_identifier() {
+        let chunk = ChunkRecord {
+            id: 1,
+            path: "test.ts".to_string(),
+            start_line: 1,
+            end_line: 5,
+            language: "typescript".to_string(),
+            symbol_hint: Some("LiveVideo".to_string()),
+            text: "export function LiveVideo() {}".to_string(),
+            embedding: Vec::new(),
+        };
+        let text = TantivyBundle::bm25_text(&chunk);
+        assert!(text.contains("export function LiveVideo()"));
+        assert!(text.contains("live video"));
+    }
+
+    #[test]
+    fn bm25_text_no_hint_returns_original() {
+        let chunk = ChunkRecord {
+            id: 1,
+            path: "test.ts".to_string(),
+            start_line: 1,
+            end_line: 5,
+            language: "typescript".to_string(),
+            symbol_hint: None,
+            text: "const x = 1;".to_string(),
+            embedding: Vec::new(),
+        };
+        assert_eq!(TantivyBundle::bm25_text(&chunk), "const x = 1;");
     }
 }
