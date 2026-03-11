@@ -3,7 +3,7 @@
   "Describe the module layout and directory structure of this React codebase — which directories own which concerns?",
   "Where is scheduleUpdateOnFiber defined and what are its first steps when called?",
   "Where is createRoot defined and what does it initialize before returning?",
-  "Where is performConcurrentWorkOnRoot defined and what does it do on each invocation?",
+  "Where is performWorkOnRoot defined and what does it do on each invocation?",
   "What does useState call internally when state is updated — trace the call chain from the hook to the scheduler?",
   "What functions does reconcileChildFibers call and what does each return?",
   "What calls performSyncWorkOnRoot and from where is it triggered in the render pipeline?",
