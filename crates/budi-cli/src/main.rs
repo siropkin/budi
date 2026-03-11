@@ -129,6 +129,12 @@ enum Commands {
         #[command(subcommand)]
         command: HookCommands,
     },
+    /// Print a compact status line for Claude Code (reads stdin, outputs one line)
+    Statusline {
+        /// Install the status line in ~/.claude/settings.json
+        #[arg(long, default_value_t = false)]
+        install: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -358,6 +364,13 @@ fn main() -> Result<()> {
             HookCommands::SessionStart => cmd_hook_session_start(),
             HookCommands::SessionEnd => cmd_hook_session_end(),
         },
+        Commands::Statusline { install } => {
+            if install {
+                cmd_statusline_install()
+            } else {
+                cmd_statusline()
+            }
+        }
     }
 }
 
@@ -2713,6 +2726,92 @@ fn classify_update_error(err: &reqwest::Error) -> UpdateErrorReason {
 
 fn emit_hook_response(output: UserPromptSubmitOutput) -> Result<()> {
     println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+fn cmd_statusline() -> Result<()> {
+    // Drain stdin (Claude Code pipes session JSON, avoid broken pipe)
+    let _ = io::stdin().read_to_string(&mut String::new());
+
+    let client = daemon_client_with_timeout(Duration::from_millis(200));
+    let url = format!(
+        "http://{}:{}/stats",
+        config::DEFAULT_DAEMON_HOST,
+        config::DEFAULT_DAEMON_PORT
+    );
+    let resp = client.get(&url).send();
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            if let Ok(stats) = r.json::<serde_json::Value>() {
+                let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
+                let injections = stats
+                    .get("injections")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let chars = stats
+                    .get("chars_injected")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let confirmed = stats
+                    .get("confirmed_reads")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let total_reads = stats
+                    .get("total_reads")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                if queries == 0 {
+                    println!("\x1b[36mbudi \x1b[32m✓\x1b[0m ready");
+                } else {
+                    let chars_k = chars as f64 / 1000.0;
+                    let mut line = format!(
+                        "\x1b[36mbudi \x1b[33m⚡\x1b[0m {}i/{} · {:.1}k chars",
+                        injections, queries, chars_k
+                    );
+                    if total_reads > 0 && confirmed > 0 {
+                        let hit_pct = confirmed as f64 / total_reads as f64 * 100.0;
+                        line.push_str(&format!(" · {:.0}% hits", hit_pct));
+                    }
+                    println!("{}", line);
+                }
+            }
+        }
+        _ => {
+            println!("\x1b[36mbudi \x1b[90m○\x1b[0m");
+        }
+    }
+    Ok(())
+}
+
+const CLAUDE_USER_SETTINGS: &str = ".claude/settings.json";
+
+fn cmd_statusline_install() -> Result<()> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating {}", parent.display()))?;
+    }
+    let mut settings = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed reading {}", settings_path.display()))?;
+        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    settings["statusLine"] = json!({
+        "type": "command",
+        "command": "budi statusline",
+        "padding": 1
+    });
+    let raw = serde_json::to_string_pretty(&settings)?;
+    fs::write(&settings_path, raw)
+        .with_context(|| format!("Failed writing {}", settings_path.display()))?;
+    eprintln!("Installed budi status line in {}", settings_path.display());
     Ok(())
 }
 
