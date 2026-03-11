@@ -2065,7 +2065,7 @@ fn is_stub_body(text: &str) -> bool {
     if non_blank.len() == 3 {
         let body_line = non_blank
             .last()
-            .map(|l| l.trim_end_matches(|c: char| c == ';' || c == ',').trim())
+            .map(|l| l.trim_end_matches([';', ',']).trim())
             .unwrap_or("");
         if body_line == "pass"
             || body_line == "return"
