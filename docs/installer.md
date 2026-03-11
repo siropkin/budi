@@ -21,6 +21,7 @@ Installed binaries:
 
 - `budi`
 - `budi-daemon`
+- `budi-mcp`
 
 ## Install from prebuilt GitHub release
 
