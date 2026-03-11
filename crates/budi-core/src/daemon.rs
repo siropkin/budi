@@ -35,6 +35,24 @@ struct SessionState {
     /// Repo-relative file paths that were injected in this session.
     /// Used for post-injection feedback: track which files Claude reads after injection.
     injected_files: HashSet<String>,
+    // Per-session counters for session-end summary.
+    queries: u64,
+    injections: u64,
+    skips: u64,
+    chars_injected: u64,
+    confirmed_reads: u64,
+    total_reads: u64,
+}
+
+/// Per-session stats snapshot returned by the `/session-stats` endpoint.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionStatsSnapshot {
+    pub queries: u64,
+    pub injections: u64,
+    pub skips: u64,
+    pub chars_injected: u64,
+    pub confirmed_reads: u64,
+    pub total_reads: u64,
 }
 
 /// Lightweight query counters for visibility into daemon activity.
@@ -352,15 +370,27 @@ impl DaemonState {
         };
         response.call_graph_summary = call_graph;
 
-        // Update query stats.
+        // Update query stats (global + per-session).
+        let ctx_len = response.context.len() as u64;
         {
             let mut stats = self.query_stats.lock().unwrap();
             stats.queries += 1;
             if should_inject {
                 stats.injections += 1;
-                stats.chars_injected += response.context.len() as u64;
+                stats.chars_injected += ctx_len;
             } else {
                 stats.skips += 1;
+            }
+        }
+        if let Some(ref sid) = request.session_id {
+            let mut guard = self.sessions_guard();
+            let session = guard.entry(sid.clone()).or_default();
+            session.queries += 1;
+            if should_inject {
+                session.injections += 1;
+                session.chars_injected += ctx_len;
+            } else {
+                session.skips += 1;
             }
         }
 
@@ -414,12 +444,17 @@ impl DaemonState {
             stats.total_reads += 1;
         }
         {
-            let guard = self.sessions_guard();
-            if let Some(session) = guard.get(&request.session_id)
-                && session.injected_files.contains(&file_path_rel_early)
-            {
-                let mut stats = self.query_stats.lock().unwrap();
-                stats.confirmed_reads += 1;
+            let mut guard = self.sessions_guard();
+            if let Some(session) = guard.get_mut(&request.session_id) {
+                session.total_reads += 1;
+                if session.injected_files.contains(&file_path_rel_early) {
+                    session.confirmed_reads += 1;
+                    let mut stats = self.query_stats.lock().unwrap();
+                    stats.confirmed_reads += 1;
+                }
+            } else {
+                // No session entry — check immutable for global confirmed_reads only.
+                // (shouldn't happen in practice since queries create sessions first)
             }
         }
 
@@ -1204,6 +1239,19 @@ impl DaemonState {
             stats.confirmed_reads,
             stats.total_reads,
         )
+    }
+
+    /// Returns per-session stats for a given session_id, or None if the session doesn't exist.
+    pub fn session_stats(&self, session_id: &str) -> Option<SessionStatsSnapshot> {
+        let guard = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        guard.get(session_id).map(|s| SessionStatsSnapshot {
+            queries: s.queries,
+            injections: s.injections,
+            skips: s.skips,
+            chars_injected: s.chars_injected,
+            confirmed_reads: s.confirmed_reads,
+            total_reads: s.total_reads,
+        })
     }
 
     fn sessions_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionState>> {

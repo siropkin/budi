@@ -2451,21 +2451,64 @@ fn cmd_hook_session_end() -> Result<()> {
     let Ok(config) = config::load_or_default(&repo_root) else {
         return Ok(());
     };
-    if !config.debug_io {
-        return Ok(());
-    }
 
     // Read session_id from environment (Claude Code sets CLAUDE_SESSION_ID for Stop hooks).
     let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
 
-    let Ok(log_path) = config::hook_log_path(&repo_root) else {
-        return Ok(());
+    // Fetch per-session stats from daemon for the summary.
+    if let Some(ref sid) = session_id
+        && let Some(stats) = fetch_session_stats(&config, sid)
+    {
+        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
+        let injections = stats
+            .get("injections")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let confirmed = stats
+            .get("confirmed_reads")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let total_reads = stats
+            .get("total_reads")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        if queries > 0 {
+            let rate = injections as f64 / queries as f64 * 100.0;
+            let mut summary = format!(
+                "budi: {}/{} prompts got context ({:.0}%)",
+                injections, queries, rate
+            );
+            if total_reads > 0 {
+                let hit_rate = confirmed as f64 / total_reads as f64 * 100.0;
+                summary.push_str(&format!(
+                    ", {}/{} file reads pre-delivered ({:.0}%)",
+                    confirmed, total_reads, hit_rate
+                ));
+            }
+            eprintln!("{}", summary);
+        }
+    }
+
+    // Log detailed session-end event when debug_io is enabled.
+    if config.debug_io {
+        log_session_end_debug(&repo_root, &config, &session_id);
+    }
+    Ok(())
+}
+
+fn log_session_end_debug(
+    repo_root: &std::path::Path,
+    config: &BudiConfig,
+    session_id: &Option<String>,
+) {
+    let Ok(log_path) = config::hook_log_path(repo_root) else {
+        return;
     };
     let Ok(raw) = std::fs::read_to_string(&log_path) else {
-        return Ok(());
+        return;
     };
 
-    // Collect output events for this session.
     let mut total_injected = 0u32;
     let mut total_prompts = 0u32;
     let mut first_ts: Option<u64> = None;
@@ -2476,8 +2519,7 @@ fn cmd_hook_session_end() -> Result<()> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        // Filter by session_id if available.
-        if let Some(ref sid) = session_id
+        if let Some(sid) = session_id
             && val.get("session_id").and_then(Value::as_str) != Some(sid.as_str())
         {
             continue;
@@ -2514,7 +2556,7 @@ fn cmd_hook_session_end() -> Result<()> {
     }
 
     if total_prompts == 0 {
-        return Ok(());
+        return;
     }
 
     let duration_secs = match (first_ts, last_ts) {
@@ -2526,7 +2568,7 @@ fn cmd_hook_session_end() -> Result<()> {
     top_files.sort_by(|a, b| b.1.cmp(&a.1));
     top_files.truncate(5);
 
-    log_hook_event(&repo_root, &config, || {
+    log_hook_event(repo_root, config, || {
         json!({
             "event": "SessionEnd",
             "ts_unix_ms": now_unix_ms(),
@@ -2538,7 +2580,6 @@ fn cmd_hook_session_end() -> Result<()> {
             "top_files": top_files.iter().map(|(p, n)| json!({"path": p, "count": n})).collect::<Vec<_>>(),
         })
     });
-    Ok(())
 }
 
 /// Read session-affinity.json and return the top N entries (path, anchors) sorted by recency.
@@ -2870,6 +2911,17 @@ fn fetch_daemon_stats(config: &BudiConfig) -> Option<serde_json::Value> {
     let url = format!("{}/stats", config.daemon_base_url());
     client
         .get(url)
+        .send()
+        .ok()
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+}
+
+fn fetch_session_stats(config: &BudiConfig, session_id: &str) -> Option<serde_json::Value> {
+    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
+    let url = format!("{}/session-stats", config.daemon_base_url());
+    client
+        .post(url)
+        .json(&serde_json::json!({"session_id": session_id}))
         .send()
         .ok()
         .and_then(|r| r.json::<serde_json::Value>().ok())

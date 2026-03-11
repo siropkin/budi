@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
         .route("/status", post(status_repo))
         .route("/prefetch-neighbors", post(prefetch_neighbors))
         .route("/stats", get(stats))
+        .route("/session-stats", post(session_stats))
         .with_state(app_state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -200,6 +201,21 @@ async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "total_reads": total_reads,
         "read_hit_rate": if total_reads > 0 { format!("{:.0}%", confirmed_reads as f64 / total_reads as f64 * 100.0) } else { "n/a".to_string() },
     }))
+}
+
+async fn session_stats(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let session_id = body
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if let Some(snap) = state.daemon_state.session_stats(session_id) {
+        Json(serde_json::to_value(snap).unwrap_or_default())
+    } else {
+        Json(serde_json::json!({}))
+    }
 }
 
 async fn query(
