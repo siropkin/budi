@@ -56,9 +56,11 @@ const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
-#[command(about = "Deterministic local RAG hooks for Claude Code")]
+#[command(about = "Local RAG context booster for Claude Code — pre-injects relevant code snippets via hooks")]
 #[command(version)]
+#[command(after_help = "Get started:\n  cd /path/to/repo && budi init && budi index --hard")]
 struct Cli {
+    /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(long, short = 'v', action = ArgAction::Count, global = true)]
     verbose: u8,
     #[command(subcommand)]
@@ -67,17 +69,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Set up budi in the current repo (config, hooks, daemon)
     Init {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
     },
+    /// Build or refresh the code index for the current repo
     Index {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
+        /// Force a full re-index (discard cached chunks and embeddings)
         #[arg(long, default_value_t = false)]
         hard: bool,
+        /// Show indexing progress in real time
         #[arg(long, default_value_t = false)]
         progress: bool,
         #[arg(long = "ignore-pattern", action = ArgAction::Append, hide = true)]
@@ -85,6 +91,7 @@ enum Commands {
         #[arg(long = "include-ext", action = ArgAction::Append, hide = true)]
         include_extensions: Vec<String>,
     },
+    /// Check repo health: config, hooks, daemon, index
     Doctor {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
@@ -107,6 +114,7 @@ enum Commands {
         #[command(subcommand)]
         command: EvalCommands,
     },
+    /// Manage indexed repos: status, search, preview
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
@@ -207,6 +215,7 @@ enum RepoCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Show daemon and index status for the current repo
     Status {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
@@ -219,10 +228,13 @@ enum RepoCommands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Search the index for code matching a query
     Search {
+        /// Natural-language query (e.g., "where is dispatch_request defined")
         query: String,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
+        /// Maximum number of results to return
         #[arg(long, default_value_t = 8)]
         limit: usize,
         #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid, hide = true)]
@@ -230,7 +242,9 @@ enum RepoCommands {
         #[arg(long, default_value_t = false, hide = true)]
         json: bool,
     },
+    /// Preview what budi would inject for a given prompt
     Preview {
+        /// Simulated user prompt to test retrieval against
         prompt: String,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
