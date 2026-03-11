@@ -28,7 +28,7 @@ jobs:
       PUBLISH_TOKEN: ${{ secrets.MARKETPLACE_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           token: ${{ env.PUBLISH_TOKEN }}
           fetch-depth: 0
