@@ -690,9 +690,13 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         issues.push("Not a git repository. Run `git init` first.".into());
     }
 
-    // Config check
+    // Config check (optional — defaults are fine)
     let has_config = paths.config_file.exists();
-    doctor_check("config", has_config, Some(&paths.config_file));
+    if has_config {
+        doctor_check("config", true, Some(&paths.config_file));
+    } else {
+        println!("  [ok] config: using defaults");
+    }
 
     // Hook settings check
     let hooks_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
