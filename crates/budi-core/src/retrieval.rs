@@ -1007,6 +1007,30 @@ pub fn build_query_response(
                     .chunk(c.id)
                     .is_some_and(|chunk| chunk.start_line <= 2 && chunk.end_line <= 15)
         });
+    // SymbolUsage no-call-site skip: when none of the top candidates contain an
+    // actual call to the target symbol (e.g. `handle_exception(`), the retrieval
+    // found wrong-direction results — callees or semantically similar but unrelated
+    // functions. Injecting these misleads Claude into a shallow answer.
+    // Flask P15: "What calls handle_exception" → injected log_exception (a callee
+    // OF handle_exception, not a caller) and handle_url_build_error (unrelated).
+    // Neither contained `handle_exception(` as a call expression.
+    let sym_use_no_call_site_skip = intent.kind == QueryIntentKind::SymbolUsage
+        && !exact_match_symbol_tokens.is_empty()
+        && !scored.iter().take(3).any(|c| {
+            runtime.chunk(c.id).is_some_and(|chunk| {
+                let text_lower = chunk.text.to_ascii_lowercase();
+                exact_match_symbol_tokens.iter().any(|token| {
+                    let call_pat = format!("{token}(");
+                    text_lower.match_indices(&call_pat).any(|(pos, _)| {
+                        let before = &text_lower[..pos];
+                        !before.ends_with("def ")
+                            && !before.ends_with("fn ")
+                            && !before.ends_with("func ")
+                            && !before.ends_with("function ")
+                    })
+                })
+            })
+        });
     // FlowTrace callee-query skip: "What functions does X call and what does each return?"
     // When a thin delegation function is found (≤25 lines), the injection shows only the
     // wrapper — Claude anchors on 1-2 direct calls instead of exploring transitive callees.
@@ -1032,6 +1056,7 @@ pub fn build_query_response(
         || module_layout_skip
         || sym_use_low_confidence_skip
         || sym_use_thin_caller_skip
+        || sym_use_no_call_site_skip
         || flowtrace_callee_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
@@ -1041,6 +1066,7 @@ pub fn build_query_response(
         || module_layout_skip
         || sym_use_low_confidence_skip
         || sym_use_thin_caller_skip
+        || sym_use_no_call_site_skip
         || flowtrace_callee_skip
     {
         f32::MAX
