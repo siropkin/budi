@@ -61,12 +61,13 @@ That's it. Use Claude Code normally.
 ### Manual install
 
 ```bash
-# From latest release:
-curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install.sh | bash -s -- --from-release
-
-# Or build from source:
+# From latest GitHub release (requires gh CLI):
 git clone https://github.com/siropkin/budi.git && cd budi
-cargo build --release && cp target/release/budi target/release/budi-daemon ~/.local/bin/
+./scripts/install.sh --from-release
+
+# Or build from source (requires Rust toolchain):
+git clone https://github.com/siropkin/budi.git && cd budi
+./scripts/install.sh
 ```
 
 ## Useful commands
