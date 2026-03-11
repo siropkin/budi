@@ -2077,8 +2077,12 @@ pub(crate) fn is_test_path(path: &str) -> bool {
     if lower.contains("-test-") {
         return true;
     }
-    // Stub/fixture directories containing test doubles (e.g. stubs/, fixtures/)
-    if lower.contains("/stubs/") || lower.contains("/fixtures/") {
+    // Stub/fixture/mock directories containing test doubles
+    if lower.contains("/stubs/")
+        || lower.contains("/fixtures/")
+        || lower.contains("/mocks/")
+        || lower.contains("/testdata/")
+    {
         return true;
     }
     // Filename-level test file detection for Go (_test.go), JS/TS (.test.ts, .spec.ts),
@@ -4817,6 +4821,8 @@ mod tests {
             "internal/stacks/stackruntime/internal/stackeval/stubs/errored.go"
         ));
         assert!(is_test_path("test/fixtures/sample_config.json"));
+        assert!(is_test_path("src/mocks/provider.ts"));
+        assert!(is_test_path("internal/testdata/plan.json"));
         // Production paths should not match
         assert!(!is_test_path("internal/stacks/stackruntime/eval.go"));
     }
