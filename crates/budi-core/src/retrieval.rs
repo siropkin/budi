@@ -1205,6 +1205,10 @@ pub fn build_query_response(
             })
         });
         if let Some(cont_item) = continuation {
+            let cont_start = cont_item.start_line;
+            let cont_end = cont_item.end_line;
+            let cont_path = cont_item.path.clone();
+            let cont_score = cont_item.score;
             if short_def_append {
                 // Short definition (class preamble) with no card 2: append continuation.
                 selection.snippets.push(cont_item);
@@ -1212,6 +1216,30 @@ pub fn build_query_response(
                 // Replace card 2 (foreign call site) with the continuation of the function body.
                 selection.snippets.truncate(1);
                 selection.snippets.push(cont_item);
+            }
+            // Extended continuation: if the first continuation chunk is very long (≥60
+            // lines), the underlying function likely spans multiple chunks. Add one more
+            // adjacent chunk so Claude sees more of the implementation body.
+            // Example: Django ModelBase.__new__ is 294 lines across 4 chunks; without
+            // this, Claude only sees the first 80 lines.
+            if cont_end.saturating_sub(cont_start) >= 60
+                && let Some(cont2_id) = runtime.adjacent_chunk(&cont_path, cont_start)
+                && let Some(cont2) = runtime.chunk(cont2_id)
+            {
+                let trimmed = cont2.text.trim_start();
+                if cont2.path == cont_path && !chunk_starts_new_definition(trimmed) {
+                    selection.snippets.push(crate::rpc::QueryResultItem {
+                        path: cont2.path.clone(),
+                        start_line: cont2.start_line,
+                        end_line: cont2.end_line,
+                        language: cont2.language.clone(),
+                        score: cont_score * 0.90,
+                        reasons: vec!["extended-continuation".to_string()],
+                        channel_scores: QueryChannelScores::default(),
+                        text: cont2.text.clone(),
+                        slm_relevance_note: None,
+                    });
+                }
             }
         } else if wrong_symbol_continuation_blocked {
             // The wrong-symbol continuation was blocked; the foreign card 2
@@ -2240,6 +2268,25 @@ fn is_go_test_helper_chunk(text: &str) -> bool {
 /// `todo!()`, `raise NotImplementedError`, or consist only of returning an error.
 /// These are not useful definitions for SymbolDefinition queries — the real implementation
 /// lives elsewhere and Claude should find it instead of getting anchored on the stub.
+/// Returns true if the chunk text begins with a new top-level definition
+/// (function, class, impl block, etc.) after stripping leading whitespace.
+/// Used to guard extended continuation: don't cross definition boundaries.
+fn chunk_starts_new_definition(trimmed: &str) -> bool {
+    trimmed.starts_with("class ")
+        || trimmed.starts_with("def ")
+        || trimmed.starts_with("fn ")
+        || trimmed.starts_with("func ")
+        || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("pub(crate) fn ")
+        || trimmed.starts_with("impl ")
+        || trimmed.starts_with("type ")
+        || trimmed.starts_with("export function ")
+        || trimmed.starts_with("export default ")
+        || trimmed.starts_with("export class ")
+        || trimmed.starts_with("@") // Python decorator → new method/function follows
+        || trimmed.starts_with("#[") // Rust attribute → new item follows
+}
+
 fn is_stub_body(text: &str) -> bool {
     // Class/struct preamble chunks are NOT stubs — they're the start of large types.
     let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -6726,5 +6773,32 @@ it("renders", () => {})
             response.snippets
         );
         let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn chunk_starts_new_definition_detects_common_patterns() {
+        // Positive cases
+        assert!(chunk_starts_new_definition("class Foo:"));
+        assert!(chunk_starts_new_definition("def bar(self):"));
+        assert!(chunk_starts_new_definition("fn baz() {"));
+        assert!(chunk_starts_new_definition("func main() {"));
+        assert!(chunk_starts_new_definition("pub fn new() -> Self {"));
+        assert!(chunk_starts_new_definition("pub(crate) fn helper() {"));
+        assert!(chunk_starts_new_definition("impl MyStruct {"));
+        assert!(chunk_starts_new_definition("type Config struct {"));
+        assert!(chunk_starts_new_definition("export function init() {"));
+        assert!(chunk_starts_new_definition("export default class App {"));
+        assert!(chunk_starts_new_definition("export class Component {"));
+        assert!(chunk_starts_new_definition("@classmethod"));
+        assert!(chunk_starts_new_definition("@staticmethod"));
+        assert!(chunk_starts_new_definition("#[derive(Debug)]"));
+        assert!(chunk_starts_new_definition("#[test]"));
+
+        // Negative cases — continuation code, not new definitions
+        assert!(!chunk_starts_new_definition("return nil, nil, diags"));
+        assert!(!chunk_starts_new_definition("new_class.add_to_class(\"_meta\", Options(meta))"));
+        assert!(!chunk_starts_new_definition("if is_proxy:"));
+        assert!(!chunk_starts_new_definition("// comment"));
+        assert!(!chunk_starts_new_definition(""));
     }
 }
