@@ -335,7 +335,7 @@ EOF
 [budi-install] Installation complete.
 [budi-install] Binary directory: $BIN_DIR
 [budi-install] Next step:
-  cd /path/to/your/repo && budi init && budi index --hard
+  cd /path/to/your/repo && budi init --index
 EOF
 }
 

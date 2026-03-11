@@ -58,7 +58,7 @@ const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 #[command(name = "budi")]
 #[command(about = "Local RAG context booster for Claude Code — pre-injects relevant code snippets via hooks")]
 #[command(version)]
-#[command(after_help = "Get started:\n  cd /path/to/repo && budi init && budi index --hard")]
+#[command(after_help = "Get started:\n  cd /path/to/repo && budi init --index")]
 struct Cli {
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(long, short = 'v', action = ArgAction::Count, global = true)]
@@ -75,6 +75,9 @@ enum Commands {
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
+        /// Also build the code index after setup (equivalent to running budi index --hard)
+        #[arg(long, default_value_t = false)]
+        index: bool,
     },
     /// Build or refresh the code index for the current repo
     Index {
@@ -284,7 +287,8 @@ fn main() -> Result<()> {
         Commands::Init {
             repo_root,
             no_daemon,
-        } => cmd_init(repo_root, no_daemon),
+            index,
+        } => cmd_init(repo_root, no_daemon, index),
         Commands::Index {
             repo_root,
             hard,
@@ -355,7 +359,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
+fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, auto_index: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     config::ensure_repo_layout(&repo_root)?;
@@ -374,7 +378,16 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
     );
     println!("Hooks: {}", repo_root.join(CLAUDE_LOCAL_SETTINGS).display());
 
-    println!("Run `budi index --hard` to prewarm the first index.");
+    if auto_index {
+        println!("Building index (this may take a few minutes for large repos)...");
+        let response = run_index_with_progress(&repo_root, &config, true, &[], &[])?;
+        println!(
+            "Index ready: files={}, chunks={}, embedded={}",
+            response.indexed_files, response.indexed_chunks, response.embedded_chunks
+        );
+    } else {
+        println!("Run `budi index --hard` to build the first index.");
+    }
     println!("Restart Claude Code or review `/hooks` so updated hook settings are applied.");
     Ok(())
 }
