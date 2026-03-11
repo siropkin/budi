@@ -632,6 +632,13 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "devtools-path-penalty");
         }
 
+        // Build/config infrastructure (rollup, webpack, jest setup, CI scripts, fixtures)
+        // is not production architecture. Demote so actual source code wins.
+        if intent.kind == QueryIntentKind::Architecture && is_build_infra_path(&chunk.path) {
+            adjusted -= 0.20;
+            push_unique_reason(&mut reasons, "build-infra-penalty");
+        }
+
         // FlowTrace queries are about production execution paths, so tests that merely call
         // into framework entrypoints should not outrank the actual runtime chain. The graph
         // channel can otherwise over-reward fixture-heavy test files that happen to invoke the
@@ -2225,6 +2232,36 @@ pub(crate) fn is_devtools_path(path: &str) -> bool {
         || lower.contains("noop-renderer")
         || lower.contains("noop_renderer")
         || lower.contains("nooprenderer")
+}
+
+/// True if the path is build/bundler/CI infrastructure rather than production source.
+/// Covers rollup/webpack/vite/esbuild configs, jest/vitest setup, CI scripts,
+/// fixture directories, and common config files.
+fn is_build_infra_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    // Build tool directories
+    lower.starts_with("scripts/rollup")
+        || lower.starts_with("scripts/jest")
+        || lower.starts_with("scripts/babel")
+        || lower.starts_with("scripts/eslint")
+        || lower.starts_with("scripts/prettier")
+        || lower.starts_with("scripts/webpack")
+        || lower.starts_with("scripts/flow")
+        || lower.starts_with("scripts/ci")
+        || lower.starts_with("fixtures/")
+        || lower.starts_with(".github/")
+        // Config files at root
+        || lower.ends_with(".config.js")
+        || lower.ends_with(".config.ts")
+        || lower.ends_with(".config.mjs")
+        || lower.ends_with(".config.cjs")
+        || lower == ".eslintrc.js"
+        || lower == ".eslintrc.cjs"
+        || lower == ".babelrc.js"
+        || lower == "jest.config.js"
+        || lower == "vitest.config.ts"
+        || lower == "webpack.config.js"
+        || lower == "rollup.config.js"
 }
 
 /// True if the chunk text starts with a struct, type, or class definition.
@@ -5086,6 +5123,32 @@ mod tests {
         ));
         // Non-test function
         assert!(!is_go_test_helper_chunk("func Plan(ctx *Context) error {"));
+    }
+
+    // ── is_build_infra_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_build_infra_path_detects_build_scripts() {
+        assert!(is_build_infra_path("scripts/rollup/bundles.js"));
+        assert!(is_build_infra_path("scripts/jest/setupHostConfigs.js"));
+        assert!(is_build_infra_path("scripts/babel/transform.js"));
+        assert!(is_build_infra_path("fixtures/fiber-debugger/src/App.js"));
+        assert!(is_build_infra_path(".github/workflows/ci.yml"));
+        assert!(is_build_infra_path("webpack.config.js"));
+        assert!(is_build_infra_path("rollup.config.js"));
+        assert!(is_build_infra_path("vitest.config.ts"));
+        assert!(is_build_infra_path("next.config.mjs"));
+        assert!(is_build_infra_path(".eslintrc.js"));
+    }
+
+    #[test]
+    fn is_build_infra_path_rejects_source_files() {
+        assert!(!is_build_infra_path(
+            "packages/react-reconciler/src/ReactFiber.js"
+        ));
+        assert!(!is_build_infra_path("src/flask/app.py"));
+        assert!(!is_build_infra_path("internal/terraform/context.go"));
+        assert!(!is_build_infra_path("crates/budi-core/src/retrieval.rs"));
     }
 
     // ── is_inline_test_chunk ─────────────────────────────────────────────────
