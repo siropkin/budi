@@ -2241,6 +2241,8 @@ pub(crate) fn is_devtools_path(path: &str) -> bool {
         || lower.contains("noop-renderer")
         || lower.contains("noop_renderer")
         || lower.contains("nooprenderer")
+        || lower.contains("eslint-plugin")
+        || lower.contains("eslint_plugin")
 }
 
 /// True if the chunk text is primarily an i18n message definition block.
