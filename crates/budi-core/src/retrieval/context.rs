@@ -510,6 +510,9 @@ fn is_comment_only_line(line: &str) -> bool {
         || trimmed.starts_with('*')
         || trimmed.starts_with("/*")
         || trimmed.starts_with("*/")
+        // Python docstrings (triple-quoted strings used as documentation)
+        || trimmed.starts_with("\"\"\"")
+        || trimmed.starts_with("'''")
 }
 
 pub(super) fn snippet_fingerprint(text: &str) -> String {
