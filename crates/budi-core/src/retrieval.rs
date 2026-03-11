@@ -627,7 +627,7 @@ pub fn build_query_response(
         // like "entry points" or "how is the component tree structured", devtools tree-
         // type definitions are a false positive (HNSW matches "tree" from the query to
         // "Element type with parentID" in devtools types). Noop renderers are test infra.
-        if intent.kind == QueryIntentKind::Architecture && is_devtools_path(&chunk.path) {
+        if is_devtools_path(&chunk.path) {
             adjusted -= 0.30;
             push_unique_reason(&mut reasons, "devtools-path-penalty");
         }
