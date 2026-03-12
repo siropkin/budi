@@ -13,7 +13,7 @@
       "name": "budi-hooks",
       "source": "./plugins/budi-hooks",
       "description": "Claude Code hooks that inject the right local code context before Claude starts searching.",
-      "version": "3.3.0",
+      "version": "3.4.0",
       "author": {
         "name": "Ivan Seredkin",
         "url": "https://github.com/siropkin/budi"
