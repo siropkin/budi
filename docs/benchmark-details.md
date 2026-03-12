@@ -3,11 +3,11 @@
 Reproducible A/B benchmark of `budi` across 8 open-source repositories.
 Each case includes prompts, hook injection traces, both model responses, and LLM judge rationales.
 
-- Generated: 2026-03-11T11:34:53Z
+- Generated: 2026-03-12T15:58:16Z
 - budi version: 3.1.0
 - Runner: `scripts/dev/ab_benchmark_runner.py`
 - Repos: 8
-- Total prompts judged: 130
+- Total prompts judged: 141
 
 ## Repositories
 
@@ -18,7 +18,7 @@ Each case includes prompts, hook injection traces, both model responses, and LLM
 | Django | Python | [https://github.com/djangoproject/django](https://github.com/djangoproject/django) | `3483bfc` | 18 |
 | FastAPI | Python | [https://github.com/fastapi/fastapi](https://github.com/fastapi/fastapi) | `11614be` | 18 |
 | Fastify | JavaScript | [https://github.com/fastify/fastify](https://github.com/fastify/fastify) | `128ca6e2` | 18 |
-| Express | JavaScript | [https://github.com/expressjs/express](https://github.com/expressjs/express) | `6c4249f` | 5 |
+| Express | JavaScript | [https://github.com/expressjs/express](https://github.com/expressjs/express) | `6c4249f` | 18 |
 | ripgrep | Rust | [https://github.com/BurntSushi/ripgrep](https://github.com/BurntSushi/ripgrep) | `4519153` | 18 |
 | Terraform | Go | [https://github.com/hashicorp/terraform](https://github.com/hashicorp/terraform) | `07b244b` | 18 |
 
@@ -26,18 +26,18 @@ Each case includes prompts, hook injection traces, both model responses, and LLM
 
 | Metric | Result |
 | --- | --- |
-| Non-regressions | **109/130 (83%)** |
-| Wins (budi better) | 43 |
-| Ties (same quality, lower cost) | 66 |
-| Regressions (quality drops) | 21 |
-| Total cost savings | **11%** |
+| Non-regressions | **117/141 (82%)** |
+| Wins (budi better) | 37 |
+| Ties (same quality, lower cost) | 80 |
+| Regressions (quality drops) | 24 |
+| Total cost savings | **10%** |
 
 ```mermaid
 pie showData
     title "Judge outcomes across all repos"
-    "budi wins" : 43
-    "ties" : 66
-    "regressions" : 21
+    "budi wins" : 37
+    "ties" : 80
+    "regressions" : 24
 ```
 
 ## Per-Repo Summary
@@ -45,13 +45,13 @@ pie showData
 | Repo | Prompts | Non-reg | Wins | Ties | Losses | Cost delta | Avg Q delta | Avg G delta |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | React | 18 | **15/18** | 7 | 8 | 3 | -14% | -0.06 | +0.11 |
-| Flask | 18 | **13/18** | 3 | 10 | 5 | -12% | -0.28 | -0.17 |
-| Django | 18 | **14/18** | 5 | 9 | 4 | -6% | -0.22 | +0.06 |
-| FastAPI | 18 | **18/18** | 11 | 7 | 0 | +6% | +0.58 | +1.00 |
-| Fastify | 18 | **17/18** | 4 | 13 | 1 | -8% | +0.08 | +0.11 |
-| Express | 5 | **4/5** | 1 | 3 | 1 | -21% | +0.00 | +0.20 |
-| ripgrep | 17 | **12/17** | 4 | 8 | 5 | -17% | -0.24 | +0.18 |
-| Terraform | 18 | **16/18** | 8 | 8 | 2 | -19% | +0.28 | +0.50 |
+| Flask | 18 | **13/18** | 6 | 7 | 5 | -23% | -0.17 | +0.11 |
+| Django | 18 | **15/18** | 4 | 11 | 3 | -8% | -0.14 | +0.00 |
+| FastAPI | 18 | **14/18** | 6 | 8 | 4 | -10% | +0.19 | +0.22 |
+| Fastify | 18 | **16/18** | 5 | 11 | 2 | +6% | +0.06 | +0.11 |
+| Express | 18 | **16/18** | 1 | 15 | 2 | -5% | -0.06 | +0.00 |
+| ripgrep | 15 | **14/15** | 3 | 11 | 1 | -2% | +0.10 | +0.17 |
+| Terraform | 18 | **14/18** | 5 | 9 | 4 | -19% | +0.03 | -0.11 |
 
 ## Full Case Evidence
 
@@ -1695,100 +1695,79 @@ Both responses are nearly identical in structure, content, accuracy, and level o
 
 **Prompt:** What are the entry points of this Flask application and how is the application object created at startup?
 
-- Interactions: no_budi=19 / with_budi=14
-- Cost USD: no_budi=$0.1733 / with_budi=$0.2463
+- Interactions: no_budi=19 / with_budi=18
+- Cost USD: no_budi=$0.2684 / with_budi=$0.2933
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's a summary of the entry points and application startup:
+Here's a breakdown of the entry points and application object creation:
 
 ## Entry Points
 
-### 1. CLI entry point: `flask` command
-Defined in `pyproject.toml:82-83`:
-``\`
-[project.scripts]
-flask = "flask.cli:main"
-``\`
+### 1. CLI: `flask` command (`src/flask/cli.py:1122-1127`)
+The primary entry point. The `main()` function calls `cli.main()`, where `cli` is a `FlaskGroup` instance (line 1110). This is registered as a console script entry point (the `flask` command). `FlaskGroup` automatically adds `run`, `shell`, and `routes` subcommands.
 
-`cli.py:1122` — `main()` calls `cli.main()`, where `cli` is a `FlaskGroup` instance (`cli.py:1110`). `FlaskGroup` is a Click command group that auto-discovers the Flask app and registers default subcommands (`run`, `shell`, `routes`) plus any plugin commands from the `flask.commands` entry point group.
+### 2. `app.run()` (`src/flask/app.py:632`)
+The programmatic entry point for development — `app.run()` calls `werkzeug.serving.run_simple` to start a dev server.
 
-### 2. Programmatic / WSGI entry point
-Users create a `Flask` instance directly:
-``\`python
-from flask import Flask
-app = Flask(__name__)
-``\`
+### 3. WSGI callable: `app.__call__` / `app.wsgi_app` (`src/flask/app.py:1618-1625`)
+For production. A WSGI server (Gunicorn, uWSGI, etc.) imports the `Flask` instance and calls it as a WSGI application. `__call__` delegates to `wsgi_app`, which pushes a request context, dispatches the request, and handles teardown.
 
-The `Flask` class is defined at `src/flask/app.py:109`, inheriting from `sansio.app.App`. Its `__init__` (`app.py:310`) delegates to the parent, sets up a CLI group (`self.cli`), and optionally adds a static file route.
+## Application Object Creation
 
-## App Discovery (how the CLI finds the app)
+The `Flask` class (`src/flask/app.py:109`) extends `App` (from `src/flask/sansio/app.py`). Users create it with `Flask(__name__)`.
 
-When you run `flask run`, `FlaskGroup` uses `locate_app()` (`cli.py:241`) which:
+### App Discovery (CLI path)
+When using the `flask` CLI, `ScriptInfo.load_app()` (`src/flask/cli.py:333`) finds the app through this priority:
 
-1. Imports the module specified by `--app` / `FLASK_APP`, or auto-discovers `wsgi.py` / `app.py` in the current directory.
-2. Calls `find_best_app()` (`cli.py:41`) which searches the module for:
-   - An attribute named `app` or `application` that is a `Flask` instance
-   - Any single `Flask` instance in the module
-   - A factory function named `create_app` or `make_app`, called with no args
-
-## `Flask.__init__` (`app.py:310`)
-
-The constructor:
-1. Delegates to `App.__init__` (the sansio base c
-...[truncated 241 chars]
+1. **`create_app` callback** — if provided to `FlaskGroup`/`ScriptInfo`, it's called directly (line 342)
+2. **`--app` / `FLASK_APP` env var** — parsed as `module:name` or `module:factory(args)`, resolved via `locate_app` → `find_app_by_string` (line 344-349)
+3. **Auto-discovery** — looks for 
+...[truncated 301 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's how this Flask application is structured in terms of entry points and application object creation:
+Here's how it all fits together:
 
 ## Entry Points
 
-### 1. `flask` CLI command (primary entry point)
-
-Registered in `pyproject.toml:83` as:
+### 1. CLI entry point: `flask` command
+Defined in `pyproject.toml:83`:
 ``\`
 flask = "flask.cli:main"
 ``\`
 
-This calls `flask.cli:main` → `cli.main()` where `cli` is a `FlaskGroup` instance (`cli.py:1110-1119`). `FlaskGroup` is a Click command group that adds the built-in `run`, `shell`, and `routes` subcommands.
+`flask.cli:main` (line 1122) simply calls `cli.main()`, where `cli` is a `FlaskGroup` instance (line 1110) — a Click command group with built-in subcommands: `run`, `shell`, and `routes`.
 
-### 2. `python -m flask`
+### 2. WSGI entry point: `Flask.__call__`
+The `Flask` class in `src/flask/app.py:109` inherits from `App` (the sansio base) and implements the WSGI protocol. Any WSGI server (Gunicorn, uWSGI, etc.) calls the `Flask` instance directly as a callable.
 
-`src/flask/__main__.py` simply imports and calls `cli.main()` — same path as above.
+## How the Application Object Is Created at Startup
 
-### 3. Programmatic / WSGI entry
+There are two paths depending on how you start the app:
 
-Users create a `Flask` instance directly:
-``\`python
-from flask import Flask
-app = Flask(__name__)
-``\`
-
-The app is then served either via:
-- **`app.run()`** (`app.py:632`) — calls `werkzeug.serving.run_simple` for development
-- **`app.__call__()`** (`app.py:1618`) → delegates to **`app.wsgi_app()`** (`app.py:1566`) — the standard WSGI interface used by production servers (Gunicorn, uWSGI, etc.)
-
-## How the Application Object is Created at Startup
-
-### Via CLI (`flask run`)
-
-1. `FlaskGroup.make_context()` (`cli.py:657`) creates a `ScriptInfo` object and sets `FLASK_RUN_FROM_CLI=true`
-2. When a command needs the app, `ScriptInfo.load_app()` (`cli.py:333`) is called
-3. `load_app()` resolves the app via one of three strategies:
-   - **Custom factory**: if `create_app` callback was provided, call it
-   - **`--app` / `FLASK_APP`**: parse `module:name`, import the module, call `locate_app()` (`cl
-...[truncated 943 chars]
+### Path A: Via the `flask` CLI
+1. `main()` → `cli.main()` → `FlaskGroup` processes `--app` / `FLASK_APP` / env file options
+2. `FlaskGroup` creates a `ScriptInfo` object that holds the app import path
+3. `ScriptInfo.load_app()` (`cli.py:333`) resolves the app:
+   - If a `create_app` callback was provided, it calls that
+   - If `--app` / `FLASK_APP` was set, it splits on `:`, imports the module, and calls `locate_app()`
+   - Otherwise it tries importing `wsgi.py` then `app.py` from the current directory
+4. `locate_app()` → `find_best_app()` (`cli.py:41`) searches the imported module for:
+   - A module-level variable named `app` or `application` that's a `Flask` instance
+   - Any single `Flask` instance in the module
+   - A factory function named `create_app` or `make_app`, which it c
+...[truncated 602 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-grounded in the repository. Response B (with_budi) is more comprehensive: it includes the `python -m flask` entry point via `__main__.py`, explains the WSGI call chain (`__call__` → `wsgi_app`), details the `ScriptInfo.load_app()` flow with its three strategies, mentions `make_context()` and `FLASK_RUN_FROM_CLI`, and covers the full class hierarchy including `Scaffold`. Response A covers the essentials correctly but omits these details. Both cite accurate line numbers and file paths. Response B is more actionable for someone trying to understand the full startup flow.
+Both responses are accurate and well-grounded. Response A correctly identifies three entry points (CLI, app.run(), WSGI callable) with good line references. Response B identifies two entry points but adds the pyproject.toml console_scripts reference (line 83), which is a valuable concrete detail showing how the CLI entry point is actually registered. Response B provides a more structured and actionable walkthrough of app creation, clearly separating the CLI path from direct instantiation, and includes the key Flask.__init__ setup details (cli group, static folder, sansio base delegation) with specific line ranges. Response B also shows a code example for direct instantiation. Response A mentions app.run() as a separate entry point, which is a reasonable addition but is really just a convenience wrapper around werkzeug rather than a true entry point. Overall, Response B is slightly more complete and actionable due to better coverage of __init__ internals and the pyproject.toml grounding.
 ```
 
 </details>
@@ -1797,8 +1776,8 @@ Both responses are accurate and well-grounded in the repository. Response B (wit
 
 **Prompt:** Describe the module layout of this Flask codebase — which files own which concerns (routing, context, config, blueprints)?
 
-- Interactions: no_budi=13 / with_budi=16
-- Cost USD: no_budi=$0.1144 / with_budi=$0.1354
+- Interactions: no_budi=23 / with_budi=10
+- Cost USD: no_budi=$0.1790 / with_budi=$0.1049
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
@@ -1806,21 +1785,25 @@ Both responses are accurate and well-grounded in the repository. Response B (wit
 ```text
 Here's the module layout:
 
-## Core Architecture — `sansio/` (protocol-agnostic base)
+## Inheritance backbone: `sansio/` (protocol-agnostic) → top-level (WSGI)
 
-- **`sansio/scaffold.py`** — Base class `Scaffold` shared by both `App` and `Blueprint`. Owns route registration decorators (`@route`, `@before_request`, `@after_request`, `@errorhandler`, etc.), endpoint resolution, template/static file path setup, and the `setupmethod` guard.
-- **`sansio/app.py`** — `App`, the protocol-agnostic application class. Owns the URL `Map`, config setup, Jinja environment, template filters/globals/tests, blueprint registration, error handler dispatch, and `url_for` logic. Extends `Scaffold`.
-- **`sansio/blueprints.py`** — `Blueprint` (sansio version) and `BlueprintSetupState`. Owns deferred registration callbacks so blueprints can record setup actions and replay them when registered on an app. Extends `Scaffold`.
+The codebase is split into a **sans-I/O layer** (`sansio/`) that holds routing, blueprint registration, and config logic without touching WSGI, and a **WSGI layer** (top-level modules) that adds actual request handling.
 
-## WSGI Layer (top-level modules)
+### Core hierarchy
 
-- **`app.py`** — `Flask`, the full WSGI application. Extends `sansio.App` with the WSGI `__call__`, request/response dispatching (`wsgi_app`, `full_dispatch_request`), context pushing/popping, `run()`, error handling, and the CLI integration.
-- **`blueprints.py`** — `Blueprint` (WSGI version). Thin subclass of `sansio.Blueprint` adding `send_static_file` and CLI group support.
+| File | Concern | Key classes/objects |
+|---|---|---|
+| `sansio/scaffold.py` | **Base for app & blueprints.** Owns route decorator registration (`@route`, `before_request`, `after_request`, `errorhandler`, etc.), static/template folder setup, view function registry. | `Scaffold`, `setupmethod` |
+| `sansio/app.py` | **Protocol-agnostic app.** Extends `Scaffold`. Owns URL `Map`/`Rule` management, config attributes, blueprint registration dispatch, Jinja environment setup, `aborter`, JSON provider. | `App(Scaffold)` |
+| `sansio/blueprints.py` | **Protocol-agnostic blueprint.** Extends `Scaffold`. Deferred registration pattern — records setup callbacks, replays them on `register()`. | `Blueprint(Scaffold)`, `BlueprintSetupState` |
 
-## Context & Globals
+### WSGI layer (adds I/O)
 
-- **`ctx.py`** — `AppContext`, `RequestContext`, `_AppCtxGlobals` (the `g` object), plus helpers `after_this_request`, `copy_current_request_context`, `has_app_context`, `has_request_context`. Owns the push/pop lifecycle for
-...[truncated 2006 chars]
+| File | Concern |
+|---|---|
+| `app.py` | **`Flask(App)`** — the main WSGI application class. Owns the full request lifecycle: `wsgi_app()`, `full_dispatch_request()`, context push/pop, error handling, `run()`, CLI integration. Imports and wires together contexts, sessions, signals. |
+| `blueprints.py` | **`Blueprint(SansioBlueprint)`** — thin WSGI wrapper adding `send_static_file` and CL
+...[truncated 2352 chars]
 ```
 
 #### Response (`with_budi`)
@@ -1828,30 +1811,30 @@ Here's the module layout:
 ```text
 Here's the module layout:
 
-## Core hierarchy (sansio layer + WSGI layer)
+### Core hierarchy (sansio split)
 
-- **`sansio/scaffold.py`** — `Scaffold` base class shared by both `App` and `Blueprint`. Owns route registration (`@route`, `@before_request`, `@after_request`, `@errorhandler`, etc.), static file/template loader setup, and the decorator-based hook API.
-- **`sansio/app.py`** — `App(Scaffold)` — sans-I/O application core. URL map, registered blueprints, config setup, error handler dispatch, URL building — everything that doesn't touch WSGI.
-- **`app.py`** — `Flask(App)` — the full WSGI application. Adds `wsgi_app()`, `run()`, request/response handling, `make_response`, the development server, and context push/pop during actual requests.
+Flask uses a **two-layer architecture** — async/IO-free ("sansio") base classes, and full WSGI subclasses:
 
-## Blueprints
+- **`sansio/scaffold.py`** — `Scaffold` base class shared by both `App` and `Blueprint`. Owns route registration decorators (`@route`, `@before_request`, `@after_request`, `@errorhandler`, etc.), static file/template folder config, and the `url_map` rule helpers.
+- **`sansio/app.py`** — `App(Scaffold)`. IO-free application core: URL map (`werkzeug.routing.Map`), config setup, blueprint registration, error handler dispatch logic, template filter/global/test registration, JSON provider.
+- **`sansio/blueprints.py`** — `Blueprint(Scaffold)`. IO-free blueprint: deferred setup functions (`BlueprintSetupState`), per-blueprint hook registration that gets replayed onto the app at register time.
 
-- **`sansio/blueprints.py`** — `Blueprint(Scaffold)` + `BlueprintSetupState`. Sans-I/O blueprint logic: deferred registration, nested blueprints, `record`/`register` mechanism.
-- **`blueprints.py`** — `Blueprint(SansioBlueprint)` — thin WSGI-aware subclass (minimal additions over the sansio version).
+### WSGI layer
 
-## Context management
+- **`app.py`** — `Flask(App)`. The actual WSGI app. Adds `wsgi_app()`, `__call__`, request/response handling (`full_dispatch_request`, `make_response`), context push/pop (`request_context`, `app_context`), error handling, `run()`, and the CLI integration.
+- **`blueprints.py`** — `Blueprint(SansioBlueprint)`. Thin subclass adding `send_static_file` and `cli` (Click `AppGroup`).
 
-- **`ctx.py`** — `AppContext`, `_AppCtxGlobals`, `after_this_request`, `copy_current_request_context`, `has_app_context`, `has_request_context`. Manages pushing/popping app and request contexts onto the `ContextVar` stack and running teardown callbacks.
-- **`globals.py`** — The thread/context-local proxies: `current_app`, `g`, `request`, `session`, `app_ctx`. All are `LocalProxy` wrappers around a single `ContextVar` (`_cv_app`).
+### Context
 
-## Co
-...[truncated 2160 chars]
+- **`ctx.py`** — `AppContext` and `RequestContext` classes. Manages the context-local stacks (push/pop), teardown callbacks, and the `_AppCtxGlobals` (the `g` object).
+- **`globals.py`** — The thread/context-local proxies: `
+...[truncated 1605 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are remarkably similar in structure, accuracy, and depth. They both correctly identify the sansio/WSGI architectural split, enumerate the same core files and their concerns, use similar formatting with a narrative section for key modules and a table for supporting modules, and arrive at the same concluding insight about the design. Response A includes `RequestContext` in ctx.py (an important omission from B) and mentions `send_static_file` specifically in the WSGI Blueprint. Response B adds slightly more detail in some table entries (e.g., `NullSession`/`SecureCookieSession` in sessions, `FlaskGroup`/`ScriptInfo`/`routes` in cli, `EnvironBuilder` in testing) and has a useful cross-referencing "Routing & views" section. These minor differences balance out — neither response is meaningfully better than the other overall.
+Both responses are nearly identical in content, accuracy, and depth. They correctly identify the sansio two-layer architecture, the Scaffold → App → Flask inheritance chain (and its Blueprint mirror), and accurately map every module to its concern. Response A includes a "Key classes/objects" column in its core hierarchy table and a closing architectural summary, while Response B uses dedicated section headers for Context, Config, and Routing/Views which maps slightly more directly to the prompt's phrasing. These are minor stylistic differences; the substantive content, grounding in the actual codebase, and practical usefulness are equivalent.
 ```
 
 </details>
@@ -1861,30 +1844,8 @@ Both responses are remarkably similar in structure, accuracy, and depth. They bo
 **Prompt:** Where is dispatch_request defined and what does it do after matching a URL to a view function?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0306 / with_budi=$0.0250
-- Hook: reason=ok context_chars=698
-
-#### Injected context
-
-```text
-[structural context]
-dispatch_request  (app.py:966)
-  ← called by: View, AsyncView, RenderTemplateView
-  → refs: ensure_sync, make_default_options_response, raise_routing_exception
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/app.py
-  span: 966-990
-  anchor: def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:
-  proof:
-    - return value of the view or error handler. This does not have to
-    - moved to the new :meth:`full_dispatch_request`.
-    - be a response object. In order to convert the return value to a
-```
+- Cost USD: no_budi=$0.0349 / with_budi=$0.0267
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
@@ -1893,27 +1854,29 @@ Defined at `src/flask/app.py:966`.
 
 After matching a URL to a view function, `dispatch_request` does the following:
 
-1. **Checks for routing exceptions** (line 978–979): If the request has a `routing_exception`, it raises it immediately via `raise_routing_exception`.
+1. **Checks for routing exceptions** (line 978–979): If the request has a `routing_exception` (e.g., 404 or 405 from URL matching), it raises it immediately.
 
-2. **Handles automatic OPTIONS** (lines 983–987): If the matched rule has `provide_automatic_options` set and the request method is `OPTIONS`, it returns a default OPTIONS response (`make_default_options_response`) instead of calling the view.
+2. **Handles automatic OPTIONS** (lines 983–987): If the matched rule has `provide_automatic_options` set and the request method is `OPTIONS`, it returns a default OPTIONS response via `make_default_options_response` instead of calling the view.
 
-3. **Calls the view function** (lines 989–990): Looks up the view function from `self.view_functions` using `rule.endpoint` as the key, wraps it with `ensure_sync` (to handle async views), and calls it with `req.view_args` (the URL parameters extracted from the match) as keyword arguments. The return value is passed back as a `ResponseReturnValue` (not yet a full `Response` object — that conversion happens later in `make_response`).
+3. **Calls the view function** (lines 989–990): Looks up the view function from `self.view_functions` using `rule.endpoint` as the key, wraps it with `ensure_sync` (for async view support), and calls it with the URL's matched `view_args` (e.g., `id=42` from `/users/<id>`). The return value is passed back as-is — it's not yet a `Response` object at this point.
+
+The actual pre/post-processing (before/after request hooks) and exception handling happen one level up in `full_dispatch_request` (line 992).
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`dispatch_request` is defined at `src/flask/app.py:966`. After matching a URL to a view function, it does the following:
+`dispatch_request` is defined at `src/flask/app.py:966`. After URL matching, it does the following:
 
-1. **Checks for routing exceptions** (line 978–979): If the request has a `routing_exception`, it raises it via `raise_routing_exception`.
-2. **Handles automatic OPTIONS** (lines 983–987): If the matched rule has `provide_automatic_options` and the method is `OPTIONS`, it returns `make_default_options_response(ctx)` instead of calling the view.
-3. **Dispatches to the view function** (lines 989–990): Extracts `view_args` from the request, looks up the view function by `rule.endpoint` in `self.view_functions`, wraps it with `ensure_sync`, and calls it with the view args. The return value is passed back (not necessarily a `Response` object — `make_response` handles that conversion later).
+1. **Checks for routing exceptions** (line 978–979): If the request has a `routing_exception`, it raises it via `self.raise_routing_exception(req)`.
+2. **Handles automatic OPTIONS** (lines 983–987): If the matched rule has `provide_automatic_options` and the method is `OPTIONS`, it returns `self.make_default_options_response(ctx)` instead of calling the view.
+3. **Dispatches to the view function** (lines 989–990): Extracts `view_args` from the request, looks up the view function by `rule.endpoint` in `self.view_functions`, wraps it with `self.ensure_sync()`, and calls it with the matched URL arguments. The return value is passed back (not necessarily a `Response` object yet — `make_response` handles that conversion upstream in `full_dispatch_request`).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are essentially identical in content, structure, and accuracy. They identify the same file and line number (src/flask/app.py:966), describe the same three steps (routing exception check, automatic OPTIONS handling, view function dispatch), reference the same line ranges, and mention the same details about ensure_sync, view_args, and make_response. The only differences are trivial wording variations. Neither response has a meaningful advantage over the other.
+Both responses are nearly identical in content, structure, and accuracy. They correctly identify the definition at src/flask/app.py:966 and describe the same three steps: checking routing exceptions, handling automatic OPTIONS, and dispatching to the view function. Both reference the same line numbers and provide equivalent detail. Response A adds a note about full_dispatch_request at line 992; Response B mentions make_response handling conversion in full_dispatch_request. These are minor stylistic differences with no meaningful quality gap.
 ```
 
 </details>
@@ -1923,30 +1886,8 @@ Both responses are essentially identical in content, structure, and accuracy. Th
 **Prompt:** Where is full_dispatch_request defined and what steps does it take before and after calling dispatch_request?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0690 / with_budi=$0.0649
-- Hook: reason=ok context_chars=605
-
-#### Injected context
-
-```text
-[structural context]
-full_dispatch_request  (app.py:992)
-  ← called by: test_environ_for_valid_idna_completes, wsgi_app
-  → refs: dispatch_request, finalize_request, handle_user_exception
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/app.py
-  span: 992-1019
-  anchor: def full_dispatch_request(self, ctx: AppContext) -> Response:
-  proof:
-    - rv = self.dispatch_request(ctx)
-    - return self.finalize_request(ctx, rv)
-    - warnings.warn(
-```
+- Cost USD: no_budi=$0.0356 / with_budi=$0.0306
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
@@ -1954,52 +1895,48 @@ evidence_cards:
 Defined at `src/flask/app.py:992`. Here's the sequence:
 
 **Before `dispatch_request`:**
-1. **First-request bookkeeping** (lines 999–1010): On the very first request, it emits a deprecation warning if the legacy `should_ignore_error` method is set, then sets `_got_first_request = True`.
-2. **`request_started` signal** (line 1013): Sends the `request_started` signal to any registered listeners.
-3. **`preprocess_request`** (line 1014): Runs all `before_request` handlers (app-level and blueprint-level). If any handler returns a non-`None` value, that value is used as the response and `dispatch_request` is **skipped**.
+1. **First-request bookkeeping** (lines 999–1010): On the very first request, emits a deprecation warning if the legacy `should_ignore_error` method is set, then marks `_got_first_request = True`.
+2. **`request_started` signal** (line 1013): Sends the `request_started` signal to any connected receivers.
+3. **`preprocess_request`** (line 1014): Runs all `before_request` functions (app-level and blueprint-level). If any of them returns a non-`None` value, that value is used as the response and `dispatch_request` is **skipped**.
 
-**Calling `dispatch_request`:**
-4. Only called (line 1016) if `preprocess_request` returned `None` (i.e., no before-request handler short-circuited).
+**`dispatch_request`** (line 1016): Called only if `preprocess_request` returned `None`.
 
 **After `dispatch_request`:**
-5. **`finalize_request`** (line 1019): Converts the return value into a `Response` object and runs all `after_request` handlers (postprocessing).
-
-**Error handling:**
-- If any exception is raised during steps 2–4, it's caught and passed to `handle_user_exception` (line 1018), and that result is then finalized via `finalize_request` as well.
+4. **Error handling** (lines 1017–1018): If anything in the try block raises, `handle_user_exception` converts the exception into a response.
+5. **`finalize_request`** (line 1019): Always called. It runs `make_response` to convert the return value into a `Response` object, then calls `process_response` which executes all `after_request` functions.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Defined at `src/flask/app.py:992`.
+`full_dispatch_request` is defined at `src/flask/app.py:992`.
 
 **Before `dispatch_request`:**
-
-1. **Deprecation warning** (lines 999–1008) — on the first request, if `should_ignore_error` is set, emits a `DeprecationWarning` that it will be removed in Flask 3.3.
-2. **Marks first request received** (line 1010) — sets `self._got_first_request = True`.
-3. **Sends `request_started` signal** (line 1013) — notifies any listeners that a request has begun.
-4. **Runs preprocessors** (line 1014) — calls `self.preprocess_request(ctx)`. If any `before_request` handler returns a non-`None` response, that response is used directly and `dispatch_request` is **skipped**.
+1. **Deprecation warning** (lines 999–1008) — on the first request, if `should_ignore_error` is set, it emits a `DeprecationWarning`.
+2. **Marks first request** (line 1010) — sets `_got_first_request = True`.
+3. **Sends `request_started` signal** (line 1013).
+4. **Runs request preprocessors** (line 1014) — calls `self.preprocess_request(ctx)`. If any preprocessor returns a non-`None` value, that becomes the response and `dispatch_request` is **skipped**.
 
 **After `dispatch_request`:**
+5. **Finalizes the response** (line 1019) — calls `self.finalize_request(ctx, rv)`, which runs after-request handlers and returns the final `Response`.
 
-5. **Error handling** (lines 1017–1018) — if either `preprocess_request` or `dispatch_request` raises an exception, it's caught and passed to `self.handle_user_exception(ctx, e)`.
-6. **Finalizes the response** (line 1019) — calls `self.finalize_request(ctx, rv)`, which converts the return value into a `Response` and runs `after_request` postprocessing functions.
+**Error handling:** The entire try block (signal, preprocess, dispatch) is wrapped in an `except Exception` that routes errors through `self.handle_user_exception(ctx, e)` (line 1018), and the result is still passed to `finalize_request`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the definition at src/flask/app.py:992 and describe the same sequence of steps with accurate line references. They cover first-request bookkeeping, request_started signal, preprocess_request, the conditional dispatch_request call, error handling, and finalize_request. Response A groups first-request steps together and explicitly notes dispatch_request is only called if preprocess returned None (line 1016). Response B separates the deprecation warning and _got_first_request flag into distinct steps and includes the ctx parameter in method calls, showing slightly more code-level detail. Response B is also marginally more precise about error handling covering both preprocess_request and dispatch_request. However, these differences are negligible — both are well-grounded, accurate, and equally actionable.
+Both responses correctly identify full_dispatch_request at src/flask/app.py:992 and accurately describe the same sequence of steps with correct line references. Response A groups first-request bookkeeping together and provides slightly more detail on finalize_request (mentioning make_response and process_response). Response B separates the deprecation warning from the _got_first_request flag into distinct steps and presents error handling as a separate section. Both are well-grounded in the codebase with accurate line numbers and correct descriptions of the control flow. The differences are stylistic rather than substantive.
 ```
 
 </details>
 
-<details><summary>Flask P5 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Flask P5 | winner=with_budi | Q 9→9 G 8→9</summary>
 
 **Prompt:** Where is wsgi_app defined and what does it do when a WSGI request arrives?
 
-- Interactions: no_budi=3 / with_budi=3
-- Cost USD: no_budi=$0.0372 / with_budi=$0.0373
+- Interactions: no_budi=3 / with_budi=2
+- Cost USD: no_budi=$0.0863 / with_budi=$0.0821
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
@@ -2007,357 +1944,288 @@ Both responses correctly identify the definition at src/flask/app.py:992 and des
 ```text
 `wsgi_app` is defined at `src/flask/app.py:1566`. Here's what happens when a WSGI request arrives:
 
-1. **`__call__`** (line 1618) is invoked by the WSGI server, which simply delegates to `wsgi_app`. This indirection exists so you can wrap `app.wsgi_app` with middleware without losing the reference to the `Flask` app object.
+1. **Create a request context** (`ctx = self.request_context(environ)`) — wraps the raw WSGI `environ` dict into Flask's `RequestContext`, which holds the `Request` object, URL adapter, etc.
 
-2. **Create a request context** (line 1592) — `self.request_context(environ)` builds a `RequestContext` from the raw WSGI `environ` dict.
+2. **Push the context** (`ctx.push()`) — makes the request context active on the current thread/greenlet, enabling `flask.request`, `flask.g`, and similar proxies.
 
-3. **Push the context** (line 1596) — `ctx.push()` makes the request and app contexts active on the current thread/greenlet (this is what enables `flask.request`, `flask.g`, etc.).
+3. **Dispatch the request** (`self.full_dispatch_request(ctx)`) — runs before-request hooks, matches the URL to a view function, calls it, and runs after-request hooks to produce a `Response`.
 
-4. **Dispatch the request** (line 1597) — `self.full_dispatch_request(ctx)` runs before-request hooks, matches the URL to a view function, calls it, and runs after-request hooks to produce a `Response`.
+4. **Handle errors** — if an `Exception` is raised, `handle_exception` converts it into an error response. If a non-`Exception` `BaseException` (like `KeyboardInterrupt`) is raised, it re-raises immediately.
 
-5. **Handle exceptions** (lines 1598–1603) — If an `Exception` occurs, `self.handle_exception()` converts it into an error response. If a non-`Exception` `BaseException` occurs (e.g. `KeyboardInterrupt`), it's re-raised.
+5. **Return the WSGI response** (`return response(environ, start_response)`) — calls Werkzeug's `Response.__call__`, which invokes `start_response` with the status/headers and yields the body bytes.
 
-6. **Return the WSGI response** (line 1604) — The `Response` object is itself callable as a WSGI app, so `response(environ, start_response)` streams the response back to the server.
+6. **Teardown (finally block)** — `ctx.pop(error)` always runs, tearing down the request and app contexts (calling `teardown_request` / `teardown_appcontext` handlers) regardless of whether an error occurred.
 
-7. **Teardown** (in the `finally` block, lines 1605–1616) — Regardless of success or failure, the request context is popped (`ctx.pop(error)`), which triggers teardown callbacks and cleans up the context stack. Errors can optionally be suppres
-...[truncated 30 chars]
+The method is deliberately separated from `__call__` so you can wrap it with WSGI middleware (`app.wsgi_app = MyMiddleware(app.wsgi_app)`) without losing the `Flask` app object reference.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`wsgi_app` is defined at `src/flask/app.py:1566`. Here's what happens when a WSGI request arrives:
+`wsgi_app` is defined at `src/flask/app.py:1566` on the `Flask` app class. It's the actual WSGI entry point. Here's what happens when a request arrives:
 
-1. **`__call__`** (line 1618) — The WSGI server calls the Flask app object directly. This delegates to `wsgi_app`, keeping the indirection so middleware can wrap `wsgi_app` without losing the app reference.
+1. **Create request context** (line 1592) — `self.request_context(environ)` builds a `RequestContext` from the raw WSGI `environ` dict.
+2. **Push context** (line 1596) — `ctx.push()` makes the request and app contexts active (enabling `request`, `g`, `current_app` proxies).
+3. **Dispatch** (line 1597) — `self.full_dispatch_request(ctx)` runs before-request hooks, matches the URL to a view, calls the view, and runs after-request hooks, producing a `Response`.
+4. **Error handling** (lines 1598–1603) — If an `Exception` is raised, `self.handle_exception()` converts it into an error response. Non-`Exception` `BaseException`s (like `KeyboardInterrupt`) are re-raised.
+5. **Return response** (line 1604) — The `Response` object is called as a WSGI app itself (`response(environ, start_response)`), streaming bytes back to the server.
+6. **Cleanup** (lines 1606–1616) — In the `finally` block, the request context is always popped (`ctx.pop(error)`), which triggers teardown callbacks regardless of whether an error occurred.
 
-2. **Create request context** (line 1592) — `self.request_context(environ)` builds a `RequestContext` from the raw WSGI environ dict.
-
-3. **Push context** (line 1596) — `ctx.push()` makes the request and app contexts active (this is what enables `flask.request`, `flask.g`, etc.).
-
-4. **Dispatch** (line 1597) — `self.full_dispatch_request(ctx)` runs the full dispatch pipeline: before-request hooks → route matching → view function → after-request hooks → returns a `Response`.
-
-5. **Error handling** (lines 1598–1603) — If an `Exception` is raised, `self.handle_exception()` converts it into an error response. If a non-Exception `BaseException` (like `KeyboardInterrupt`) is raised, it records the error and re-raises.
-
-6. **Return response** (line 1604) — The `Response` object is called as a WSGI app itself: `response(environ, start_response)`, returning the iterable of bytes the WSGI server expects.
-
-7. **Teardown** (finally block, lines 1605–1616) — Always runs, even on errors. It optionally preserves context for the Werkzeug debugger, filters ignorable errors via `should_ignore_error`, and pops the request context (`ctx.pop(error)`), which triggers teardown callbacks.
+The separate `__call__` method (line 1618) simply delegates to `wsgi_app`. This indirection exists so you can wrap `app.wsgi_app` with middleware while keeping a reference to the original `Flask` object intact.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, accuracy, and level of detail. They correctly identify the definition location (src/flask/app.py:1566), walk through the same 7 steps with the same line references, and explain each step accurately. Minor wording differences exist (e.g., Response B mentions preserving context for the Werkzeug debugger in the teardown step, which is a nice detail; Response A slightly more clearly describes the teardown flow). These differences are negligible and both responses are equally high quality, well-grounded in the repository, and actionable.
+Both responses are substantively identical in content, correctness, and structure — they describe the same 6 steps accurately. Response B edges ahead by including specific line numbers for each step (lines 1592, 1596, 1597, 1598–1603, 1604, 1606–1616, 1618), which makes it more grounded in the repository and more actionable for navigation. Response A references only the definition line. The difference is small but consistent across grounding and actionability.
 ```
 
 </details>
 
-<details><summary>Flask P6 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>Flask P6 | winner=no_budi | Q 9→7 G 8→7</summary>
 
 **Prompt:** Trace the call chain from an incoming HTTP request to the view function — what functions are called in order?
 
-- Interactions: no_budi=13 / with_budi=5
-- Cost USD: no_budi=$0.1278 / with_budi=$0.0582
-- Hook: reason=ok context_chars=846
-
-#### Injected context
-
-```text
-[structural context]
-dispatch_request  (app.py:966)
-  ← called by: View, AsyncView, RenderTemplateView
-  → refs: ensure_sync, make_default_options_response, raise_routing_exception
-dispatch_request  (app.py:966)
-  ← called by: View, AsyncView, RenderTemplateView
-  → refs: ensure_sync, make_default_options_response, raise_routing_exception
-wsgi_app  (app.py:1566)
-  ← called by: test_session_using_application_root, __call__
-  → refs: full_dispatch_request, handle_exception, pop
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/app.py
-  span: 966-1616
-  anchor: chain: wsgi_app@1566 -> full_dispatch_request@992 -> dispatch_request@966 -> view_functions[rule.endpoint]@990
-  r
-```
+- Interactions: no_budi=13 / with_budi=4
+- Cost USD: no_budi=$0.1418 / with_budi=$0.0474
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the complete call chain from HTTP request to view function:
 
-### Request Call Chain
+### 1. `Flask.__call__()` — `app.py:1618`
+The WSGI server calls the app object. It simply delegates to `wsgi_app`.
 
-``\`
-1. App.__call__(environ, start_response)           # app.py:1618
-   └─ 2. App.wsgi_app(environ, start_response)     # app.py:1566
-       ├─ 3. App.request_context(environ)           # app.py:1501
-       │     └─ AppContext.from_environ(app, environ)  — creates context with Request object
-       ├─ 4. AppContext.push()                       # ctx.py:416
-       │     ├─ Sets context var (_cv_app)
-       │     ├─ Sends appcontext_pushed signal
-       │     ├─ Opens session (session_interface.open_session)
-       │     └─ AppContext.match_request()           — URL routing via url_adapter.match()
-       ├─ 5. App.full_dispatch_request(ctx)          # app.py:992
-       │     ├─ Sends request_started signal
-       │     ├─ 6. App.preprocess_request(ctx)       # app.py:1366
-       │     │     ├─ Runs url_value_preprocessors
-       │     │     └─ Runs before_request_funcs (short-circuits if any returns non-None)
-       │     ├─ 7. App.dispatch_request(ctx)         # app.py:966
-       │     │     ├─ Checks req.routing_exception
-       │     │     ├─ Auto OPTIONS handling (if applicable)
-       │     │     └─ **Calls view_functions[rule.endpoint](**view_args)** ← your view
-       │     └─ 8. App.finalize_request(ctx, rv)     # app.py:1021
-       │           ├─ App.make_response(rv)          — converts return value to Response
-       │           ├─ App.process_response(ctx, response)  # app.py
-...[truncated 1181 chars]
+### 2. `Flask.wsgi_app()` — `app.py:1566`
+The real entry point. Does three things in sequence:
+1. **Creates context**: `self.request_context(environ)` → `AppContext.from_environ()` — builds an `AppContext` wrapping the `Request` object and URL adapter.
+2. **Pushes context**: `ctx.push()` (see step 3)
+3. **Dispatches**: `self.full_dispatch_request(ctx)` (see step 4)
+4. **Cleanup**: `ctx.pop(error)` in the `finally` block, which runs teardown functions.
+
+### 3. `AppContext.push()` — `ctx.py:416`
+- Sets the context var (`_cv_app`) so `current_app`, `request`, `g` become available.
+- Sends `appcontext_pushed` signal.
+- **Opens the session**: `self._get_session()` calls `session_interface.open_session()`.
+- **Matches the URL**: `self.match_request()` — Werkzeug's URL routing happens here, populating `request.url_rule` and `request.view_args`.
+
+### 4. `Flask.full_dispatch_request()` — `app.py:992`
+- Sends the `request_started` signal.
+- Calls `self.preprocess_request(ctx)` (see step 5).
+- If preprocessing returned `None` (no early response), calls `self.dispatch_request(ctx)` (see step 6).
+- Calls `self.finalize_request(ctx, rv)` (see step 7).
+
+### 5. `Flask.preprocess_request()` — `app.py:1366`
+- Runs **URL value preprocessors** (`url_value_preprocessors`) — app-level first, then blueprint.
+- Runs **
+...[truncated 1616 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the call chain from an incoming HTTP request to the view function:
+Here's the call chain from incoming request to view function:
 
-1. **`__call__`** (`app.py:1618`) — The WSGI server calls the Flask app as a callable. It simply delegates to `wsgi_app`.
+1. **`__call__`** (`app.py:1618`) — The WSGI server calls the app as a callable; it delegates immediately to `wsgi_app`.
 
-2. **`wsgi_app`** (`app.py:1566`) — Creates a `RequestContext` from the WSGI `environ`, pushes it (`ctx.push()`), then calls `full_dispatch_request`.
+2. **`wsgi_app`** (`app.py:1566`) — Creates a request context via `request_context(environ)`, pushes it with `ctx.push()`, then calls `full_dispatch_request`.
 
-3. **`full_dispatch_request`** (`app.py:992`) — Sends the `request_started` signal, runs `preprocess_request` (before-request hooks). If no hook returns a response, calls `dispatch_request`. Wraps everything so exceptions go to `handle_user_exception`. Finally calls `finalize_request`.
+3. **`full_dispatch_request`** (`app.py:992`) — Sends the `request_started` signal, runs `preprocess_request` (which executes `before_request` hooks). If no hook short-circuits with a response, calls `dispatch_request`. Afterwards, passes the return value to `finalize_request` (which runs `after_request` hooks and builds the `Response`).
 
-4. **`preprocess_request`** — Runs `url_value_preprocessor` and `before_request` callbacks. If any `before_request` callback returns a non-`None` value, that short-circuits dispatch (the view is never called).
+4. **`dispatch_request`** (`app.py:966`) — Resolves the matched URL rule, checks for routing exceptions, and finally calls the view function:
+   ``\`python
+   return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+   ``\`
 
-5. **`dispatch_request`** (`app.py:966`) — Checks for routing exceptions, handles automatic `OPTIONS` responses, then looks up the view function via `self.view_functions[rule.endpoint]` and calls it with the matched `view_args`.
-
-6. **`finalize_request`** (`app.py:1021`) — Takes the view's return value, calls `make_response` to convert it to a `Response`, then runs `process_response` (after-request hooks) and sends the `request_finished` signal.
-
-Back in `wsgi_app`, the final `Response` object is called as a WSGI app (`response(environ, start_response)`), and `ctx.pop()` runs teardown callbacks in the `finally` block.
-
-**Summary:**
+**In short:**
 
 ``\`
-__call_
-...[truncated 315 chars]
+__call__  →  wsgi_app  →  full_dispatch_request  →  dispatch_request  →  view_functions[endpoint]
+                              ↓ (before)                                      ↓ (after)
+                         preprocess_request                            finalize_request
+``\`
+
+After the view returns, control flows back through `finalize_request` (after-request hooks, response building), and then `wsgi_app` calls `response(environ, start_response)` to send bytes to the client. The request context is popped in the `finally` block via `ctx.pop()`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-grounded in the Flask codebase. Response A is more comprehensive: it includes the tree-style diagram showing nesting depth, covers context pushing (AppContext.push with _cv_app), session open/save, signals (appcontext_pushed/popped, request_started/finished), and teardown details. It references both app.py and ctx.py with specific line numbers. Response B covers the essential chain correctly and concisely with accurate line numbers, but omits some details like session handling, signal dispatching, and the AppContext layer. Both correctly identify short-circuiting via before_request and the finally-block teardown. Response A's hierarchical visualization better conveys the actual call nesting, making it slightly more actionable for someone trying to understand or debug the request lifecycle.
+Both responses correctly identify the core call chain (__call__ → wsgi_app → full_dispatch_request → dispatch_request → view function) with accurate line references. Response A is significantly more thorough: it covers ctx.push() internals (session opening, URL matching), preprocess_request details (URL value preprocessors + before_request handlers), finalize_request breakdown (make_response, process_response, after_request handlers, save_session), signals, and teardown. The ASCII tree summary is highly actionable. Response B is correct but much more abbreviated, missing important intermediate steps like context pushing details, session handling, URL matching, and the distinction between make_response and process_response. Response B mentions ensure_sync which is a valid detail, but overall provides less depth. Both are grounded in repo specifics with correct file/line references. Response A wins on completeness and actionability.
 ```
 
 </details>
 
-<details><summary>Flask P7 | winner=no_budi | Q 9→8 G 8→8</summary>
+<details><summary>Flask P7 | winner=with_budi | Q 8→8 G 7→8</summary>
 
 **Prompt:** Trace what happens when a view function raises an exception — how does Flask catch and convert it to a response?
 
-- Interactions: no_budi=11 / with_budi=6
-- Cost USD: no_budi=$0.1392 / with_budi=$0.0914
-- Hook: reason=ok context_chars=785
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/app.py
-  span: 966-990
-  anchor: def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:
-  proof:
-    - return value of the view or error handler. This does not have to
-    - be a response object. In order to convert the return value to a
-    - proper response object, call :func:`make_response`.
-- file: src/flask/wrappers.py
-  span: 18-58
-  anchor: class Request(RequestBase):
-  proof:
-    - matched endpoint and view arguments.
-    - It is what ends up as :class:`~flask.request`. If you want to replace
-    - :attr:`~flask.Flask.request_class` to your subclass.
-```
+- Interactions: no_budi=11 / with_budi=9
+- Cost USD: no_budi=$0.1406 / with_budi=$0.1185
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the complete exception handling flow:
+Here's the full exception handling chain, from WSGI entry to response:
 
-## Exception Flow: View → Response
+## The call chain
 
-### 1. Entry point: `wsgi_app` (app.py:1566)
+### 1. `wsgi_app` (line 1566) — the outermost boundary
 
-The WSGI server calls `wsgi_app`. It pushes the request context, then calls `full_dispatch_request` inside a `try/except`:
-
-``\`python
+``\`
 try:
     ctx.push()
     response = self.full_dispatch_request(ctx)
-except Exception as e:
+except Exception as e:                          # ← catches everything that escapes
     error = e
-    response = self.handle_exception(ctx, e)  # last-resort handler
+    response = self.handle_exception(ctx, e)    # ← last-resort handler
 ``\`
 
-### 2. `full_dispatch_request` (app.py:992)
+This is the **safety net**. Any exception not handled by inner layers ends up here.
 
-Runs `before_request` hooks via `preprocess_request`, then calls `dispatch_request` which invokes the actual view function. **Any exception raised here is caught:**
+### 2. `full_dispatch_request` (line 992) — dispatches with pre/post processing
+
+``\`
+try:
+    request_started.send(self)
+    rv = self.preprocess_request(ctx)
+    if rv is None:
+        rv = self.dispatch_request(ctx)         # ← calls your view function
+except Exception as e:
+    rv = self.handle_user_exception(ctx, e)     # ← first chance to handle
+return self.finalize_request(ctx, rv)
+``\`
+
+Your view runs at `dispatch_request` (line 990: `self.view_functions[rule.endpoint](**view_args)`). Any exception it raises is caught here and passed to `handle_user_exception`.
+
+### 3. `handle_user_exception` (line 865) — tries registered error handlers
+
+Two paths:
+
+- **HTTPException** (e.g. `abort(404)`): delegates to `handle_http_exception` (line 888), which looks up a handler registered via `@app.errorhandler(404)`. If none found, **returns the HTTPException itself** (which is a valid WSGI response via Werkzeug).
+
+- **Non-HTTP exception** (e.g. `ValueError`): searches `_find_error_handler` for a matching handler re
+...[truncated 1995 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the full exception-handling chain, from view function to response:
+
+---
+
+### 1. View function raises — caught in `full_dispatch_request`
+
+`app.py:992-1019` — `full_dispatch_request` wraps the call to `dispatch_request` (which invokes your view at line 990) in a `try/except`:
 
 ``\`python
 try:
     rv = self.preprocess_request(ctx)
     if rv is None:
-        rv = self.dispatch_request(ctx)
+        rv = self.dispatch_request(ctx)      # view runs here
 except Exception as e:
-    rv = self.handle_user_exception(ctx, e)
+    rv = self.handle_user_exception(ctx, e)  # first catch
 return self.finalize_request(ctx, rv)
 ``\`
 
-### 3. `handle_user_exception` (app.py:865) — first handler attempted
+### 2. `handle_user_exception` — route to the right handler
 
-Two branches:
+`app.py:865-895` — This is the triage point:
 
-- **HTTPException** (e.g. `abort(404)`): delegates to `handle_http_exception`, which looks up a registered error handler for that HTTP code. If none found, returns the exception itself (which is a valid WSGI response).
+- **HTTPException** (e.g. `abort(404)`): delegates to `handle_http_exception`, which looks up a registered error handler via `_find_error_handler`. If none is found, the HTTPException itself is returned (it's already a valid WSGI response).
+- **Non-HTTP exception** (e.g. `ValueError`): searches for a matching error handler registered via `@app.errorhandler(ValueError)`. If a handler is found, it's called. **If no handler is found, the exception re-raises** (`raise` at line 893).
 
-- **Non-HTTP exception** (e.g. `ValueError`): calls `_find_error_handler` to search for a handler registered via `@app.errorhandler(ValueError)`. If a handler is found, it's called. **If no handler exists, the exception is re-raised** (`raise`), bubbling up to `wsgi_app`.
+### 3. Unhandled exceptions bubble to `wsgi_app` → `handle_exception`
 
-### 4. `handle_exception` (app.py:897) — last re
-...[truncated 1808 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Here's the full exception-handling chain:
-
-## 1. View function is called — `dispatch_request` (line 990)
-
-``\`python
-return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
-``\`
-
-If the view raises, the exception propagates up to `full_dispatch_request`.
-
-## 2. `full_dispatch_request` catches it (line 1012–1018)
+`app.py:1594-1600` — If `handle_user_exception` re-raised (no handler found for a non-HTTP exception), the exception propagates out of `full_dispatch_request` and is caught by the outer `try/except` in `wsgi_app`:
 
 ``\`python
 try:
-    ...
-    rv = self.dispatch_request(ctx)
-except Exception as e:
-    rv = self.handle_user_exception(ctx, e)
-return self.finalize_request(ctx, rv)
-``\`
-
-The exception is handed to `handle_user_exception`, and whatever it returns becomes the response value passed to `finalize_request` (which calls `make_response` + after-request hooks).
-
-## 3. `handle_user_exception` (line 865–895) — first triage
-
-Two paths:
-
-- **HTTPException** (e.g. `abort(404)`): delegates to `handle_http_exception`, which looks up a registered error handler via `_find_error_handler`. If none is registered, the `HTTPException` itself is returned (Werkzeug exceptions are valid WSGI responses).
-
-- **Non-HTTP exception** (e.g. `ValueError`): looks for a registered handler for that exception type. If a handler is found, it's called and its return value becomes `rv`. **If no handler is found, the exception is re-raised** (`raise` at line 893), escaping `full_dispatch_request`.
-
-## 4. `wsgi_app` catches unhandled exceptions (line 1598–1600)
-
-``\`python
-except Exception as e:
-    error = e
-    response = self.handle_exception(ctx, e)
-``\`
-
-This is the last-resort catch. It cal
-...[truncated 1145 chars]
+    response = self.full_dispatch_request(ctx)
+except Exception 
+...[truncated 1654 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses accurately trace the exception flow through wsgi_app → full_dispatch_request → handle_user_exception → handle_exception → finalize_request, with correct line references and code snippets. They are very close in quality. Response A edges ahead by covering two additional details: (1) the `_find_error_handler` lookup priority order (blueprint-specific code → app-specific code → blueprint class MRO → app class MRO), which is useful for understanding handler resolution, and (2) the `finalize_request` behavior when `from_error_handler=True` (errors are logged and swallowed rather than re-raised). Response B is slightly more concise and ends with a nice summary insight about the design split between handle_user_exception and handle_exception, but omits those details. Both are well-grounded with specific file paths and line numbers. The difference is small — A is marginally more comprehensive.
+Both responses trace the same exception handling chain (wsgi_app → full_dispatch_request → handle_user_exception → handle_exception → finalize_request) with nearly identical accuracy and structure. They cover the same key details: HTTPException vs non-HTTP branching, PROPAGATE_EXCEPTIONS behavior, InternalServerError wrapping, _find_error_handler lookup, and finalize_request's from_error_handler flag. Response A includes a slightly more detailed section on _find_error_handler lookup order (blueprint vs app, MRO walking) which is a nice bonus. Response B provides slightly better file:line references (e.g. app.py:992-1019, app.py:865-895, app.py:1594-1600) making it marginally more grounded and navigable. Response B's visual summary with Unicode arrows is also slightly cleaner. Both are high quality and very close; Response B edges ahead on grounding due to more precise line range references tied to the actual repository.
 ```
 
 </details>
 
-<details><summary>Flask P8 | winner=no_budi | Q 7→5 G 7→5</summary>
+<details><summary>Flask P8 | winner=with_budi | Q 7→8 G 6→7</summary>
 
 **Prompt:** What calls dispatch_request and what arguments does each call site pass?
 
-- Interactions: no_budi=2 / with_budi=3
-- Cost USD: no_budi=$0.0294 / with_budi=$0.0328
-- Hook: reason=ok context_chars=686
-
-#### Injected context
-
-```text
-[structural context]
-dispatch_request  (app.py:966)
-  ← called by: View, AsyncView, RenderTemplateView
-  → refs: ensure_sync, make_default_options_response, raise_routing_exception
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/app.py
-  span: 966-990
-  anchor: def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:
-  proof:
-    - proper response object, call :func:`make_response`.
-    - moved to the new :meth:`full_dispatch_request`.
-    - return value of the view or error handler. This does not have to
-```
+- Interactions: no_budi=4 / with_budi=4
+- Cost USD: no_budi=$0.0510 / with_budi=$0.0506
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-There are two levels of `dispatch_request`:
+There are **3 call sites** in production code:
 
-**1. `App.dispatch_request(self, ctx: AppContext)`** — called from one place:
+### 1. `src/flask/app.py:1016` — `Flask.full_dispatch_request`
+``\`python
+rv = self.dispatch_request(ctx)
+``\`
+Passes **`ctx: AppContext`** — the application context for the current request. This calls `Flask.dispatch_request` (the app-level method).
 
-- **`App.full_dispatch_request`** at `src/flask/app.py:1016` — passes `ctx` (the `AppContext`).
+### 2. `src/flask/views.py:110` — `View.as_view` (init_every_request=True)
+``\`python
+return current_app.ensure_sync(self.dispatch_request)(**kwargs)
+``\`
+Passes **`**kwargs`** — the URL rule keyword arguments (route parameters like `id`, `name`, etc.) captured from the matched URL rule.
 
-**2. `App.full_dispatch_request(self, ctx: AppContext)`** — called from two places:
+### 3. `src/flask/views.py:116` — `View.as_view` (init_every_request=False)
+``\`python
+return current_app.ensure_sync(self.dispatch_request)(**kwargs)
+``\`
+Same as above — passes **`**kwargs`** (URL rule parameters). The only difference is that the `View` instance is reused across requests instead of being recreated.
 
-- **`App.wsgi_app`** at `src/flask/app.py:1597` — passes `ctx` (the `AppContext` created just above).
-- **`tests/test_reqctx.py:292`** and **`tests/test_reqctx.py:313`** — pass `ctx` (an `AppContext` built in the test).
-
-**3. `View.dispatch_request(self, **kwargs)`** — called from:
-
-- **`View.dispatch_view`** at `src/flask/views.py:110` and `src/flask/views.py:116` — passes `**kwargs` (the URL rule keyword arguments captured from the route).
-
-In summary:
-
-| Method | Call site | Arguments passed |
-|---|---|---|
-| `App.dispatch_request` | `App.full_dispatch_request` (app.py:1016) | `ctx` (AppContext) |
-| `App.full_dispatch_request` | `App.wsgi_app` (app.py:1597) | `ctx` (AppContext) |
-| `App.full_dispatch_request` | tests (test_reqctx.py:292, 313) | `ctx` (AppContext) |
-| `View.dispatch_request` | `View.dispatch_view` (views.py:110, 116) | `**kwargs` (URL route parameters) |
+Note: the two `views.py` call sites invoke `View.dispatch_request` (the view-class method), while the `app.py` call site invokes `Flask.dispatch_request` (the app-level method) — they are different methods on different classes.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There is **one call site** for `dispatch_request` in the production code:
+There are two separate `dispatch_request` methods with different call sites:
 
-**`src/flask/app.py:1016`** — inside `full_dispatch_request`:
+### `Flask.dispatch_request(self, ctx: AppContext)` — `app.py:966`
+
+**Single call site** at `app.py:1016` inside `full_dispatch_request`:
 ``\`python
 rv = self.dispatch_request(ctx)
 ``\`
-It passes `ctx`, which is the `AppContext` parameter received by `full_dispatch_request(self, ctx: AppContext)` at line 992.
+Passes `ctx` (the `AppContext`).
 
-The `View` / `AsyncView` / `RenderTemplateView` classes in `views.py` and tests *define* their own `dispatch_request` methods (overrides on view classes), but they don't call `Flask.dispatch_request`. `Flask.dispatch_request` is only invoked from `full_dispatch_request`.
+### `View.dispatch_request(self)` — `views.py:78`
+
+**Two call sites** in `views.py`, both inside `View.as_view`. They call via `ensure_sync` and pass `**kwargs` (the URL rule arguments):
+
+1. **`views.py:110`** — when `init_every_request` is `True` (new instance per request):
+   ``\`python
+   return current_app.ensure_sync(self.dispatch_request)(**kwargs)
+   ``\`
+
+2. **`views.py:116`** — when `init_every_request` is `False` (shared instance):
+   ``\`python
+   return current_app.ensure_sync(self.dispatch_request)(**kwargs)
+   ``\`
+
+Both pass `**kwargs` from the `view(**kwargs)` wrapper, which are the URL route parameters (e.g., `id`, `name`).
 ```
 
 #### Judge rationale
 
 ```text
-Response A is more comprehensive and correctly identifies both App.dispatch_request (called from full_dispatch_request with ctx) and View.dispatch_request (called from View.dispatch_view with **kwargs). It includes some off-topic content about full_dispatch_request callers, but the core information is accurate. Response B only identifies the App.dispatch_request call site and incorrectly dismisses View.dispatch_request call sites as merely "definitions/overrides" when they are genuinely called from dispatch_view. The question asks about "dispatch_request" generically, so both the App and View versions are in scope. Response A provides a more complete and accurate answer with specific line references and a summary table.
+Both responses correctly identify the same 3 call sites for dispatch_request across app.py and views.py, and both describe the arguments passed at each site accurately. Both likely share the same error about the ctx parameter type (AppContext vs RequestContext). Response B is better organized—it separates the two distinct dispatch_request methods (Flask vs View) into clear sections from the start, whereas Response A mentions this distinction only as a footnote. Response B also provides definition line numbers (app.py:966, views.py:78) in addition to call site lines, giving more grounding in repository specifics. The content is largely equivalent, but B's structure makes the information more immediately useful.
 ```
 
 </details>
@@ -2366,189 +2234,127 @@ Response A is more comprehensive and correctly identifies both App.dispatch_requ
 
 **Prompt:** What calls preprocess_request and when is it triggered relative to the view function?
 
-- Interactions: no_budi=5 / with_budi=4
-- Cost USD: no_budi=$0.0398 / with_budi=$0.0440
-- Hook: reason=ok context_chars=875
-
-#### Injected context
-
-```text
-[structural context]
-before_request  (scaffold.py:459)
-  ← called by: before_request
-  → refs: get, setdefault
-test_basic_view  (test_views.py:18)
-  → refs: add_url_rule, as_view, common_test
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/sansio/scaffold.py
-  span: 459-581
-  anchor: def url_value_preprocessor(
-  proof:
-    - The function can modify the values captured from the matched url before
-    - they are passed to the view. For example, this can be used to pop a
-    - every view.
-- file: tests/test_views.py
-  span: 18-26
-  anchor: def test_basic_view(app):
-  proof:
-    - class Index(flask.views.View):
-    - return flask.request.method
-    - app.add_url_rule("/", view_func=Index.as_view("index"))
-```
+- Interactions: no_budi=5 / with_budi=5
+- Cost USD: no_budi=$0.0444 / with_budi=$0.0432
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-`preprocess_request` is called by `full_dispatch_request` at `app.py:1014`, **after** the `request_started` signal is sent and **before** `dispatch_request` (which calls the view function).
+`preprocess_request` is called by `full_dispatch_request` at `src/flask/app.py:1014`, **after** the `request_started` signal is sent and **before** `dispatch_request` (the view function).
 
-Here's the flow in `full_dispatch_request` (line 1012-1019):
+The sequence in `full_dispatch_request` (line 1012–1019) is:
 
 1. `request_started.send(...)` — signal
-2. `preprocess_request(ctx)` — runs preprocessing
-3. `dispatch_request(ctx)` — calls the view function (only if preprocessing returned `None`)
+2. `self.preprocess_request(ctx)` — runs preprocessing
+3. `self.dispatch_request(ctx)` — calls the view (only if `preprocess_request` returned `None`)
 
-**What `preprocess_request` does** (line 1366-1392):
+**What `preprocess_request` does** (line 1366–1392):
 
-1. Runs all registered `url_value_preprocessors` (app-level first, then blueprint).
-2. Runs all `before_request_funcs` (registered via `@app.before_request` / `@bp.before_request`).
+1. Runs all registered `url_value_preprocessors` (app-level first, then blueprint, innermost last).
+2. Runs all `before_request_funcs` in the same order.
+3. If any `before_request` handler returns a non-`None` value, that value is treated as the response and **the view function is skipped entirely** (line 1015–1016).
 
-If any `before_request` handler returns a non-`None` value, that value is used as the response and **the view function is never called** — `dispatch_request` is skipped (line 1015-1016).
+So it acts as a gate: if a `@before_request` handler returns something (e.g., a redirect or error), the view never executes.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`preprocess_request` is called by `full_dispatch_request` at `app.py:1014`, **immediately before** the view function runs. The sequence in `full_dispatch_request` (line 1012–1019) is:
+`preprocess_request` is called by `full_dispatch_request` at `app.py:1014`, **after** the `request_started` signal fires and **before** `dispatch_request` (which calls the view function).
 
-1. `request_started` signal is sent
-2. `preprocess_request()` is called
-3. **Only if it returns `None`**, `dispatch_request()` (the view) is called
-4. If any step raises, `handle_user_exception` handles it
-5. `finalize_request` runs post-processing
+The sequence in `full_dispatch_request` (line 1012–1019):
 
-Inside `preprocess_request` itself (`app.py:1366–1392`), it does two things in order:
+1. `request_started.send(...)` — signal
+2. `preprocess_request(ctx)` — runs preprocessors
+3. `dispatch_request(ctx)` — calls the view (only if step 2 returned `None`)
 
-1. **URL value preprocessors** — runs all `url_value_preprocessors` (app-level first, then blueprint) to modify captured URL values before they reach the view.
-2. **Before-request functions** — runs all `before_request_funcs`. If any returns a non-`None` value, that value is treated as the response and **the view is never called** (line 1014–1016: the `rv is None` check gates `dispatch_request`).
+**What `preprocess_request` does** (line 1366–1392):
 
-So `preprocess_request` acts as a gate: it runs before-request hooks and can short-circuit the entire view dispatch.
+1. Runs all registered `url_value_preprocessors` (app-level first, then blueprint chain).
+2. Runs all `before_request_funcs` (app-level first, then blueprint chain).
+3. If any `@before_request` handler returns a non-`None` value, that value is treated as the response and **the view function is never called**.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in content, accuracy, and grounding. They both correctly identify full_dispatch_request as the caller at app.py:1014, describe the same sequence (signal → preprocess → dispatch), reference the same line numbers for preprocess_request (1366–1392), and explain the short-circuit behavior when before_request returns non-None. Response B adds slightly more context (mentioning handle_user_exception and finalize_request steps, and a closing summary sentence), but both are equally correct and well-grounded in the repository. The differences are stylistic rather than substantive.
+Both responses are nearly identical in content, structure, accuracy, and grounding. They reference the same line numbers (1014, 1012–1019, 1366–1392), describe the same sequence (request_started → preprocess_request → dispatch_request), and explain the same gating behavior of before_request handlers. Response A includes a brief closing summary sentence; Response B is marginally more concise. The differences are trivial and do not meaningfully affect quality, grounding, or actionability.
 ```
 
 </details>
 
-<details><summary>Flask P10 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Flask P10 | winner=no_budi | Q 9→8 G 8→8</summary>
 
 **Prompt:** How does Flask load application configuration — trace from app creation to config values being available?
 
-- Interactions: no_budi=15 / with_budi=9
-- Cost USD: no_budi=$0.1923 / with_budi=$0.1301
-- Hook: reason=ok context_chars=533
-
-#### Injected context
-
-```text
-[structural context]
-Config  (config.py:50)
-  → refs: from_envvar, from_object, from_pyfile
-make_config  (app.py:479)
-  ← called by: __init__
-  → refs: flask, get_debug_flag
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/config.py
-  span: 50-93
-  anchor: class Config(dict): # type: ignore[type-arg]
-  proof:
-    - config.
-    - Either you can fill the config from a co
-```
+- Interactions: no_budi=11 / with_budi=7
+- Cost USD: no_budi=$0.1790 / with_budi=$0.0988
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the full trace:
 
-## Flask Configuration Loading Trace
+## Flask Configuration Loading — End to End
 
-### 1. `Flask()` constructor — `src/flask/app.py:109`
-
-`Flask` subclasses `App` (the sansio base class). The constructor lives in `App.__init__()` at `src/flask/sansio/app.py:279`.
-
-### 2. `App.__init__` calls `self.make_config()` — `src/flask/sansio/app.py:316`
+### 1. `Flask()` is instantiated (`app.py:109`)
+`Flask` subclasses `App` (in `sansio/app.py`). The `App.__init__` (`sansio/app.py:279`) runs and calls:
 
 ``\`python
-self.config = self.make_config(instance_relative_config)
+self.config = self.make_config(instance_relative_config)  # sansio/app.py:316
 ``\`
 
-### 3. `make_config()` — `src/flask/sansio/app.py:479-493`
-
+### 2. `make_config()` builds the `Config` object (`sansio/app.py:479-493`)
 ``\`python
-def make_config(self, instance_relative: bool = False) -> Config:
+def make_config(self, instance_relative=False):
     root_path = self.root_path
     if instance_relative:
-        root_path = self.instance_path       # files resolve relative to instance/
-    defaults = dict(self.default_config)      # copy the class-level defaults
-    defaults["DEBUG"] = get_debug_flag()      # override DEBUG from FLASK_DEBUG env var
+        root_path = self.instance_path       # file paths resolve from instance/ instead
+    defaults = dict(self.default_config)     # copy the class-level defaults
+    defaults["DEBUG"] = get_debug_flag()     # override DEBUG from environment
     return self.config_class(root_path, defaults)
 ``\`
 
-Three key ingredients here:
+- **`config_class`** is `Config` (`sansio/app.py:193`)
+- **`root_path`** determines where relative config file paths resolve from
 
-- **`root_path`** — either the app's root or instance path, used later to resolve relative filenames in `from_pyfile`/`from_file`.
-- **`self.default_config`** — the `ImmutableDict` of built-in defaults defined on `Flask` at `src/flask/app.py:206-237` (DEBUG, TESTING, SECRET_KEY, SESSION_COOKIE_*, etc.).
-- **`get_debug_flag()`** — reads `FLASK_DEBUG` env var (`src/flask/helpers.py:28-33`).
+### 3. Default values come from `Flask.default_config` (`app.py:206-238`)
+An `ImmutableDict` with all built-in keys: `DEBUG`, `SECRET_KEY`, `TESTING`, `SESSION_COOKIE_*`, `MAX_CONTENT_LENGTH`, etc. These become the initial contents of the `Config` dict.
 
-### 4. `Config.__init__` — `src/flask/config.py:94-100`
+### 4. `Config` is a `dict` subclass (`config.py:50`)
+Created via `Config(root_path, defaults)` → calls `super().__init__(defaults or {})`, so all defaults are immediately available as dict items. It stores `root_path` for resolving relative file paths later.
 
-``\`python
-class Config(dict):
-    def __init__(self, root_path, defaults=None):
-        super().__init__(defaults or {})   # p
-...[truncated 2264 chars]
+### 5. User loads additional config via methods
+...[truncated 2087 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full trace:
+Here's the trace from app creation to config values being available:
 
-## 1. `Flask()` constructor — entry point
+### 1. `Flask.__init__` triggers config creation
 
-`src/flask/app.py:206` — `Flask` defines `default_config` as an `ImmutableDict` with all built-in keys (`DEBUG`, `SECRET_KEY`, `TESTING`, session settings, etc.).
+When you call `Flask(__name__)`, the `App.__init__` in `src/flask/sansio/app.py:316` runs:
 
-## 2. `App.__init__()` calls `make_config`
-
-`src/flask/sansio/app.py:316`:
 ``\`python
 self.config = self.make_config(instance_relative_config)
 ``\`
 
-## 3. `make_config()` builds the `Config` object
+### 2. `make_config` builds the `Config` object (`src/flask/sansio/app.py:479`)
 
-`src/flask/sansio/app.py:479-493`:
-- Chooses `root_path`: either the app's `root_path` or `instance_path` (if `instance_relative_config=True`)
-- Copies `self.default_config` into a plain dict
-- Sets `defaults["DEBUG"] = get_debug_flag()` (reads `FLASK_DEBUG` env var)
-- Returns `self.config_class(root_path, defaults)` — by default `config_class = Config` (`sansio/app.py:193`)
+- Picks `root_path` — either the app's root or instance path (if `instance_relative_config=True`).
+- Copies `self.default_config` into a fresh dict and sets `DEBUG` from the environment via `get_debug_flag()`.
+- Returns `self.config_class(root_path, defaults)` — by default `config_class` is `Config`.
 
-## 4. `Config.__init__()` — a dict with defaults
+### 3. `default_config` provides the built-in defaults (`src/flask/app.py:206`)
 
-`src/flask/config.py:94-100`:
+An `ImmutableDict` on the `Flask` class with keys like `DEBUG`, `TESTING`, `SECRET_KEY`, `SESSION_COOKIE_NAME`, `MAX_CONTENT_LENGTH`, etc. These become the initial values in the config dict.
+
+### 4. `Config.__init__` (`src/flask/config.py:94`)
+
 ``\`python
 class Config(dict):
     def __init__(self, root_path, defaults=None):
@@ -2556,58 +2362,64 @@ class Config(dict):
         self.root_path = root_path
 ``\`
 
-It's a plain `dict` seeded with the default values. The `root_path` is stored so file-relative loading methods know where to look.
+It's just a `dict` subclass seeded with the defaults. The `root_path` is stored so that file-based loading methods can resolve relative paths.
 
-## 5. User populates config after creation
+### 5. User populates config post-creation
 
-After `app = Flask(__name__)`, users call methods on `app.config`:
+After `app = Flask(__name__)`, the user calls methods on `app.config`:
 
-| Method | Source |
-|---|---|
-| `from_object(obj)` | Imports a module/class, copies uppercase attributes (`config.py:218`) |
-| `from_pyfile(filename)` | Executes a `.py`/`.cfg` file, then calls `from_object` 
-...[truncated 1312 chars]
+| Method | Source | How it works |
+|---|---|---|
+| `from_object(obj)` | `config.py:21
+...[truncated 1422 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, accuracy, and depth. They trace the same path: Flask constructor → App.__init__ → make_config → Config.__init__ → user config methods → ConfigAttribute descriptor. Both cite the same file paths and line numbers (sansio/app.py:316, sansio/app.py:479-493, config.py:94-100, etc.) and include the same code snippets and method tables. Response A has marginally more detail (e.g., showing ConfigAttribute __get__/__set__ code, noting the uppercase exception for from_prefixed_env, including app.debug = True in the summary). Response B is slightly more concise and claims "28 keys" vs A's "~20". These differences are too minor to declare a winner — both are excellent, well-grounded traces of Flask's configuration loading.
+Both responses are well-structured, accurate traces of Flask's configuration loading pipeline, covering the same core flow: Flask.__init__ → make_config → default_config → Config(dict) → user-facing from_* methods. Line number references are similar and both appear reasonably accurate for this codebase. Response A (no_budi) is more complete in two notable ways: (1) it includes the ConfigAttribute descriptor mechanism (section 6), which is a genuine and important part of how config values are accessed via app.debug/app.secret_key — this is directly relevant to the prompt's "config values being available" aspect; (2) its from_* method table is more detailed, including from_file and from_mapping with accurate line references and clear explanations of how each delegates. Response B (with_budi) covers the same ground adequately but its table entries for from_mapping and from_file are less precise (from_mapping described as just "direct dict update", from_file missing line reference and detail). Response B does mention current_app.config access, which is a useful addition, but the omission of ConfigAttribute is a bigger gap since the prompt specifically asks about config values being available. Both are strong answers; A edges ahead on completeness and depth.
 ```
 
 </details>
 
-<details><summary>Flask P11 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>Flask P11 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Which environment variables does Flask read at startup and how do they affect runtime behavior?
 
-- Interactions: no_budi=8 / with_budi=13
-- Cost USD: no_budi=$0.1064 / with_budi=$0.1305
+- Interactions: no_budi=9 / with_budi=10
+- Cost USD: no_budi=$0.0996 / with_budi=$0.1126
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here are the environment variables Flask reads at startup and their effects:
+Here are the environment variables Flask reads and how they affect behavior:
 
-### Core Variables (read automatically)
+### Core env vars (read automatically)
 
-| Variable | Where | Effect |
+| Variable | Where read | Effect |
 |---|---|---|
-| **`FLASK_APP`** | `cli.py:361,453` | Tells the `flask` CLI which application module to import (e.g. `module:name`). Used when there's no `--app` option, and no `wsgi.py`/`app.py` auto-discovered. |
-| **`FLASK_DEBUG`** | `helpers.py:32`, `app.py:713` | Enables/disables debug mode. Overrides `app.debug` at startup. Truthy unless value is `"0"`, `"false"`, or `"no"`. When run via CLI, the `--debug` flag sets this env var (`cli.py:481`). |
-| **`FLASK_RUN_FROM_CLI`** | `app.py:697`, `cli.py:667` | Set to `"true"` internally by `flask run`. Causes `app.run()` calls in user code to be silently ignored, preventing a second dev server from starting. |
-| **`FLASK_SKIP_DOTENV`** | `helpers.py:43` | When set to a truthy value (`"1"`, `"true"`, `"yes"`), skips loading `.env` and `.flaskenv` files entirely. |
-| **`FLASK_ENV_FILE`** | `conftest.py:19` (test infra) | Referenced in test setup; used to point to a custom env file path. |
+| **`FLASK_DEBUG`** | `helpers.py:32`, `app.py:713`, `cli.py:481` | Enables debug mode (debugger, reloader, verbose errors). Truthy unless `"0"`, `"false"`, or `"no"`. Set by the `--debug` CLI flag. Overridden by `debug` param passed to `app.run()`. |
+| **`FLASK_RUN_FROM_CLI`** | `app.py:697`, `cli.py:667` | Set to `"true"` by the `flask` CLI. Makes `app.run()` a no-op so it doesn't start a second server when the module is imported by the CLI. |
+| **`FLASK_SKIP_DOTENV`** | `helpers.py:43` | When set to a truthy value (`"1"`, `"true"`, `"yes"`), prevents Flask from loading `.flaskenv` and `.env` files. |
+| **`FLASK_ENV_FILE`** | `cli.py` (cleaned in `conftest.py:19`) | Specifies a custom dotenv file path for the `--env-file` CLI option. |
 
-### Dotenv Loading (`cli.py:698–763`)
+### Dotenv loading (`cli.py:698-763`)
 
-When the CLI starts (or `app.run()` is called), Flask loads environment variables from **`.flaskenv`** then **`.env`** files (`.env` values take precedence). Values are only set if the key is **not already in `os.environ`**. This requires `python-dotenv` to be installed.
+When `python-dotenv` is installed and `FLASK_SKIP_DOTENV` is not set, Flask loads variables from:
+1. `.flaskenv` (lowest priority)
+2. `.env` (overrides `.flaskenv`)
+3. Explicit `--env-file` path (highest priority)
 
-### Configuration from Prefixed Env Vars (`config.py:126–169`)
+Values are only set if the key is **not already in `os.environ`** — existing env vars are never overwritten.
 
-`app.config.from_prefixed
-...[truncated 1446 chars]
+### Configuration from env vars (`config.py`)
+
+| Method | Effect |
+|---|---|
+| **`Config.from_envvar(name)`** | Reads an env var whose value is a path to a config file, then loads that file (`config.py:102`). |
+| **`Conf
+...[truncated 719 chars]
 ```
 
 #### Response (`with_budi`)
@@ -2615,30 +2427,28 @@ When the CLI starts (or `app.run()` is called), Flask loads environment variable
 ```text
 Here are the environment variables Flask reads and how they affect behavior:
 
-### Core Variables
+### Core Environment Variables
 
-**`FLASK_APP`** — Tells the `flask` CLI which application to import. Accepted as a fallback when `--app` is not passed. Looked up by Click's env var handling for the `--app` option (`cli.py:453`).
+| Variable | Where Read | Effect |
+|---|---|---|
+| **`FLASK_DEBUG`** | `helpers.py:32`, `app.py:713`, `cli.py:481` | Enables/disables debug mode. Values `"0"`, `"false"`, `"no"` → off; anything else → on. The `--debug` CLI flag writes this env var. When set, it overrides `app.debug` during `app.run()`. |
+| **`FLASK_RUN_FROM_CLI`** | `app.py:697`, `cli.py:667` | Set to `"true"` by the `flask` CLI in `FlaskGroup.make_context()`. Causes `app.run()` to no-op so that an unguarded `app.run()` in your module doesn't start a second server. |
+| **`FLASK_SKIP_DOTENV`** | `helpers.py:43` | If set to a truthy value (anything except `"0"`, `"false"`, `"no"`), prevents Flask from loading `.flaskenv` and `.env` files. |
+| **`FLASK_ENV_FILE`** | referenced in `cli.py` (the `--env-file` option) | Path to a custom dotenv file loaded instead of/in addition to the defaults. |
 
-**`FLASK_DEBUG`** — Enables/disables debug mode. Read in `helpers.py:32` via `get_debug_flag()`. Values like `"0"`, `"false"`, `"no"` are falsy; anything else enables debug. It is checked:
-- At `app.run()` startup (`app.py:713`) — if set, overrides the app's current debug setting.
-- By the CLI's `--debug` flag callback (`cli.py:481`) — the flag *writes* this env var so it's available early during app factory calls.
+### Configuration Loading
 
-**`FLASK_SKIP_DOTENV`** — When set to a truthy value (anything except `"0"`, `"false"`, `"no"`), prevents Flask from loading `.flaskenv` and `.env` files. Read in `helpers.py:43` via `get_load_dotenv()`.
-
-### CLI-Internal Variables
-
-**`FLASK_RUN_FROM_CLI`** — Set to `"true"` by `FlaskGroup.make_context()` (`cli.py:667`). When present, `app.run()` becomes a no-op (`app.py:697`) to prevent an unguarded `app.run()` call from blocking the CLI command. This is an internal mechanism, not something users typically set.
-
-### Dotenv Files (Indirect)
-
-**`.flaskenv` and `.env`** — Not env vars themselves, but Flask's `load_dotenv()` function (`cli.py:698-763`) loads these files (if `python-dotenv` is installed) and sets any keys not already in `os.environ`. `.env` values take preceden
-...[truncated 952 chars]
+| Variable | Where Read | Effect |
+|---|---|---|
+| **`FLASK_*` prefix** | `config.py:126-164` (`from_prefixed_env`) | When `app.config.from_prefixed_env()` is called, all env vars starting with `FLASK_` are loaded into the config dict with the prefix stripped. Double underscores (`__`) create nested dict keys. Values are parsed via `json.loads`. |
+| **User-defined env var** | `config.py:102-124` (`from_envvar`) | `app.config.from_envvar("YOURAPPLICATION_SETTINGS")` reads the named env var
+...[truncated 903 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are well-grounded in the repository with accurate file/line references and correct descriptions of behavior. Response A (no_budi) edges ahead in three ways: (1) It covers `from_prefixed_env()` and `from_envvar()` — two important mechanisms for loading config from environment variables — which Response B omits entirely. These are directly relevant to the question of "environment variables Flask reads." (2) It includes a clear startup flow summary that ties the pieces together chronologically. (3) It mentions `FLASK_ENV_FILE` from test infra and `WERKZEUG_RUN_MAIN` with proper context. Response B is accurate and well-organized but narrower in scope, missing the config-from-env-var patterns that are practically important for Flask users. Both responses correctly describe FLASK_APP, FLASK_DEBUG, FLASK_SKIP_DOTENV, FLASK_RUN_FROM_CLI, dotenv loading, and PYTHONSTARTUP with accurate line references.
+Both responses cover the same set of environment variables (FLASK_DEBUG, FLASK_RUN_FROM_CLI, FLASK_SKIP_DOTENV, FLASK_ENV_FILE, FLASK_* prefix via from_prefixed_env, from_envvar, WERKZEUG_RUN_MAIN, PYTHONSTARTUP) with accurate descriptions and specific file:line references. Response A has a slightly cleaner presentation of dotenv loading priority (numbered list of .flaskenv → .env → --env-file), while Response B splits into more table sections but is equally accurate. Both are well-grounded in repository specifics with matching line references and both are highly actionable. The differences are purely stylistic — neither contains information the other lacks, and both are correct.
 ```
 
 </details>
@@ -2647,175 +2457,117 @@ Both responses are well-grounded in the repository with accurate file/line refer
 
 **Prompt:** What unit tests cover Blueprint registration and where do they live in the repo?
 
-- Interactions: no_budi=4 / with_budi=1
-- Cost USD: no_budi=$0.0366 / with_budi=$0.0209
-- Hook: reason=ok context_chars=1704
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: tests/test_blueprints.py
-  span: 1083-1086
-  anchor: def test_self_registration(app, client) -> None:
-  proof:
-    - bp = flask.Blueprint("bp", __name__)
-    - with pytest.raises(ValueError):
-    - bp.register_blueprint(bp)
-- file: tests/test_blueprints.py
-  span: 120-1089
-  anchor: early: test_blueprint_prefix_slash@120, test_blueprint_url_defaults@131, test_dotted_name_not_allowed@245, test_empty_name_not_allowed@250
-  relevance: same-file test coverage inventory
-  proof:
-    - late: test_child_and_parent_subdomain@1044, test_unique_blueprint_names@1066, test_self_registration@1083, test_blueprint_renaming@1089
-- file: tests/test_cli.py
-  span: 692-698
-  anchor: def test_cli_empty(app):
-  proof:
-    - bp = Blueprint("blue", __name__, cli_group="blue")
-    - result = app.test_cli_runner().invoke(args=["blue", "--help"])
-    - app.register_blueprint(bp)
-- file: tests/test_apps/blueprintapp/__init__.py
-  span: 1-9
-  anchor: from flask import Flask
-  proof:
-    - app = Flask(__name__)
-    - ap
-...[truncated 300 chars]
-```
+- Interactions: no_budi=7 / with_budi=1
+- Cost USD: no_budi=$0.0574 / with_budi=$0.0231
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Key registration-related tests in `tests/test_blueprints.py`:
+The main test file is **`tests/test_blueprints.py`**, which calls `register_blueprint` ~58 times across its tests.
 
-- **`test_self_registration`** (line 1083) — verifies a blueprint can't register itself
-- **`test_blueprint_renaming`** (line 1089) — renaming blueprints during registration
-- **`test_unique_blueprint_names`** (line 1066) — duplicate name detection
-- **`test_nested_blueprint`** (line 865) — registering blueprints within blueprints
-- **`test_blueprint_prefix_slash`** (line 120) — URL prefix handling on registration
-- **`test_blueprint_url_defaults`** (line 131) — URL defaults applied at registration
-- **`test_blueprint_specific_error_handling`** (line 8) — error handlers registered via blueprints
+Key tests specifically focused on **registration behavior**:
+
+| Test | Line | What it covers |
+|---|---|---|
+| `test_blueprint_prefix_slash` | :120 | URL prefix normalization during registration |
+| `test_blueprint_url_defaults` | :131 | URL defaults passed at registration time |
+| `test_unique_blueprint_names` | :1066 | Warning when registering blueprints with duplicate names |
+| `test_self_registration` | :1083 | Preventing a blueprint from registering on itself |
+| `test_blueprint_renaming` | :1089 | Renaming a blueprint via `name_prefix` during registration |
+| `test_nested_blueprint` | :865 | Registering blueprints on other blueprints (nesting) |
+
+Other files that touch blueprint registration tangentially:
+
+- `tests/test_basic.py` — registers blueprints as part of broader app tests
+- `tests/test_async.py` — async blueprint registration
+- `tests/test_cli.py` — CLI command registration on blueprints
+- `tests/test_user_error_handler.py` — error handler registration on blueprints
+- `tests/test_testing.py` — blueprints in test client scenarios
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The unit tests covering Blueprint registration live in **`tests/test_blueprints.py`** and a few supporting files:
+Blueprint registration is tested across several files:
 
-**Primary file: `tests/test_blueprints.py`**
-- `test_self_registration` (line 1083) — verifies a blueprint cannot register itself (`bp.register_blueprint(bp)` raises `ValueError`)
-- `test_unique_blueprint_names` (line 1066) — checks name uniqueness during registration
-- `test_blueprint_renaming` (line 1089) — covers renaming on registration
+**Primary coverage** — `tests/test_blueprints.py`
+- `test_self_registration` (line 1083) — verifies a blueprint can't register itself
+- `test_unique_blueprint_names` (line 1066) — name uniqueness enforcement
+- `test_blueprint_renaming` (line 1089) — renaming on registration
 - `test_blueprint_prefix_slash` (line 120) — URL prefix handling
-- `test_blueprint_url_defaults` (line 131) — URL defaults during registration
-- `test_dotted_name_not_allowed` (line 245) — rejects dotted blueprint names
+- `test_blueprint_url_defaults` (line 131) — URL defaults propagation
+- `test_dotted_name_not_allowed` (line 245) — rejects dotted names
 - `test_empty_name_not_allowed` (line 250) — rejects empty names
-- `test_child_and_parent_subdomain` (line 1044) — nested blueprint subdomain registration
+- `test_child_and_parent_subdomain` (line 1044) — nested blueprint subdomains
 
 **Other files with registration-related tests:**
-- `tests/test_cli.py:692` — `test_cli_empty` registers a blueprint with a CLI group and tests CLI integration
-- `tests/test_apps/blueprintapp/__init__.py:1` — integration fixture that calls `app.register_blueprint(admin)` and `app.register_blueprint(frontend)`
-- `tests/test_async.py:18` — defines `BlueprintError` used in async blueprint tests
+- `tests/test_basic.py:1671` — `test_inject_blueprint_url_defaults` registers a blueprint and tests URL default injection
+- `tests/test_cli.py:692` — `test_cli_empty` registers a blueprint with a CLI group
+- `tests/test_user_error_handler.py:136` — `test_error_handler_blueprint` registers a blueprint with error handlers
+- `tests/test_async.py:18` — defines `BlueprintError` for async blueprint tests
 
-The core registration logic under test lives in `src/flask/sansio/app.py` (e.g., `iter_blueprints` at line 594).
+**Integration-style app** — `tests/test_apps/blueprintapp/__init__.py` registers `admin` and `frontend` blueprints in a mini Flask app used by broader blueprint tests.
+
+The iteration side lives in `src/flask/sansio/app.py:594` (`iter_blueprints`), which returns `self.blueprints.values()`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify tests/test_blueprints.py as the primary file and share several of the same test function names with matching line numbers (test_self_registration at 1083, test_unique_blueprint_names at 1066, test_blueprint_renaming at 1089, test_blueprint_prefix_slash at 120, test_blueprint_url_defaults at 131). Response A includes test_blueprint_specific_error_handling at line 8 which is questionable as a "registration" test — it's more about error handling. Response B is more comprehensive: it adds test_dotted_name_not_allowed and test_empty_name_not_allowed (name validation during registration), mentions tests in other files (test_cli.py, blueprintapp fixture, test_async.py), and references the core registration logic location in src/flask/sansio/app.py. Response B provides broader coverage of the codebase and more context about where registration logic lives, making it more actionable for someone trying to understand or extend blueprint registration testing.
+Both responses correctly identify tests/test_blueprints.py as the primary file and overlap on key tests (test_self_registration, test_unique_blueprint_names, test_blueprint_renaming, test_blueprint_prefix_slash, test_blueprint_url_defaults). Response B (with_budi) is more thorough: it adds test_dotted_name_not_allowed, test_empty_name_not_allowed, and test_child_and_parent_subdomain — all registration-relevant validation tests. It also provides specific line numbers for tests in secondary files (test_basic.py:1671, test_cli.py:692, test_user_error_handler.py:136, test_async.py:18) rather than just naming the files vaguely. The mention of tests/test_apps/blueprintapp/__init__.py as an integration-style registration fixture and the pointer to iter_blueprints in src/flask/sansio/app.py:594 add useful context. Response A's table format is nice but its secondary file coverage is less specific (no line numbers, vaguer descriptions). Response A's claim of ~58 register_blueprint calls is unverified but plausible. Overall, Response B is more grounded and actionable due to more specific line references and broader test coverage.
 ```
 
 </details>
 
-<details><summary>Flask P13 | winner=tie | Q 9→9 G 8→9</summary>
+<details><summary>Flask P13 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Where is register_blueprint defined and what does it do when called with a Blueprint?
 
 - Interactions: no_budi=5 / with_budi=3
-- Cost USD: no_budi=$0.0644 / with_budi=$0.0447
-- Hook: reason=ok context_chars=1133
-
-#### Injected context
-
-```text
-[structural context]
-register_blueprint  (app.py:566)
-  ← called by: test_template_test_after_route_with_temp, test_blueprint_with_subdomain, test_cli_empty
-  → refs: register
-register  (blueprints.py:273)
-  ← called by: test_tag_order, TaggedJSONSerializer, reset_logging
-  → refs: _merge_blueprint_funcs, add_url_rule, copy
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/sansio/app.py
-  span: 566-592
-  anchor: def register_blueprint(self, blueprint: Blueprint, **options: t.Any) -> None:
-  proof:
-    - blueprint.
-    - Calls the blueprint's :meth:`~flask.Blueprint.register` method after
-    - recording the blueprint in the application's :attr:`blueprints`.
-- file: src/flask/sansio/blueprints.py
-  span: 273-377
-  anchor: def register(self, app: App, options: dict[str, t.Any]) -> None:
-  proof:
-    - views and callbacks registered on the blueprint with the
-    - :param app: The application this blueprint is being registered
-    - :meth:`~Flask.register_blue
-```
+- Cost USD: no_budi=$0.0689 / with_budi=$0.0444
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the full picture:
 
-**Definition:** `register_blueprint` is defined at `src/flask/sansio/app.py:567` on the `App` class. There's also one on `Blueprint` itself (`src/flask/sansio/blueprints.py:256`) for nesting blueprints.
+**`register_blueprint`** is defined at `src/flask/sansio/app.py:567`. It's a one-liner that delegates to `blueprint.register(self, options)`.
 
-**What it does:** The `App.register_blueprint` method is a thin wrapper — it simply calls `blueprint.register(self, options)` (line 592).
+**`Blueprint.register`** at `src/flask/sansio/blueprints.py:273` does the real work:
 
-**`Blueprint.register`** (`src/flask/sansio/blueprints.py:273`) does the heavy lifting:
-
-1. **Resolves the name** — combines any `name_prefix` with the blueprint's name (supports dotted names for nested blueprints).
-2. **Checks for duplicates** — raises `ValueError` if a blueprint with the same name is already registered.
-3. **Registers in `app.blueprints`** — stores `self` in the app's blueprint dict (line 319).
-4. **Creates setup state** — calls `self.make_setup_state(app, options, ...)` to build a `BlueprintSetupState`.
-5. **Adds static file route** — if the blueprint has a static folder, registers a URL rule for serving static files.
-6. **Merges blueprint functions** — on first registration, calls `_merge_blueprint_funcs` to merge error handlers, template filters, before/after request hooks, etc. into the app.
-7. **Executes deferred functions** — iterates over `self.deferred_functions` and calls each with the setup state. This is where routes (`@bp.route`), error handlers, and other decorators actually get registered — they were deferred until a real app was available.
-8. **Registers CLI commands** — adds any 
-...[truncated 248 chars]
+1. **Resolves the name** (lines 302–304) — combines any `name_prefix` with the blueprint's own name.
+2. **Prevents duplicate registration** (306–314) — raises `ValueError` if a blueprint with the same name is already registered.
+3. **Records the blueprint** (319–321) — adds it to `app.blueprints[name]`, sets `_got_registered_once = True`, and creates a `BlueprintSetupState` via `make_setup_state`.
+4. **Registers static files** (323–328) — if the blueprint has a static folder, adds a URL rule for serving static assets.
+5. **Merges blueprint-level callbacks** (331–332) — calls `_merge_blueprint_funcs` to copy things like `before_request`, `after_request`, error handlers, etc. into the app.
+6. **Runs deferred functions** (334–335) — iterates over `self.deferred_functions` (populated by `@bp.route`, `@bp.before_request`, etc.) and calls each with the setup state, which actually registers URL rules and callbacks on the app.
+7. **Registers CLI commands** (337–347) — merges any Click CLI commands from the blueprint into the app's CLI group.
+8. **Recursively registers nested blueprints** (349+) — iterates over `self._blueprints` and registers child blueprints, combining URL prefixes and subdomains.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**`register_blueprint`** is defined at `src/flask/sansio/app.py:567`. It's a thin method that simply delegates to `blueprint.register(self, options)`.
+`register_blueprint` is defined at `src/flask/sansio/app.py:567`. It's a thin method that simply delegates to `blueprint.register(self, options)`.
 
-**`Blueprint.register`** at `src/flask/sansio/blueprints.py:273` does the actual work:
+The real work happens in `Blueprint.register` at `src/flask/sansio/blueprints.py:273`. When called, it:
 
-1. **Resolves the name** — computes a dotted name from `name_prefix` and the blueprint's own name (lines 302–304).
-2. **Checks for duplicates** — raises `ValueError` if a blueprint with the same name is already registered (306–314).
-3. **Records the blueprint** in `app.blueprints[name]` and creates a `BlueprintSetupState` (319–321).
-4. **Registers static files** — adds a URL rule for `static_url_path` if the blueprint has a static folder (323–328).
-5. **Merges blueprint data** into the app (e.g., error handlers, template filters) via `_merge_blueprint_funcs` on first registration (331–332).
-6. **Runs deferred functions** — calls every callback registered via `@blueprint.record` with the setup state (334–335).
-7. **Registers CLI commands** — merges blueprint CLI commands into the app's CLI group (337–347).
-8. **Recursively registers nested blueprints** — iterates `self._blueprints`, computes combined URL prefixes/subdomains, and calls `register` on each child blueprint (349–377).
+1. **Resolves the name** (lines 302–304) — combines any `name_prefix` with the blueprint's own name (or a custom `name` option).
+2. **Checks for duplicates** (306–314) — raises `ValueError` if a blueprint with that name is already registered.
+3. **Records the blueprint** (319–321) — stores it in `app.blueprints[name]`, marks it as registered, and creates a `BlueprintSetupState`.
+4. **Registers a static file route** (323–328) — if the blueprint has a static folder.
+5. **Merges blueprint-level callbacks** (331–332) — calls `_merge_blueprint_funcs` on first registration to copy error handlers, template filters, etc. into the app.
+6. **Runs deferred functions** (334–335) — executes all callbacks recorded via `@blueprint.record`, passing the setup state.
+7. **Registers CLI commands** (337–347) — adds the blueprint's CLI commands to the app's CLI group.
+8. **Recursively registers nested blueprints** (349–377) — iterates over child blueprints, computes their combined `url_prefix`/`subdomain`, and calls `register` on each.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate, well-structured, and walk through the same steps in Blueprint.register. Response A adds a useful mention of Blueprint.register_blueprint for nesting blueprints. Response B provides more precise line-number references for each step, making it slightly more grounded in the repository. Both are equally actionable and correct. The differences are minor enough to call it a tie overall.
+Both responses are nearly identical in structure, accuracy, and grounding. They correctly identify register_blueprint at src/flask/sansio/app.py:567 and Blueprint.register at src/flask/sansio/blueprints.py:273, and both provide the same 8-step breakdown with accurate line references. Minor differences: Response A more accurately describes deferred_functions as populated by @bp.route, @bp.before_request etc., while Response B says they're recorded via @blueprint.record (slightly less precise). Response B adds a small detail about custom name options and is marginally more specific about nested blueprint prefix computation. These differences are too minor to distinguish a winner.
 ```
 
 </details>
@@ -2825,8 +2577,8 @@ Both responses are accurate, well-structured, and walk through the same steps in
 **Prompt:** Where is make_response defined and how does it convert a view return value to a Response object?
 
 - Interactions: no_budi=7 / with_budi=3
-- Cost USD: no_budi=$0.0773 / with_budi=$0.0496
-- Hook: reason=ok context_chars=839
+- Cost USD: no_budi=$0.0840 / with_budi=$0.0510
+- Hook: reason=ok context_chars=716
 
 #### Injected context
 
@@ -2835,9 +2587,6 @@ Both responses are accurate, well-structured, and walk through the same steps in
 make_response  (helpers.py:139)
   ← called by: test_make_response_with_response_instanc, make_response, TestHelpers
   → refs: make_response, render_template
-make_response  (app.py:1224)
-  ← called by: test_make_response_with_response_instanc, make_response, TestHelpers
-  → refs: response, update
 
 [budi context]
 rules:
@@ -2850,7 +2599,7 @@ evidence_cards:
   proof:
     - views do not have to return response objects but can return a value that
     - is converted into a response object by Flask itself, it becomes tricky to
-    - add headers to it. This function can be called inste
+    - add headers to it. This function can be called instead of using a return
 ```
 
 #### Response (`no_budi`)
@@ -2858,270 +2607,205 @@ evidence_cards:
 ```text
 There are two definitions:
 
-### 1. `helpers.make_response` — the public helper (`src/flask/helpers.py:139`)
+### 1. Public helper — `src/flask/helpers.py:139`
 
-This is a thin convenience wrapper that delegates to the current app:
+This is the user-facing `make_response(*args)`. It's a thin convenience wrapper that delegates to the current app:
 
 ``\`python
-def make_response(*args):
-    return current_app.ensure_sync(current_app.make_response)(*args)
+def make_response(*args: t.Any) -> Response:
 ``\`
 
-It lets view functions call `make_response(body, status, headers)` without importing the app instance.
+It lets view code call `make_response(body, status, headers)` without needing a reference to the app object. Internally it calls `current_app.make_response(...)`.
 
-### 2. `Flask.make_response` — the core logic (`src/flask/app.py:1224–1364`)
+### 2. Core logic — `src/flask/app.py:1224`
 
-This is where the actual conversion happens. The algorithm proceeds in three stages:
+`Flask.make_response(self, rv)` does the actual conversion. Here's the pipeline:
 
-**Stage 1 — Unpack tuples** (line 1285–1303):
-- 3-tuple `(body, status, headers)` → all three unpacked
-- 2-tuple → if the second element is a `Headers`/`dict`/`tuple`/`list`, it's treated as headers; otherwise it's a status code
-- Any other tuple length → `TypeError`
+1. **Tuple unpacking** (line 1285–1303): If `rv` is a tuple, it's unpacked into `(body, status, headers)`. A 2-tuple is disambiguated by checking if the second element looks like headers (`Headers`, `dict`, `tuple`, `list`) or a status code.
 
-**Stage 2 — Convert body to `response_class`** (line 1314–1350):
-- **Already a `response_class` instance** → used as-is
-- **`str`, `bytes`, `bytearray`, or `Iterator`** → passed directly to `self.response_class(rv, status=status, headers=headers)`, and `status`/`headers` are cleared (so they aren't applied twice)
-- **`dict` or `list`** → JSON-serialized via `self.json.response(rv)`
-- **Other `BaseResponse` subclass or callable** → coerced via `response_class.force_type(rv, request.environ)` (handles WSGI callables and foreign response types)
-- **Anything else** → `TypeError`
+2. **None check** (line 1306–1311): If the body is `None`, a `TypeError` is raised.
 
-**Stage 3 — Apply leftover status/headers** (line 1354–1362):
-- If `status` wasn't already
-...[truncated 164 chars]
+3. **Type-based conversion** (line 1314–1350) — if `rv` is not already a `response_class` instance:
+   - **`str`, `bytes`, `bytearray`, or `Iterator`**: Passed directly to `self.response_class(rv, status=status, headers=headers)`. Iterators become streaming responses.
+   - **`dict` or `list`**: Converted to JSON via `self.json.response(rv)`.
+   - **`BaseResponse` subclass or callable**: Coerced to the app's `response_class` using `response_class.force_type(rv, request.environ)`. This also handles WSGI callables.
+   - **Anything else**: Raises `TypeError`.
+
+4. **Apply status & headers** (line 1354–1362): If `status`/`he
+...[truncated 254 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`make_response` is defined in two places:
+`make_response` is defined in two layers:
 
-### 1. Helper function — `src/flask/helpers.py:139`
+**1. Public helper** — `src/flask/helpers.py:139`
 
-A thin convenience wrapper for use in view functions. It:
-- With no args: returns an empty `response_class()` instance.
-- With one arg: delegates to `current_app.make_response(arg)`.
-- With multiple args: packs them into a tuple and delegates to `current_app.make_response()`.
+A thin convenience wrapper. It normalizes arguments and delegates to the app:
+- No args → returns an empty `response_class()`.
+- One arg → passes it to `current_app.make_response()`.
+- Multiple args → packs them as a tuple and passes that to `current_app.make_response()`.
 
-### 2. Core method — `src/flask/app.py:1224`
+**2. Core conversion logic** — `src/flask/app.py:1224` (`Flask.make_response`)
 
-`Flask.make_response(self, rv)` does the actual conversion. The logic proceeds in stages:
+This method converts the view's return value (`rv`) into a `Response` instance through these steps:
 
-**Tuple unpacking** (line 1285–1303): If `rv` is a tuple, it's unpacked into `(body, status, headers)`, `(body, status)`, or `(body, headers)`. The second element is treated as headers if it's a `dict`/`list`/`tuple`/`Headers`, otherwise as status.
+1. **Tuple unpacking** (line 1285–1303) — If `rv` is a tuple, it extracts `(body, status, headers)`, `(body, status)`, or `(body, headers)`. A 2-tuple's second element is treated as headers if it's a `dict`/`list`/`tuple`/`Headers`, otherwise as status.
 
-**None check** (line 1306): Raises `TypeError` if the body is `None`.
+2. **None check** (line 1306) — `None` body raises `TypeError`.
 
-**Type-based conversion** (line 1314–1350):
-| Return type | Conversion |
-|---|---|
-| `str`, `bytes`, `bytearray`, `Iterator` | Passed directly to `response_class()` with status/headers |
-| `dict`, `list` | Converted via `self.json.response(rv)` (jsonify) |
-| `BaseResponse` subclass or callable | Coerced via `response_class.force_type()` (handles WSGI callables and other response classes) |
-| Already `response_class` | Returned unchanged |
-| Anything else | Raises `TypeError` |
+3. **Type-based conversion** (line 1314–1350):
+   - **`str`, `bytes`, `bytearray`, or iterator** → passed directly to `self.response_class()` with status/headers.
+   - **`dict` or `list`** → JSON-serialized via `self.json.response(rv)`.
+   - **`BaseResponse` subclass or callable** → coerced via `response_class.force_type()` (handles both other response classes and WSGI callables).
+   - **Anything else** → raises `TypeError`.
 
-**Apply overrides** (lines 1354–1362): After the body is a `Response`, any `status` from a tuple is applied (as string or int), and any `headers` are merged via `rv.headers.update()`.
+4. **Apply overrides** (lines 1354–1362) — If status/headers were extracted from a tuple, they're applied to the final response object (`rv.status_code` / `rv.headers.update`).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are highly accurate and well-structured, identifying the two definitions (helpers.py wrapper and Flask.make_response core method) with correct line references and the same three-stage conversion algorithm. Response A includes the actual code snippet for the helper function, which is a nice touch. Response B adds a useful table format for type-based conversion and mentions the None check (line 1306), but its description of the helper function's no-args behavior (returning an empty response_class instance) appears to conflate the helper's behavior with the app method's behavior — the helper simply delegates all args to the app. Response A's slight edge in helper accuracy is offset by Response B's table clarity and None check mention, making them effectively tied.
+Both responses identify the same two definition sites (helpers.py:139 and app.py:1224) with accurate line references and describe the same conversion pipeline (tuple unpacking, None check, type-based conversion, apply overrides). Response B adds slightly more detail about the public helper's no-args/multi-args behavior, while Response A adds slightly more detail about int vs string status handling in the override step. These differences are minor and complementary — neither response is meaningfully better than the other. Both are well-grounded in the repository and highly actionable.
 ```
 
 </details>
 
-<details><summary>Flask P15 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>Flask P15 | winner=no_budi | Q 8→7 G 9→7</summary>
 
 **Prompt:** What calls handle_exception and what does each call site pass as arguments?
 
-- Interactions: no_budi=6 / with_budi=3
-- Cost USD: no_budi=$0.0541 / with_budi=$0.0340
-- Hook: reason=ok context_chars=1039
-
-#### Injected context
-
-```text
-[structural context]
-handle_url_build_error  (app.py:978)
-  ← called by: url_for, test_build_error_handler
-  → refs: handler
-handle_exception  (app.py:897)
-  ← called by: handle_exception
-  → refs: _find_error_handler, ensure_sync, finalize_request
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/sansio/app.py
-  span: 978-1010
-  anchor: def handle_url_build_error(
-  proof:
-    - :param values: The keyword arguments passed to ``url_for``.
-    - its return value is returned by ``url_for``.
-    - for handler in self.url_build_error_handlers:
-- file: src/flask/app.py
-  span: 897-948
-  anchor: def handle_exception(self, ctx: AppContext, e: Exception) -> Response:
-  proof:
-    - associated with it, or that was raised from an error handler.
-    - If an error handler is registered for ``InternalServerError`` or
-    - ``500``, it will be used. For consistency, the handler
-```
+- Interactions: no_budi=5 / with_budi=3
+- Cost USD: no_budi=$0.0455 / with_budi=$0.0330
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-There is only **one call site** in the codebase that calls `handle_exception`:
+There is **one call site** in the source code:
 
-**`app.py:1600`** — inside `wsgi_app`:
+**`src/flask/app.py:1600`** — inside `wsgi_app`:
 ``\`python
 response = self.handle_exception(ctx, e)
 ``\`
-- **`ctx`**: the `RequestContext` created from the WSGI `environ` (line 1592: `ctx = self.request_context(environ)`)
-- **`e`**: the `Exception` caught when `self.full_dispatch_request(ctx)` raises
+It passes:
+- **`ctx`** — the `RequestContext` created from `environ` at line 1592
+- **`e`** — the `Exception` caught from `self.full_dispatch_request(ctx)`
 
-This is the top-level catch-all in the WSGI entry point. Any exception that escapes `full_dispatch_request` (which itself calls `handle_user_exception`) lands here with the current request context and the raised exception.
-
-The other occurrences are not call sites:
-- **`app.py:263`** — references `cls.handle_exception` for a deprecation-check loop (detecting old subclass signatures), not an invocation.
-- **`app.py:897`** — the definition itself.
-- **tests/docs** — these register user-level error handlers named `handle_exception` via `@app.errorhandler`, unrelated to `Flask.handle_exception`.
+The reference at line 263 is not a call — it's listing `handle_exception` in a tuple used to detect subclasses that override it with an old (pre-`ctx` parameter) signature, for deprecation wrapping.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**Summary:** `handle_exception` is called in exactly one place:
+There is only **one** call site for `handle_exception`:
 
-- **`wsgi_app`** (`src/flask/app.py:1600`) — called when `full_dispatch_request` raises an `Exception`. It passes:
-  1. **`ctx`** — the `RequestContext` created from the WSGI `environ` (line 1592). Note: despite the type hint `AppContext` on the definition, the actual value passed is a `RequestContext`.
-  2. **`e`** — the caught `Exception` from `full_dispatch_request`.
+**`src/flask/app.py:1600`** — inside `wsgi_app`. It passes two arguments:
+1. **`ctx`** — the request context (`self.request_context(environ)`), created at line 1592.
+2. **`e`** — the `Exception` caught when `self.full_dispatch_request(ctx)` raises (line 1598).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the single call site at app.py:1600 in wsgi_app and accurately describe the two arguments (ctx and e). Response A is more thorough: it proactively addresses other occurrences in the codebase (the deprecation-check loop at line 263, the definition at line 897, and test/doc references) and explains why they are NOT call sites. This additional context is valuable for someone trying to understand the full picture. Response B is more concise and adds an interesting observation about the type hint mismatch (RequestContext vs AppContext), but provides less overall coverage of the codebase. Response A's completeness in disambiguating non-call-site references gives it a slight edge in grounding and actionability.
+Both responses correctly identify the single call site at src/flask/app.py:1600 inside wsgi_app, passing ctx (RequestContext) and e (Exception). Response A adds value by also mentioning the line 263 reference where handle_exception appears in a tuple for deprecation detection, proactively clarifying it is not a call site. This shows deeper grounding in the repository and anticipates a follow-up question. Response B is accurate but more minimal, omitting this additional context.
 ```
 
 </details>
 
-<details><summary>Flask P16 | winner=tie | Q 9→8 G 9→8</summary>
+<details><summary>Flask P16 | winner=with_budi | Q 8→8 G 8→9</summary>
 
 **Prompt:** What calls finalize_request and what does it do to the response before returning it to the WSGI caller?
 
-- Interactions: no_budi=5 / with_budi=5
-- Cost USD: no_budi=$0.0560 / with_budi=$0.0483
-- Hook: reason=ok context_chars=958
-
-#### Injected context
-
-```text
-[structural context]
-__call__  (app.py:1618)
-  ← called by: celery_init_app
-  → refs: wsgi_app
-process_response  (app.py:1394)
-  ← called by: process_response
-  → refs: _get_session, ensure_sync, is_null_session
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/app.py
-  span: 1618-1625
-  anchor: def __call__(
-  proof:
-    - WSGI application. This calls :meth:`wsgi_app`, which can be
-    - wrapped to apply middleware.
-    - return self.wsgi_app(environ, start_response)
-- file: src/flask/app.py
-  span: 1394-1418
-  anchor: def process_response(self, ctx: AppContext, response: Response) -> Response:
-  proof:
-    - before it's sent to the WSGI server. By default this will
-    - :param response: a :attr:`response_class` object.
-    - :return: a new response object or the same, has to be an
-```
+- Interactions: no_budi=9 / with_budi=6
+- Cost USD: no_budi=$0.0880 / with_budi=$0.0660
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the full picture:
 
-## What calls `finalize_request`
+## Who calls `finalize_request`
 
-Two callers in `src/flask/app.py`:
+Two callers, both in `src/flask/app.py`:
 
-1. **`full_dispatch_request`** (line 1019) — the normal request path. After `preprocess_request` and `dispatch_request` (or `handle_user_exception` if an exception occurred), it calls `finalize_request(ctx, rv)` to turn the view return value into a final response.
+1. **`full_dispatch_request`** (line 1019) — the normal path. After dispatching the request (and running `preprocess_request` / `dispatch_request`), it calls `finalize_request(ctx, rv)`.
 
-2. **`handle_exception`** (line 948) — the 500-error path. When an unhandled exception reaches the top-level handler, it wraps it in an `InternalServerError`, optionally runs a registered error handler, then calls `finalize_request(ctx, server_error, from_error_handler=True)`.
-
-(Line 267 is just an introspection loop checking whether subclasses override certain methods — not an actual call.)
+2. **`handle_exception`** (line 948) — the error path. When an unhandled exception reaches the top-level 500 handler, it calls `finalize_request(ctx, server_error, from_error_handler=True)`.
 
 ## What `finalize_request` does (lines 1021–1051)
 
-Three steps before the response goes back to the WSGI caller:
+Three things, in order:
 
-1. **`self.make_response(rv)`** — converts the view's return value (string, tuple, dict, `HTTPException`, etc.) into a proper `Response` object.
+1. **`make_response(rv)`** (line 1039) — converts the view's return value (string, tuple, dict, `HTTPException`, etc.) into a proper `Response` object.
 
-2. **`self.process_response(ctx, response)`** — runs all `@after_request` handlers (app-level and blueprint-level) and applies the session cookie via `save_session`. Returns the potentially modified response.
+2. **`process_response(ctx, response)`** (line 1041) — runs all after-request hooks:
+   - Context-local `_after_request_functions` (e.g. from `after_this_request`)
+   - Blueprint and app-level `@after_request` handlers (in reverse registration order)
+   - **Saves the session** onto the response via `session_interface.save_session`
 
-3. **`request_finished.send(..., response=response)`** — fires the `request_finished` signal so listeners can observe (but not modify) the final response.
+3. **Sends `request_finished`** signal (line 1042–1044).
 
-If any of steps 2–3 raise an exception **and** `from_error_handler=True` (i.e., we're already handling a server erro
-...[truncated 285 chars]
+If `from_error_handler=True` (the error path), any exception during steps 2–3 is logged and swallowed instead of re-raised, preventing an infinite error loop. Otherwise the exception propagates normally.
+
+The resulting `Response` object is then returned up to the WSGI machinery.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Two places call `finalize_request`:
+## Who calls `finalize_request`
 
-1. **`full_dispatch_request`** (`app.py:1019`) — the normal path, after dispatching the request (or handling a user exception). Called without `from_error_handler`.
+Two call sites in `src/flask/app.py`:
 
-2. **`handle_exception`** (`app.py:948`) — the error path, after an unhandled exception is caught and wrapped in an `InternalServerError`. Called with `from_error_handler=True`.
+1. **`full_dispatch_request`** (line 1019) — the happy path. After `preprocess_request` and `dispatch_request` (or after `handle_user_exception` catches an error), it calls `finalize_request(ctx, rv)`.
 
-**What it does to the response** (lines 1039–1051):
+2. **`handle_exception`** (line 948) — the error path. When an unhandled exception reaches the top-level handler, it wraps it in an `InternalServerError`, optionally runs a registered error handler, then calls `finalize_request(ctx, server_error, from_error_handler=True)`.
 
-1. **`make_response(rv)`** — converts the view's return value into a proper `Response` object.
-2. **`process_response(ctx, response)`** — runs after-request functions and saves the session (as seen at `app.py:1394`).
-3. **Sends `request_finished`** signal with the response.
-4. If `from_error_handler=True` and any of the above raises, the exception is logged and swallowed instead of propagating — preventing an infinite error loop.
+(Line 267 just checks whether the method was overridden on a subclass — it's not a runtime call.)
 
-The resulting `Response` is then returned up through `wsgi_app`, which calls `__call__` (`app.py:1618`) to hand it to the WSGI server.
+## What `finalize_request` does (lines 1021–1051)
+
+It converts the view's return value into a finished WSGI response in three steps:
+
+1. **`self.make_response(rv)`** (line 1039) — turns the raw return value (string, tuple, `HTTPException`, etc.) into a proper `Response` object.
+
+2. **`self.process_response(ctx, response)`** (line 1041) — runs all `@after_request` handlers (blueprint-level then app-level), which can modify headers, cookies, etc. on the response. Also handles saving the session.
+
+3. **`request_finished.send(...)`** (line 1042) — fires the `request_finished` signal with the final response.
+
+If any exception occurs during steps 2–3 **and** `from_error_handler=True` (meaning we're already handling an error), it logs the failure and swallows the exception to avoid masking the original error. Otherwise it re-raises.
+
+The resultin
+...[truncated 107 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the two callers (full_dispatch_request at line 1019, handle_exception at line 948) and the three steps finalize_request performs (make_response, process_response, request_finished signal). Both note the from_error_handler exception-swallowing behavior. Response A is slightly more detailed—it mentions what process_response does internally (after_request handlers + save_session), notes the line 267 false positive, and more accurately describes the WSGI return path (response(environ, start_response)). Response B's mention of __call__ at app.py:1618 is slightly imprecise since __call__ calls wsgi_app, not the reverse. However, both are substantively correct and well-grounded with line numbers. The differences are minor enough to call it a tie, though Response A edges ahead slightly on completeness and accuracy.
+Both responses are highly similar in structure and accuracy, identifying the same two callers and three processing steps. Response B edges ahead in grounding by noting line 267 (subclass override check), being more precise about handle_exception wrapping in InternalServerError, and explicitly tracing the return path through wsgi_app → __call__ to the WSGI server—directly answering the 'returning it to the WSGI caller' part of the question. Response A provides slightly more detail about process_response internals (reverse registration order, after_this_request). Overall they are very close, with Response B having a slight edge due to better addressing the full scope of the question.
 ```
 
 </details>
 
-<details><summary>Flask P17 | winner=with_budi | Q 8→8 G 8→8</summary>
+<details><summary>Flask P17 | winner=no_budi | Q 8→7 G 8→7</summary>
 
 **Prompt:** I want to add a middleware that logs request timing. What files and functions would I need to modify?
 
-- Interactions: no_budi=6 / with_budi=4
-- Cost USD: no_budi=$0.0473 / with_budi=$0.0393
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0891 / with_budi=$0.0902
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-You don't need to modify any Flask source files. Flask provides `before_request` and `after_request` hooks for exactly this. In your application code:
+You don't need to modify any Flask source files. Flask provides `before_request` and `after_request` hooks specifically for this. In your application code:
 
 ``\`python
 import time
-from flask import Flask, g
-
-app = Flask(__name__)
+from flask import g, request
 
 @app.before_request
 def start_timer():
@@ -3129,154 +2813,78 @@ def start_timer():
 
 @app.after_request
 def log_request_time(response):
+    duration = time.perf_counter() - g.start_time
+    app.logger.info(f"{request.method} {request.path} — {duration:.4f}s [{response.status_code}]")
+    return response
+``\`
+
+The relevant Flask internals, if you're curious:
+
+- **`src/flask/sansio/scaffold.py:460`** — `before_request()` decorator, registers functions into `before_request_funcs`
+- **`src/flask/sansio/scaffold.py:487`** — `after_request()` decorator, registers functions into `after_request_funcs`
+- **`src/flask/app.py:1369`** — `try_trigger_before_request_functions()` calls all registered before-request handlers
+- **`src/flask/app.py:1394`** — `process_response()` calls all registered after-request handlers
+- **`src/flask/app.py:1041`** — the point in `full_dispatch_request()` where `process_response` is invoked
+
+If you want this scoped to a blueprint instead of the whole app, the same decorators exist on `Blueprint` objects, plus `before_app_request`/`after_app_request` at `src/flask/sansio/blueprints.py:614-629` for blueprint-registered app-wide hooks.
+```
+
+#### Response (`with_budi`)
+
+```text
+You wouldn't need to modify any Flask source files. Flask already provides the hooks you need. In your **application code**, you'd use the built-in `before_request` and `after_request` decorators:
+
+``\`python
+import time
+from flask import g, request
+
+@app.before_request
+def start_timer():
+    g.start_time = time.perf_counter()
+
+@app.after_request
+def log_request_timing(response):
     duration = time.perf_counter() - g.start_time
     app.logger.info(f"{request.method} {request.path} — {duration:.4f}s")
     return response
 ``\`
 
-**Key files for reference if you want to understand the internals:**
+If you're interested in **where these hooks live in the Flask source**:
 
-| File | What it does |
-|---|---|
-| `src/flask/sansio/scaffold.py:460` | `before_request` — registers pre-request callbacks |
-| `src/flask/sansio/scaffold.py:487` | `after_request` — registers post-request callbacks |
-| `src/flask/app.py:992` | `full_dispatch_request` — where before/after hooks are invoked around dispatch |
-| `src/flask/app.py:1394` | `process_response` — calls `after_request` functions on the response |
+| What | File | Key lines |
+|---|---|---|
+| `before_request` / `after_request` decorator registration | `src/flask/sansio/scaffold.py:460-504` | Appends to `before_request_funcs` / `after_request_funcs` dicts |
+| Hook storage (`before_request_funcs`, `after_request_funcs`) | `src/flask/sansio/scaffold.py:133-155` | Dict of `{blueprint_name: [callables]}` |
+| `try_trigger_before_first_request_functions` — dispatches `before_request` hooks | `src/flask/app.py:1369-1391` | Iterates blueprints then app-level hooks |
+| `process_response` — dispatches `after_request` hooks | `src/flask/app.py:1394-1412` | Calls hooks in reverse registration order |
+| `full_dispatch_request` — ties it together | `src/flask/app.py:1041` | Calls `try_trigger...`, dispatches, then `process_response` |
 
-If you need something lower-level (e.g., including time spent in Flask's own request setup), you could instead write a WSGI middleware wrapping `app.wsgi_app` (`src/flask/app.py:1566`), but the hook approach above is the standard and simplest way.
-```
-
-#### Response (`with_budi`)
-
-```text
-You **don't need to modify any Flask source files**. Flask already provides hooks for this. Here's how to add request timing as an application developer:
-
-``\`python
-import time
-from flask import Flask, g, request
-
-app = Flask(__name__)
-
-@app.before_request
-def start_timer():
-    g.start_time = time.perf_counter()
-
-@app.after_request
-def log_request_time(response):
-    duration = time.perf_counter() - g.start_time
-    app.logger.info(f"{request.method} {request.path} - {duration:.4f}s")
-    return response
-``\`
-
-The key Flask mechanisms involved:
-
-- **`src/flask/sansio/scaffold.py:460`** — `before_request()` decorator registers functions to run before each request
-- **`src/flask/sansio/scaffold.py:487`** — `after_request()` decorator registers functions to run after each request
-- **`src/flask/app.py:992`** — `full_dispatch_request()` orchestrates calling before/after hooks around the view
-- **`src/flask/app.py:1394`** — `process_response()` runs the after_request functions
-
-If you want to modify Flask itself to add **built-in** timing middleware, the place to do it would be `src/flask/app.py` in `full_dispatch_request()` (line 992) or `wsgi_app()` (line 1566). Which approach are you going for?
+No modifications to Flask internals are needed — the `@app.before_request` / `@app.after_request` API is the 
+...[truncated 34 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, content, file references, and code. They reference the same files and line numbers (scaffold.py:460, scaffold.py:487, app.py:992, app.py:1394, app.py:1566) and provide the same hook-based approach. The key difference is that Response A has a bug: it imports `g` from flask but omits `request`, yet uses `request.method` and `request.path` in the code — this would cause a NameError at runtime. Response B correctly includes `from flask import Flask, g, request`. Response B also ends with a useful follow-up question asking which approach the user wants. Otherwise the quality, grounding, and actionability are equivalent. The slight edge goes to Response B for the correct import and the interactive follow-up.
+Both responses are structurally very similar: they correctly advise against modifying Flask internals, provide working before_request/after_request code, and reference the same source file locations. However, Response A (no_budi) edges ahead on three points: (1) It correctly names the function `try_trigger_before_request_functions`, while Response B incorrectly calls it `try_trigger_before_first_request_functions` — conflating it with the removed `before_first_request` mechanism. (2) Response A includes `response.status_code` in the log line, making the example more practically useful. (3) Response A adds valuable information about blueprint-scoped hooks (`before_app_request`/`after_app_request` on blueprints at `src/flask/sansio/blueprints.py`), which is a common follow-up need. Response B's table format is a nice touch for readability, but doesn't overcome the function name inaccuracy.
 ```
 
 </details>
 
-<details><summary>Flask P18 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Flask P18 | winner=no_budi | Q 9→8 G 8→8</summary>
 
 **Prompt:** How does Flask decide which error handler to call when an exception is raised — trace from the exception to the registered handler?
 
-- Interactions: no_budi=15 / with_budi=11
-- Cost USD: no_budi=$0.1677 / with_budi=$0.1374
-- Hook: reason=ok context_chars=649
-
-#### Injected context
-
-```text
-[structural context]
-app_errorhandler  (blueprints.py:655)
-  ← called by: test_error_handler_subclass, test_aborting, handle_custom
-  → refs: app_errorhandler, record_once
-handle_http_exception  (app.py:830)
-  ← called by: handle_user_exception
-  → refs: _find_error_handler, ensure_sync
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: src/flask/sansio/blueprints.py
-  span: 655-670
-  anchor: def app_errorhandler(
-  proof:
-    - self, code: type[Exception] | int
-    - the blueprint. Equivalen
-```
+- Interactions: no_budi=15 / with_budi=12
+- Cost USD: no_budi=$0.1417 / with_budi=$0.1041
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the complete trace:
-
-## Exception → Error Handler: The Full Path
-
-### 1. Entry point: `wsgi_app` (`app.py:1566`)
-
-``\`
-wsgi_app
-  └─ try:
-       full_dispatch_request(ctx)        # normal path
-     except Exception:
-       handle_exception(ctx, e)          # last-resort catch
-``\`
-
-### 2. `full_dispatch_request` (`app.py:992`)
-
-Runs `preprocess_request` + `dispatch_request` (which calls your view function). Any exception raised is caught and routed to:
-
-``\`python
-except Exception as e:
-    rv = self.handle_user_exception(ctx, e)
-``\`
-
-### 3. `handle_user_exception` (`app.py:865`)
-
-This is the main branching point:
-
-- **HTTPException** (e.g. `abort(404)`) → goes to `handle_http_exception`, unless `trap_http_exception` returns `True` (debug trapping).
-- **Any other exception** (e.g. `ValueError`) → calls `_find_error_handler` directly. If no handler is found, **re-raises**, which bubbles up to `handle_exception` in `wsgi_app`.
-
-### 4. `handle_http_exception` (`app.py:830`)
-
-For HTTP exceptions specifically:
-- Returns unchanged if `e.code is None` (proxy exceptions) or if it's a `RoutingException`.
-- Otherwise calls `_find_error_handler(e, ctx.request.blueprints)`.
-- If no handler found, **returns the exception itself** (which is already a valid WSGI response).
-
-### 5. `_find_error_handler` (`sansio/app.py:865`) — the core lookup
-
-This is where the handler is actually resolved. The search has a **specific priority order**:
-
-``\`python
-def _find_error_handler(self, e, blueprin
-...[truncated 2624 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
 Here's the full trace from exception to handler:
 
-## Exception → Handler flow
-
-### 1. Entry point: `full_dispatch_request` (`app.py:1012-1018`)
-
-When a view function (or preprocessing) raises an exception, it's caught and routed to `handle_user_exception`:
+## 1. Entry point: `full_dispatch_request` (`app.py:992`)
 
 ``\`python
 try:
@@ -3284,132 +2892,234 @@ try:
     if rv is None:
         rv = self.dispatch_request(ctx)
 except Exception as e:
-    rv = self.handle_user_exception(ctx, e)
+    rv = self.handle_user_exception(ctx, e)   # ← all exceptions land here
 ``\`
 
-### 2. Triage: `handle_user_exception` (`app.py:865-895`)
+## 2. Triage: `handle_user_exception` (`app.py:865`)
 
-This method splits into two paths:
+Two branches:
 
-- **HTTPException** (e.g. `abort(404)`) → forwarded to `handle_http_exception(ctx, e)` (unless `TRAP_HTTP_EXCEPTIONS` is set)
-- **Any other exception** → calls `_find_error_handler(e, ctx.request.blueprints)` directly. If no handler is found, the exception is **re-raised**, falling through to `handle_exception`.
+- **HTTPException** (e.g. `NotFound`, `Forbidden`): delegates to `handle_http_exception()` — unless `TRAP_HTTP_EXCEPTIONS` is set, in which case it's treated as a regular exception and re-raised.
+- **Any other exception**: calls `_find_error_handler()` directly. If no handler is found, **re-raises** — which drops into `handle_exception()`.
 
-### 3. HTTP path: `handle_http_exception` (`app.py:830-863`)
+## 3. HTTP exceptions: `handle_http_exception` (`app.py:830`)
 
-Filters out proxy exceptions (no code) and `RoutingException`s (internal redirects). Then calls `_find_error_handler` and either invokes the handler or returns the raw HTTPException as the response.
+- Returns proxy exceptions (no code) and `RoutingException` unchanged.
+- Otherwise calls `_find_error_handler(e, blueprints)`. If no handler found, returns the exception itself (Werkzeug renders it as an HTTP response).
 
-### 4. Fallback: `handle_exception` (`app.py:897-946`)
+## 4. Last resort: `handle_exception` (`app.py:897`)
 
-Catches anything that wasn't handled above. Wraps the original exception in an `InternalServerError(original_exception=e)`, then does one more `_find_error_handler` lookup for a 500 handler. This is why a registered `@app.errorhandler(500)` always receives an `InternalServerError` instance.
+Catches anything that escaped `handle_user_exception`. Always produces a 500:
 
-### 5. The core lookup: `_find_error_
-...[truncated 2801 chars]
+1. Sends the `got_request_exception` signal.
+2. If `PROPAGATE_EXCEPTIONS` (or debug/testing), re-raises.
+3. Logs the exception.
+4. Wraps it in `InternalServerError(original_exception=e)`.
+5. Calls `_find_error_handler` one more time with the `InternalServerError` — so a handler registered for `500` or `InternalServerError` gets a last chance.
+
+#
+...[truncated 2411 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the full trace from exception to handler:
+
+### 1. Exception is caught in `full_dispatch_request` (`app.py:1012-1018`)
+
+Any exception raised during `preprocess_request` or `dispatch_request` is caught and passed to `handle_user_exception`.
+
+### 2. `handle_user_exception` (`app.py:865-895`) — triage
+
+Two branches:
+
+- **HTTPException** (and not trapped): delegates to `handle_http_exception` (line 888).
+- **All other exceptions**: calls `_find_error_handler` directly (line 890). If no handler is found, the exception is **re-raised** (line 893), which bubbles up to `handle_exception` for the generic 500 path.
+
+### 3. `handle_http_exception` (`app.py:830-863`) — HTTP-specific path
+
+- Returns the exception as-is if it has no `code` (proxy exceptions) or is a `RoutingException`.
+- Otherwise calls `_find_error_handler` (line 860). If no handler matches, returns the `HTTPException` itself as the response (line 862).
+
+### 4. `_find_error_handler` (`sansio/app.py:865-888`) — the lookup core
+
+This is where the priority logic lives. It searches `error_handler_spec` in a specific order using **two nested loops**:
+
+``\`
+for c in (code, None):        # first by specific HTTP code, then by None (class-only)
+    for name in (*blueprints, None):  # blueprint handlers first, then app-level (None)
+        for cls in exc_class.__mro__:  # walk the MRO for class hierarchy matching
+``\`
+
+**Priority order** (first match wins):
+
+| Priority | Scope | Match type |
+|---|---|---|
+| 1 | Innermost bluep
+...[truncated 1109 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the same path through the Flask codebase with accurate file references and line numbers. They both correctly identify: (1) full_dispatch_request catching exceptions and routing to handle_user_exception, (2) the HTTPException vs other exception split, (3) handle_http_exception for HTTP errors, (4) handle_exception as fallback wrapping in InternalServerError, (5) _find_error_handler as the core lookup with its nested loop structure over code/name/MRO. Both include the actual source code of _find_error_handler and correctly explain the priority order (blueprint by code → app by code → blueprint by class → app by class, with MRO walk within each). Response A includes slightly more detail on the registration side (blueprint register merging) and the data structure, plus mentions wsgi_app as the outermost entry point. Response B includes a nice ASCII flow diagram. Both are well-grounded in the actual repository structure with correct file paths. The differences are minor and stylistic — both are equally comprehensive and accurate.
+Both responses are strong and trace the same core flow accurately: full_dispatch_request → handle_user_exception → _find_error_handler, with the HTTP exception branch through handle_http_exception. Both correctly describe the triple-nested loop in _find_error_handler (code/None × blueprints/app × MRO) and include clear priority tables.
+
+Response A edges ahead for completeness: it covers the `handle_exception` fallback path (the 500/InternalServerError wrapping when no handler is found and the exception re-raises), which is a critical part of the full trace the question asks for. Response B omits this step entirely. Response A also mentions relevant config flags (TRAP_HTTP_EXCEPTIONS, PROPAGATE_EXCEPTIONS, got_request_exception signal) and includes a helpful ASCII summary flow diagram showing the complete path end-to-end.
+
+Response B has some strengths: more specific inline line references (e.g., "line 888", "line 860"), a cleaner 6-row priority table, and useful context about app_errorhandler vs errorhandler on blueprints. However, the app_errorhandler discussion is slightly tangential to the "trace from exception to handler" question.
+
+On grounding, both reference similar line numbers for the key functions. Response A cites register_error_handler in sansio/scaffold.py; Response B cites app_errorhandler in blueprints.py — both are real and relevant. Neither could be fully verified with available tools, but the references are consistent with the Flask codebase structure.
+
+The 
+...[truncated 243 chars]
 ```
 
 </details>
 
 ### Django
 
-<details><summary>Django P1 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Django P1 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** What are the entry points of this Django application and how is the request handling pipeline structured at startup?
 
-- Interactions: no_budi=11 / with_budi=11
-- Cost USD: no_budi=$0.1530 / with_budi=$0.1553
+- Interactions: no_budi=11 / with_budi=15
+- Cost USD: no_budi=$0.2019 / with_budi=$0.2209
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how Django's entry points and request pipeline are structured:
+Here's how this Django codebase (v6.1 alpha) is structured at startup and request handling:
 
 ## Entry Points
 
-There are two public entry points, both in `django/core/`:
+There are **two** HTTP entry points, plus the management command interface:
 
-1. **WSGI** — `django/core/wsgi.py:5` → `get_wsgi_application()`
-2. **ASGI** — `django/core/asgi.py:5` → `get_asgi_application()`
+### 1. WSGI — `django/core/wsgi.py:5`
+`get_wsgi_application()` → calls `django.setup()` → returns a `WSGIHandler` instance.
 
-Both call `django.setup(set_prefix=False)` and then return their respective handler (`WSGIHandler` / `ASGIHandler`).
+### 2. ASGI — `django/core/asgi.py:5`
+`get_asgi_application()` → calls `django.setup()` → returns an `ASGIHandler` instance.
 
-## Startup: Middleware Chain Construction
+### 3. Management — `django-admin` / `manage.py`
+Used for CLI commands (`runserver`, `migrate`, etc.), not for serving HTTP directly.
 
-When a handler is instantiated, `__init__` calls `self.load_middleware()` (`base.py:27`), which builds the entire request pipeline:
+## Startup Sequence
 
-1. **Inner handler** — starts with `_get_response` (sync) or `_get_response_async`, wrapped in `convert_exception_to_response` (from `exception.py:25`)
-2. **Middleware wrapping** — iterates `settings.MIDDLEWARE` in **reverse**, wrapping each middleware around the handler using the onion/decorator pattern. Each middleware's `__call__` gets the next handler as `get_response`.
-3. **Hook collection** — as each middleware is instantiated, its optional `process_view`, `process_template_response`, and `process_exception` methods are collected into separate lists.
-4. **Sync/async adaptation** — `adapt_method_mode()` (`base.py:106`) wraps sync↔async boundaries using `sync_to_async` / `async_to_sync` as needed.
-5. **Final result** — `self._middleware_chain` is set to the fully composed handler.
+1. **`django.setup()`** (`django/__init__.py:8`) — triggered by both entry points:
+   - Configures settings (side effect of first access)
+   - Configures logging
+   - Populates the app registry (`apps.populate(INSTALLED_APPS)`)
 
-## Request Flow (per request)
+2. **Handler construction** — both `WSGIHandler.__init__` and `ASGIHandler.__init__` call `self.load_middleware()`:
+   - WSGI passes `is_async=False`, ASGI passes `is_async=True`
 
-### WSGI path (`WSGIHandler.__call__`, `wsgi.py:120`):
-``\`
-Server calls handler(environ, start_resp
-...[truncated 2067 chars]
+3. **`BaseHandler.load_middleware()`** (`django/core/handlers/base.py:27`) — builds the middleware chain:
+   - Starts with `_get_response` (sync) or `_get_response_async` (async) as the innermost handler
+   - Iterates `settings.MIDDLEWARE` **in reverse**, wrapping each middleware around the previous handler (onion pattern)
+   - Adapts sync/async mismatches via `adapt_method_mode()` (using `sync_to_async` / `async_to_sync`)
+   - Collects `process_view`, `process_template_response`, and `proces
+...[truncated 1442 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's how Django's entry points and request handling pipeline work:
+Here's a comprehensive overview of Django's entry points and request handling pipeline:
 
 ## Entry Points
 
-There are **two public entry points**, both in `django/core/`:
+There are **3 entry points** into Django:
 
-1. **WSGI** — `django/core/wsgi.py:5` — `get_wsgi_application()`
-2. **ASGI** — `django/core/asgi.py:5` — `get_asgi_application()`
+### 1. CLI: `django-admin` / `manage.py` / `python -m django`
+- `django/__main__.py:9` → calls `management.execute_from_command_line()`
+- `ManagementUtility.execute()` (`django/core/management/__init__.py:354`) parses argv, calls `django.setup()`, then dispatches to the appropriate management command
+- Special case for `runserver`: wraps `django.setup()` in `autoreload.check_errors()` so the dev server starts even with broken code
 
-Both do the same thing: call `django.setup(set_prefix=False)` then return their respective handler instance (`WSGIHandler` or `ASGIHandler`).
+### 2. WSGI: `django/core/wsgi.py:5` — `get_wsgi_application()`
+- Calls `django.setup(set_prefix=False)`, returns a `WSGIHandler` instance
+- Used by production servers like gunicorn/uWSGI
 
-## Startup Initialization
+### 3. ASGI: `django/core/asgi.py:5` — `get_asgi_application()`
+- Calls `django.setup(set_prefix=False)`, returns an `ASGIHandler` instance
+- Used by async servers like Daphne/Uvicorn
 
-When a handler is instantiated, `load_middleware()` is called in its `__init__`:
+## Bootstrap: `django.setup()` (`django/__init__.py:8`)
 
-- **`WSGIHandler.__init__`** (`django/core/handlers/wsgi.py:116`) calls `self.load_middleware()` (sync mode)
-- **`ASGIHandler.__init__`** (`django/core/handlers/asgi.py:154`) calls `self.load_middleware(is_async=True)`
+All entry points converge on `django.setup()`, which does three things in order:
+1. **Configure logging** via `settings.LOGGING_CONFIG`
+2. **Set URL script prefix** (optional)
+3. **Populate the app registry** — `apps.populate(settings.INSTALLED_APPS)` — imports app configs, runs `AppConfig.ready()` hooks
 
-### Middleware Chain Construction (`base.py:27`)
+## Request Handling Pipeline
 
-`BaseHandler.load_middleware()` builds the middleware chain by:
+### Middleware Chain Construction (startup-time)
 
-1. Starting with the innermost callable: `_get_response` (sync) or `_get_response_async` (async), wrapped in `convert_exception_to_response`
-2. Iterating over `settings.MIDDLEWARE` **in reverse** — each middleware wraps the previous handler, forming an onion-like chain
-3. For each middleware, it also collects `process_view`, `process_template_response`, and `process_exception` hooks into separate lists
-4. Each layer is wrapped with `convert_exception_to_response` so exceptions never leak between layers
-5. Sync/async adaptation happens automatically via `adapt_method_mode()` using `sync_to_async`/`async_to_sync`
-6. The final
-...[truncated 2264 chars]
+`BaseHandler.load_middleware()` (`django/core/handlers/base.py:27`) builds the chain **once** at 
+...[truncated 1916 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, accuracy, and depth. They cover the same topics (WSGI/ASGI entry points, middleware chain construction, request flow, exception handling, key design points) with the same level of detail and the same file/line references. Minor differences: Response A explicitly notes process_exception is always sync (base.py:93); Response B explicitly notes ASGIHandler passes is_async=True to load_middleware and states no per-request middleware instantiation. These are marginal distinctions that don't meaningfully differentiate quality. Both are well-grounded in the actual codebase with accurate line references and correct technical descriptions.
+Both responses are strong and accurate. Response B (with_budi) edges ahead in several areas: (1) It includes the `python -m django` entry point via `__main__.py` and covers the management/CLI path more thoroughly, including the `autoreload.check_errors()` special case for `runserver`. (2) It correctly notes `set_prefix=False` in the WSGI/ASGI setup calls. (3) It covers exception handling more completely, listing the specific exception-to-status-code mappings in `convert_exception_to_response`. (4) It mentions `response.close()` in the ASGI flow. Response A is also well-structured and accurate but treats management commands more briefly and misses some of these finer details. Both correctly describe the middleware chain construction, the onion pattern, sync/async adaptation, and the inner request resolution flow with accurate file references.
 ```
 
 </details>
 
-<details><summary>Django P2 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Django P2 | winner=tie | Q 8→8 G 7→7</summary>
 
 **Prompt:** Describe the module layout and directory structure of this Django codebase — which directories own which functionality?
 
-- Interactions: no_budi=14 / with_budi=13
-- Cost USD: no_budi=$0.1480 / with_budi=$0.1546
+- Interactions: no_budi=14 / with_budi=14
+- Cost USD: no_budi=$0.1434 / with_budi=$0.1458
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full layout of the Django source repository:
+Here's the layout of this Django source repository:
+
+## Top-level directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `django/` | The framework source code (the installable package) |
+| `docs/` | Sphinx documentation (`.txt`/`.rst` source files) |
+| `tests/` | The full test suite (`runtests.py` is the entry point) |
+| `.github/` | CI workflows, PR templates, security policy |
+
+## `django/` — the framework package
+
+### Core plumbing
+
+| Package | Owns |
+|---------|------|
+| `django/apps/` | App registry and `AppConfig` — loading and introspecting installed apps |
+| `django/conf/` | Settings (`global_settings.py`), project/app templates, locale data (translations & date/number formats for ~90 languages) |
+| `django/urls/` | URL routing — resolvers, `path()`/`re_path()`, URL reversing |
+| `django/http/` | `HttpRequest`, `HttpResponse`, cookie handling, multipart parsing |
+| `django/middleware/` | Built-in middleware (CSRF, security, clickjacking, gzip, common, locale) |
+| `django/dispatch/` | Signal framework (`Signal`, `receiver`) |
+| `django/tasks/` | Background/async task support (newer addition) |
+
+### Database layer (`django/db/`)
+
+| Sub-package | Owns |
+|-------------|------|
+| `db/models/` | ORM: fields, querysets, managers, lookups, expressions, aggregates, SQL compilation |
+| `db/backends/` | Database backend adapters (SQLite, PostgreSQL, MySQL, Oracle) |
+| `db/migrations/` | Migration framework — autodetector, operations, executor, state |
+
+### Request/respon
+...[truncated 2669 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the layout of this Django source repository:
 
 ## Top-level directories
 
@@ -3417,86 +3127,60 @@ Here's the full layout of the Django source repository:
 |-----------|---------|
 | `django/` | The framework source code (the installable package) |
 | `docs/` | Sphinx documentation (`.txt`/`.rst` files, `conf.py`) |
-| `tests/` | The full test suite, run via `tests/runtests.py` |
-| `.github/` | CI workflows, PR templates, funding/security docs |
+| `tests/` | The full test suite (`runtests.py` as the entry point, `test_sqlite.py` for default DB config) |
 
-## `django/` — core framework package
+## `django/` — core package breakdown
 
-### Infrastructure & configuration
-- **`django/apps/`** — App registry and `AppConfig` (app discovery, readiness signals)
-- **`django/conf/`** — Settings machinery (`global_settings.py`, `LazySettings`), locale data, app/project templates, URL config helpers (`conf/urls/`)
-- **`django/dispatch/`** — Signal framework (`Signal`, `receiver`)
+### Framework plumbing
+
+| Module | Owns |
+|--------|------|
+| `django/apps/` | App registry & `AppConfig` — discovers and loads installed apps |
+| `django/conf/` | Settings (`global_settings.py`, lazy settings object), locale data (`.po`/`.mo` translations for ~90 languages), project/app templates |
+| `django/urls/` | URL routing — resolvers, `path()`/`re_path()`, URL converters |
+| `django/dispatch/` | Signal framework (`Signal`, `receiver`) |
+| `django/tasks/` | Background/deferred task support (newer addition) |
 
 ### HTTP layer
-- **`django/http/`** — `HttpRequest`, `HttpResponse`, cookie handling, multipart parsing
-- **`django/middleware/`** — Built-in middleware (CSRF, security, clickjacking, gzip, common, locale, etc.)
-- **`django/urls/`** — URL routing (`path()`, `re_path()`, `URLResolver`, `reverse()`)
-- **`django/views/`** — Generic views (class-based and function-based), error handlers, static file serving, `View` base class
+
+| Module | Owns |
+|--------|------|
+| `django/http/` | `HttpRequest`, `HttpResponse`, cookie handling, multipart parsing |
+| `django/middleware/` | Built-in middleware (CSRF, security, clickjacking, gzip, locale, common) |
+| `django/views/` | Generic views (class-based and function-based), error handlers, static file serving |
 
 ### Database / ORM
-- **`django/db/`** — Top-level DB connection and router
-  - `db/models/` — ORM: fields, querysets, managers, lookups, expressions, aggregates, SQL compiler
-  - `db/backends/` — Database backend adapters (SQLite, PostgreSQL, MySQL, Oracle)
-  - `db/migrations/` — Migration fr
-...[truncated 2572 chars]
-```
 
-#### Response (`with_budi`)
-
-```text
-Here's the layout of this Django codebase (the official Django framework source):
-
-## Top-level directories
-
-| Directory | Purpose |
-|-----------|---------|
-| `django/` | The framework source code (the installable package) |
-| `docs/` | Sphinx documentation (reStructuredText) |
-| `tests/` | The entire test suite — one subdirectory per feature area (e.g. `tests/aggregation/`, `tests/auth_tests/`, `tests/cache/`, `tests/gis_tests/`, etc.) |
-| `.github/` | CI workflows, PR templates, funding/security info |
-| `.tx/` | Transifex translation config |
-
-## `django/` — Core framework packages
-
-### Top-level modules
-- **`apps/`** — App registry and `AppConfig` machinery
-- **`conf/`** — Settings (`global_settings.py`), locale data (translations for ~90 languages), URL config helpers, and app/project templates
-- **`db/`** — The entire ORM layer:
-  - `db/models/` — Fields, querysets, managers, expressions, aggregates, lookups, SQL compiler
-  - `db/backends/` — Database backend adapters (SQLite, PostgreSQL, MySQL, Oracle)
-  - `db/migrations/` — Migration framework (operations, autodetector, executor, state)
-- **`core/`** — Framework infrastructure:
-  - `core/cache/` — Cache framework (memcached, Redis, DB, file, local-memory backends)
-  - `core/checks/` — System check framework
-  - `core/files/` — File handling and storage
-  - `core/handlers/` — WSGI and ASGI request handlers
-  - `core/mail/` — Email sending (SMTP, console, file backends)
-  - `core/management/` — `manage.py` commands infr
-...[truncated 2258 chars]
+| Module | Owns |
+|--------|------|
+| `django/db/` | Top-level DB connection management |
+| `django/db/models/` | ORM — fields, querysets, managers, aggregates, expressions, lookups, signals |
+| `dja
+...[truncated 2912 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are comprehensive, accurate, and well-structured descriptions of the Django codebase layout. Response A offers slightly better categorical organization (grouping by HTTP layer, Database/ORM, etc.) but is truncated at the end. Response B is complete, mentions the `.tx/` directory and provides a useful note about the flat test structure with ~250+ subdirectories. The differences are marginal — A's organization edge is offset by its truncation, while B's completeness is offset by slightly less structured categorization. Both are equally grounded in the actual repository structure and equally actionable for navigating the codebase.
+Both responses are nearly identical in structure, accuracy, and coverage. They use the same table-based format, cover the same directories (apps, conf, urls, db, contrib, core, utils, etc.), and provide equivalent descriptions. Response A includes .github/ as a top-level directory and separates request/response processing into its own section; Response B mentions test_sqlite.py and adds slightly more detail on some contrib apps. Both appear to be based on general Django knowledge rather than repository exploration, so grounding is equivalent. The truncation affects Response B more (412 chars vs 169 chars), but the core content delivered is comparable. Neither response demonstrates a clear advantage over the other.
 ```
 
 </details>
 
-<details><summary>Django P3 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>Django P3 | winner=tie | Q 9→8.5 G 9→9</summary>
 
 **Prompt:** Where is the ModelBase metaclass defined and what does it do when a new model class is created?
 
-- Interactions: no_budi=6 / with_budi=3
-- Cost USD: no_budi=$0.0893 / with_budi=$0.0572
+- Interactions: no_budi=5 / with_budi=3
+- Cost USD: no_budi=$0.1304 / with_budi=$0.1059
 - Hook: reason=ok context_chars=576
 
 #### Injected context
 
 ```text
 [structural context]
-__new__  (base.py:98)
-  ← called by: ModelFormMetaclass, ChoicesType, SwappableTuple
+attrs  (base.py:98)
+  ← called by: SimplerXMLGenerator, SplitArrayWidget, Stylesheet
   → refs: __new__, __set_name__, _has_contribute_to_class
 
 [budi context]
@@ -3516,67 +3200,65 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-`ModelBase` is defined at `django/db/models/base.py:95`. It's a metaclass (subclass of `type`) that intercepts the creation of every Django model class. Here's what its `__new__` method does step by step:
+`ModelBase` is defined at **`django/db/models/base.py:95`**. It's the metaclass for all Django models (inherits from `type`). Here's what its `__new__` method does when a new model class is created:
 
-1. **Skip for `Model` itself** (lines 103–105) — If there are no `ModelBase` parents, it's the base `Model` class, so just use normal `type.__new__`.
+1. **Short-circuit for `Model` itself** (line 103-105) — If there are no `ModelBase` parents (i.e., this is the `Model` base class, not a subclass), it delegates to `type.__new__` and returns immediately.
 
-2. **Separate attributes** (lines 108–123) — Splits class attributes into two groups:
-   - Attributes with a `contribute_to_class()` method (Django-specific, like fields and managers) — deferred for later.
-   - Everything else — passed to `type.__new__()` so `__set_name__` works properly.
+2. **Separate contributable attrs** (lines 117-123) — Splits class attributes into two groups: those with a `contribute_to_class()` method (Django-specific, like fields and managers) and regular Python attributes. Regular attrs go to `type.__new__()` so `__set_name__` works; contributable ones are added later.
 
-3. **Resolve `app_label`** (lines 129–144) — Looks up the app config from `INSTALLED_APPS` using the module path. Raises `RuntimeError` for non-abstract models without one.
+3. **Resolve app_label** (lines 129-144) — Looks up the app configuration from `INSTALLED_APPS` using the module path. Raises `RuntimeError` for non-abstract models outside any installed app.
 
-4. **Create `_meta` (Options)** (line 146) — Attaches an `Options` instance built from the inner `Meta` class.
+4. **Attach `_meta` (Options)** (line 146) — Creates and attaches the `Options` instance from the inner `Meta` class.
 
-5. **Create exception classes** (lines 147–192) — For non-abstract models, creates per-model `DoesNotExist`, `MultipleObjectsReturned`, and `NotUpdated` exception subclasses that inherit from parent model exceptions.
+5. **Create exception classes** (lines 147-192) — For concrete models, generates `DoesNotExist`, `MultipleObjectsReturned`, and `NotUpdated` exception subclasses that inherit from parent model exceptions.
 
-6. **Inherit ordering/get_latest_by** (lines 193–200) — Non-abstract children inherit `ordering` and `get_latest_by` from non-abstract parents if not overridden.
+6. **Inherit ordering/get_latest_by** (lines 193-200) — Non-abstract children inherit `ordering` and `get_latest_by` from their non-abstract parent if not explicitly set.
 
-7. **Proxy model setup** (lines 225–250) — Validates proxy models (no fields on abstract parents, exactly one concrete base) and calls `setup_proxy()`.
-
-8. **Multi-table inheritance (MT
-...[truncated 1023 chars]
+7. **Proxy model setup** (lines 225-250) — Validates proxy models (no fields from abstract 
+...[truncated 922 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's a summary of `ModelBase` and what its `__new__` does:
+The `ModelBase` metaclass is defined at `django/db/models/base.py:95`.
 
-**Location:** `django/db/models/base.py:95`
+When a new model class is created, its `__new__` method does the following (in order):
 
-`ModelBase` is the metaclass for all Django models (it subclasses `type`). Its `__new__` method runs every time a new model class is defined (e.g., `class MyModel(models.Model): ...`). Here's what it does step by step:
+1. **Short-circuit for `Model` itself** (line 103–105) — If none of the bases are `ModelBase` instances (i.e. this is the `Model` base class, not a subclass), it delegates straight to `type.__new__` with no Django setup.
 
-1. **Skip for `Model` itself** (line 103–105) — If there are no `ModelBase` parents, this is the base `Model` class, so it delegates to `type.__new__` without any Django setup.
+2. **Split attributes** (lines 108–122) — Pops `__module__`, `__classcell__`, and `Meta` from the class attrs. Remaining attributes are split into two buckets:
+   - **Contributable attrs** — those with a `contribute_to_class()` method (fields, managers, etc.), held for later.
+   - **Regular attrs** — passed directly to `type.__new__()` so `__set_name__` is called.
 
-2. **Separate attributes** (lines 108–122) — Splits class attributes into two groups:
-   - **Contributable attrs** — those with a `contribute_to_class()` method (e.g., fields, managers). These are added later via `add_to_class`.
-   - **Regular attrs** — passed to `type.__new__()` so `__set_name__` is called properly.
+3. **Create the class** (line 123) — Calls `type.__new__()` with the regular attrs.
 
-3. **Resolve app_label** (lines 129–144) — Finds the app this model belongs to via `apps.get_containing_app_config()`. Raises `RuntimeError` for non-abstract models that aren't in any installed app.
+4. **Resolve `app_label`** (lines 129–144) — Looks up the containing `AppConfig`; raises `RuntimeError` for non-abstract models not in `INSTALLED_APPS`.
 
-4. **Attach `_meta` (Options)** (line 146) — Creates and attaches the `Options` object from the inner `Meta` class.
+5. **Attach `_meta` (Options)** (line 146) — Adds the `Options` instance built from the inner `Meta` class.
 
-5. **Create exception classes** (lines 147–192) — For non-abstract models, creates `DoesNotExist`, `MultipleObjectsReturned`, and `NotUpdated` exception classes, inheriting from parent model exceptions where applicable.
+6. **Create exception classes** (lines 147–192) — For non-abstract models, creates `DoesNotExist`, `MultipleObjectsReturned`, and `NotUpdated` exception subclasses, inheriting from parent models' versions when applicable.
 
-6. **Inherit ordering/get_latest_by** (lines 193–200) — Non-abstract children inherit `ordering` and `get_latest_by` from their non-abstr
-...[truncated 806 chars]
+7. **Inherit ordering/get_latest_by** (lines 193–200) — Non-abstract children inherit `ordering` and `get_latest_by` from their non-abstract parent if not explicitly set.
+
+8. **Pr
+...[truncated 518 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify ModelBase at django/db/models/base.py:95 and provide accurate step-by-step breakdowns with correct line references. Response A is more comprehensive, covering 12 distinct steps versus 10, and notably includes important later-stage details that Response B glosses over: abstract base field inheritance (deep-copying fields), private field inheritance (GenericForeignKey), deep-copying indexes for unique names, and the critical final registration step (_prepare() and apps.register_model()). Response A also mentions the add_to_class helper method. Response B's steps 9-10 become vague ("Collects parent links", "Walks the MRO") where Response A provides specifics about auto-generated OneToOneField parent links and the concrete vs abstract parent handling. Response B does add a nice closing summary and explicitly calls out the contributable attributes step (lines 213-214), which is a minor advantage. Overall, Response A provides a more complete and actionable picture of the metaclass behavior.
+Both responses correctly identify ModelBase at django/db/models/base.py:95 and walk through the __new__ method with accurate line references. Response A is slightly more comprehensive—it covers deep-copy indexes (lines 376-378) and the final registration/abstract model handling (lines 380-390), plus gives more detail on the MTI setup (lines 252-349). Response B adds a useful explicit step about contributable attrs being added via add_to_class() (lines 213-214) but trails off with less detail on MTI and omits the final registration steps. Both are well-grounded with specific line numbers and accurate descriptions. The difference is marginal—A is more thorough while B is slightly more concise but less complete. Calling it a near-tie with A having a slight edge in completeness.
 ```
 
 </details>
 
-<details><summary>Django P4 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Django P4 | winner=no_budi | Q 9→7 G 9→8</summary>
 
 **Prompt:** Where is the get_resolver function defined and what are its first steps when called?
 
-- Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0239 / with_budi=$0.0201
+- Interactions: no_budi=3 / with_budi=1
+- Cost USD: no_budi=$0.0274 / with_budi=$0.0121
 - Hook: reason=ok context_chars=680
 
 #### Injected context
@@ -3607,35 +3289,32 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-`get_resolver` is defined at `django/urls/resolvers.py:108`. When called, it:
+Defined at `django/urls/resolvers.py:108`. When called, it:
 
-1. Checks if the `urlconf` argument is `None` — if so, defaults it to `settings.ROOT_URLCONF`.
-2. Delegates to `_get_cached_resolver(urlconf)`, which is a `@functools.cache`-decorated function that constructs and caches a `URLResolver(RegexPattern(r"^/"), urlconf)`.
+1. Checks if `urlconf` is `None` — if so, defaults it to `settings.ROOT_URLCONF`.
+2. Delegates to `_get_cached_resolver(urlconf)` (line 111), which is a `@functools.cache`-decorated function that constructs and caches a `URLResolver(RegexPattern(r"^/"), urlconf)`.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**`get_resolver`** is defined at `django/urls/resolvers.py:108`. When called, it:
-
-1. Checks if `urlconf` is `None` — if so, defaults it to `settings.ROOT_URLCONF` (line 109–110).
-2. Delegates to `_get_cached_resolver(urlconf)` (line 111), which is a `@functools.cache`-decorated function that returns a `URLResolver(RegexPattern(r"^/"), urlconf)`.
+`get_resolver` is defined at `django/urls/resolvers.py:108`. When called, it first checks if `urlconf` is `None` and, if so, sets it to `settings.ROOT_URLCONF`. Then it returns the result of `_get_cached_resolver(urlconf)`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are essentially identical in content and correctness. They identify the same file and line, describe the same two steps, and reference the same cached resolver pattern. Response B adds line number references (109-110, 111) which is marginally more actionable, but the substance is the same.
+Both responses correctly identify the file and line number and describe the same two steps. Response A goes further by explaining what _get_cached_resolver does (it's @functools.cache-decorated and constructs a URLResolver(RegexPattern(r'^/'), urlconf)), providing more depth and actionability. Response B stops at mentioning the delegation without explaining what happens inside.
 ```
 
 </details>
 
-<details><summary>Django P5 | winner=with_budi | Q 8→9 G 7→9</summary>
+<details><summary>Django P5 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** Where is the BaseHandler class defined and what does it initialize on construction?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0265 / with_budi=$0.0282
+- Cost USD: no_budi=$0.0302 / with_budi=$0.0259
 - Hook: reason=ok context_chars=564
 
 #### Injected context
@@ -3665,14 +3344,14 @@ evidence_cards:
 ```text
 `BaseHandler` is defined at `django/core/handlers/base.py:21`.
 
-It has **no `__init__` method** — it doesn't initialize anything on construction. Instead, it defines four **class-level attributes** set to `None`:
+It has **no `__init__` method** — it doesn't initialize anything on construction. Instead, it declares four **class-level attributes** set to `None`:
 
 - `_view_middleware`
 - `_template_response_middleware`
 - `_exception_middleware`
 - `_middleware_chain`
 
-These are populated later via `load_middleware()`, which is called by subclasses after the environment is set up. That method builds the middleware chain from `settings.MIDDLEWARE`.
+These are populated later by `load_middleware()` (line 27), which must be called explicitly after the environment is set up. That method fills the three middleware lists and builds the `_middleware_chain` from `settings.MIDDLEWARE`.
 ```
 
 #### Response (`with_budi`)
@@ -3680,20 +3359,20 @@ These are populated later via `load_middleware()`, which is called by subclasses
 ```text
 `BaseHandler` is defined at `django/core/handlers/base.py:21`.
 
-It has **no `__init__` method** — it doesn't initialize anything on construction. Instead, it declares four **class-level attributes**, all set to `None`:
+It has **no `__init__` method** — it doesn't initialize anything on construction. Instead, it declares four **class-level attributes** set to `None`:
 
 - `_view_middleware` (line 22)
 - `_template_response_middleware` (line 23)
 - `_exception_middleware` (line 24)
 - `_middleware_chain` (line 25)
 
-These are populated later by `load_middleware()` (line 27), which subclasses call after the environment is set up. That method builds the middleware chain from `settings.MIDDLEWARE`, filling the three middleware lists and assigning the final composed handler to `_middleware_chain`.
+These are populated later by `load_middleware()` (line 27), which is called by subclasses (`WSGIHandler`, `AsyncClientHandler`, etc.) after the environment is set up — not during `__init__`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are correct and nearly identical in substance. Response B edges ahead by including specific line numbers for each class-level attribute and for load_middleware(), making it more grounded in the repository and easier for the user to navigate. It also adds a bit more detail about what load_middleware does (filling the three middleware lists and assigning the composed handler). The differences are minor but consistently favor Response B.
+Both responses are correct and nearly identical in content: same file location, same observation about no __init__, same four class-level attributes, same mention of load_middleware(). Response B is slightly better grounded by providing per-attribute line numbers (lines 22-25) and naming specific subclasses (WSGIHandler, AsyncClientHandler) that call load_middleware, giving the reader more actionable pointers into the codebase. The difference is small but consistent across all dimensions.
 ```
 
 </details>
@@ -3702,103 +3381,103 @@ Both responses are correct and nearly identical in substance. Response B edges a
 
 **Prompt:** Trace the call chain from an incoming HTTP request to the view function — what functions does it pass through?
 
-- Interactions: no_budi=7 / with_budi=8
-- Cost USD: no_budi=$0.1240 / with_budi=$0.1321
+- Interactions: no_budi=7 / with_budi=6
+- Cost USD: no_budi=$0.1363 / with_budi=$0.1228
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the complete call chain for a synchronous WSGI request reaching a view:
+Here's the complete call chain for a synchronous WSGI request:
 
----
-
-### 1. `WSGIHandler.__call__` — entry point
-**`django/core/handlers/wsgi.py:120`**
-
+### 1. `WSGIHandler.__call__` — `wsgi.py:120`
 The WSGI server calls the handler as a callable. It:
-- Sets the script prefix
-- Fires `request_started` signal
+- Sends `request_started` signal
 - Creates a `WSGIRequest` from the WSGI `environ`
 - Calls `self.get_response(request)`
 
-### 2. `BaseHandler.get_response` 
-**`django/core/handlers/base.py:138`**
-
-- Sets `ROOT_URLCONF` for the thread via `set_urlconf()`
-- Invokes `self._middleware_chain(request)` — the assembled middleware stack
+### 2. `BaseHandler.get_response` — `base.py:138`
+- Sets the root URLconf via `set_urlconf(settings.ROOT_URLCONF)`
+- Calls `self._middleware_chain(request)` — the outermost middleware
 
 ### 3. Middleware chain (outermost → innermost)
-**`django/core/handlers/base.py:27-104`** (`load_middleware`)
+During `load_middleware()` (`base.py:27`), Django builds a nested chain from `settings.MIDDLEWARE` in **reverse** order. Each middleware wraps the next one's `__call__`. Every layer is also wrapped in `convert_exception_to_response` (`exception.py:25`), which catches exceptions and turns them into HTTP responses.
 
-Built at startup. Each middleware wraps the next, forming a nested call chain. The outermost middleware's `__call__` is invoked first, which typically calls `self.get_response(request)` to pass to the next middleware inward. The **innermost** handler is `_get_response`, wrapped with `convert_exception_to_response`.
+The chain looks like:
+``\`
+convert(MW_1.__call__)
+  → convert(MW_2.__call__)
+    → convert(MW_3.__call__)
+      → convert(_get_response)   ← the innermost handler
+``\`
 
-Default stack (from `settings.MIDDLEWARE`): SecurityMiddleware → SessionMiddleware → CommonMiddleware → CsrfViewMiddleware → AuthenticationMiddleware → MessageMiddleware → ...
+### 4. `BaseHandler._get_response` — `base.py:176`
+This is the **core** of the pipeline, inside all request/response middleware:
 
-### 4. `BaseHandler._get_response` — the core
-**`django/core/handlers/base.py:176`**
-
-This is the heart of the dispatch:
-
-1. **`self.resolve_request(request)`** (line 183) — resolves the URL:
-   - Gets `URLResolver` via `get_resolver()`
-   - Calls `resolver.resolve(request.path_info)` (`django/urls/resolvers.py:670
-...[truncated 1843 chars]
+**4a. `resolve_request`** (`base.py:302`) — URL resolution
+- Gets the `URLResolver` via `get_resolver()`
+- Calls `resolver.resolve(request.path_info)` (`resolvers.py:670`)
+- `URLResolver.resolve` pattern-matches the path recursively through `url_patterns`, eventually hitting `URLPattern.resolve` (`resolvers.py:471`) which returns a `ResolverMatch(callback, args, kwarg
+...[truncated 2086 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full call chain for a WSGI request reaching a view (the synchronous path):
+Here's the complete call chain for a synchronous WSGI request:
 
-## Request → View Call Chain
+### 1. `WSGIHandler.__call__` — `wsgi.py:120`
+The WSGI server calls the handler as a callable. It:
+- Sends the `request_started` signal
+- Creates a `WSGIRequest` from the WSGI `environ`
+- Calls `self.get_response(request)`
+
+### 2. `BaseHandler.get_response` — `base.py:138`
+- Sets the root URLconf via `set_urlconf(settings.ROOT_URLCONF)`
+- Calls `self._middleware_chain(request)`
+
+### 3. `_middleware_chain` — the middleware onion
+Built during `load_middleware()` (`base.py:27`). Each middleware is wrapped with `convert_exception_to_response` (`exception.py:25`) so exceptions become proper HTTP responses. The chain is constructed **inside-out** from `settings.MIDDLEWARE`:
 
 ``\`
-WSGIHandler.__call__()                          # wsgi.py:120
-│
-├─ 1. set_script_prefix()                       # Sets SCRIPT_NAME for the thread
-├─ 2. signals.request_started.send()            # Fires request_started signal
-├─ 3. WSGIRequest(environ)                      # Builds the request object
-│
-└─ 4. BaseHandler.get_response(request)         # base.py:138
-   │
-   ├─ 5. set_urlconf(settings.ROOT_URLCONF)     # Sets the root URLconf for this thread
-   │
-   └─ 6. self._middleware_chain(request)         # base.py:142
-      │
-      │  ┌──────────────────────────────────────────────┐
-      │  │ The middleware chain is an onion built during │
-      │  │ load_middleware() (base.py:27).               │
-      │  │                                              │
-      │  │ Each middleware wraps the next one:           │
-      │  │   convert_exception_to_response(mw_N)        │
-      │  │     → convert_exception_to_response(mw_N-1)  │
-      │  │       → ...                                  │
-      │  │         → convert_exception_to_response(     │
-      │  │             _get_response)                   │
-      │  └──────────────────────────────────────────────┘
-      │
-      │  Middleware __call__ methods execute in order
-      │  (e.g. SecurityMiddleware, SessionMiddleware,
-      │   CommonMiddleware, CsrfViewMiddleware,
-      │   AuthenticationMiddleware, Mess
-...[truncated 2024 chars]
+outermost middleware.__call__(request)
+  → next middleware.__call__(request)
+    → ...
+      → innermost middleware.__call__(request)
+        → _get_response(request)     ← the core
+``\`
+
+Each middleware's `__call__` typically does:
+1. Pre-processing on the request
+2. `response = self.get_response(request)` (calls next layer)
+3. Post-processing on the response
+
+### 4. `BaseHandler._get_response` — `base.py:176`
+The innermost handler. This is where URL resolution and view invocation happen:
+
+1. **`self.resolve_request(request)`** (`base.py:302`) — resolves the URL:
+   - Gets the resolver via `get_resolver()`
+   - Calls `resolver.resolve(request.path_info)` → returns `(view_func, args, kwargs)`
+   - Sets `request.resolver_match`
+
+2. **View middlew
+...[truncated 1668 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are excellent and nearly identical in content, accuracy, and grounding. They trace the same call chain: WSGIHandler.__call__ → get_response → _middleware_chain → _get_response → resolve_request → process_view → view function. Both reference the same file paths and line numbers (wsgi.py:120, base.py:138, base.py:176, base.py:302, resolvers.py:670, etc.). Response A uses a prose-then-diagram format and explicitly covers process_template_response in the main flow. Response B uses a single unified ASCII diagram with a key-points section and adds details like reverse iteration in load_middleware and convert_exception_to_response wrapping each layer. Both mention process_exception. The differences are presentational rather than substantive — both are thoroughly grounded in the Django codebase and equally actionable for understanding the request lifecycle.
+Both responses are nearly identical in structure, content, and accuracy. They trace the same call chain (WSGIHandler.__call__ → BaseHandler.get_response → middleware chain → _get_response → resolve_request → view middleware → make_view_atomic → view invocation → template response/exception middleware) with the same file/line references. Response A provides slightly more detail on URL resolution internals (resolvers.py:670, resolvers.py:471) while Response B adds a useful explanation of the middleware __call__ pattern (pre-processing → get_response → post-processing). Both include clear visual summaries. The differences are minor stylistic choices that don't meaningfully differentiate quality.
 ```
 
 </details>
 
-<details><summary>Django P7 | winner=with_budi | Q 7→9 G 7→8</summary>
+<details><summary>Django P7 | winner=no_budi | Q 8→7 G 9→7</summary>
 
 **Prompt:** What functions does get_response call and what does each return?
 
-- Interactions: no_budi=10 / with_budi=3
-- Cost USD: no_budi=$0.0716 / with_budi=$0.0655
+- Interactions: no_budi=9 / with_budi=4
+- Cost USD: no_budi=$0.0773 / with_budi=$0.0493
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
@@ -3806,99 +3485,79 @@ Both responses are excellent and nearly identical in content, accuracy, and grou
 ```text
 Here's what `get_response` (`django/core/handlers/base.py:138`) calls and what each returns:
 
-1. **`set_urlconf(settings.ROOT_URLCONF)`** (`django/urls/base.py:148`) — Sets the URLconf for the current thread/asyncio task by storing the value in a thread-local. Returns **`None`** (no return statement).
+1. **`set_urlconf(settings.ROOT_URLCONF)`** (`django/urls/base.py:148`) — Sets the URLconf for the current thread/asyncio task. Returns **`None`** (no return statement).
 
-2. **`self._middleware_chain(request)`** (`django/core/handlers/base.py:104`) — This is the composed middleware chain built during `load_middleware()`. It's a nested callable where each middleware wraps the next, ultimately calling the view. Returns an **`HttpResponse`** object.
+2. **`self._middleware_chain(request)`** (`base.py:142`) — This is the composed middleware chain built during `load_middleware()` (line 27). It's a nested callable wrapping all middleware around the core handler (`_get_response`). Returns an **`HttpResponse`** object.
 
-3. **`request.close`** — Not called directly; it's appended to `response._resource_closers` for later cleanup. It's a method reference, not an invocation within `get_response`.
+3. **`request.close`** — Not called directly; it's appended to `response._resource_closers` for later cleanup. No immediate return.
 
-4. **`log_response(...)`** (`django/utils/log.py:257`) — Called only when `response.status_code >= 400`. Logs 4xx responses as warnings and 5xx as errors via Django's request logger. Returns **`None`**.
+4. **`log_response(...)`** (`django/utils/log.py:257`) — Called only when `response.status_code >= 400`. Logs 4xx as warnings and 5xx as errors via Django's request logger. Returns **`None`** (either exits early if already logged, or logs and sets `response._has_been_logged = True`).
 
-The method itself returns the **`HttpResponse`** object obtained from the middleware chain.
+The method itself returns the **`HttpResponse`** produced by the middleware chain.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's what `get_response` (line 138) calls and what each returns:
+Here are the functions called by `get_response` (`django/core/handlers/base.py:138`) and what each returns:
 
-1. **`set_urlconf(settings.ROOT_URLCONF)`** (line 141) — Sets the default URL resolver configuration for the current thread. Returns `None`.
+1. **`set_urlconf(settings.ROOT_URLCONF)`** (`django.urls.set_urlconf`) — Sets the root URLconf for the current thread. Returns `None`.
 
-2. **`self._middleware_chain(request)`** (line 142) — Executes the full middleware chain (built during `load_middleware`), which ultimately calls `_get_response`. Returns an **`HttpResponse`** object.
+2. **`self._middleware_chain(request)`** — The compiled middleware chain (built in `load_middleware`). Returns an **`HttpResponse`** object after passing the request through all middleware and the view.
 
-3. **`request.close`** (line 143, appended to `_resource_closers`) — Not called here, just registered as a closer for later cleanup.
+3. **`request.close`** — Not called directly; it's appended to `response._resource_closers` so it runs when the response is closed. It cleans up request resources (uploaded file handlers, etc.). Returns `None` when eventually called.
 
-4. **`log_response(...)`** (line 145) — Called only if `status_code >= 400`. Logs the error response. Returns `None`.
+4. **`log_response(...)`** (`django.utils.log.log_response`) — Called only when `response.status_code >= 400`. Logs the error response. Returns `None`.
 
-The method itself returns the **`HttpResponse`** from the middleware chain.
-
----
-
-If you're also interested in `_get_response` (line 176), which is the inner core that `_middleware_chain` eventually delegates to:
-
-1. **`self.resolve_request(request)`** (line 183) — Resolves the URL to a view. Returns a **`ResolverMatch`** (unpacked as `callback, callback_args, callback_kwargs`).
-
-2. **View middleware methods** (line 187–190) — Each returns `None` (continue) or an **`HttpResponse`** (short-circuit).
-
-3. **`self.make_view_atomic(callback)`** (line 194) — Wraps the view in `transaction.atomic` if needed. Returns the **view callable** (possibly wrapped).
-
-4. **`wrapped_callback(request, ...)`** (line 199) — The actual view. Returns an **`HttpResponse`** (or `TemplateResponse`).
-
-5. **`self.process_exception_by_middleware(e, req
-...[truncated 546 chars]
+The method itself returns the **`HttpResponse`** object produced by the middleware chain.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the four key operations in `get_response`: `set_urlconf`, `self._middleware_chain(request)`, registering `request.close`, and `log_response`. They agree on return values and behavior. Response A adds file path references (e.g., `django/urls/base.py:148`) which is useful but includes a slightly misleading line number for `set_urlconf`. Response B goes significantly further by also documenting `_get_response`, the inner method that `_middleware_chain` delegates to, covering `resolve_request`, view middleware, `make_view_atomic`, the view call, exception handling, `check_response`, template response middleware, and `response.render()`. This extra depth is highly actionable for someone trying to understand the full request-response flow, making Response B substantially more useful while still being accurate and grounded in the codebase.
+Both responses identify the same four function calls within get_response and correctly describe their return values. Response A provides more specific grounding: exact file paths with line numbers (e.g., django/urls/base.py:148, django/utils/log.py:257), details about log_response behavior (4xx as warnings, 5xx as errors, sets _has_been_logged), and mentions the early exit path. Response B uses dotted module paths instead of file:line references, which are less directly navigable, and provides slightly less detail about log_response internals. Both are accurate and well-structured, but Response A edges ahead on grounding and specificity.
 ```
 
 </details>
 
-<details><summary>Django P8 | winner=tie | Q 8→8 G 9→9</summary>
+<details><summary>Django P8 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** What calls execute_from_command_line and from where is it triggered?
 
-- Interactions: no_budi=2 / with_budi=2
-- Cost USD: no_budi=$0.0252 / with_budi=$0.0265
+- Interactions: no_budi=2 / with_budi=3
+- Cost USD: no_budi=$0.0301 / with_budi=$0.0283
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
-
-```text
-There are **3 call sites** that trigger `execute_from_command_line` (defined at `django/core/management/__init__.py:440`):
-
-### 1. `django-admin` entry point
-**`pyproject.toml:45`** — registered as a console script:
-``\`
-django-admin = "django.core.management:execute_from_command_line"
-``\`
-This is the primary CLI entry point when you run `django-admin`.
-
-### 2. `python -m django`
-**`django/__main__.py:10`** — called with no arguments (uses `sys.argv`):
-``\`python
-management.execute_from_command_line()
-``\`
-
-### 3. `manage.py` (project template)
-**`django/conf/project_template/manage.py-tpl:18`** — the generated `manage.py` for every Django project:
-``\`python
-execute_from_command_line(sys.argv)
-``\`
-
-The remaining hits are test files and docs that also call it, plus two test-specific `manage.py` variants (`configured_settings_manage.py`, `configured_dynamic_settings_manage.py`) used by the admin_scripts test suite.
-```
-
-#### Response (`with_budi`)
 
 ```text
 Here's the call chain for `execute_from_command_line`:
 
 **Definition:** `django/core/management/__init__.py:440`
 
-**Callers (entry points):**
+**Callers (3 entry points):**
+
+1. **`django-admin` CLI entry point** — `pyproject.toml:45` registers `django.core.management:execute_from_command_line` as the `django-admin` console script. This is the primary way it's triggered from the command line.
+
+2. **`manage.py` (project template)** — `django/conf/project_template/manage.py-tpl:18` calls `execute_from_command_line(sys.argv)` in `main()`. Every Django project's `manage.py` uses this.
+
+3. **`python -m django`** — `django/__main__.py:10` calls `management.execute_from_command_line()`, enabling `python -m django <command>`.
+
+**Test callers** (not production entry points):
+- `tests/i18n/test_compilation.py:123`
+- `tests/i18n/test_extraction.py:1046`
+- `tests/admin_scripts/tests.py:2565`
+- `tests/admin_scripts/configured_settings_manage.py:9`
+- `tests/admin_scripts/configured_dynamic_settings_manage.py:20`
+- `tests/i18n/sampleproject/manage.py:12`
+
+So all three standard Django invocation methods (`django-admin`, `manage.py`, `python -m django`) funnel through `execute_from_command_line` as the single entry point into the management command infrastructure.
+```
+
+#### Response (`with_budi`)
+
+```text
+`execute_from_command_line` is defined at `django/core/management/__init__.py:440` and is called from three entry points:
 
 1. **`django-admin` CLI** — `pyproject.toml:45` registers it as a console script entry point:
    ``\`
@@ -3910,106 +3569,74 @@ Here's the call chain for `execute_from_command_line`:
    management.execute_from_command_line()
    ``\`
 
-3. **`manage.py`** (project template) — `django/conf/project_template/manage.py-tpl:18`:
+3. **`manage.py`** (per-project) — `django/conf/project_template/manage.py-tpl:18`:
    ``\`python
    execute_from_command_line(sys.argv)
    ``\`
 
-4. **Tests** — called directly in `tests/i18n/test_compilation.py`, `tests/i18n/test_extraction.py`, and `tests/admin_scripts/tests.py` for testing management command behavior.
-
-**In short:** `execute_from_command_line` is the single entry point for all Django management commands, triggered three ways in production: the `django-admin` console script, `python -m django`, and the per-project `manage.py`.
+The remaining hits are test files and docs that exercise it directly for testing purposes.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify the same three production call sites with correct file paths and line numbers: pyproject.toml:45 (django-admin console script), django/__main__.py:10 (python -m django), and django/conf/project_template/manage.py-tpl:18 (manage.py). Both include code snippets. Response A mentions test files and test-specific manage.py variants in passing; Response B explicitly names test files (test_compilation.py, test_extraction.py, admin_scripts/tests.py). Both provide a clear summary. The differences are marginal — Response A has slightly more detail on test variants, Response B explicitly lists test file paths. Overall quality, grounding, and actionability are equivalent.
+Both responses correctly identify the same definition location (django/core/management/__init__.py:440) and the same three production entry points: django-admin via pyproject.toml, python -m django via __main__.py, and manage.py via the project template. Both reference specific file paths and line numbers. Response A provides a more exhaustive list of test callers with specific file paths, while Response B includes inline code snippets that give immediate context for each call site. Response B is slightly more actionable due to the code snippets, but Response A compensates with its thorough test file enumeration. Overall they are of equivalent quality and correctness.
 ```
 
 </details>
 
-<details><summary>Django P9 | winner=no_budi | Q 9→7 G 9→7</summary>
+<details><summary>Django P9 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** What calls get_wsgi_application and what arguments does each call site pass?
 
 - Interactions: no_budi=2 / with_budi=2
-- Cost USD: no_budi=$0.0229 / with_budi=$0.0219
-- Hook: reason=ok context_chars=980
-
-#### Injected context
-
-```text
-[structural context]
-get_internal_wsgi_application  (basehttp.py:29)
-  ← called by: get_handler
-  → refs: get_wsgi_application, import_string, improperlyconfigured
-get_wsgi_application  (wsgi.py:5)
-  ← called by: get_internal_wsgi_application
-  → refs: setup, wsgihandler
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: django/core/servers/basehttp.py
-  span: 29-54
-  anchor: def get_internal_wsgi_application():
-  proof:
-    - whatever ``django.core.wsgi.get_wsgi_application`` returns.
-    - return get_wsgi_application()
-    - Load and return the WSGI application as configured by the user in
-- file: django/core/wsgi.py
-  span: 5-13
-  anchor: def get_wsgi_application():
-  proof:
-    - The public interface to Django's WSGI support. Return a WSGI callable.
-    - return WSGIHandler()
-    - django.setup(set_prefix=False)
-```
+- Cost USD: no_budi=$0.0265 / with_budi=$0.0242
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Every call site passes **no arguments**:
+All call sites pass **no arguments** — `get_wsgi_application()` takes none. Here are the callers:
 
-| Location | Call |
+| Call site | Code |
 |---|---|
-| `django/core/servers/basehttp.py:46` | `return get_wsgi_application()` — default handler factory for the dev server |
-| `django/conf/project_template/project_name/wsgi.py-tpl:16` | `application = get_wsgi_application()` — project template's WSGI entry point |
-| `tests/wsgi/tests.py:23` | `application = get_wsgi_application()` — basic functionality test |
-| `tests/wsgi/tests.py:58` | `application = get_wsgi_application()` — test case |
-| `tests/wsgi/tests.py:75` | `application = get_wsgi_application()` — test case |
+| `django/core/servers/basehttp.py:46` | `return get_wsgi_application()` — inside `get_internal_wsgi_application()`, used as the default WSGI handler for the dev server |
+| `django/conf/project_template/project_name/wsgi.py-tpl:16` | `application = get_wsgi_application()` — the project template's WSGI entry point |
+| `tests/wsgi/tests.py:23` | `application = get_wsgi_application()` — `test_get_wsgi_application` |
+| `tests/wsgi/tests.py:58` | `application = get_wsgi_application()` — test for `INSTALLED_APPS` validation |
+| `tests/wsgi/tests.py:75` | `application = get_wsgi_application()` — test for file response |
 
-The function itself (`django/core/wsgi.py:5`) takes no parameters, so all call sites simply invoke it with `()`.
+Every call is a bare `get_wsgi_application()` with no arguments.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Two production call sites, both passing **no arguments**:
+Two call sites in production code, both passing **no arguments**:
 
-1. **`django/core/servers/basehttp.py:46`** — `get_internal_wsgi_application()` calls `return get_wsgi_application()` as the fallback when the user hasn't configured a custom `WSGI_APPLICATION` setting.
+1. **`django/core/servers/basehttp.py:46`** — `get_internal_wsgi_application()` calls `return get_wsgi_application()` as the fallback when no `WSGI_APPLICATION` setting is configured.
 
-2. **`django/conf/project_template/project_name/wsgi.py-tpl:16`** — the default project template assigns `application = get_wsgi_application()`, which is what most deployed Django apps use.
+2. **`django/conf/project_template/project_name/wsgi.py-tpl:16`** — the default project template assigns `application = get_wsgi_application()` to expose the WSGI entry point.
 
-The remaining hits are tests (`tests/wsgi/tests.py`) and documentation, all also calling it with no arguments.
+Tests (`tests/wsgi/tests.py:23,58,75`) also call it with no arguments.
+
+`get_wsgi_application` takes no parameters — every call site invokes it bare.
 ```
 
 #### Judge rationale
 
 ```text
-Response A provides a complete, precise table listing all 5 call sites with exact file paths and line numbers, making it immediately actionable. Response B correctly identifies the two production call sites with good contextual explanation but hand-waves the test call sites as "the remaining hits," which is less thorough for a question asking "what calls get_wsgi_application." Both correctly note no arguments are passed. Response A is more complete and directly answers the question as asked.
+Both responses identify the exact same 5 call sites with correct file paths and line numbers, and both correctly state that no arguments are passed. Response A uses a table format listing all sites uniformly. Response B adds a useful distinction between production code and test code, and provides slightly more context (e.g., explaining the fallback condition in basehttp.py). Both are well-grounded and accurate. The differences are minor stylistic choices — A is more exhaustive in presentation, B is more concise and contextual. Overall quality is essentially equal.
 ```
 
 </details>
 
-<details><summary>Django P10 | winner=tie | Q 8→8 G 7→7</summary>
+<details><summary>Django P10 | winner=with_budi | Q 8→8 G 7→8</summary>
 
 **Prompt:** What is the cleanup order for middleware when a response is returned — trace the middleware exit path?
 
-- Interactions: no_budi=6 / with_budi=4
-- Cost USD: no_budi=$0.1488 / with_budi=$0.1159
+- Interactions: no_budi=8 / with_budi=5
+- Cost USD: no_budi=$0.1411 / with_budi=$0.1252
 - Hook: reason=ok context_chars=2133
 
 #### Injected context
@@ -4052,114 +3679,105 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-Here's the complete middleware exit path in Django:
+Here's the complete middleware exit path:
 
 ## Middleware Chain Structure
 
-During `load_middleware()` (`base.py:27`), the chain is built by iterating `settings.MIDDLEWARE` **in reverse** (`base.py:41`). Each middleware wraps the next one, creating a nested call stack like Russian dolls:
+The chain is built in `base.py:27-104` by iterating `settings.MIDDLEWARE` **in reverse**. Each middleware wraps the next one, creating a nested call stack like Russian dolls:
 
 ``\`
 MW_1( MW_2( MW_3( _get_response ) ) )
 ``\`
 
-## Request/Response Flow (sync path)
+Each middleware is also wrapped with `convert_exception_to_response` (`base.py:97`), which catches any exception and converts it to an HTTP response — ensuring every layer always receives a response, never an exception.
+
+## Exit Path (Response Flowing Back Out)
 
 Given `MIDDLEWARE = ['MW_1', 'MW_2', 'MW_3']`:
 
-### Entry (outside → inside)
-``\`
-MW_1.__call__()  →  MW_1.process_request()
-  MW_2.__call__()  →  MW_2.process_request()
-    MW_3.__call__()  →  MW_3.process_request()
-      _get_response()         ← the innermost handler
-``\`
+### 1. Innermost: `_get_response` (`base.py:176-228`)
+- Runs `process_view` hooks in **forward order** (MW_1 → MW_2 → MW_3) — `base.py:186-191`
+- Calls the view — `base.py:199`
+- If the view raises, runs `process_exception` hooks in **reverse order** (MW_3 → MW_2 → MW_1) — `base.py:358-366`
+- If response has `.render()`, runs `process_template_response` in **reverse order** (MW_3 → MW_2 → MW_1) — `base.py:211-219`, then calls `response.render()`
 
-### Inside `_get_response()` (`base.py:176`)
-1. **`process_view`** — called in **definition order**: MW_1 → MW_2 → MW_3 (line 86)
-2. **View is called** (line 199)
-3. **`process_template_response`** — called in **reverse order**: MW_3 → MW_2 → MW_1 (line 211)
-4. **`process_exception`** — called in **reverse order**: MW_3 → MW_2 → MW_1 (line 363)
-
-### Exit / Cleanup (inside → outside)
-``\`
-      _get_response() returns response
-    MW_3.process_response(request, response)   ← first to run
-  MW_2.process_response(request, response)     ← second
-MW_1.process_response(request, response)       ← last (outermost)
-``\`
-
-This happens because each `MiddlewareMixin.__call__` (`deprecation.py:302`) does:
+### 2. Response unwinds through `MiddlewareMixin.__call__` (`deprecation.py:302-312`)
+Each middleware's `__call__` does:
 ``\`python
-response = response or self.get_response(request)   # recurse inward
-response = self.process_response(request, response)  # then cle
-...[truncated 1656 chars]
+response = response or self.get_response(request)   # calls inner middleware
+if hasattr(self, 'process_response'):
+    response = self.process_response(request, response)  # post-processes
+``\`
+
+So `process_response` runs in **reverse order** as the call stack unwinds:
+1. **MW_3**.`process_response` (innermost
+...[truncated 1113 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the middleware exit path when a response is returned:
+Here's the middleware exit path traced through the code:
 
-## Middleware Chain Structure
+## Middleware Exit Order
 
-During `load_middleware()` (`base.py:41`), middleware is iterated in **reversed** `MIDDLEWARE` order. Each middleware wraps the next handler, creating a nested chain. For a setting like:
+Django's middleware forms a **nested onion** — each middleware wraps the next one. The response unwinds in **reverse order** of `settings.MIDDLEWARE`.
 
-``\`python
-MIDDLEWARE = [
-    'A',
-    'B',
-    'C',
-]
-``\`
+### 1. Chain construction (`base.py:27-104`)
 
-The chain is built as: **A(B(C(_get_response)))**.
-
-## Response Exit Path (sync, `MiddlewareMixin.__call__` at `deprecation.py:302`)
-
-Each middleware's `__call__` does:
+`load_middleware` iterates over `settings.MIDDLEWARE` in **reverse** (line 41):
 
 ``\`python
-response = self.get_response(request)        # call inner middleware
-response = self.process_response(request, response)  # then process on the way out
-return response
+for middleware_path in reversed(settings.MIDDLEWARE):
+    ...
+    mw_instance = middleware(adapted_handler)   # line 63
+    handler = convert_exception_to_response(mw_instance)  # line 97
 ``\`
 
-This means `process_response` hooks run in **reverse order** of `process_request` — they unwind naturally via the call stack:
+Each middleware wraps the previous `handler`, so the **first** middleware in `settings.MIDDLEWARE` becomes the **outermost** layer, and the innermost handler is `_get_response`.
 
-``\`
-→ A.process_request(request)
-  → B.process_request(request)
-    → C.process_request(request)
-      → _get_response(request)   # view + view/exception/template middleware
-    ← C.process_response(request, response)
-  ← B.process_response(request, response)
-← A.process_response(request, response)
+### 2. Request enters — `get_response` (`base.py:138`)
+
+``\`python
+response = self._middleware_chain(request)  # calls outermost middleware
 ``\`
 
-## Inside `_get_response` (`base.py:176`)
+### 3. Each `MiddlewareMixin.__call__` (`deprecation.py:302-312`)
 
-Before the response bubbles back up through `process_response`, these run in this order:
+``\`python
+def __call__(self, request):
+    response = None
+    if hasattr(self, "process_request"):
+        response = self.process_request(request)        # ① request phase (top→down)
+    response = response or self.get_response(request)   # ② recurse into next middleware
+    if hasattr(self, "process_response"):
+        response = self.process_response(request, response)  # ③ response phase (bottom→up)
+    return response
+``\`
 
-1. **View middleware** (`process_view`) — runs in **forward** order (`base.py:186`)
-2. **View called** (`base.py:199`)
-3. **Exception middleware** (`process_exception`) — runs in **reverse** order if the view raises (`base.py:363`), innermost
-...[truncated 1342 chars]
+### 4. The full exit path for a normal response
+
+Given `MIDDLEWARE = [A, B, C]`:
+
+``\`
+Request in:   A.process_r
+...[truncated 2032 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in quality, covering the same core concepts: middleware chain construction via reversed iteration in load_middleware(), the nested call stack producing reverse-order process_response, the hooks inside _get_response (process_view forward, process_exception/process_template_response reverse), and short-circuit behavior. Response A adds extra detail about convert_exception_to_response wrapping and post-chain cleanup (request.close, request_finished signal), plus a nice ASCII diagram. Response B provides a clean summary table and mentions response.render() after template response middleware, with slightly more precise line references (e.g., base.py:186 vs base.py:86). Both are well-grounded with file/line references that appear reasonable for the Django codebase. The differences are marginal — A has more depth on edge cases while B has better organization — making this a tie.
+Both responses are accurate and well-structured explanations of Django's middleware exit path. Response A provides a comprehensive summary table covering all hook types and explains the convert_exception_to_response safety net well. Response B edges ahead by citing specific middleware implementations (FlatpageFallbackMiddleware, CsrfViewMiddleware, MessageMiddleware) with their source file locations, including inline code snippets from the actual implementation, explicitly covering short-circuit behavior when process_request returns early, and providing a concrete example showing what real middleware do in their process_response hooks. Response B's grounding in the broader repository (not just base.py and deprecation.py) gives it a slight edge overall.
 ```
 
 </details>
 
-<details><summary>Django P11 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>Django P11 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** How does Django load runtime configuration and which environment variables or settings does it read at startup?
 
-- Interactions: no_budi=3 / with_budi=4
-- Cost USD: no_budi=$0.0580 / with_budi=$0.0631
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0621 / with_budi=$0.0654
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
@@ -4167,68 +3785,71 @@ Both responses are nearly identical in quality, covering the same core concepts:
 ```text
 Here's how Django loads its runtime configuration:
 
-## The Loading Flow
+## The loading mechanism (`django/conf/__init__.py`)
 
-### 1. Entry Point: `DJANGO_SETTINGS_MODULE` environment variable
+**1. Lazy initialization via `LazySettings`** (line 39)
 
-The **only** environment variable Django requires at startup is **`DJANGO_SETTINGS_MODULE`** (defined at `django/conf/__init__.py:21`). It must be a dotted Python module path (e.g., `myproject.settings`).
+The module-level `settings = LazySettings()` (line 257) is a lazy proxy. No settings are loaded until something first accesses an attribute on it, which triggers `_setup()`.
 
-### 2. Lazy Loading via `LazySettings`
+**2. `_setup()` reads the environment variable** (line 46)
 
-The global `settings` object (`django/conf/__init__.py:257`) is a **`LazySettings`** instance — a `LazyObject` proxy. Settings are **not loaded at import time**. The actual loading is deferred until the first attribute access.
+The single critical env var is **`DJANGO_SETTINGS_MODULE`** (line 21). `_setup()` calls `os.environ.get("DJANGO_SETTINGS_MODULE")` and raises `ImproperlyConfigured` if it's not set (unless `settings.configure()` was called manually first).
 
-On first access, `_setup()` (line 46) runs:
-1. Reads `os.environ["DJANGO_SETTINGS_MODULE"]`
-2. If missing, raises `ImproperlyConfigured`
-3. Creates a `Settings(settings_module)` instance
+**3. `Settings.__init__()` does the actual loading** (line 152)
 
-### 3. `Settings.__init__` (line 152) — the actual loading
+Two-phase process:
+- **Phase 1 — Global defaults** (lines 155–157): Iterates over `django.conf.global_settings` and copies every `UPPER_CASE` attribute onto the `Settings` instance.
+- **Phase 2 — User module** (lines 162–183): `importlib.import_module(settings_module)` imports the user's settings module, then every `UPPER_CASE` attribute from it overwrites the defaults. Certain settings (`ALLOWED_HOSTS`, `INSTALLED_APPS`, `TEMPLATE_DIRS`, `LOCALE_PATHS`, `SECRET_KEY_FALLBACKS`) are validated to be list/tuple.
 
-Three phases:
+**4. Timezone side-effect** (lines 185–195): If `time.tzset` exists (Unix), it validates `TIME_ZONE` against `/usr/share/zoneinfo` and sets `os.environ["TZ"]` accordingly.
 
-1. **Load defaults** — iterates over `django.conf.global_settings` and copies all `UPPER_CASE` attributes onto itself (line 155–157).
+## Environment variables Django reads at startup
 
-2. **Load user module** — calls `importlib.import_module(settings_module)` (line 162), then copies all `UPPER_CASE` attributes from the user's module, overriding the defaults (lines 172–183). It also validates that certain settings (`ALLOWED_HOSTS`, `INSTALLED_APPS`, `TEMPLATE_DIRS`, `LOCALE_PATHS`, `SECRET_KEY_FALLBACKS`) are lists or tuples.
-
-3. **Set timezone** — if `TIME_ZONE` is set (and platform supports it), validates the timezone against `/usr/share/zoneinfo`, then sets `os.e
-...[truncated 1244 chars]
+| Variable | Where | Purpose |
+|---|---|---|
+| `DJANGO_SE
+...[truncated 929 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's how Django loads its runtime configuration at startup:
+Here's how Django loads runtime configuration:
 
-## Entry point: `django.setup()`
+## The Loading Mechanism
 
-Defined in `django/__init__.py:8`, this is the main bootstrap function. It:
+**1. Entry point: `LazySettings` (a lazy proxy)**
 
-1. **Triggers settings loading** — accessing any attribute on `settings` forces lazy initialization
-2. **Configures logging** via `settings.LOGGING_CONFIG` and `settings.LOGGING`
-3. **Sets the URL script prefix** from `settings.FORCE_SCRIPT_NAME`
-4. **Populates the app registry** with `settings.INSTALLED_APPS`
+`django/conf/__init__.py:257` creates a module-level singleton:
+``\`python
+settings = LazySettings()
+``\`
 
-## Settings loading: `django/conf/__init__.py`
+Settings are **not loaded at import time**. They are loaded lazily — on first attribute access — via `_setup()` at line 46.
 
-The `settings` singleton (`django/conf/__init__.py:257`) is a **`LazySettings`** proxy. Settings are loaded on first attribute access, not at import time.
+**2. The sole environment variable: `DJANGO_SETTINGS_MODULE`**
 
-### The one required environment variable
+This is the **only environment variable Django itself reads** to find configuration (`django/conf/__init__.py:21`). It must be a Python dotted module path (e.g., `myproject.settings`). If it's unset and nobody called `settings.configure()`, Django raises `ImproperlyConfigured`.
 
-**`DJANGO_SETTINGS_MODULE`** (line 21) — this is the only env var Django itself reads. It must be a dotted Python module path (e.g. `myproject.settings`). If it's unset and `settings.configure()` hasn't been called, Django raises `ImproperlyConfigured`.
+The variable gets set in three standard places:
+- `manage.py` — `os.environ.setdefault('DJANGO_SETTINGS_MODULE', '...')`
+- `wsgi.py` — same pattern
+- `asgi.py` — same pattern
+- Management commands can also override it via `--settings` flag (`django/core/management/base.py:99`).
 
-### Loading sequence (`Settings.__init__`, line 152)
+**3. Two-phase loading in `Settings.__init__` (line 152)**
 
-1. **Defaults from `global_settings`** — all uppercase attributes from `django/conf/global_settings.py` are copied as defaults
-2. **User module imported** — `importlib.import_module(settings_module)` loads the module specified by `DJANGO_SETTINGS_MODULE`
-3. **User settings override defaults** — all uppercase attributes from the user module overwrite the global defaults
-4. **Validation** — certain settings (`ALLOWED_HOSTS`, `INSTALLED_APPS`, `TEMPLATE_DI
-...[truncated 944 chars]
+1. **Defaults from `global_settings`** (line 155–157): Iterates all `UPPER_CASE` attributes from `django/conf/global_settings.py` and copies them onto the `Settings` instance.
+2. **User overrides** (line 162–183): `importlib.import_module(settings_module)` imports the user's settings module, then all its `UPPER_CASE` attributes overwrite the defaults. Certain settings (`ALLOWED_HOSTS`, `INSTALLED_APPS`, etc.) are validated to be list/tuple.
+
+**4. Timezone s
+...[truncated 1395 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-grounded with specific file/line references. The key differentiator is that Response B covers `django.setup()` in `django/__init__.py:8`, which is the actual bootstrap entry point — it mentions logging configuration via LOGGING_CONFIG, URL script prefix from FORCE_SCRIPT_NAME, and app registry population. This is directly relevant to the "at startup" part of the question. Response A instead covers `LazySettings.__getattr__` post-processing (MEDIA_URL/STATIC_URL/SECRET_KEY), which is useful but less about the startup flow. Both correctly identify DJANGO_SETTINGS_MODULE as the sole env var read and TZ as written. Response B provides a more complete picture of the full startup sequence.
+Both responses are highly accurate, well-structured, and grounded in the same specific file locations and line numbers in django/conf/__init__.py. They cover the same core topics: LazySettings lazy proxy, DJANGO_SETTINGS_MODULE as the sole env var, two-phase loading (global_settings then user module), timezone side-effect writing TZ, settings.configure() alternative, and the three standard entry points. Response B adds one extra detail — the __getattr__ post-processing for MEDIA_URL/STATIC_URL and SECRET_KEY validation — and includes a slightly more explicit closing note distinguishing framework code from user code. Response A uses a slightly cleaner table format. The differences are marginal enough to call it a tie, though Response B has a slight edge in actionability due to the extra post-processing detail.
 ```
 
 </details>
@@ -4237,82 +3858,79 @@ Both responses are accurate and well-grounded with specific file/line references
 
 **Prompt:** What unit tests would you add to cover the URL routing system in this codebase — list the most important coverage gaps?
 
-- Interactions: no_budi=24 / with_budi=24
-- Cost USD: no_budi=$0.4955 / with_budi=$0.4992
+- Interactions: no_budi=24 / with_budi=26
+- Cost USD: no_budi=$0.4347 / with_budi=$0.4479
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Now I have a thorough understanding of the codebase. Here are the most important coverage gaps:
+Now I have a thorough picture. Here are the most important coverage gaps:
 
 ---
 
-## Key URL Routing Test Coverage Gaps
+## Key Unit Test Coverage Gaps in Django's URL Routing System
 
-### 1. `reverse()` with `query` and `fragment` — edge cases
-The `query`/`fragment` parameters on `reverse()` (`base.py:36-107`) are tested, but missing:
-- **`query` as a `QueryDict` with multiple values** for the same key (only one basic `QueryDict` test exists)
-- **`fragment` with special characters** (e.g., unicode, `#`, `?`)
+### 1. `ResolverMatch.__getitem__()` — no direct test
+`resolvers.py:76-77` — The tuple unpacking protocol (`func, args, kwargs = resolve(...)`) is never tested directly. Should verify indexing with 0, 1, 2 and `IndexError` for out-of-range.
 
-### 2. `LocaleRegexRouteDescriptor` — zero tests
-`resolvers.py:293-311` — the `RoutePattern`-specific locale descriptor has **no dedicated tests** at all. `LocaleRegexDescriptor` (for `RegexPattern`) is tested in `test_localeregexdescriptor.py`, but the `RoutePattern` equivalent is not. Key cases:
-- Translated lazy route string compiled per-language
-- Non-translated route compiled only once (caching in `__dict__`)
+### 2. `ResolverMatch.__repr__()` with `functools.partial` views
+`resolvers.py:80-101` — There's a test for `repr` with partial (`tests/urlpatterns_reverse/tests.py:1671`), but the `captured_kwargs` and `extra_kwargs` branches in `__repr__` (lines 95-100) are not covered. Should test repr output when both fields are populated.
 
-### 3. `LocalePrefixPattern` — minimal coverage
-`resolvers.py:388-419` — tested indirectly via `i18n/patterns/tests.py` but no **unit-level** tests for:
-- `match()` when path doesn't start with the language prefix (returns `None`)
-- `language_prefix` when `prefix_default_language=False` and current language equals `LANGUAGE_CODE`
-- `check()` returns empty list
-- `describe()` and `__str__`
+### 3. `RoutePattern.match()` — fast path without converters
+`resolvers.py:340-345` — The optimized no-regex path (endpoint exact match and prefix `startswith`) is only indirectly exercised. Should unit-test `RoutePattern.match()` directly for:
+- Endpoint with no converters (exact match)
+- Non-endpoint with no converters (prefix match)
+- Non-matching cases for both
 
-### 4. `RoutePattern.match()` — fast-path branches untested directly
-`resolvers.py:324-346` has three distinct branches:
-- **With converters** (regex path) — tested
-- **Endpoint without converters** (exact string mat
-...[truncated 3160 chars]
+### 4. `RegexPattern.match()` with `fullmatch` vs `search`
+`resolvers.py:202-216` — The `fullmatch` branch (endpoint with `$`-terminated regex) has no isolated test. Should verify that an endpoint `RegexPattern` rejects partial matches that `search` would accept.
+
+### 5. `LocalePrefixPattern` — direct unit tests
+`resolvers.py:388-419` — The `match()`, `check()`, `describe()`, and `__str__()` methods have no dedic
+...[truncated 3782 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Based on my thorough review of the source code (`django/urls/`) and the existing test suites (`tests/urlpatterns/` and `tests/urlpatterns_reverse/`), here are the most important coverage gaps:
+Now I have a thorough picture. Here are the most important coverage gaps:
 
 ---
 
-## Top Coverage Gaps in Django URL Routing Tests
+## Key Unit Test Coverage Gaps in Django's URL Routing System
 
-### 1. `ResolverMatch.__reduce_ex__` — only basic pickling tested
-- Existing test covers `pickle.dumps()` but doesn't test `pickle.loads()` round-trip or `copy.deepcopy()` which also invokes `__reduce_ex__`.
+### 1. `is_valid_path()` — Zero tests
+`django/urls/base.py:169` — No tests exist anywhere. Should test:
+- Returns `ResolverMatch` for a valid path
+- Returns `False` for an unresolvable path
+- Works with a custom `urlconf` argument
 
-### 2. `RoutePattern.match()` — fast-path branches under-tested
-`resolvers.py:324-346` has three distinct branches:
-- **With converters** → regex path (tested)
-- **Endpoint without converters** → exact string equality (barely tested directly)
-- **Non-endpoint without converters** → `startswith` prefix match (barely tested directly)
+### 2. `URLResolver._join_route()` / `_extend_tried()` — No direct tests
+`django/urls/resolvers.py:657-663` — These static methods are only exercised indirectly. Should test:
+- `_join_route("", "^foo/")` returns `"^foo/"`
+- `_join_route("prefix/", "^bar/")` strips `^` and joins
+- `_extend_tried` with `sub_tried=None` vs a list of sub-patterns
 
-Missing: explicit unit tests for `RoutePattern.match()` on these non-converter branches, especially edge cases like empty routes, partial prefix matches, and lazy-translated routes on each branch.
+### 3. `URLPattern.lookup_str` — No direct tests
+`django/urls/resolvers.py:487-500` — Tested indirectly through `_is_callback()`, but the branching logic (partial views, `view_class`, class instances without `__name__`) is not unit-tested. Should test:
+- Function-based view
+- `functools.partial` wrapping a view
+- Class-based view via `.as_view()` (has `view_class`)
+- Callable class instance (no `__name__`)
 
-### 3. `LocalePrefixPattern` — zero direct unit tests
-`resolvers.py:388-419`: No tests directly exercise:
-- `match()` when `language_prefix` is empty (default language + `prefix_default_language=False`)
-- `match()` when path doesn't start with the language prefix
-- `regex` property construction
-- `describe()` and `__str__()`
-- `check()` returning empty list
-
-### 4. `_route_to_regex` — edge cases
-`resolvers.py:249-290`:
-- Route with **no parameters** (static string) — not directly tested
-- Route with **mu
-...[truncated 3991 chars]
+### 4. `LocalePrefixPattern` — No direct tests
+`django/urls/resolvers.py:388-419` — Not tested at the unit level (only through i18n integration tests). Should test:
+- `match()` with and without a matching language prefix
+- `language_prefix` property when current language equals/differs from `LANGUAGE_CODE`
+- `prefix_default_language=False` skips prefix for default l
+...[truncated 2253 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are well-grounded, referencing specific file paths and line numbers (e.g., resolvers.py:324-346, base.py:169-178). They share several key findings — RoutePattern.match() fast-path branches, LocalePrefixPattern lacking direct tests, _join_route/_extend_tried untested, is_valid_path untested, CheckURLMixin with APPEND_SLASH=False — which mutually reinforces their accuracy. Response A identifies 14 gaps and includes a priority ranking table, plus unique items like LocaleRegexRouteDescriptor, reverse() query/fragment edge cases, duplicate parameter names in _route_to_regex, and translate_url() edge cases. Response B identifies 11+ gaps with unique valuable items like _populate() re-entrancy guard for recursive URLconf inclusion, get_callable() partial coverage, and resolve() tried-list accumulation for deeply nested includes. Response A's priority table adds actionability, while Response B's coverage of _populate() recursion and get_callable() are genuinely important gaps. Overall quality and grounding are comparable; Response A has a slight edge in actionability due to the priority table but both are truncated making full comparison imperfect. The tie reflects genuinely comparable quality.
+Both responses are well-grounded in the codebase with specific file paths and line numbers. Response A is more comprehensive (14+ items) but was truncated, losing some content. It covers unique areas like RegexPattern.match fullmatch/search distinction, set_script_prefix/get_script_prefix, set_urlconf/get_urlconf, and reverse() with query/fragment. Response B covers 10 items with unique additions like URLPattern.lookup_str branching, URLResolver.check() logic, reverse() args/kwargs ValueError path, and get_callable() edge cases. Response B provides a clear priority summary at the end, making it slightly more actionable. Both correctly identify key gaps (is_valid_path, LocalePrefixPattern, RoutePattern fast-path, _route_to_regex edge cases, _join_route/_extend_tried). The trade-off between A's breadth (despite truncation) and B's focus with prioritization makes them roughly equivalent overall.
 ```
 
 </details>
@@ -4321,70 +3939,55 @@ Both responses are well-grounded, referencing specific file paths and line numbe
 
 **Prompt:** Where is the QuerySet class defined and what does it do?
 
-- Interactions: no_budi=5 / with_budi=2
-- Cost USD: no_budi=$0.0561 / with_budi=$0.0301
-- Hook: reason=ok context_chars=585
-
-#### Injected context
-
-```text
-[structural context]
-__init__  (query.py:306)
-  ← called by: AsyncClientHandler, ManyToManyRel, DjangoTranslation
-  → refs: query
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: django/db/models/query.py
-  span: 303-321
-  anchor: class QuerySet(AltersData):
-  proof:
-    - def __init__(self, model=None, query=None, using=None, hints=None):
-    - self._query = query or sql.Query(self.model)
-    - self._prefetch_related_lookups = ()
-```
+- Interactions: no_budi=3 / with_budi=2
+- Cost USD: no_budi=$0.0397 / with_budi=$0.0323
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 The `QuerySet` class is defined at **`django/db/models/query.py:303`**.
 
-**What it does:** As the docstring says, it represents a **lazy database lookup for a set of objects**. It is the core public API for Django's ORM. Key points:
+It inherits from `AltersData` and its docstring summarizes it well:
 
-- **Lazy evaluation** — queries aren't executed until the results are actually needed (iteration, slicing, `len()`, etc.). Results are cached in `_result_cache`.
-- **Chainable** — methods like `filter()`, `exclude()`, `order_by()`, `values()`, etc. return new `QuerySet` instances, enabling method chaining.
-- **Wraps `sql.Query`** — internally holds a `_query` (`sql.Query`) object that builds the actual SQL.
-- **Data-altering operations** — inherits from `AltersData` and provides methods like `create()`, `update()`, `delete()`, `bulk_create()`, etc.
-- **Manager integration** — provides `as_manager()` (line 337) to turn a custom `QuerySet` into a `Manager`.
+> **"Represent a lazy database lookup for a set of objects."**
 
-Key instance attributes initialized in `__init__` (line 306):
-- `model` — the Django model class this queryset is for
-- `_db` / `_hints` — database routing info
-- `_query` — the underlying `sql.Query` object
-- `_result_cache` — cached results (populated on first evaluation)
-- `_iterable_class` — defaults to `ModelIterable`, controls how rows are yielded (can be `ValuesIterable`, `ValuesListIterable`, etc.)
+It's the core abstraction for building and executing database queries in Django's ORM. Key aspects:
+
+- **Lazy evaluation** — results are not fetched from the database until the queryset is iterated, sliced, or otherwise consumed. Results are cached in `_result_cache`.
+- **Chainable** — methods like `filter()`, `exclude()`, `order_by()`, `values()`, etc. return new `QuerySet` instances, enabling a fluent API.
+- **Wraps `sql.Query`** — the underlying SQL generation is delegated to `self._query` (a `sql.Query` instance, line 310).
+- **Key instance attributes** (lines 306–321):
+  - `model` — the Django model class this queryset is for
+  - `_db` / `_hints` — database routing info
+  - `_result_cache` — cached results (populated on first evaluation)
+  - `_iterable_class` — controls what objects iteration yields (`ModelIterable` by default, `ValuesIterable` for `.values()`, etc.)
+  - `_prefetch_related_lookups` — tracks `prefetch_related()` calls
+- **`as_manager()`** (line 337) — classmethod to create a `Manager` from a custom `QuerySet`, bridging the two APIs.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**`QuerySet`** (defined at `django/db/models/query.py:303`) is Django's core class for representing **lazy database lookups**. Key points:
+The `QuerySet` class is defined at `django/db/models/query.py:303`. Per its docstring, it **represents a lazy database lookup for a set of objects**.
 
-- **Lazy evaluation** — It doesn't hit the database until the results are actually needed (iterated, sliced, etc.). Results are cached in `_result_cache`.
-- **Chainable API** — Methods like `filter()`, `exclude()`, `order_by()`, `values()`, etc. return new `QuerySet` instances, enabling method chaining.
-- **Wraps `sql.Query`** — The actual SQL construction is delegated to `self._query` (a `sql.Query` instance, line 310).
-- **Inherits from `AltersData`** — This mixin marks methods that modify data (like `delete()`, `update()`) so templates can't accidentally call them.
-- **Prefetch support** — Tracks prefetch-related lookups (`_prefetch_related_lookups`) and known related objects for optimization.
-- **Manager integration** — The `as_manager()` classmethod (line 337) lets you turn a custom `QuerySet` into a `Manager`.
+Key points:
+
+- **Inherits from `AltersData`** — a base that marks methods which modify the database.
+- **Lazy evaluation** — the SQL query is not executed until the results are actually needed. Results are cached in `_result_cache`.
+- **`__init__`** (line 306) accepts:
+  - `model` — the Django model class this queryset is for
+  - `query` — an `sql.Query` object (created automatically if not provided)
+  - `using` — the database alias to use
+  - `hints` — routing hints for database routers
+- **Core internal state** includes the SQL query (`_query`), a result cache (`_result_cache`), prefetch lookups (`_prefetch_related_lookups`), and an iterable class (`_iterable_class` defaulting to `ModelIterable`).
+- Provides the chainable API (`.filter()`, `.exclude()`, `.order_by()`, `.values()`, etc.) that Django's ORM is built around — each method returns a new `QuerySet` clone.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify QuerySet at django/db/models/query.py:303 and cover the same core concepts: lazy evaluation, chainable API, sql.Query wrapping, AltersData inheritance, and manager integration via as_manager(). Response A provides slightly more detail on __init__ attributes (model, _db, _hints, _iterable_class), while Response B adds prefetch support and explains the AltersData mixin's purpose (preventing template calls). These are minor complementary differences that balance out. Both are accurate, well-grounded in the repository, and equally useful.
+Both responses correctly identify QuerySet at django/db/models/query.py:303, describe its lazy evaluation, chainable API, internal state (_result_cache, _query, _iterable_class, _prefetch_related_lookups), and inheritance from AltersData. Response A adds a mention of as_manager() and slightly more explicit attribute listing with line references. Response B adds a useful note about what AltersData does ("marks methods which modify the database") and describes __init__ parameters more clearly. These are minor differences in emphasis rather than quality — both are accurate, well-grounded in the actual code, and practically useful.
 ```
 
 </details>
@@ -4394,32 +3997,25 @@ Both responses correctly identify QuerySet at django/db/models/query.py:303 and 
 **Prompt:** Where is the resolve function defined and what is its role in URL resolution?
 
 - Interactions: no_budi=6 / with_budi=1
-- Cost USD: no_budi=$0.0544 / with_budi=$0.0180
+- Cost USD: no_budi=$0.0601 / with_budi=$0.0193
 - Hook: reason=ok context_chars=896
 
 #### Injected context
 
 ```text
 [structural context]
-resolve  (base.py:22)
-  ← called by: URLNode, add_preserved_filters, FlatpageNode
-  → refs: get_resolver, get_urlconf, resolve
 resolve  (resolvers.py:670)
   ← called by: URLNode, add_preserved_filters, FlatpageNode
   → refs: _extend_tried, _join_route, append
+resolve  (base.py:22)
+  ← called by: URLNode, add_preserved_filters, FlatpageNode
+  → refs: get_resolver, get_urlconf, resolve
 
 [budi context]
 rules:
 - Use only file paths shown in snippets for exact-path answers.
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
-- file: django/urls/base.py
-  span: 22-25
-  anchor: def resolve(path, urlconf=None):
-  proof:
-    - return get_resolver(urlconf).resolve(path)
-    - urlconf = get_urlconf()
-    - if urlconf is None:
 - file: django/urls/resolvers.py
   span: 670-717
   anchor: def resolve(self, path):
@@ -4427,89 +4023,102 @@ evidence_cards:
     - sub_match = pattern.resolve(new_path)
     - return ResolverMatch(
     - self._join_route(current_route, sub_match.route),
+- file: django/urls/base.py
+  span: 22-25
+  anchor: def resolve(path, urlconf=None):
+  proof:
+    - return get_resolver(urlconf).resolve(path)
+    - urlconf = get_urlconf()
+    - if urlconf is None:
 ```
 
 #### Response (`no_budi`)
 
 ```text
-There are three `resolve` definitions involved in Django's URL resolution:
+There are three `resolve` functions involved in Django's URL resolution, forming a layered dispatch chain:
 
-### 1. Top-level `resolve()` — `django/urls/base.py:22`
+### 1. Top-level entry point: `django/urls/base.py:22`
+
 ``\`python
 def resolve(path, urlconf=None):
 ``\`
-This is the **public API entry point**. It gets the root URL configuration (defaulting to `settings.ROOT_URLCONF`), obtains the root `URLResolver` via `get_resolver()`, and delegates to its `.resolve(path)` method.
 
-### 2. `URLPattern.resolve()` — `django/urls/resolvers.py:471`
-This is the **leaf-level resolver**. A `URLPattern` represents a single URL route mapped to a view. Its `resolve()`:
-- Tries to match `path` against `self.pattern`.
-- On match, merges captured args/kwargs with any `default_args`.
-- Returns a `ResolverMatch` containing the view callback, args, kwargs, and route info.
-- Returns `None` on no match.
+This is the public API. It determines the active URL configuration (defaulting to `ROOT_URLCONF`), gets the root `URLResolver` via `get_resolver()`, and delegates to its `resolve()` method. This is what's called by Django's request handling machinery (e.g., `BaseHandler`) to turn a request path into a view.
 
-### 3. `URLResolver.resolve()` — `django/urls/resolvers.py:670`
-This is the **recursive/tree-level resolver**. A `URLResolver` represents an `include()` — a group of URL patterns under a common prefix. Its `resolve()`:
-- Matches the prefix of `path` against its own pattern.
-- On prefix match, iterates over `self.url_patterns` and recursively calls `pattern.resolve(new_path)` on the remaining path.
-- Merges captured kwargs from the prefix with those from the sub-match.
-- Builds up route, app_name, and namespace chains for namespaced URL resolution.
-- Tracks all `tried` patterns for the `Resolver404` error message if nothing matches.
-- Raises `Resolver404` if no sub-pattern matches.
+### 2. `URLPattern.resolve()`: `django/urls/resolvers.py:471`
 
-##
-...[truncated 390 chars]
+Handles a **leaf node** — a single URL pattern (e.g., one `path()` entry). It asks `self.pattern.match(path)` and, on match, returns a `ResolverMatch` containing the view callback, positional args, and kwargs.
+
+### 3. `URLResolver.resolve()`: `django/urls/resolvers.py:670`
+
+Handles a **branch node** — a group of URL patterns (e.g., an `include()`). It:
+1. Matches its own prefix pattern against the path.
+2. Iterates over `self.url_patterns`, recursively calling `pattern.resolve(new_path)` on each child (which may be another `URLResolver` or a `URLPattern`).
+3. Merges captured args/kwargs from the prefix with those from the sub-match.
+4. Tracks all tried patterns so that on failure it raises `Resolver404` with useful debug info.
+
+### In summary
+
+`resolve(path)` → root `URLResolver.resolve(path)` → recursively walks the URL tree → eventually hits a `URLPattern.resolve(remaining_path)` → returns a `Resolve
+...[truncated 137 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The `resolve` function is defined in two places:
+There are two key `resolve` functions:
 
-1. **`django/urls/base.py:22`** — A top-level helper that gets the URL resolver for the current/given urlconf and delegates:
-   ``\`python
-   def resolve(path, urlconf=None):
-       if urlconf is None:
-           urlconf = get_urlconf()
-       return get_resolver(urlconf).resolve(path)
-   ``\`
-   This is the public entry point used by `URLNode`, `add_preserved_filters`, and `FlatpageNode`.
+**1. `django/urls/base.py:22`** — The public entry point:
 
-2. **`django/urls/resolvers.py:670`** — The method on `URLResolver` that does the actual work: it iterates over URL patterns, calls each pattern's `resolve(new_path)`, and on a match builds and returns a `ResolverMatch` (combining the matched route, view, args/kwargs, etc.). It also tracks tried patterns via `_extend_tried` and joins nested routes with `_join_route`.
+``\`python
+def resolve(path, urlconf=None):
+    if urlconf is None:
+        urlconf = get_urlconf()
+    return get_resolver(urlconf).resolve(path)
+``\`
 
-In short: `base.resolve()` is the facade, and `URLResolver.resolve()` is the engine that recursively walks the URL configuration tree to find the view matching a given path.
+This is a thin wrapper that gets the root URL resolver for the current/given URLconf and delegates to it.
+
+**2. `django/urls/resolvers.py:670`** — The core recursive resolver on `URLResolver`:
+
+This method walks the URL pattern tree. For each registered pattern, it calls `pattern.resolve(new_path)` to check for a match. On a successful sub-match, it builds and returns a `ResolverMatch` containing the matched view, args/kwargs, the joined route, and the list of tried patterns. It accumulates `tried` entries for error reporting (e.g., 404 debug pages) via `_extend_tried`.
+
+In short: `base.resolve()` is the API you call with a URL path; `URLResolver.resolve()` does the actual recursive pattern matching and returns a `ResolverMatch` that Django uses to dispatch to the correct view.
 ```
 
 #### Judge rationale
 
 ```text
-Response A is more complete by identifying all three `resolve` definitions: the top-level `resolve()` in `base.py:22`, `URLPattern.resolve()` at `resolvers.py:471` (the leaf-level resolver), and `URLResolver.resolve()` at `resolvers.py:670` (the recursive tree resolver). It accurately describes each one's role and provides a clear summary of how they form a tree walk. Response B only explicitly identifies two definitions (base.py and URLResolver), mentioning URLPattern.resolve only indirectly ("calls each pattern's resolve(new_path)") without treating it as a distinct definition. Response B does add some grounding details (specific callers like URLNode, internal methods like _extend_tried and _join_route), but the omission of URLPattern.resolve as a first-class definition is a meaningful gap since the question asks where resolve is defined. Both are accurate in what they cover, but Response A gives a more complete and pedagogically useful answer.
+Response A identifies all three resolve definitions: base.resolve (line 22), URLPattern.resolve (line 471), and URLResolver.resolve (line 670), giving a complete picture of the dispatch chain. It clearly distinguishes leaf nodes (URLPattern) from branch nodes (URLResolver) and explains the recursive walk. Response B only explicitly calls out two of the three, omitting URLPattern.resolve as a standalone definition (it's mentioned indirectly via "pattern.resolve(new_path)"). Response B includes a helpful code snippet for base.resolve, but the missing explicit treatment of URLPattern.resolve makes it less complete. Both are accurate in what they state and provide correct line numbers, but Response A provides a more thorough and structured answer to the question.
 ```
 
 </details>
 
-<details><summary>Django P15 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>Django P15 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** What calls migrate and what does each call site pass as arguments?
 
-- Interactions: no_budi=5 / with_budi=4
-- Cost USD: no_budi=$0.0532 / with_budi=$0.0500
+- Interactions: no_budi=6 / with_budi=6
+- Cost USD: no_budi=$0.1411 / with_budi=$0.1383
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-The **definition** is at `django/db/migrations/executor.py:96`:
+Here's the signature and all call sites:
 
+### Definition
+
+`django/db/migrations/executor.py:96`:
 ``\`python
-def migrate(self, targets, plan=None, state=None, fake=False, fake_initial=False):
+def migrate(self, targets, plan=None, state=None, fake=False, fake_initial=False)
 ``\`
 
-There are **two** call site categories:
+### Production call site
 
-### 1. The `migrate` management command — `django/core/management/commands/migrate.py:355`
-
+**`django/core/management/commands/migrate.py:355`** — the `migrate` management command:
 ``\`python
-post_migrate_state = executor.migrate(
+executor.migrate(
     targets,
     plan=plan,
     state=pre_migrate_state.clone(),
@@ -4517,140 +4126,147 @@ post_migrate_state = executor.migrate(
     fake_initial=fake_initial,
 )
 ``\`
+Passes all 5 arguments: targets, an explicit plan, a cloned project state, and the `fake`/`fake_initial` flags from command-line options.
 
-Passes all five arguments: `targets` (list of `(app_label, migration_name)` tuples), a precomputed `plan`, a cloned `state`, and the user-supplied `fake`/`fake_initial` booleans.
+### Test call sites (`tests/migrations/test_executor.py`)
 
-### 2. Tests — `tests/migrations/test_executor.py` (~50+ call sites)
-
-The test calls use these patterns:
-
-| Pattern | Example |
-|---|---|
-| **targets only** | `executor.migrate([("migrations", "0002_second")])` |
-| **targets = None** | `executor.migrate([("migrations", None)])` — unapply all migrations for that app |
-| **with `fake=True`** | `executor.migrate([("migrations", "0001_initial")], fake=True)` |
-| **with `fake_initial=True`** | `executor.migrate([("migrations", "0001_initial")], fake_initial=True)` |
-| **targets + plan** | `executor.migrate(None, plan)` — passes a pre-built plan with `targets=None` |
-| **empty plan** | `executor.migrate([], plan=[])` |
-
-In summary: the production call site (the `migrate` command) always passes all parameters explicitly, while the test call sites mostly rely on defaults, passing just `targets` and occa
-...[truncated 43 chars]
+| Line(s) | `targets` | `plan` | `state` | `fake` | `fake_initial` |
+|---|---|---|---|---|---|
+| 56, 105, 132, 137, 156, 176, 341, 368, 397, 449, 690, 742, 757, 797 | `[("app", "migration")]` | — | — | — | — |
+| 71, 119, 143, 188, 376, 567, 765 | `[("app", None)]` | — | — | — | — |
+| 224 | `[("migrations", "0002_second"), ("migrations2", "0001_initial")]` | — | — | `fake=True` | — |
+| 238 | `[("migrations", "0002_second"), ("migrations2", "0001_initial")]` | — | — | — | — |
+| 274, 298 | `None` | explicit `plan` list | — | — | — |
+| 309, 510, 523, 552, 573, 590, 597, 605, 611, 631, 640, 678 | multi-app target lists like `[("app", None), ...]` or `[("app", "name")]` | — | — | — | — |
+| 183, 350, 450, 462, 465, 702, 720 | `[("app", "migration")]` or `[("app", None)]` | — | — | `fake=True` | — |
+| 372 | `[("migrations", "0001_initial")]` | 
+...[truncated 283 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There are **two categories** of call sites:
-
-### 1. Production call — `django/core/management/commands/migrate.py:355`
-
-``\`python
-executor.migrate(
-    targets,              # list of (app_label, migration_name) tuples
-    plan=plan,            # pre-computed migration plan
-    state=pre_migrate_state.clone(),  # ProjectState snapshot
-    fake=fake,            # bool from --fake flag
-    fake_initial=fake_initial,        # bool from --fake-initial flag
-)
-``\`
-
-This is the only production call. It passes **all five arguments**.
-
-### 2. Test calls — `tests/migrations/test_executor.py` (~40+ calls)
-
-These use various subsets of arguments:
-
-| Pattern | Example | Notes |
-|---------|---------|-------|
-| `migrate(targets)` | `migrate([("migrations", "0002_second")])` | Most common — just targets |
-| `migrate(targets, fake=True)` | `migrate([("migrations", "0001_initial")], fake=True)` | Simulate without running |
-| `migrate(targets, fake_initial=True)` | `migrate([("migrations", "0001_initial")], fake_initial=True)` | Fake only if tables exist |
-| `migrate(None, plan)` | `migrate(None, plan)` | Targets=None, explicit plan |
-| Unapply targets | `migrate([("migrations", None)])` | `None` migration name = unapply all |
-
-The signature is:
+The signature is at `django/db/migrations/executor.py:96`:
 
 ``\`python
 def migrate(self, targets, plan=None, state=None, fake=False, fake_initial=False)
 ``\`
 
-- **`targets`**: list of `(app_label, migration_name_or_None)` tuples, or `None` when a plan is provided directly
-- **`plan`**: pre-computed plan (list of 
-...[truncated 221 chars]
+## Call sites
+
+### 1. Production code
+
+**`django/core/management/commands/migrate.py:355`** — the `migrate` management command:
+``\`python
+executor.migrate(
+    targets,
+    plan=plan,
+    state=pre_migrate_state.clone(),
+    fake=fake,
+    fake_initial=fake_initial,
+)
+``\`
+This is the only non-test caller. It passes all five arguments.
+
+### 2. Tests (`tests/migrations/test_executor.py`)
+
+All test calls follow a few patterns:
+
+| Pattern | Lines | Arguments |
+|---|---|---|
+| `targets` only | :56, :71, :105, :119, :132, :137, :143, :156, :176, :341, :368, :397, :449, :463, :503, :567, :573, :690, :742, :757, :765, :797 | `executor.migrate([("app", "name")])` or `[("app", None)]` |
+| `targets` + `fake=True` | :183, :224, :350, :450, :462, :465, :702, :720 | `executor.migrate([...], fake=True)` |
+| `targets` + `fake_initial=True` | :372 | `executor.migrate([...], fake_initial=True)` |
+| `targets=None` + explicit `plan` | :274, :298 | `executor.migrate(None, plan)` |
+| `targets=[]` + `plan=[]` | :847 | `executor.migrate([], plan=[])` — no-op test |
+| `targets` only (multi-app) | :309, :510, :523, :552, :590, :597, :605, :611, :631, :640, :678 | `executor.migrate([("app_a", ...), ("app_b", ...)])` |
+| Return value captured as `state` | :238, :597, :605 | Same as above but result assigned to `state` |
+
+In summary: the management c
+...[truncated 170 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure and content. They correctly identify the migrate method at django/db/migrations/executor.py, the production call site at django/core/management/commands/migrate.py:355, and the test call patterns in tests/migrations/test_executor.py. Response A includes the "empty plan" pattern (migrate([], plan=[])) that B omits, while Response B adds a useful parameter explanation section at the end. These differences are minor and roughly cancel out. Both are well-grounded in the repository and equally actionable.
+Both responses are nearly identical in quality. They correctly identify the same definition location, the same production call site with the same code snippet, and comprehensively catalog test call sites with similar line numbers and argument patterns. Response B groups the test calls into slightly cleaner named patterns and adds a "Return value captured as state" row (which is about the return value, not arguments—slightly off-topic). Response A provides a few more individual line references in some rows. The differences are marginal and stylistic; both are accurate, well-grounded in the repository, and equally actionable.
 ```
 
 </details>
 
-<details><summary>Django P16 | winner=with_budi | Q 7→9 G 6→9</summary>
+<details><summary>Django P16 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Who calls setup and what does it return to the caller?
 
-- Interactions: no_budi=4 / with_budi=4
-- Cost USD: no_budi=$0.0440 / with_budi=$0.0436
+- Interactions: no_budi=6 / with_budi=5
+- Cost USD: no_budi=$0.0598 / with_budi=$0.0554
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-## `django.setup()` — Summary
+There are two main `setup` functions in Django. Here's a summary of each:
 
-**What it does** (defined at `django/__init__.py:8`):
+---
 
-1. Configures logging via `configure_logging()`
-2. Sets the thread-local URL script prefix (if `set_prefix=True`)
-3. Populates the app registry via `apps.populate(settings.INSTALLED_APPS)`
+### 1. `django.setup()` — `django/__init__.py:8`
 
-**What it returns:** Nothing (`None`) — it has no return statement. It works entirely through side effects.
+**What it does:** Configures settings, logging, and populates the app registry.
 
-**Who calls it:**
+**Returns:** `None` (implicitly — no return statement).
 
-| Caller | Location |
-|---|---|
-| `ManagementUtility.execute()` | `django/core/management/__init__.py:417` |
-| `DiscoverRunner.setup_test_environment()` | `django/test/runner.py:453` |
-| `TemplateCommand.handle()` | `django/core/management/templates.py:157` |
-| `runtests.py` (test runner) | `tests/runtests.py:242` |
-| `check_migrations.py` | `scripts/check_migrations.py:15` |
-| `manage_translations.py` | `scripts/manage_translations.py:213` |
-| Various tests | `tests/apps/tests.py:641`, etc. |
+**Called by:**
+- `django/core/management/__init__.py:417` — `ManagementUtility.execute()`, which runs before any management command
+- `django/core/management/templates.py:157` — `TemplateCommand.handle()` (for `startproject`/`startapp`)
+- `django/test/runner.py:453` — `DiscoverRunner.setup_test_environment()`
 
-The primary production caller is `ManagementUtility.execute()` — this is what runs when you use `manage.py` or `django-admin`. Since it returns `None`, callers use it purely for its side effects (initializing Django) before proceeding with their own logic.
+Callers don't use a return value; they call it purely for its side effects.
+
+---
+
+### 2. `View.setup()` — `django/views/generic/base.py:126`
+
+**What it does:** Initializes `self.request`, `self.args`, and `self.kwargs` on the view instance. Also sets `self.head = self.get` if applicable.
+
+**Returns:** `None` (implicitly — no return statement).
+
+**Called by:** `View.as_view.<locals>.view()` at `base.py:99`. After calling `self.setup(request, *args, **kwargs)`, the closure checks that `self.request` was set (i.e., that a subclass override called `super().setup()`), then proceeds to `self.dispatch()`. The return value is not used.
+
+---
+
+In both cases, `setup` returns `None` and callers rely on it solely for its side effects.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**`django.setup()`** (`django/__init__.py:8`) is called by:
+Here's the summary:
 
-| Caller | Location |
-|---|---|
-| WSGI handler | `django/core/wsgi.py:12` |
-| ASGI handler | `django/core/asgi.py:12` |
-| Management utility | `django/core/management/__init__.py:417` |
-| `startproject`/`startapp` templates | `django/core/management/templates.py:157` |
-| Test runner (`DiscoverRunner.setup_test_environment`) | `django/test/runner.py:453` |
-| `runtests.py` (test harness) | `tests/runtests.py:242` |
-| Helper scripts | `scripts/check_migrations.py`, `scripts/manage_translations.py` |
+---
 
-**What it returns:** Nothing (`None`). It has no `return` statement. It works entirely through **side effects**:
+### `django.setup()` (`django/__init__.py:8`)
 
-1. **Configures logging** via `configure_logging(settings.LOGGING_CONFIG, settings.LOGGING)`.
-2. **Sets the URL script prefix** (if `set_prefix=True`).
-3. **Populates the app registry** via `apps.populate(settings.INSTALLED_APPS)` — this is the main purpose, importing and readying all installed apps.
+**Who calls it:** Django's management utilities and test infrastructure — `ManagementUtility.execute()` (`django/core/management/__init__.py:417`), `DiscoverRunner.setup_test_environment()` (`django/test/runner.py:453`), `runtests.py`, `check_migrations.py`, `manage_translations.py`, and `TemplateCommand` for `startproject`/`startapp`.
 
-Callers don't use a return value; they call `django.setup()` purely for its initialization side effects before using the Django framework.
+**What it returns:** **Nothing** (implicitly `None`). It works entirely through side effects: configures logging, sets the URL script prefix, and populates the app registry via `apps.populate()`. No caller uses a return value.
+
+---
+
+### `View.setup()` (`django/views/generic/base.py:126`)
+
+**Who calls it:** `View.dispatch()` doesn't call it directly — it's called from the closure returned by `View.as_view()`, which calls `self.setup(request, *args, **kwargs)` before `self.dispatch(...)`.
+
+**What it returns:** **Nothing** (implicitly `None`). It sets `self.request`, `self.args`, and `self.kwargs` as side effects. The caller in `as_view()` doesn't use a return value.
+
+---
+
+Both `setup` functions are fire-and-forget initializers that mutate state as side effects and return `None`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify that django.setup() returns None and works through side effects (logging, URL prefix, app registry population). The critical difference is in caller completeness: Response B includes the WSGI handler (django/core/wsgi.py:12) and ASGI handler (django/core/asgi.py:12), which are arguably the most important production callers of django.setup() — these are how Django initializes in actual web serving. Response A misses both of these entirely, which is a significant omission for a question about "who calls setup." Response B also provides slightly more detail on the logging call (mentioning the actual arguments). Both are well-structured with tables and clear explanations, but Response B's more complete and accurate caller list gives it a meaningful edge in grounding and overall quality.
+Both responses correctly identify the two main `setup` functions (`django.setup()` and `View.setup()`), provide accurate file paths and line numbers, correctly state both return `None` implicitly, and list the key callers. Response B lists a few additional callers (runtests.py, check_migrations.py, manage_translations.py) while Response A includes the nice detail about the `as_view()` closure checking that `self.request` was set after `setup()`. These small differences roughly balance out. Both are well-grounded in the repository with specific references and equally actionable.
 ```
 
 </details>
@@ -4659,157 +4275,185 @@ Both responses correctly identify that django.setup() returns None and works thr
 
 **Prompt:** What is the execution order for middleware versus URL resolution when a request first arrives?
 
-- Interactions: no_budi=6 / with_budi=4
-- Cost USD: no_budi=$0.0706 / with_budi=$0.0739
-- Hook: reason=ok context_chars=2055
-
-#### Injected context
-
-```text
-[structural context]
-get_response  (base.py:138)
-  ← called by: SecurityMiddleware, CacheMiddleware, get_response_async
-  → refs: append, log_response, set_urlconf
-process_exception_by_middleware  (base.py:358)
-  ← called by: _get_response
-get_cache_key  (cache.py:378)
-  ← called by: FetchFromCacheMiddleware
-  → refs: _generate_cache_header_key, _generate_cache_key, get
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: django/core/handlers/base.py
-  span: 138-152
-  anchor: def get_response(self, request):
-  proof:
-    - response = self._middleware_chain(request)
-    - response._resource_closers.append(request.close)
-    - request.path,
-- file: django/core/handlers/base.py
-  span: 358-367
-  anchor: def process_exception_by_middleware(self, exception, request):
-  proof:
-    - Pass the exception to the exception middleware. If no middleware
-    - response = middleware_method(request, exception)
-    - return a response for this exception, return None.
-- file: django/utils/cache.py
-  span: 378-397
-  anchor: def get_cache_key(request, key_prefix
-...[truncated 300 chars]
-```
+- Interactions: no_budi=4 / with_budi=3
+- Cost USD: no_budi=$0.0689 / with_budi=$0.0563
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the execution order, directly from the source:
+Here's the execution order, traced through the code:
 
-1. **`get_response`** (line 138): Sets `ROOT_URLCONF`, then calls `self._middleware_chain(request)`.
+### 1. Request/response middleware runs FIRST (`__call__` / `process_request`)
 
-2. **Middleware `__call__` methods run** (the chain built in `load_middleware`): Each middleware's `__call__` (which typically calls `process_request` / the `get_response` of the next middleware) executes **outside-in**, from the first middleware in `settings.MIDDLEWARE` to the last. Any middleware can short-circuit by returning a response early.
+In `get_response` (line 142), the entire `_middleware_chain` is invoked. This chain is built in `load_middleware` (line 27) by wrapping each middleware around the next, with `_get_response` at the innermost core (line 38–39). So the outermost middleware's `__call__` runs first, passing the request inward through the chain.
 
-3. **`_get_response`** (line 176): This is the **innermost handler** at the core of the middleware chain. It does two things in order:
-   - **URL resolution** — `self.resolve_request(request)` (line 183) calls `resolver.resolve(request.path_info)` to match the URL to a view.
-   - **`process_view` middleware** — iterates `self._view_middleware` (line 186), giving each a chance to intercept before the view runs.
+### 2. URL resolution happens INSIDE the middleware chain
 
-4. **View is called.**
+`_get_response` (line 176) is the innermost handler — it only executes after all middleware `__call__`/`process_request` phases have run. The first thing it does is **resolve the URL** at line 183:
 
-5. **Response middleware** runs in reverse order back up the chain (`process_template_response`, then `process_response` / the outer `__call__` returns).
+``\`python
+callback, callback_args, callback_kwargs = self.resolve_request(request)
+``\`
 
-**Key takeaway:** All middleware `__call__`/`process_request` hooks run **before** URL resolution. URL resolution only happens once the request reaches the innermost handler (`_get_response`). This means middleware like `AuthenticationMiddleware` or `SessionMiddleware` executes without knowing which view will handle the request. The `process_view` hooks run **after** URL resolution but **before**
-...[truncated 17 chars]
+### 3. Then `process_view` middleware runs
+
+After URL resolution, `_view_middleware` hooks run (line 186–191), receiving the resolved view callback and its arguments.
+
+### 4. Then the view is called
+
+### Summary of the full order:
+
+1. **Middleware `__call__`** (request phase) — outermost to innermost
+2. **URL resolution** — `resolve_request()` at `base.py:302`
+3. **`process_view`** middleware — in MIDDLEWARE order
+4. **View execution**
+5. **`process_exception`** middleware — if the view raised (innermost to outermost)
+6. **`process_template_response`** middleware — if applicable (innermost to outermost)
+7. **Middleware `__call__`** (response phase) — innermost to outermost
+
+The key ins
+...[truncated 385 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the execution order when a request arrives, based on `base.py`:
+Here's the execution order when a request arrives:
 
-### 1. `get_response()` (line 138) — entry point
-- Sets the default URL conf via `set_urlconf(settings.ROOT_URLCONF)`
-- Calls `self._middleware_chain(request)` — this is the **full middleware stack**
+### 1. `get_response()` — entry point (`base.py:138`)
+- Sets `ROOT_URLCONF` via `set_urlconf()` (just configures which URL module to use, no actual resolution yet)
+- Calls `self._middleware_chain(request)`
 
-### 2. Middleware `__call__` methods run **first**, outside-in
-The middleware chain is built in `load_middleware()` (line 27) by wrapping each middleware around the next. The outermost middleware runs first (`SecurityMiddleware`, `SessionMiddleware`, etc.). Each middleware's `__call__`/`process_request` runs **before** URL resolution.
+### 2. Request/response middleware runs **first** (the `_middleware_chain`)
+The chain is built in `load_middleware()` (`base.py:41`): middleware classes are wrapped around each other like an onion, with `_get_response` at the core. So each middleware's `__call__` (or `process_request`) runs **outside-in**, before URL resolution happens.
 
-### 3. `_get_response()` (line 176) — the **innermost** handler
-This is the core handler that the innermost middleware eventually calls. It does things in this order:
+### 3. `_get_response()` — the innermost handler (`base.py:176`)
+This is called only after all request middleware has executed. It does things in this order:
 
-   1. **URL resolution**: `resolve_request(request)` (line 183) — resolves the URL to a view + args
-   2. **View middleware**: `process_view()` hooks run (line 186)
-   3. **View execution**: the resolved view is called (line 199)
-   4. **Exception middleware**: `process_exception()` if the view raised (line 358)
-   5. **Template response middleware**: `process_template_response()` if applicable
-
-### 4. Middleware response methods run **last**, inside-out
-As `_get_response` returns, each middleware's response-phase logic (e.g. `process_response` in `MiddlewareMixin`-style middleware, or code after `get_response(request)` in new-style middleware) executes in reverse order.
+1. **URL resolution** — `self.resolve_request(request)` resolves the URL to a view + args (`base.py:183`)
+2. **View middleware** — `process_view()` methods run, receiving the resolved view callback (`base.py:186`)
+3. **View execution** — the actual view is called (`base.py:199`)
+4. **Exception middleware** — `process_exception()` if the view raised (`base.py:201`)
+5. **Template response middleware** — `process_template_response()` if applicable (`base.py:211`)
 
 ### Summary
 
 ``\`
 Request arrives
-  → set
-...[truncated 739 chars]
+  → set_urlconf (configure which URLs module)
+  → Middleware __call__ / process_request  (outside-in)
+    → URL resolution (resolve_request)
+    → process_view middleware
+    → View callable
+    → process_exception middleware (on error)
+    → 
+...[truncated 442 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-structured, covering the same core execution order: middleware __call__/process_request runs before URL resolution, which happens inside _get_response(), followed by process_view, view execution, and response middleware in reverse. Both reference specific line numbers in base.py. Response B edges ahead in several ways: (1) it covers more phases (process_exception, process_template_response) giving a more complete picture, (2) it includes an ASCII flow diagram that makes the execution order immediately scannable, (3) it references more line numbers including load_middleware at line 27 and the urlconf override at lines 308-311, and (4) its key takeaway mentions the practical detail that middleware can set request.urlconf to override URL resolution, which is a concrete repository-grounded insight. Response A is solid and concise but slightly less thorough.
+Both responses correctly identify that middleware runs before URL resolution, with URL resolution happening inside `_get_response`. They reference the same core code paths and line numbers in `base.py`. Response B edges ahead by including the `set_urlconf()` step at the entry point (`get_response`), which is a meaningful detail grounded in the actual code flow — it shows the URLconf module is configured before the middleware chain runs, even though resolution happens later. Response B also provides a cleaner ASCII flow diagram and more precise line references (e.g., `base.py:41` for `load_middleware`, `base.py:211` for template response). Response A offers a useful practical insight about middleware short-circuiting and dynamically setting `request.urlconf`, but Response B's additional grounding in the `set_urlconf` entry point and slightly tighter structure give it a small overall advantage.
 ```
 
 </details>
 
-<details><summary>Django P18 | winner=no_budi | Q 9→3 G 8→5</summary>
+<details><summary>Django P18 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** How does Django decide which template backend to use when rendering a template — trace the path from render to the template engine?
 
-- Interactions: no_budi=11 / with_budi=9
-- Cost USD: no_budi=$0.0983 / with_budi=$0.1003
-- Hook: reason=ok context_chars=586
+- Interactions: no_budi=11 / with_budi=7
+- Cost USD: no_budi=$0.1067 / with_budi=$0.0822
+- Hook: reason=ok context_chars=502
 
 #### Injected context
 
 ```text
 [structural context]
-get_traceback_html  (debug.py:431)
-  ← called by: AdminEmailHandler, technical_500_response
-  → refs: context, from_string, get_traceback_data
+check_templates  (templates.py:4)
+  → refs: all, check, extend
 
 [budi context]
 rules:
 - Use only file paths shown in snippets for exact-path answers.
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
-- file: django/views/debug.py
-  span: 431-436
-  anchor: def get_traceback_html(self):
+- file: django/core/checks/templates.py
+  span: 4-12
+  anchor: def check_templates(app_configs, **kwargs):
   proof:
-    - return t.render(c)
-    - with self.html_template_path.open(encoding="utf-8") as fh:
-    - t = DEBUG_ENGINE.from_string(fh.read())
+    - from django.template import engines
+    - for engine in engines.all():
+    - errors.extend(engine.check())
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full path from `render()` to the template engine:
+Here's the full call chain:
 
-### 1. `shortcuts.render()` → `loader.render_to_string()`
-**`django/shortcuts.py:19`** — accepts an optional `using` parameter (a backend name) and delegates to the loader:
+### 1. `shortcuts.render()` — `django/shortcuts.py:19`
+
+``\`python
+def render(request, template_name, context=None, content_type=None, status=None, using=None):
+    content = loader.render_to_string(template_name, context, request, using=using)
+    return HttpResponse(content, content_type, status)
+``\`
+
+Delegates immediately to the template loader. The `using` parameter is the key — it's an optional template engine alias (e.g. `"django"` or `"jinja2"`).
+
+### 2. `loader.render_to_string()` — `django/template/loader.py:52`
+
+Calls either `get_template()` (single name) or `select_template()` (list of names). Both call `_engine_list(using)`:
+
+``\`python
+def _engine_list(using=None):
+    return engines.all() if using is None else [engines[using]]
+``\`
+
+- **`using=None`** → tries **all** configured backends in order (from `settings.TEMPLATES`).
+- **`using="some_alias"`** → uses only that specific backend.
+
+### 3. `EngineHandler` — `django/template/utils.py:16`
+
+This is the core registry, instantiated as a module-level singleton at `django/template/__init__.py:47`:
+
+``\`python
+engines = EngineHandler()
+``\`
+
+**`EngineHandler.templates`** (cached property, line 26): Reads `settings.TEMPLATES`, a list of dicts. Each entry must have a `BACKEND` key. If no `NAME` is provided, the name defaults to the second-to-last segment of the `BACKEND` dotted path (e.g. `django.template.backends.django.DjangoTemplates` → `"django"`).
+
+**`EngineHandler.__getitem__(alias)`** (li
+...[truncated 1493 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the full trace from `render()` to the template engine:
+
+### 1. `django.shortcuts.render()` — `shortcuts.py:19`
+Takes an optional `using` parameter (a backend alias) and delegates to the loader:
 ``\`python
 content = loader.render_to_string(template_name, context, request, using=using)
 ``\`
 
-### 2. `loader.render_to_string()` → `get_template()` or `select_template()`
-**`django/template/loader.py:52`** — branches on whether `template_name` is a string or a list:
-- String → `get_template(template_name, using=using)`
-- List/tuple → `select_template(template_name_list, using=using)`
+### 2. `django.template.loader.render_to_string()` — `loader.py:52`
+Picks `get_template()` or `select_template()` depending on whether `template_name` is a string or list, passing `using` through.
 
-### 3. `get_template()` iterates over engines
-**`django/template/loader.py:5`** — calls `_engine_list(using)` to get backends, then tries each one in order:
+### 3. `django.template.loader._engine_list()` — `loader.py:65`
+This is the key decision point:
+``\`python
+def _engine_list(using=None):
+    return engines.all() if using is None else [engines[using]]
+``\`
+- **If `using` is `None`**: returns **all** configured backends, in the order they appear in `settings.TEMPLATES`.
+- **If `using` is set** (e.g. `"django"` or `"jinja2"`): returns only that one backend, looked up by its `NAME` alias.
+
+### 4. `django.template.loader.get_template()` — `loader.py:5`
+Iterates through the engine list and returns the **first engine that successfully resolves the template**:
 ``\`python
 for engine in engines:
     try:
@@ -4817,73 +4461,17 @@ for engine in engines:
     except TemplateDoesNotExist as e:
         chain.append(e)
 ``\`
-The **first engine that finds the template wins**. If none do, all exceptions are chained into a single `TemplateDoesNotExist`.
+If no engine finds it, raises `TemplateDoesNotExist` with the full chain of failures.
 
-### 4. `_engine_list()` — the selection logic
-**`django/template/loader.py:65`**:
-``\`python
-def _engine_list(using=None):
-    return engines.all() if using is None else [engines[using]]
-``\`
-- `using=None` → **all** configured engines (in `TEMPLATES` order)
-- `using="some_name"` → only that specific engine
-
-### 5. `EngineHandler` — reads `settings.TEMPLATES`
-**`django/template/utils.py:16`** — the `engines` singleton (created in 
-...[truncated 1527 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Here's the full trace for `get_traceback_html`:
-
-## Render path: `get_traceback_html` → template engine
-
-### 1. A dedicated `DEBUG_ENGINE` is hardcoded at module level
-
-**`debug.py:28-31`** — A minimal `Engine` instance is created directly, bypassing the project's `TEMPLATES` setting entirely:
-
-``\`python
-DEBUG_ENGINE = Engine(
-    debug=True,
-    libraries={"i18n": "django.templatetags.i18n"},
-)
-``\`
-
-The comment on line 24-27 explains why: the error handler must work even if the project's template configuration or loaders are broken.
-
-### 2. `get_traceback_html` reads raw HTML from disk and compiles it
-
-**`debug.py:431-436`**:
-``\`python
-def get_traceback_html(self):
-    with self.html_template_path.open(encoding="utf-8") as fh:
-        t = DEBUG_ENGINE.from_string(fh.read())   # step A
-    c = Context(self.get_traceback_data(), use_l10n=False)
-    return t.render(c)                              # step B
-``\`
-
-### 3. `Engine.from_string` wraps the string in a `Template`
-
-**`engine.py:165-170`**:
-``\`python
-def from_string(self, template_code):
-    return Template(template_code, engine=self)
-``\`
-
-The `engine=self` argument is the key — it binds this `Template` to `DEBUG_ENGINE` so no lookup of the project's configured backends happens.
-
-### 4. `Template.__init__` stores the engine and compiles
-
-**`base.py:142-157`** — When `engine` is provided (as it is here), `Template` uses it directly. The fallback `Engine.get_default()` (line 150) is only called when `engine is None` — i.e., 
-...[truncated 1192 chars]
+### 5. `django.template.utils.EngineHandler` — `utils.py:16`
+This is what `engines` (from `django.template.__init__`) is — an `EngineHandler` instance. 
+...[truncated 913 chars]
 ```
 
 #### Judge rationale
 
 ```text
-The user asked how Django decides which template backend to use "from render to the template engine" — clearly referring to the standard `django.shortcuts.render()` pipeline. Response A directly and accurately traces this path: `render()` → `loader.render_to_string()` → `get_template()` → `_engine_list()` → `EngineHandler` reading `settings.TEMPLATES` → backend instantiation. It correctly identifies `_engine_list()` as the key decision point and explains the `using` parameter logic. Response B answers a completely different question — it traces `get_traceback_html` and the `DEBUG_ENGINE` used for debug error pages. While technically accurate about that subsystem, it does not address the user's question at all. The user never asked about debug error pages; they asked about the general template backend selection mechanism. Response B's grounding is in the correct repository but the wrong part of the codebase for this question.
+Both responses trace the identical path (render → render_to_string → _engine_list → EngineHandler → get_template loop) with correct file paths and line numbers. They both explain the `using` parameter, first-match-wins iteration, lazy backend instantiation via import_string, and caching. Response A includes a nice ASCII summary diagram and is slightly more precise about the NAME defaulting logic (second-to-last segment of the dotted BACKEND path), while Response B's phrasing ("DjangoTemplates" → "django") is slightly ambiguous. However, Response B's ordering (presenting EngineHandler after the loader functions) arguably follows the call flow more naturally. The differences are marginal — both are accurate, well-grounded, and actionable.
 ```
 
 </details>
@@ -4894,141 +4482,102 @@ The user asked how Django decides which template backend to use "from render to 
 
 **Prompt:** What are the entry points of this FastAPI application and how is the request handling pipeline structured at startup?
 
-- Interactions: no_budi=18 / with_budi=21
-- Cost USD: no_budi=$0.2745 / with_budi=$0.3875
+- Interactions: no_budi=18 / with_budi=18
+- Cost USD: no_budi=$0.2894 / with_budi=$0.2488
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how the FastAPI framework is structured at its entry points and request handling pipeline:
+Now I have a complete picture. Here's the answer:
+
+---
 
 ## Entry Points
 
-### 1. CLI Entry Point (`fastapi/__main__.py`)
-Running `python -m fastapi` calls `fastapi.cli.main()`, which delegates to `fastapi_cli` (an external package). Requires `fastapi[standard]` to be installed.
+This repo is the **FastAPI framework itself** (v0.135.1), not an application built with it. There are two entry points:
 
-### 2. Application Entry Point (`fastapi/applications.py:45`)
-The `FastAPI` class extends Starlette and is the main entry point. When instantiated, `__init__` (line 61) does:
+### 1. CLI Entry Point — `fastapi/__main__.py`
+Allows `python -m fastapi`. It calls `fastapi.cli.main()` (`fastapi/cli.py:8`), which delegates to `fastapi_cli.cli.main` (an external package, `fastapi[standard]`).
 
-1. **Creates `APIRouter`** (line 986) — the core router holding all routes, lifespan handlers, dependencies, and callbacks.
-2. **Registers default exception handlers** (lines 1005–1013) for `HTTPException`, `RequestValidationError`, and `WebSocketRequestValidationError`.
-3. **Stores user middleware** (line 1015).
-4. **Calls `self.setup()`** (line 1019).
+### 2. ASGI Entry Point — `FastAPI.__call__` (`applications.py:1157`)
+The core entry point. When an ASGI server (Uvicorn, etc.) sends a request, it calls `app(scope, receive, send)`. This method sets `root_path` on the scope and delegates to Starlette's `__call__`.
 
-### 3. `setup()` — Auto-generated Documentation Routes (`applications.py:1102`)
-Registers internal routes (excluded from the OpenAPI schema):
-- **`/openapi.json`** — serves the generated OpenAPI schema
-- **`/docs`** — Swagger UI HTML
-- **`/docs/oauth2-redirect`** — OAuth2 redirect for Swagger
-- **`/redoc`** — ReDoc HTML
+---
 
-## Request Handling Pipeline
+## Startup & Request Handling Pipeline
 
-### `__call__` (`applications.py:1157`)
-Sets `root_path` on the scope, then delegates to Starlette's `__call__`, which invokes the **middleware stack**.
+### Construction (`FastAPI.__init__`, `applications.py:61–1019`)
 
-### `build_middleware_stack()` (`applications.py:1021`)
-Builds the ASGI app as a chain of middleware wrapping the router. The order from o
-...[truncated 1963 chars]
+1. **Stores config** — title, docs URLs, OpenAPI settings, etc.
+2. **Creates the core router** — `self.router = routing.APIRouter(...)` (`line 986`) with routes, lifespan, dependencies, on_startup/on_shutdown handlers.
+3. **Registers default exception handlers** (`lines 1002–1013`):
+   - `HTTPException` → `http_exception_handler`
+   - `RequestValidationError` → `request_validation_exception_handler`
+   - `WebSocketRequestValidationError` → `websocket_request_validation_exception_handler`
+4. **Stores user middleware** (`line 1015`).
+5. **Calls `self.setup()`** (`line 1019`).
+
+### `setup()` (`applications.py:1102–1155`)
+
+Registers internal documentation routes (not included in the OpenAPI schema):
+- `/opena
+...[truncated 1514 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Now I have a comprehensive picture. Here's the overview:
-
----
+Here's how FastAPI's entry points and request handling pipeline are structured:
 
 ## Entry Points
 
-This repo is the **FastAPI framework source code itself**, not a user application. There are three entry points:
+### 1. `FastAPI.__call__` (`applications.py:1157`)
+The ASGI entry point. Every HTTP/WebSocket request starts here. It sets `root_path` on the scope, then delegates to Starlette's `__call__`, which routes through the middleware stack.
 
-### 1. CLI Entry Point
-- **`pyproject.toml:119`** — `fastapi = "fastapi.cli:main"` console script
-- **`fastapi/cli.py`** — delegates to `fastapi_cli.cli.main` (from the separate `fastapi-cli` package)
-- **`fastapi/__main__.py`** — enables `python -m fastapi`, just calls `cli.main()`
+### 2. `FastAPI.__init__` (`applications.py:61`) — Startup Assembly
+At construction time, `__init__` does:
+1. Creates the core `APIRouter` (`applications.py:986`) with routes, lifespan, dependencies, etc.
+2. Registers default exception handlers for `HTTPException`, `RequestValidationError`, and `WebSocketRequestValidationError` (`applications.py:1005-1013`)
+3. Stores user middleware (`applications.py:1015-1016`)
+4. Calls `self.setup()` (`applications.py:1019`)
 
-### 2. ASGI Entry Point — `FastAPI.__call__`
-- **`fastapi/applications.py:1157`** — the `__call__(scope, receive, send)` method. This is what ASGI servers (uvicorn, etc.) invoke. It sets `root_path` on the scope, then delegates to Starlette's `__call__`, which builds the middleware stack on first request and routes through it.
+### 3. `FastAPI.setup()` (`applications.py:1102`)
+Adds built-in doc routes (not part of OpenAPI schema):
+- `/openapi.json` — serves the generated OpenAPI schema
+- `/docs` — Swagger UI
+- `/docs/oauth2-redirect` — OAuth2 redirect for Swagger
+- `/redoc` — ReDoc
 
-### 3. Public API — `fastapi/__init__.py`
-Exports `FastAPI`, `APIRouter`, `Request`, `Response`, `Depends`, path/query/body param functions, etc.
+## Middleware Stack — `build_middleware_stack()` (`applications.py:1021`)
 
----
+Built lazily on first request. The stack is assembled **outside-in**:
 
-## Request Handling Pipeline at Startup
+``\`
+Request flow (top → bottom):
 
-### `FastAPI.__init__` (`applications.py:61–1019`)
-
-1. **Creates the core `APIRouter`** (`applications.py:986–1001`) — with routes, lifespan, dependencies, on_startup/on_shutdown handlers
-2. **Registers default exception handlers** (`applications.py:1002–1013`) — for `HTTPException`, `RequestValidationError`, and `WebSocketRequestValidationError`
-3. **Stores user middleware** (`applications.py:1015–1016`)
-4. **Calls `self.setup()`** (`applications.py:1019`)
-
-### `FastAPI.setup()` (`application
-...[truncated 1451 chars]
+1. ServerErrorMiddleware       — catches 500s, optionally shows debug tracebacks
+2. User middleware             — any middleware added via app.add_middleware()
+3. ExceptionMiddleware         — dispatches to registered exception handlers
+4. AsyncExitStackMiddlew
+...[truncated 1778 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are highly accurate and well-structured, covering the same core material: CLI entry point, FastAPI.__init__ flow, setup() doc routes, build_middleware_stack() chain, APIRoute initialization, and the per-request handling pipeline via get_request_handler(). They reference the same files and similar line numbers. Response B adds minor extras (pyproject.toml console script reference, __init__.py public API as an entry point, explicit note that this is the framework source), while Response A provides a slightly more detailed ASCII summary flow diagram at the end. These differences are marginal and balance out. Both are equally grounded in repository specifics with accurate line references and equally actionable for navigating the codebase.
+Both responses are highly accurate, well-structured, and grounded in repository specifics with concrete file/line references. Response A includes the CLI entry point (`__main__.py`) and mentions WebSocket/SSE handling, which are valid additions. Response B includes a useful summary ASCII flow diagram and covers `APIRoute` (`routing.py:807`) as a separate section with compilation details. Both correctly describe the middleware stack order (ServerErrorMiddleware → User middleware → ExceptionMiddleware → AsyncExitStackMiddleware → APIRouter), the lazy build on first request, the dual AsyncExitStack pattern, and the `get_request_handler`/`solve_dependencies` pipeline. The differences are complementary rather than one being clearly superior — A is slightly more comprehensive in scope (CLI, WebSocket), while B is slightly better organized with its summary diagram. Overall a tie.
 ```
 
 </details>
 
-<details><summary>FastAPI P2 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>FastAPI P2 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Describe the module layout and directory structure of this FastAPI codebase — which directories own which functionality?
 
-- Interactions: no_budi=9 / with_budi=8
-- Cost USD: no_budi=$0.1828 / with_budi=$0.1527
-- Hook: reason=ok context_chars=1493
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: docs_src/static_files/tutorial001_py310.py
-  span: 1-6
-  anchor: from fastapi import FastAPI
-  proof:
-    - from fastapi import FastAPI
-    - from fastapi.staticfiles import StaticFiles
-    - app = FastAPI()
-- file: fastapi/applications.py
-  span: 601-680
-  anchor: license name used for the API.
-  proof:
-    - license name used for the API.
-    - for the API. The `identifier` field is mutually exclusive of the `url`
-    - field. Available since OpenAPI 3.1.0, FastAPI 0.99.0.
-- file: fastapi/routing.py
-  span: 1634-1713
-  anchor: Doc(
-  proof:
-    - router.
-    - Mark all *path operations* in this router as deprecated.
-    - Include (or not) all the *path operations* in this router in the
-- file: fastapi/applications.py
-  span: 1997-2076
-  anchor: tags: Annotated[
-  proof:
-    - response_description: Annotated[
-    - The description for the default response.
-    - ] = "Successful Response",
-- file: fastapi/__main__.py
-  span: 1-3
-  anchor: from fastapi.cli import main
-  proof:
-    - from fast
-...[truncated 292 chars]
-```
+- Interactions: no_budi=9 / with_budi=10
+- Cost USD: no_budi=$0.1662 / with_budi=$0.1957
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
@@ -5037,167 +4586,85 @@ Here's the module layout of this FastAPI codebase:
 
 ## Top-level directories
 
-| Directory | Purpose |
-|-----------|---------|
-| **`fastapi/`** | The framework's source code (the published package) |
-| **`tests/`** | Test suite (pytest), including a `benchmarks/` subfolder |
-| **`docs/`** | MkDocs documentation site — markdown files in per-language subdirectories (`de/`, `en/`, `es/`, etc.) |
-| **`docs_src/`** | Runnable Python examples referenced from the docs (one subfolder per tutorial topic, e.g. `body/`, `cors/`, `security/`) |
-| **`scripts/`** | Dev/CI helper scripts — linting, testing, coverage, doc building, translations, sponsors |
-| **`.github/`** | GitHub Actions workflows, issue/discussion templates, labeler config |
+``\`
+fastapi/           — The library source code (the actual pip-installable package)
+tests/             — Test suite
+docs/              — Documentation site content (Markdown, multi-language translations)
+docs_src/          — Runnable Python example code referenced by the docs
+scripts/           — Dev/CI helper scripts (docs build, linting, testing, translations)
+.github/           — GitHub Actions workflows, issue/PR templates, dependabot config
+``\`
 
-## `fastapi/` package internals
+## `fastapi/` — Library source
 
-| Module / Sub-package | Responsibility |
-|----------------------|----------------|
-| `__init__.py` | Public API surface — re-exports key symbols |
-| `__main__.py` | `python -m fastapi` entry point |
-| `applications.py` | `FastAPI` app class |
-| `routing.py` | `APIRouter`, `APIRoute`, `APIWebSocketRoute` |
-| `param_functions.py` | User-facing `Query()`, `Path()`, `Body()`, `Header()`, `Cookie()`, `Depends()`, etc. |
-| `params.py` | Internal param descriptor classes backing `param_functions` |
-| `dependencies/` | Dependency injection engine — `models.py` (DI model) and `utils.py` (resolution logic) |
-| `security/` | Security schemes: `api_key`, `http` (Basic/Bearer), `oauth2`, `open_id_connect_url` |
-| `openapi/` | Open
-...[truncated 1673 chars]
+| File / subpackage | Responsibility |
+|---|---|
+| `applications.py` | `FastAPI` app class (the main entrypoint users instantiate) |
+| `routing.py` | `APIRouter`, `APIRoute`, `APIWebSocketRoute` — route registration and dispatch |
+| `params.py` | Parameter metadata classes (`Path`, `Query`, `Header`, `Cookie`, `Body`, `File`, `Form`, `Depends`) |
+| `param_functions.py` | The user-facing function versions of those parameter classes |
+| `dependencies/` | Dependency injection engine — `models.py` (Dependant model), `utils.py` (resolution/solving logic) |
+| `security/` | Security scheme dependencies — API key, HTTP basic/bearer, OAuth2, OpenID Connect |
+| `openapi/` | OpenAPI schema generation — `utils.py` (schema builder), `models.py` (OpenAPI Pydantic models), `docs.py` (Swagger/ReDoc HTML), `constants.py` |
+| `middleware/` | Re-exported Starlette middleware (CORS, GZip, HTTPS redirect, trusted host, WSGI) plus `asyncexit
+...[truncated 1913 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the module layout and directory structure:
+Here's the module layout of this FastAPI codebase (v0.135.1):
 
 ## Top-level directories
 
-| Directory | Purpose |
-|-----------|---------|
-| `fastapi/` | Core library source code |
-| `tests/` | Test suite |
-| `docs/` | Documentation site (Markdown, multi-language translations) |
-| `docs_src/` | Runnable code examples referenced by the docs |
-| `.github/` | CI/CD workflows, issue templates, dependabot config |
+### `fastapi/` — The library itself
+The core package, with these sub-modules:
 
-## `fastapi/` — Core library
-
-**Root-level modules:**
-
-| File | Responsibility |
-|------|---------------|
-| `applications.py` | `FastAPI` class (the main app, subclass of Starlette) |
-| `routing.py` | `APIRouter`, `APIRoute`, route resolution and path operation logic |
-| `params.py` | Parameter metadata classes (`Path`, `Query`, `Header`, `Cookie`, `Body`, `Form`, `File`, `Depends`) |
-| `param_functions.py` | Function-based constructors for the above param classes |
-| `exceptions.py` | Custom exceptions (`HTTPException`, `RequestValidationError`, `WebSocketRequestValidationError`) |
-| `exception_handlers.py` | Default exception handlers |
-| `encoders.py` | `jsonable_encoder` — serialization of arbitrary objects to JSON-compatible dicts |
-| `responses.py` | Response classes (re-exports from Starlette + `UJSONResponse`, `ORJSONResponse`) |
-| `requests.py` | Re-export of Starlette's `Request` |
-| `websockets.py` | Re-export of Starlette's `WebSocket` |
-| `datastructures.py` | `UploadFile` and related data structures |
-| `types.py` | Shared type aliases |
-| `utils.py` | Internal utilitie
-...[truncated 1903 chars]
+| Path | Responsibility |
+|---|---|
+| `__init__.py` | Public API surface — re-exports `FastAPI`, `APIRouter`, `Request`, `Response`, `Depends`, param functions, etc. |
+| `applications.py` | The `FastAPI` application class |
+| `routing.py` | `APIRouter` and route handling logic |
+| `param_functions.py` / `params.py` | Parameter declaration helpers (`Query`, `Path`, `Body`, `Header`, `Cookie`, `Form`, `File`, `Depends`, `Security`) |
+| `dependencies/` | Dependency injection system — `models.py` (DI model types) and `utils.py` (DI resolution logic) |
+| `openapi/` | OpenAPI schema generation — `utils.py` (schema builder), `models.py` (OpenAPI Pydantic models), `docs.py` (Swagger/ReDoc HTML), `constants.py` |
+| `security/` | Security scheme implementations — `oauth2.py`, `http.py` (Bearer/Basic), `api_key.py`, `open_id_connect_url.py`, `base.py`, `utils.py` |
+| `middleware/` | Re-exported Starlette middleware — CORS, GZip, HTTPS redirect, trusted host, WSGI, plus `asyncexitstack.py` for dependency yield cleanup |
+| `_compat/` | Pydantic compatibility layer (`v2.py`, `shared.py`) |
+| `exceptions.py` / `exception_handlers.py` | `HTTPException`, `WebSocketException`, and default exception handlers |
+| `encoders.py` | `jsonable_encoder` for serializing arbitrary objects to JSON-compatible dicts |
+| `requests.py`, `respo
+...[truncated 1863 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are comprehensive, well-structured, and accurately describe the FastAPI codebase layout. Response A includes the `scripts/` directory which B omits, and adds a useful "Key observations" section, but has a minor error stating "four sub-packages" while listing five. Response B provides a more detailed breakdown of the `tests/` directory (mentioning `test_tutorial/`, `test_request_params/`, `benchmarks/`) and lists specific files within the `security/` sub-package. Both correctly identify all major top-level directories, root-level modules, and sub-packages within `fastapi/`. The differences are minor and complementary — each captures details the other misses — making this effectively a tie.
+Both responses are nearly identical in structure, accuracy, and depth. They cover the same directories (fastapi/, tests/, docs/, docs_src/, scripts/, .github/) with very similar descriptions. Response A includes slightly more granular file-level detail (e.g., listing `Default` sentinel in datastructures.py, unique ID generation in utils.py). Response B adds the version number, lists specific security submodule filenames, mentions locale directories explicitly, and includes a root files section. These are minor differentiators that roughly cancel out. Both are well-grounded in the actual repository structure and equally actionable for understanding the codebase layout.
 ```
 
 </details>
 
-<details><summary>FastAPI P3 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>FastAPI P3 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Where is the APIRouter class defined and what does it initialize before returning?
 
-- Interactions: no_budi=8 / with_budi=5
-- Cost USD: no_budi=$0.1422 / with_budi=$0.1133
-- Hook: reason=ok context_chars=1299
-
-#### Injected context
-
-```text
-[structural context]
-_DefaultLifespan  (routing.py:222)
-  → refs: _shutdown, _startup
-test_response_dependency_returns_different_response_instance  (test_response_dependency.py:97)
-  → refs: get
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/routing.py
-  span: 222-243
-  anchor: class _DefaultLifespan:
-  proof:
-    - Default lifespan context manager that runs on_startup and on_shutdown handlers.
-    - on_startup and on_shutdown event handlers.
-    - def __init__(self, router: "APIRouter") -> None:
-- file: fastapi/routing.py
-  span: 1208-1287
-  anchor: Read more about it in the
-  proof:
-    - To include (or not) all the *path operations* in this router in the
-    - Callable[[APIRoute], str],
-    - Enable strict checking for request Content-Type headers.
-- file: tests/test_response_dependency.py
-  span: 97-121
-  anchor: def test_response_dependency_returns_different_response_instance():
-  proof:
-    - def test_response_dependency_returns_different_response_instance():
-    - """Dependency that returns a different Response instance s
-...[truncated 94 chars]
-```
+- Interactions: no_budi=7 / with_budi=5
+- Cost USD: no_budi=$0.1442 / with_budi=$0.0847
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-`APIRouter` is defined at `fastapi/routing.py:1001`. It extends Starlette's `routing.Router`.
-
-Its `__init__` (line 1028–1311) does the following before returning:
-
-1. **Resolves the lifespan context** (lines 1267–1276) — wraps the `lifespan` parameter into a proper async context manager (handling async generators, sync generators, or using `_DefaultLifespan` as fallback), stores it as `self.lifespan_context`.
-
-2. **Calls `super().__init__`** (line 1278) — passes `routes`, `redirect_slashes`, `default`, and the resolved `lifespan_context` to Starlette's `Router`.
-
-3. **Validates prefix** (lines 1284–1288) — asserts it starts with `/` and doesn't end with `/`.
-
-4. **Initializes instance attributes**:
-   - `self.on_startup` / `self.on_shutdown` — event handler lists
-   - `self.prefix`
-   - `self.tags`
-   - `self.dependencies`
-   - `self.deprecated`
-   - `self.include_in_schema`
-   - `self.responses`
-   - `self.callbacks`
-   - `self.dependency_overrides_provider`
-   - `self.route_class`
-   - `self.default_response_class`
-   - `self.generate_unique_id_function`
-   - `self.strict_content_type`
-```
-
-#### Response (`with_budi`)
-
-```text
 The `APIRouter` class is defined at `fastapi/routing.py:1001`. It extends Starlette's `routing.Router`.
 
-**In `__init__` (line 1028–1311), before returning it initializes:**
+**`__init__`** (line 1028–1311) does the following before returning:
 
-1. **Lifespan context** (lines 1267–1276) — resolves the `lifespan` parameter:
-   - If `None`, wraps `on_startup`/`on_shutdown` handlers via `_DefaultLifespan(self)` (defined at line 222)
-   - If an async generator, wraps with `asynccontextmanager`
-   - If a sync generator, wraps with `_wrap_gen_lifespan_context`
-   - Otherwise uses it directly
-   - Stores it as `self.lifespan_context`
+1. **Resolves the lifespan context** (lines 1267–1276): If no `lifespan` is given, uses `_DefaultLifespan(self)`. If it's an async generator, wraps it with `asynccontextmanager`. If it's a sync generator, wraps with `_wrap_gen_lifespan_context`. Stores result as `self.lifespan_context`.
 
-2. **Calls `super().__init__`** (line 1278) passing `routes`, `redirect_slashes`, `default`, and the resolved `lifespan_context` to Starlette's Router.
+2. **Calls `super().__init__()`** (line 1278) passing `routes`, `redirect_slashes`, `default`, and the resolved `lifespan_context` to Starlette's `Router`.
 
-3. **Validates `prefix`** (lines 1284–1288) — must start with `/` and not end with `/`.
+3. **Validates the prefix** (lines 1284–1288): Asserts it starts with `"/"` and doesn't end with `"/"`.
 
 4. **Sets instance attributes** (lines 1293–1311):
    - `self.on_startup` / `self.on_shutdown` — event handler lists
@@ -5215,21 +4682,49 @@ The `APIRouter` class is defined at `fastapi/routing.py:1001`. It extends Starle
    - `self.strict_content_type`
 ```
 
+#### Response (`with_budi`)
+
+```text
+`APIRouter` is defined at `fastapi/routing.py:1001`. It extends Starlette's `routing.Router`. Here's what `__init__` does before returning:
+
+1. **Resolves the lifespan context** (lines 1267–1276): If no `lifespan` is provided, it uses `_DefaultLifespan(self)`. If it's an async generator, it wraps it with `asynccontextmanager`. If it's a sync generator, it wraps with `_wrap_gen_lifespan_context`. Stores the result in `self.lifespan_context`.
+
+2. **Calls `super().__init__`** (line 1278) with `routes`, `redirect_slashes`, `default`, and the resolved `lifespan_context`.
+
+3. **Validates `prefix`** (lines 1284–1288): Asserts it starts with `"/"` and doesn't end with `"/"`.
+
+4. **Sets `on_startup` / `on_shutdown`** (lines 1293–1298): Stored as lists, since Starlette removed native support for these.
+
+5. **Initializes instance attributes** (lines 1300–1311):
+   - `self.prefix`
+   - `self.tags`
+   - `self.dependencies`
+   - `self.deprecated`
+   - `self.include_in_schema`
+   - `self.responses`
+   - `self.callbacks`
+   - `self.dependency_overrides_provider`
+   - `self.route_class`
+   - `self.default_response_class`
+   - `self.generate_unique_id_function`
+   - `self.strict_content_type`
+```
+
 #### Judge rationale
 
 ```text
-Both responses are very similar in structure, accuracy, and coverage. They identify the same class location (line 1001), the same __init__ range (1028–1311), and list the same instance attributes. Response B edges ahead with more detailed lifespan context resolution — it explains each branch (None → _DefaultLifespan at line 222, async generator → asynccontextmanager, sync generator → _wrap_gen_lifespan_context, otherwise direct use), providing more grounded and actionable information. Response B also includes the line range for instance attributes (1293–1311). The differences are modest but consistent: Response B provides slightly richer detail without being verbose.
+Both responses are nearly identical in content, structure, and accuracy. They both correctly identify APIRouter at fastapi/routing.py:1001, describe the same initialization steps (lifespan resolution, super().__init__ call, prefix validation, attribute assignment), and reference the same line numbers. Response A includes the __init__ line range (1028-1311) and groups on_startup/on_shutdown with other attributes. Response B separates on_startup/on_shutdown into its own step with a contextual note about Starlette removing native support. These are minor stylistic differences that don't meaningfully affect quality, grounding, or actionability. Both are well-grounded with specific line references and provide equally useful answers.
 ```
 
 </details>
 
-<details><summary>FastAPI P4 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>FastAPI P4 | winner=no_budi | Q 9→8 G 9→7</summary>
 
 **Prompt:** Where is the get_dependant function defined and what are its first steps when called?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0741 / with_budi=$0.0744
-- Hook: reason=ok context_chars=2007
+- Cost USD: no_budi=$0.0409 / with_budi=$0.0387
+- Hook: reason=ok context_chars=659
 
 #### Injected context
 
@@ -5238,18 +4733,6 @@ Both responses are very similar in structure, accuracy, and coverage. They ident
 get_dependant  (utils.py:284)
   ← called by: routing.py, get_parameterless_sub_dependant
   → refs: add_non_field_param_to_dependency, add_param_to_fields, analyze_param
-run_endpoint_function  (routing.py:316)
-  ← called by: run_endpoint_function
-  → refs: call, run_endpoint_function
-is_union_of_base_models  (utils.py:866)
-  ← called by: _should_embed_body_fields
-  → refs: lenient_issubclass
-_sse_with_checkpoints  (routing.py:593)
-  ← called by: _sse_with_checkpoints
-  → refs: _sse_with_checkpoints
-decimal_encoder  (encoders.py:43)
-  ← called by: decimal_encoder
-  → refs: decimal_encoder
 
 [budi context]
 rules:
@@ -5261,155 +4744,130 @@ evidence_cards:
   anchor: def get_dependant(
   proof:
     - scope: Literal["function", "request"] | None = None,
-    - and dependant.computed_scope == "request"
+    - and param_details.depends.scope == "function"
     - '"request", it cannot depend on dependencies with scope "function".'
-- file: fastapi/routing.py
-  span: 316-326
-  anchor: async def run_endpoint_function(
-  proof:
-    - return await dependant.
-...[truncated 300 chars]
 ```
 
 #### Response (`no_budi`)
-
-```text
-`get_dependant` is defined at `fastapi/dependencies/utils.py:284`. Here's what it does when called:
-
-1. **Creates a `Dependant` object** (line 294) with the provided `call`, `name`, `path`, `use_cache`, `scope`, and OAuth scopes.
-2. **Merges OAuth scopes** (line 303) — combines `parent_oauth_scopes` and `own_oauth_scopes` into `current_scopes`.
-3. **Extracts path parameter names** (line 304) from the `path` string via `get_path_param_names`.
-4. **Gets the typed signature** (line 305) of the callable using `get_typed_signature(call)`.
-5. **Iterates over each signature parameter** (line 307) and for each one:
-   - Checks if it's a path param.
-   - Calls `analyze_param` to classify it.
-   - If it's a **dependency** (`param_details.depends`): validates scope compatibility, then **recursively** calls `get_dependant` for the sub-dependency and appends it to `dependant.dependencies`.
-   - If it's a **non-field param** (like `Request`, `Response`, `WebSocket`): handled by `add_non_field_param_to_dependency`.
-   - Otherwise it's a **field param**: added to `body_params` if it's a `Body`, or routed through `add_param_to_fields` for query/path/header/cookie params.
-```
-
-#### Response (`with_budi`)
 
 ```text
 `get_dependant` is defined at **`fastapi/dependencies/utils.py:284`**.
 
 When called, its first steps are:
 
-1. **Create a `Dependant` object** (line 294) with the provided `call`, `name`, `path`, `use_cache`, `scope`, and OAuth scopes.
+1. **Create a `Dependant` instance** (line 294) with the provided `call`, `name`, `path`, `use_cache`, `scope`, and OAuth scopes.
 2. **Merge OAuth scopes** (line 303) — combines `parent_oauth_scopes` and `own_oauth_scopes` into `current_scopes`.
-3. **Extract path parameter names** (line 304) from the `path` string via `get_path_param_names`.
-4. **Inspect the callable's signature** (lines 305–306) — calls `get_typed_signature(call)` and gets its `parameters`.
-5. **Iterate over each signature parameter** (line 307) and for each one:
-   - Checks if it's a path param (line 308).
-   - Calls `analyze_param` (line 309) to classify it.
-   - If it's a **dependency** (`param_details.depends`): validates scope compatibility (a `"request"`-scoped generator can't depend on `"function"`-scoped deps), then **recursively calls `get_dependant`** for the sub-dependency (line 331).
-   - If it's a **non-field param** (like `Request`, `WebSocket`, `Response`): registers it via `add_non_field_param_to_dependency` (line 342).
-   - Otherwise it's a **field param**: appended to `body_params` if it's a `Body`, or routed to `add_param_to_fields` for query/header/cookie/path params (lines 352–355).
+3. **Extract path parameter names** (line 304) from the `path` string via `get_path_param_names()`.
+4. **Inspect the callable's signature** (line 305–306) — calls `get_typed_signature(call)` and gets its parameters.
+5. **Iterate over each signature parameter** (line 307+), and for each one:
+   - Checks if it's a path param.
+   - Calls `analyze_param()` to classify it.
+   - If it's a **dependency** (`Depends`/`Security`): recursively calls `get_dependant()` for the sub-dependency and appends it to `dependant.dependencies`.
+   - If it's a **non-field param** (like `Request`, `WebSocket`, `Response`): registers it via `add_non_field_param_to_dependency()`.
+   - Otherwise treats it as a **field param** — body params go to `dependant.body_params`, others (query, header, path, cookie) go through `add_param_to_fields()`.
+6. **Returns** the fully populated `Dependant` object.
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's what `get_dependant` does when called:
+
+1. **Creates a `Dependant` object** (line 294–302) — populates it with the `call`, `name`, `path`, `use_cache`, `scope`, and OAuth scopes.
+
+2. **Merges OAuth scopes** (line 303) — combines `parent_oauth_scopes` and `own_oauth_scopes` into `current_scopes`.
+
+3. **Extracts path parameter names** (line 304) — calls `get_path_param_names(path)` to find which parameters come from the URL path.
+
+4. **Introspects the callable's signature** (lines 305–306) — uses `get_typed_signature(call)` to get the function's parameters with type annotations resolved.
+
+5. **Iterates over each parameter** (line 307+) and for each one:
+   - Calls `analyze_param` to classify it.
+   - If it's a **dependency** (`Depends`), validates scope compatibility (a `"request"`-scoped generator can't depend on `"function"`-scoped deps), then **recursively** calls `get_dependant` for the sub-dependency.
+   - If it's a **non-field param** (like `Request`, `WebSocket`, `Response`), adds it via `add_non_field_param_to_dependency`.
+   - Otherwise, adds it as a **body param** or **query/path/header/cookie param** via `add_param_to_fields`.
+
+6. **Returns** the fully populated `Dependant` object.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, content, and accuracy. They correctly identify the function at fastapi/dependencies/utils.py:284 and describe the same 5 steps in the same order. Response B includes slightly more granular line numbers (e.g., lines 305-306, line 331, line 342) and adds one specific detail about scope validation ("a 'request'-scoped generator can't depend on 'function'-scoped deps"), but these are minor differences. Both are well-grounded in the repository and equally actionable. The similarity is too close to declare a winner.
+Both responses describe the same function with accurate, detailed step-by-step breakdowns and matching line references. The critical differentiator is that the prompt explicitly asks "Where is the get_dependant function defined" — Response A directly answers this with the precise file path and line number (`fastapi/dependencies/utils.py:284`), while Response B omits the file location entirely, jumping straight to behavior description. This is a notable gap in answering the prompt. Response B does add a useful detail about scope validation (request-scoped generators can't depend on function-scoped deps), but this doesn't compensate for missing the location. Both are well-structured and accurate in their behavioral descriptions.
 ```
 
 </details>
 
-<details><summary>FastAPI P5 | winner=tie | Q 9→8 G 9→8</summary>
+<details><summary>FastAPI P5 | winner=with_budi | Q 9→9 G 8→9</summary>
 
 **Prompt:** Where is the solve_dependencies function defined and what does it do on each invocation?
 
-- Interactions: no_budi=5 / with_budi=2
-- Cost USD: no_budi=$0.0649 / with_budi=$0.0390
-- Hook: reason=ok context_chars=594
-
-#### Injected context
-
-```text
-[structural context]
-solve_dependencies  (utils.py:595)
-  ← called by: solve_dependencies, get_websocket_app
-  → refs: _solve_generator, backgroundtasks, call
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/dependencies/utils.py
-  span: 595-732
-  anchor: async def solve_dependencies(
-  proof:
-    - request: Request | WebSocket,
-    - response: Response | None = None,
-    - request_astack = request.scope.get("fastapi_inner_astack")
-```
+- Interactions: no_budi=3 / with_budi=2
+- Cost USD: no_budi=$0.0502 / with_budi=$0.0439
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Defined at `fastapi/dependencies/utils.py:595`. Here's what it does on each invocation:
 
-1. **Setup** (lines 609–624): Retrieves two `AsyncExitStack`s from the request scope (`fastapi_inner_astack` for request-scoped deps, `fastapi_function_astack` for function-scoped). Initializes empty `values`/`errors` dicts, a default `Response` if none provided, and a `dependency_cache` if none provided.
+1. **Setup** — Retrieves two `AsyncExitStack`s from the request scope (`fastapi_inner_astack` for request-scoped deps, `fastapi_function_astack` for function-scoped deps). Initializes empty `values` dict, `errors` list, a default `Response` (if none provided), and a `dependency_cache` dict (if none provided).
 
-2. **Recursively solve sub-dependencies** (lines 625–681): Iterates over `dependant.dependencies`. For each:
-   - Checks for **dependency overrides** and swaps the callable/dependant if overridden.
-   - **Recurses** into `solve_dependencies` for the sub-dependant (passing the shared `dependency_cache`).
-   - If the sub-dependency result has errors, collects them and skips execution.
-   - Otherwise **invokes the dependency callable** via one of four strategies:
-     - Cache hit (`use_cache` + already in `dependency_cache`) — reuse cached value.
-     - Generator (`is_gen_callable` / `is_async_gen_callable`) — uses `_solve_generator` with the appropriate exit stack (request- or function-scoped).
-     - Async callable — `await call(...)`.
-     - Sync callable — `await run_in_threadpool(call, ...)`.
-   - Stores the result in `values` (keyed by the dependency's `name`) and populates the `dependency_cache`.
+2. **Recursively solve sub-dependencies** — Iterates over `dependant.dependencies`. For each sub-dependency:
+   - Checks for dependency overrides (test-time DI swaps) and re-analyzes the override with `get_dependant` if present.
+   - **Recursively calls itself** to solve the sub-dependency's own dependencies first.
+   - Propagates errors upward if the recursive call fails.
+   - **Resolves the sub-dependency's value** via one of four paths:
+     - **Cache hit** — returns the cached result if `use_cache` is set and the key exists.
+     - **Generator dependency** — uses `_solve_generator` with the appropriate `AsyncExitStack` (request-scoped or function-scoped).
+     - **Async callable** — `await call(...)`.
+     - **Sync callable** — `await run_in_threadpool(call, ...)`.
+   - Stores the resolved value in `values` (keyed by parameter name) and populates `dependency_cache`.
 
-3. **Extract request parameters** (lines 682–698): Parses path, query, header, and cookie params from the request into `values`, collecting validation errors.
+3. **Extract request parameters** — Parses and validates path, query, header, and cookie parameters from the request into `values`, collecting any validation errors.
 
-4. **Parse request body** (l
-...[truncated 705 chars]
+4. **Parse request body** — If body params are d
+...[truncated 457 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**Defined at** `fastapi/dependencies/utils.py:595`.
+Defined at `fastapi/dependencies/utils.py:595`. Here's what it does on each invocation:
 
-On each invocation it:
+1. **Setup** (609–624) — Grabs two `AsyncExitStack`s from the request scope (`fastapi_inner_astack` for request-scoped deps, `fastapi_function_astack` for function-scoped deps). Initializes empty `values`/`errors` dicts and a default `Response` if none was passed. Initializes the `dependency_cache` if absent.
 
-1. **Retrieves async exit stacks** from `request.scope` (`fastapi_inner_astack` for request-scoped deps, `fastapi_function_astack` for function-scoped deps).
+2. **Recursively solve sub-dependencies** (625–681) — Iterates over `dependant.dependencies`:
+   - Checks for **dependency overrides** and rebuilds the sub-dependant if an override exists.
+   - **Recurses** into itself (`await solve_dependencies(...)`) to resolve each sub-dependency's own dependency tree first.
+   - Propagates errors upward; on error, skips invoking the dependency callable.
+   - If **caching** is enabled and the result is already cached, reuses it.
+   - Otherwise **invokes the callable**: generator deps go through `_solve_generator` (pushed onto the appropriate exit stack), coroutines are awaited directly, sync callables are run via `run_in_threadpool`.
+   - Stores the result in `values` (keyed by parameter name) and populates the cache.
 
-2. **Initializes** empty `values`/`errors` dicts and a default `Response` if none provided.
+3. **Extract request parameters** (682–698) — Parses path, query, header, and cookie params from the request into `values`, collecting validation errors.
 
-3. **Recursively solves sub-dependencies** — iterates over `dependant.dependencies`, applying dependency overrides if configured, then **calls itself recursively** for each sub-dependency. For each resolved sub-dependency it:
-   - Returns cached results if `use_cache` is set and the key exists.
-   - Calls `_solve_generator` (entering the generator into the appropriate `AsyncExitStack`) for generator dependencies.
-   - `await`s coroutine callables directly, or runs sync callables via `run_in_threadpool`.
-   - Stores results in `values` and `dependency_cache`.
+4. **Parse request body** (699–709) — If the dependant declares body params, deserializes/validates the body.
 
-4. **Extracts request parameters** — parses path, query, header, and cookie params from the request into `values`, collecting validation errors.
-
-5. **Parses the request body** (if `body_params` exist) via `request_body_to_args`.
-
-6. **Injects special parameters** — `Request`/`WebSocket`, `HTTPConnection`, `BackgroundTasks`, `Response`, and `SecurityScopes` objects into `values` based on the dependant's declared parameter names.
-
-7. **Returns a `SolvedDependency`** containing the resolved `values`, any `errors`, `background_tasks`, `response`, and the `dependency_cache`.
+5. **Inject special parameters** (710–725) — Injects framework obje
+...[truncated 609 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the function at fastapi/dependencies/utils.py:595 and provide an accurate, well-structured breakdown of what it does on each invocation. They cover the same key steps: exit stack retrieval, recursive sub-dependency solving with caching/overrides/generator support, request parameter extraction, body parsing, special parameter injection, and returning SolvedDependency. Response A is slightly more detailed with line number ranges for each section and an explicit enumeration of the four callable invocation strategies (cache hit, generator, async, sync), plus a useful summary paragraph. Response B is more concise but covers the same ground accurately. The difference is marginal — both are correct and well-grounded, making this essentially a tie with Response A having a slight edge in specificity.
+Both responses are nearly identical in content, structure, and accuracy. They identify the same definition location (line 595), describe the same six steps, and cover the same details (exit stacks, dependency overrides, caching, generator vs async vs sync resolution, parameter extraction, body parsing, special parameter injection, and return). Response B adds line number ranges for each section (e.g., 609–624, 625–681, etc.), which provides slightly better grounding in the actual source code, and includes a concise summary sentence. These are minor advantages — the core explanation is equivalent in both.
 ```
 
 </details>
 
-<details><summary>FastAPI P6 | winner=with_budi | Q 7→8 G 7→8</summary>
+<details><summary>FastAPI P6 | winner=no_budi | Q 8→7.5 G 8→8</summary>
 
 **Prompt:** Trace the call chain from an incoming HTTP request to the route handler function — what functions does it pass through?
 
-- Interactions: no_budi=18 / with_budi=14
-- Cost USD: no_budi=$0.2705 / with_budi=$0.2236
-- Hook: reason=ok context_chars=1800
+- Interactions: no_budi=16 / with_budi=12
+- Cost USD: no_budi=$0.1990 / with_budi=$0.1866
+- Hook: reason=ok context_chars=943
 
 #### Injected context
 
@@ -5418,14 +4876,6 @@ Both responses correctly identify the function at fastapi/dependencies/utils.py:
 run_endpoint_function  (routing.py:316)
   ← called by: run_endpoint_function
   → refs: call, run_endpoint_function
-middleware  (applications.py:4601)
-  ← called by: test_depend_validation, test_custom_middleware_exception_not_rai, httpsredirect.py
-  → refs: add_process_time_header, middleware
-exception_handler  (applications.py:4647)
-  ← called by: validation_exception_handler, request_validation_handler, validation_exception_handler
-  → refs: exception_handler, unicorn_exception_handler
-Default  (datastructures.py:174)
-  → refs: defaultplaceholder
 
 [budi context]
 rules:
@@ -5436,292 +4886,198 @@ evidence_cards:
   span: 316-326
   anchor: async def run_endpoint_function(
   proof:
+    - assert dependant.call is not None, "dependant.call must be a function"
     - return await dependant.call(**values)
     - return await run_in_threadpool(dependant.call, **values)
-    - async def run_endpoint_function(
 - file: fastapi/routing.py
   span: 1088-1167
-  anchor: """
+  anchor: OpenAPI callbacks that should apply to all *path operations* in this
   proof:
-    - router.
-    - routes: Annotated[
-    - list[BaseRoute] | None,
-- file: fastapi/applications.py
-  span: 4601-4645
-  anchor:
-...[truncated 300 chars]
+    - A list of routes to serve incoming HTTP and WebSocket requests.
+    - Default function handler for this router. Used to handle
+    - Custom route (*path operation*) class to be used by this router.
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Now I have enough to trace the full call chain. Here's the complete picture:
+Here's the full call chain from HTTP request to route handler:
 
----
+## Request Call Chain
 
-## HTTP Request Call Chain in FastAPI
-
-For a standard (non-streaming) endpoint like `@app.get("/items")`, here's the exact function chain:
-
-### 1. ASGI Entry Point — `FastAPI.__call__` (inherited from Starlette)
-`fastapi/applications.py:45` — `FastAPI(Starlette)` inherits `__call__(scope, receive, send)` from Starlette, which delegates to its middleware stack and router.
-
-### 2. Starlette Router — route matching
-Starlette's `Router` iterates over registered routes, calling `APIRoute.matches(scope)` (`routing.py:994`) to find the matching route. Once matched, it calls `route.handle(scope, receive, send)`.
-
-### 3. `APIRoute.app` — the ASGI app built at init time
-At `routing.py:972`:
-``\`python
-self.app = request_response(self.get_route_handler())
 ``\`
-This composes two layers into a single ASGI app stored on the route.
-
-### 4. `request_response(func)` — outer ASGI wrapper (`routing.py:95`)
-Converts a `func(request) -> response` callable into an ASGI app. It:
-- Creates the `Request` object from the ASGI scope
-- Sets up **two `AsyncExitStack`s** on the scope: `fastapi_inner_astack` (request-scoped deps) and `fastapi_function_astack` (function-scoped deps)
-- Calls `wrap_app_handling_exceptions` (Starlette utility for exception handling)
-- Awaits the inner `f(request)` — which is the handler from step 5
-- Sends the `Response` via ASGI
-
-### 5. `get_request_handler(...)` — returns the inner `app(request)
-...[truncated 2008 chars]
+Incoming HTTP Request (ASGI: scope, receive, send)
+│
+├── 1. ServerErrorMiddleware.__call__()           ← catches 500s / unhandled exceptions
+│       starlette/middleware/errors.py
+│
+├── 2. User Middleware(s).__call__()               ← any middleware added via app.add_middleware()
+│
+├── 3. ExceptionMiddleware.__call__()              ← dispatches registered exception handlers (422, HTTPException, etc.)
+│       starlette/middleware/exceptions.py
+│
+├── 4. AsyncExitStackMiddleware.__call__()         ← sets up scope["fastapi_middleware_astack"] for file cleanup
+│       fastapi/middleware/asyncexitstack.py:15
+│
+├── 5. APIRouter.__call__() (self.router)          ← Starlette Router; iterates routes, calls route.matches()
+│       starlette/routing.py  (Router)
+│
+├── 6. APIRoute.handle()                           ← matched route; delegates to self.app
+│       starlette/routing.py  (Route.handle)
+│
+├── 7. request_response() wrapper                  ← ASGI→Request adapter; sets up two AsyncExitStacks
+│       fastapi/routing.py:95                        (fastapi_inner_astack, fastapi_function_astack)
+│   │
+│   └── wraps via wrap_app_handling_exceptions()
+│
+├── 8. get_request_handler() → app()               ← the async function returned by get_request_handler()
+│       fastapi/routing.py:347
+│   │
+│   ├── 8a. Parse request body (JSON / form)
+│   │
+│   ├── 8b. solve_dependencies()                   ← r
+...[truncated 1676 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full call chain from an incoming HTTP request to your route handler:
+Starlette is an installed dependency, not vendored. That's fine — I have enough to trace the full chain.
 
-## Request Call Chain
+Here's the call chain from an incoming HTTP request to your route handler:
 
+### 1. **Starlette `Router.__call__`** (ASGI entrypoint)
+The ASGI server (Uvicorn) calls the FastAPI/Starlette app with `(scope, receive, send)`. The `Router` (base of `APIRouter` and `FastAPI`) iterates its routes calling `route.matches(scope)` to find a match.
+
+### 2. **`APIRoute.matches`** (`routing.py:994`)
+Overrides Starlette's `Route.matches` — checks if the request path/method matches this route. Adds `scope["route"] = self`.
+
+### 3. **Starlette `Route.handle`** (in Starlette's routing)
+Once matched, Starlette calls `route.handle(scope, receive, send)`, which invokes `self.app(scope, receive, send)`.
+
+### 4. **`APIRoute.app`** — set at `routing.py:972`
+``\`python
+self.app = request_response(self.get_route_handler())
 ``\`
-HTTP Request (ASGI server: uvicorn/hypercorn)
-│
-├─ 1. ServerErrorMiddleware.__call__()          ← catches 500s
-│     (starlette.middleware.errors)
-│
-├─ 2. User middleware(s).__call__()              ← @app.middleware("http"), add_middleware()
-│     (if any registered)
-│
-├─ 3. ExceptionMiddleware.__call__()            ← dispatches @app.exception_handler()
-│     (starlette.middleware.exceptions)
-│
-├─ 4. AsyncExitStackMiddleware.__call__()       ← sets scope["fastapi_middleware_astack"]
-│     (fastapi/middleware/asyncexitstack.py:15)
-│
-├─ 5. APIRouter.__call__() → Router.__call__()  ← Starlette's router ASGI app
-│     Iterates routes, calls route.matches(scope)
-│
-├─ 6. APIRoute.matches()                        ← path + method matching
-│     (fastapi/routing.py:994)
-│
-├─ 7. request_response() wrapper                ← Starlette's ASGI→Request/Response adapter
-│     (starlette.routing.request_response)
-│     Wraps the handler returned by APIRoute.app
-│
-├─ 8. get_request_handler() → inner `app()`     ← the closure returned at routing.py:378
-│     (fastapi/routing.py:347)
-│     Steps inside:
-│     a. Parse body (form/JSON)                  ← lines 398-445
-│     b. solve_dependencies()                    ← line 453 — resolves all Depends()
-│     c. run_endpoint_function()                 ← line 670
-│
-└─ 9. run_endpoint_function()                   ← routing.py:316
-      → dependa
-...[truncated 793 chars]
+This is the ASGI app created by wrapping the request handler.
+
+### 5. **`request_response`** (`routing.py:95`)
+The outer `app` creates a `Request` object, then the inner `app` sets up two `AsyncExitStack`s on the scope (`fastapi_inner_astack`, `fastapi_function_astack`) and calls:
+``\`python
+response = await f(request)  # f = the handler from get_request_handler
+``\`
+Then sends the response via `await response(scope, receive, send)`.
+
+### 6. **`get_request_handler` → inner `app`** (`routing.py:347`, handler at line `378`)
+This is where the core FastAPI logic lives:
+1. **Parses 
+...[truncated 1047 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Response B (with_budi) provides a more complete call chain by including the middleware stack (ServerErrorMiddleware → user middleware → ExceptionMiddleware → AsyncExitStackMiddleware → Router), which is a critical part of how an HTTP request reaches the route handler. It also correctly references `build_middleware_stack()` and `AsyncExitStackMiddleware` with specific file paths. Response A (no_budi) has better detail on the inner request-handling pipeline (notably including `serialize_response` which B omits) and a cleaner summary diagram, but it glosses over the middleware layers between ASGI entry and route matching with just a brief note at the end. Since the question specifically asks about the full chain from incoming request to handler, the middleware stack is essential context that B captures and A largely skips. Both responses cite plausible line numbers and key functions like `get_request_handler`, `run_endpoint_function`, and `solve_dependencies`.
+Both responses trace the call chain accurately through FastAPI's routing internals, referencing correct files and line numbers (routing.py:95, :316, :347, :378, :972, :994). Response A is more complete by including the middleware stack (ServerErrorMiddleware → ExceptionMiddleware → AsyncExitStackMiddleware) which genuinely sits in the call chain before route matching, plus mentioning build_middleware_stack at applications.py:1021. Response B omits this middleware layer, starting directly at Router.__call__. However, Response B compensates with actual code snippets from the source (e.g., the run_endpoint_function coroutine handling), which aids understanding. Both reference solve_dependencies and run_endpoint_function correctly. Response A's summary table and more complete chain give it a slight edge on actionability and overall quality, while grounding is comparable since both cite specific line numbers from the repository.
 ```
 
 </details>
 
-<details><summary>FastAPI P7 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>FastAPI P7 | winner=tie | Q 8→8 G 7→7</summary>
 
 **Prompt:** What functions does request_validation call and what does each return?
 
-- Interactions: no_budi=4 / with_budi=2
-- Cost USD: no_budi=$0.0343 / with_budi=$0.0241
-- Hook: reason=ok context_chars=1529
-
-#### Injected context
-
-```text
-[structural context]
-validation_exception_handler  (tutorial006_py310.py:18)
-  ← called by: validation_exception_handler, validation_exception_handler, validation_exception_handler
-  → refs: exception_handler, request_validation_exception_handler, validation_exception_handler
-request_validation_exception_handler  (exception_handlers.py:20)
-  ← called by: validation_exception_handler, request_validation_exception_handler
-  → refs: errors, jsonable_encoder, request_validation_exception_handler
-RequestValidationError  (exceptions.py:212)
-  → refs: __init__
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: docs_src/handling_errors/tutorial006_py310.py
-  span: 18-21
-  anchor: @app.exception_handler(RequestValidationError)
-  proof:
-    - @app.exception_handler(RequestValidationError)
-    - async def validation_exception_handler(request, exc):
-    - return await request_validation_exception_handler(request, exc)
-- file: fastapi/exception_handlers.py
-  span: 20-26
-  anchor: async def request_validation_exception_handler(
-  proof:
-    - async def r
-...[truncated 300 chars]
-```
+- Interactions: no_budi=4 / with_budi=3
+- Cost USD: no_budi=$0.0374 / with_budi=$0.0296
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 `request_validation_exception_handler` (line 20) calls two functions:
 
-1. **`exc.errors()`** — A method on `RequestValidationError` (inherited from Pydantic's `ValidationError`). Returns a **list of dicts**, each describing a validation error (with keys like `type`, `loc`, `msg`, `input`).
+1. **`exc.errors()`** — method on `RequestValidationError` that returns the list of validation errors (each a dict with keys like `loc`, `msg`, `type`).
 
-2. **`jsonable_encoder(...)`** — From `fastapi.encoders`. Takes the list of error dicts and returns a **JSON-compatible version** of it (converting any non-serializable types to JSON-safe primitives).
+2. **`jsonable_encoder(...)`** — from `fastapi.encoders`, converts the error list into a JSON-serializable structure (handles things like non-serializable types). Returns a JSON-compatible Python object (in this case, a list of dicts).
 
-The results are passed to `JSONResponse(status_code=422, content={"detail": ...})`, which is the return value of the handler.
+The results are passed to `JSONResponse(status_code=422, content={"detail": ...})`, which returns a `JSONResponse`.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`request_validation_exception_handler` (line 20-26) calls two functions:
+`request_validation_exception_handler` (line 20) calls two functions:
 
-1. **`exc.errors()`** — Returns the list of validation errors from the `RequestValidationError` exception. This comes from pydantic's `ValidationError` and returns a `list[dict]` describing each validation failure (field, message, type, etc.).
+1. **`exc.errors()`** — Returns the list of validation errors from the `RequestValidationError` exception (inherited from Pydantic's `ValidationError`). Returns a `list[dict]` where each dict describes one validation error (with keys like `loc`, `msg`, `type`).
 
-2. **`jsonable_encoder(exc.errors())`** — Encodes that error list into a JSON-compatible structure (ensuring all values are serializable). Returns the JSON-serializable `dict`/`list`.
+2. **`jsonable_encoder(exc.errors())`** — Converts the error list into a JSON-compatible structure (handling any non-serializable types). Returns a JSON-serializable `Any` value (in this case, a `list[dict]`).
 
-The overall function itself constructs and returns a **`JSONResponse`** with status code `422` and a body of `{"detail": <encoded errors>}`.
+The result is passed as `content` to `JSONResponse(status_code=422, content=...)`, which is what the function returns.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in content, structure, and accuracy. They correctly identify the two functions called (exc.errors() and jsonable_encoder), describe what each returns, and note the overall JSONResponse return with status 422. Response B gives a slightly more precise line range (20-26 vs 20) but Response A mentions specific dict keys (type, loc, msg, input). These minor differences balance out, making this a tie.
+Both responses are nearly identical in structure, accuracy, and content. They correctly identify the two functions called (exc.errors() and jsonable_encoder()), describe what each returns, and note the final JSONResponse construction. Response B adds minor extra detail (Pydantic inheritance, return type Any) but these are negligible differences. Neither response is meaningfully better than the other.
 ```
 
 </details>
 
-<details><summary>FastAPI P8 | winner=with_budi | Q 7→9 G 7→9</summary>
+<details><summary>FastAPI P8 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** What calls run_endpoint_function and from where is it triggered in the request pipeline?
 
-- Interactions: no_budi=8 / with_budi=10
-- Cost USD: no_budi=$0.0881 / with_budi=$0.1249
-- Hook: reason=ok context_chars=1978
-
-#### Injected context
-
-```text
-[structural context]
-run_endpoint_function  (routing.py:316)
-  ← called by: run_endpoint_function
-  → refs: call, run_endpoint_function
-is_union_of_base_models  (utils.py:866)
-  ← called by: _should_embed_body_fields
-  → refs: lenient_issubclass
-_extract_endpoint_context  (routing.py:250)
-  ← called by: _extract_endpoint_context
-  → refs: endpointcontext
-is_scalar_field  (v2.py:336)
-  ← called by: is_scalar_field, utils.py, __init__.py
-  → refs: field_annotation_is_scalar
-decimal_encoder  (encoders.py:43)
-  ← called by: decimal_encoder
-  → refs: decimal_encoder
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/routing.py
-  span: 316-326
-  anchor: async def run_endpoint_function(
-  proof:
-    - return await dependant.call(**values)
-    - return await run_in_threadpool(dependant.call, **values)
-    - async def run_endpoint_function(
-- file: fastapi/dependencies/utils.py
-  span: 866-882
-  anchor: def is_union_of_base_models(field_type: Any) -> bool:
-  proof:
-    - return False
-    - return True
-    - def is_union_of_base_models(field_
-...[truncated 300 chars]
-```
+- Interactions: no_budi=7 / with_budi=7
+- Cost USD: no_budi=$0.0803 / with_budi=$0.0727
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the call chain:
 
-### `run_endpoint_function` (defined at `routing.py:316`)
+1. **`run_endpoint_function`** is defined at `fastapi/routing.py:316`. It's a simple async wrapper that either `await`s the endpoint directly (if it's a coroutine) or runs it via `run_in_threadpool` (if sync).
 
-**Called by:** the inner `app()` coroutine at `routing.py:670`, inside the `else` branch (i.e. non-streaming, non-SSE endpoints).
+2. **It's called from one place** — `fastapi/routing.py:670`, inside the `app()` inner function of `get_request_handler()` (line 378). This is the non-streaming branch (the `else` at line 669), meaning it runs for regular (non-generator) endpoints.
 
-**Pipeline path:**
+3. **The request pipeline flow:**
+   - `get_request_handler()` (line 347) builds and returns the `app()` coroutine — this is the ASGI-level handler for each route.
+   - When a request arrives, Starlette's routing dispatches to `app(request)`.
+   - Inside `app()`: body is parsed → dependencies are solved → then `run_endpoint_function()` is called with the resolved dependency values to invoke the actual user-defined path operation function.
+   - The result is then serialized into a `Response`.
 
-1. **`get_request_handler()`** (`routing.py:347`) — a factory that builds and returns the `app` coroutine.
-2. Inside it, **`async def app(request: Request)`** (`routing.py:378`) is defined. This is the actual ASGI endpoint handler that Starlette invokes for each request.
-3. `app` parses the body, resolves dependencies via `solve_dependencies`, then branches:
-   - SSE stream → calls `dependant.call` directly
-   - JSON stream → calls `dependant.call` directly
-   - **Everything else** → calls **`run_endpoint_function()`** at line 670
-
-**Why it's a separate function:** The comment at line 319 explains it — it was extracted from `app` to make profiling easier, since inner functions are harder to profile.
-
-**What it does:** Simply dispatches to the user's endpoint function — `await dependant.call(**values)` if it's a coroutine, or `await run_in_threadpool(dependant.call, **values)` if it's a sync function.
+The function was intentionally extracted (see the comment on line 319) to make profiling easier, since profiling inner/nested functions is harder.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the call chain through the request pipeline:
+Here's the call chain:
 
-1. **`APIRoute.get_route_handler()`** (`routing.py:974`) calls `get_request_handler()`, which returns the inner `async def app(request)` closure.
+1. **`run_endpoint_function`** is defined at `routing.py:316`. It simply calls the endpoint (your path operation function), either directly with `await` if it's a coroutine, or via `run_in_threadpool` if it's sync.
 
-2. **`get_request_handler()`** (`routing.py:347`) builds that closure. At line 972, the result is wrapped with `request_response(self.get_route_handler())` and assigned to `self.app` — this is the ASGI app for the route.
+2. **Called by**: the inner `app` closure inside **`get_request_handler`** (`routing.py:347`). Specifically at line 670, within the non-streaming branch of that handler — after dependencies are solved and request data is parsed.
 
-3. Inside the closure **`app()`** (`routing.py:378`), the request pipeline is:
-   - Read/parse the request body (form or JSON)
-   - Solve dependencies via `solve_dependencies()`
-   - For **non-streaming endpoints**, call **`run_endpoint_function()`** at line 670
-   - For streaming/SSE endpoints, the generator is called directly instead
+3. **`get_request_handler`** returns an async function that is passed to **`request_response`** (`routing.py:95`), which wraps it into an ASGI `app`. This is the ASGI app that Starlette's routing machinery invokes when a request matches a route.
 
-4. **`run_endpoint_function()`** (`routing.py:316`) is a thin wrapper that either `await`s the endpoint directly (if async) or dispatches it to a threadpool (if sync).
-
-So the full path is:
+So the pipeline is:
 
 ``\`
-Starlette routing (ASGI)
-  → APIRoute.app  (set at routing.py:972 via request_response())
-    → app() closure  (routing.py:378, returned by get_request_handler)
-      → solve_dependencies()
-      → run_endpoint_function()  (routing.py:670)
-        → dependant.call(**values)  (your actual endpoint function)
+Incoming ASGI request
+  → Starlette router matches route
+    → request_response(app) handles scope/receive/send
+      → get_request_handler's inner `app()` runs
+        → solves dependencies (solve_dependencies)
+        → run_endpoint_function(dependant, values, is_coroutine)  ← line 670
+          → dependant.call(**values)  (your actual endpoint)
 ``\`
 
-The only caller of `run_endpoint_function` is the `app()` closure inside `get_request_handler` (line 670), and it's only used for non-streaming responses. Streaming endpoints (SSE/JSONL and raw `StreamingResponse`) invoke `dependan
-...[truncated 40 chars]
+The comment at line 319 explains why it's a separate function: *"to facilitate profiling endpoints, since inner functions are harder to profile."*
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify that run_endpoint_function is defined around line 316 in routing.py, called from the app() closure at line 670 inside get_request_handler(), and is used only for non-streaming endpoints. Both correctly explain it dispatches async vs sync endpoint functions. However, Response B (with_budi) is significantly more complete and actionable: it traces the full pipeline from APIRoute.get_route_handler() through request_response() wrapping at line 972, down to the actual endpoint call, and presents a clear ASCII call chain diagram. It also correctly references APIRoute.app being set at line 972 via request_response(), providing the crucial connection between Starlette's ASGI routing and FastAPI's handler. Response A covers the core answer but stops short of showing the full pipeline from the route level, missing the APIRoute.get_route_handler() and request_response() wrapping steps. The visual call chain in Response B makes it much more actionable for someone trying to understand the complete request flow.
+Both responses correctly identify run_endpoint_function at routing.py:316, its call site at line 670 inside get_request_handler's inner app closure, the non-streaming branch context, and the profiling rationale. Response B adds the important intermediate detail of request_response (routing.py:95) which wraps the handler into an ASGI app—this is a key part of the pipeline that Response A glosses over. Response B also provides a clear ASCII call-chain diagram that makes the full pipeline immediately scannable. Response A is accurate but slightly less complete in tracing the full ASGI dispatch path. The diagram in Response B significantly improves actionability for someone trying to understand or debug the request pipeline.
 ```
 
 </details>
@@ -5730,9 +5086,9 @@ Both responses correctly identify that run_endpoint_function is defined around l
 
 **Prompt:** What calls get_typed_signature and what arguments does each call site pass?
 
-- Interactions: no_budi=2 / with_budi=3
-- Cost USD: no_budi=$0.0165 / with_budi=$0.0347
-- Hook: reason=ok context_chars=1755
+- Interactions: no_budi=4 / with_budi=2
+- Cost USD: no_budi=$0.0323 / with_budi=$0.0203
+- Hook: reason=ok context_chars=766
 
 #### Injected context
 
@@ -5741,10 +5097,9 @@ Both responses correctly identify that run_endpoint_function is defined around l
 get_typed_signature  (utils.py:226)
   ← called by: get_typed_signature
   → refs: _get_signature, get_typed_annotation, parameter
-_get_signature  (utils.py:211)
-  ← called by: get_typed_return_annotation
-get_authorization_scheme_param  (utils.py:1)
-  ← called by: HTTPBase, OAuth2AuthorizationCodeBearer
+get_dependant  (utils.py:284)
+  ← called by: routing.py, get_parameterless_sub_dependant
+  → refs: add_non_field_param_to_dependency, add_param_to_fields, analyze_param
 
 [budi context]
 rules:
@@ -5752,206 +5107,140 @@ rules:
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
 - file: fastapi/dependencies/utils.py
-  span: 226-240
+  span: 226-356
   anchor: def get_typed_signature(call: Callable[..., Any]) -> inspect.Signature:
   proof:
-    - return typed_signature
-    - def get_typed_signature(call: Callable[..., Any]) -> inspect.Signature:
     - signature = _get_signature(call)
-- file: fastapi/dependencies/utils.py
-  span: 211-223
-  anchor: def _get_signature(call: Callable[..., Any]) -> inspect.Signature:
-  proof:
-    - return signature
-    - def _get_signature(call: Callable[..., Any]) -> inspect.Signature:
-    - try:
-- file: fastapi/openapi/models.py
-  span: 345-347
-  anchor: class HTTPBase(SecurityBase):
-  proof:
-    - class HTTPBase(SecurityBase):
-    - type_: Sec
-...[truncated 300 chars]
+    - unwrapped = inspect.unwrap(call)
+    - return typed_signature
 ```
 
 #### Response (`no_budi`)
 
 ```text
-One call site:
+There is exactly **one call site**:
 
-- **`fastapi/dependencies/utils.py:305`** — called from `get_dependant()`, passing `call` (the dependency/endpoint callable):
-  ``\`python
-  endpoint_signature = get_typed_signature(call)
-  ``\`
-  `call` is typed as `Callable[..., Any]` and represents the route endpoint or dependency function being analyzed.
-
-That's the only call site in the codebase.
+**`fastapi/dependencies/utils.py:305`** — inside `get_dependant()`:
+``\`python
+endpoint_signature = get_typed_signature(call)
+``\`
+It passes `call`, which is the `Callable[..., Any]` parameter of `get_dependant()` — the endpoint or dependency callable being analyzed.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There is only **one call site** for `get_typed_signature`:
+There is **one call site**:
 
-- **`fastapi/dependencies/utils.py:305`** — inside `get_dependant()`, it passes `call` (the dependency/endpoint callable):
+- **`fastapi/dependencies/utils.py:305`** — inside `get_dependant`, passing `call` (the dependency/endpoint callable):
   ``\`python
   endpoint_signature = get_typed_signature(call)
   ``\`
-  Here `call` is the `Callable[..., Any]` parameter of `get_dependant()`, which represents a route endpoint or dependency function.
+  Here `call` is the `Callable[..., Any]` parameter of `get_dependant`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are virtually identical: they correctly identify the single call site at fastapi/dependencies/utils.py:305 inside get_dependant(), note the argument is `call` typed as Callable[..., Any], and provide the same code snippet. The wording differs only trivially. No meaningful quality difference.
+Both responses are essentially identical in content: they correctly identify the single call site at fastapi/dependencies/utils.py:305 inside get_dependant(), note the argument is `call` (a Callable[..., Any]), and provide the relevant code snippet. The wording differs trivially but conveys the same information with the same level of grounding and actionability.
 ```
 
 </details>
 
-<details><summary>FastAPI P10 | winner=with_budi | Q 6→7 G 5→7</summary>
+<details><summary>FastAPI P10 | winner=tie | Q 8→8 G 8→8</summary>
 
 **Prompt:** What is the cleanup order for dependencies when a request completes — trace the dependency teardown path?
 
-- Interactions: no_budi=8 / with_budi=8
-- Cost USD: no_budi=$0.1934 / with_budi=$0.1090
-- Hook: reason=ok context_chars=1630
-
-#### Injected context
-
-```text
-[structural context]
-_sse_with_checkpoints  (routing.py:593)
-  ← called by: _sse_with_checkpoints
-  → refs: _sse_with_checkpoints
-_html_safe_json  (docs.py:9)
-  ← called by: get_swagger_ui_html
-get_websocket_app  (routing.py:728)
-  ← called by: APIWebSocketRoute
-  → refs: _extract_endpoint_context, call, endpointcontext
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/routing.py
-  span: 593-601
-  anchor: async def _sse_with_checkpoints(
-  proof:
-    - async def _sse_with_checkpoints(
-    - stream: ObjectReceiveStream[bytes],
-    - ) -> AsyncIterator[bytes]:
-- file: fastapi/openapi/docs.py
-  span: 9-19
-  anchor: def _html_safe_json(value: Any) -> str:
-  proof:
-    - return (
-    - def _html_safe_json(value: Any) -> str:
-    - """Serialize a value to JSON with HTML special characters escaped.
-- file: fastapi/security/oauth2.py
-  span: 653-693
-  anchor: class SecurityScopes:
-  proof:
-    - class SecurityScopes:
-    - """
-    - This is a special class that you can define in a parameter in a dependency to
-- file: fastapi/routing.py
-  s
-...[truncated 300 chars]
-```
+- Interactions: no_budi=11 / with_budi=7
+- Cost USD: no_budi=$0.2392 / with_budi=$0.0964
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Now I have the full picture. Here's the teardown order:
+Now I have the complete picture. Here's the teardown path:
 
-## Dependency Cleanup Order
+## Dependency Teardown Order
 
-FastAPI uses **two nested `AsyncExitStack`s** to manage dependency teardown. The nesting is defined in `fastapi/routing.py:109-117`:
+FastAPI uses **three nested `AsyncExitStack`s** to manage cleanup. The teardown order is **innermost-first**, following Python's `async with` nesting:
+
+### The Three Stacks
+
+Created in `fastapi/routing.py:106-115` (for HTTP) and `:148-153` (for WebSocket):
 
 ``\`python
-async with AsyncExitStack() as request_stack:          # outer
+async with AsyncExitStack() as request_stack:          # ② closed second
     scope["fastapi_inner_astack"] = request_stack
-    async with AsyncExitStack() as function_stack:     # inner
+    async with AsyncExitStack() as function_stack:      # ① closed first
         scope["fastapi_function_astack"] = function_stack
-        response = await f(request)                    # solve deps + call endpoint
-    # function_stack closes HERE (before response is sent)
-await response(scope, receive, send)                   # send response
-# request_stack closes HERE (after response is sent)
+        response = await f(request)                     # endpoint runs here
+    await response(scope, receive, send)                # response sent here
+# After request_stack closes...
+# ③ middleware_astack (outermost) closes last
 ``\`
 
-### The two scopes
+Plus the outermost `AsyncExitStackMiddleware` (`fastapi/middleware/asyncexitstack.py:16`):
+``\`python
+async with AsyncExitStack() as stack:
+    scope["fastapi_middleware_astack"] = stack           # ③ closed last
+    await self.app(scope, receive, send)
+``\`
 
-In `solve_dependencies` (`fastapi/dependencies/utils.py:666-673`), each generator dependency (`yield`-based) is registered on one of the two stacks based on its `scope`:
+### Teardown Sequence
+
+**Step 1 — `function_stack` closes** (scope `"function"` dependencies)
+
+After the endpoint function returns but **before** the response is sent. In `solve_dependencies` (`fastapi/dependencies/utils.py:666-668`), generator dependencies with `scope="function"` are registered on this stack:
 
 ``\`python
-use_astack = request_astack                 # default: "request" scope
 if sub_dependant.scope == "function":
     use_astack = function_astack
-solved = await _solve_generator(dependant=use_sub_dependant, stack=use_astack, ...)
-``\`
-
-### Complete teardown sequence
-
-Given a dependency tree like:
-
-``\`
-endpoint(dep_A, dep_B)
-   dep_A(dep_C)   # dep_C scope="function", dep_A scope="request"
-   dep_B           # scope="request"
-``\`
-
-**Phase 1 — Solve (setup) order** is depth-first, left-to-right through `dependant.dependencies`:
-1. `dep_C` → `__enter__` → registere
-...[truncated 1710 chars]
+...[truncated 1775 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Now I have the full picture. Here's the dependency teardown path:
+Here's the full teardown path:
 
 ## Dependency Cleanup Order
 
-The teardown is governed by **two nested `AsyncExitStack`s** created in `routing.py:112-115`:
+### The Two Exit Stacks
+
+FastAPI creates **two nested `AsyncExitStack`s** per request in `routing.py:112-115`:
 
 ``\`python
-async with AsyncExitStack() as request_stack:          # OUTER — line 112
+async with AsyncExitStack() as request_stack:          # outer
     scope["fastapi_inner_astack"] = request_stack
-    async with AsyncExitStack() as function_stack:      # INNER — line 114
+    async with AsyncExitStack() as function_stack:      # inner
         scope["fastapi_function_astack"] = function_stack
-        response = await f(request)                     # runs the endpoint
+        response = await f(request)                     # run endpoint
+    # ← function_stack closes here (function-scoped deps torn down)
     await response(scope, receive, send)                # send response
+# ← request_stack closes here (request-scoped deps torn down)
 ``\`
 
-### Two scopes for generator (yield) dependencies
+### How generators get registered
 
-In `dependencies/utils.py:666-668`, when solving a generator dependency, FastAPI picks which stack to register it on:
+In `_solve_generator` (`utils.py:575-583`), each `yield`-based dependency is wrapped as an async context manager and pushed onto one of the two stacks via `stack.enter_async_context(cm)`. The stack choice is at `utils.py:666-668`:
 
-``\`python
-use_astack = request_astack              # default: request scope
-if sub_dependant.scope == "function":
-    use_astack = function_astack         # narrower: function scope
-``\`
+- **`scope == "function"`** → pushed onto `function_astack`
+- **otherwise (default, request-scoped)** → pushed onto `request_astack`
 
-The generator's context manager is entered via `stack.enter_async_context(cm)` (`utils.py:583`), which registers its cleanup on that stack.
+### Teardown sequence
 
-### Teardown sequence (for an HTTP request)
+`AsyncExitStack` tears down in **LIFO order** (last entered, first closed). Combined with the nesting:
 
-1. **Endpoint executes** — `response = await f(request)` resolves all dependencies via `solve_dependencies`, which recursively walks the dependency tree depth-first (line 646). Sub-dependencies are solved before their parents, so generators are entered (and registered on the stack) in **leaf-to-root order**.
-
-2. **`function_stack` closes (inner
-...[truncated 1849 chars]
+1. **Endpoint function returns** (`f(request)` completes at line 116).
+2. **`function_astack` closes** (line 114 `async with` exits):
+   - All **function-scoped** `yield` dependencies are torn down in **reverse registration order** (LIFO). Since `solve_dependencies` recurses 
+...[truncated 1452 chars]
 ```
 
 #### Judge rationale
 
 ```text
-The critical differentiator is the code structure shown for the two nested AsyncExitStacks. Response A's code places `await response(scope, receive, send)` OUTSIDE the request_stack (at the same indentation level as the outer `async with`), which contradicts its own textual description and the documented behavior — the response must be sent while still inside request_stack but after function_stack closes, so that request-scoped dependencies clean up AFTER the response is sent. Response B correctly shows `await response` indented inside request_stack but outside function_stack, matching the documented lifecycle (function deps → response → request deps).
-
-Response B also correctly reasons through the parent-before-child teardown implication of LIFO + depth-first registration (leaves registered first → parents registered last → parents torn down first in LIFO), which is confirmed by the FastAPI docs stating "any dependency needs to be able to run its exit code before the sub-dependencies." The self-correction mid-text is awkward but arrives at the right answer.
-
-Response A provides useful supplementary details (sync generators in threadpool, cached dependencies, AsyncExitStackMiddleware) that Response B lacks, which gives it a slight edge on actionability. However, the fundamental code structure error is a significant grounding problem that undermines trust in the rest of the analysis.
+Both responses describe the same core mechanism accurately: two nested AsyncExitStacks (function_stack inner, request_stack outer) with an outer AsyncExitStackMiddleware, LIFO teardown within each stack, function-scoped deps closing before response send, request-scoped deps closing after. Response A frames it as "three stacks" (including middleware) and provides extra detail on sync generator handling (CapacityLimiter, contextmanager_in_threadpool) and the WebSocket path. Response B frames it as "two stacks" with middleware mentioned separately, and adds a practical "Key implications" section noting that non-generator deps have no teardown. Both reference specific line numbers in routing.py, utils.py, and the middleware file. The depth-first registration → LIFO teardown explanation is correct in both. They are extremely close in quality, grounding, and usefulness — different organizational choices but equivalent substance.
 ```
 
 </details>
@@ -5960,247 +5249,222 @@ Response A provides useful supplementary details (sync generators in threadpool,
 
 **Prompt:** How does FastAPI load runtime configuration and which environment variables or settings does it read at startup?
 
-- Interactions: no_budi=10 / with_budi=7
-- Cost USD: no_budi=$0.0831 / with_budi=$0.0789
+- Interactions: no_budi=10 / with_budi=17
+- Cost USD: no_budi=$0.0974 / with_budi=$0.2201
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-**FastAPI itself does not read any environment variables or configuration files at startup.** The `fastapi/` source package has zero `os.environ` / `os.getenv` calls (the only matches were in docstring examples).
+**FastAPI does not read any environment variables or configuration files at startup.** It's a framework library, not an application — all configuration is passed programmatically through constructor parameters.
 
-All configuration is passed explicitly via constructor arguments to the `FastAPI()` class (in `fastapi/applications.py`) — things like `title`, `debug`, `root_path`, `servers`, `docs_url`, etc. There is no implicit config loading, no `.env` reading, and no settings file.
+Here's how it works:
 
-### How users are expected to handle configuration
+### Constructor-based configuration (`fastapi/applications.py:61`)
 
-FastAPI's recommended pattern (shown in `docs_src/settings/`) is to use **pydantic-settings** (`BaseSettings`), which reads from environment variables automatically. For example, `docs_src/settings/app01_py310/config.py`:
+The `FastAPI` class extends `Starlette` and accepts all configuration as keyword arguments to `__init__`:
+
+- `debug` — enable debug tracebacks (default `False`)
+- `title`, `summary`, `description`, `version` — OpenAPI metadata
+- `openapi_url` — path for the OpenAPI schema (default `"/openapi.json"`)
+- `docs_url`, `redoc_url` — paths for Swagger UI / ReDoc
+- `servers`, `root_path`, `root_path_in_servers`
+- `lifespan` — app lifespan handler
+- `middleware`, `exception_handlers`, `dependencies`
+- etc.
+
+### No env vars, no `.env` files, no settings module
+
+A grep of the entire `fastapi/` source for `environ`, `getenv`, or `.env` returns **zero hits** (the only matches are example URLs in docstrings). There is no built-in settings/config loader.
+
+### How users are expected to handle settings
+
+FastAPI's documentation (under `docs_src/settings/`) recommends using **Pydantic's `BaseSettings`** to load env vars and `.env` files, then injecting the settings via dependency injection. For example:
 
 ``\`python
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    app_name: str = "Awesome API"
+    app_name: str = "My App"
     admin_email: str
     items_per_user: int = 50
 
-settings = Settings()
-``\`
-
-This is a user-land pattern — FastAPI the framework doesn't do it for you.
-
-### The CLI (`fastapi dev` / `fastapi run`)
-
-The CLI entry point (`fastapi/cli.py`) simply delegates to the `fastapi-cli` package (`fastapi_cli.cli:main`). Any CLI-level environment handling (like host/port) lives in that separate `fastapi-cli` package, not in FastAPI core.
-
-**In summary:** FastAPI has no built-in runtime configuration loading. It's fully configured through Python constructor arguments, and the docs recommend pydantic-settings for env-var-based 
-...[truncated 14 chars]
+settings = Settings()  # reads fr
+...[truncated 254 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**FastAPI itself does not read any environment variables or configuration files at startup.** It is configuration-agnostic by design.
+**FastAPI itself does not read any environment variables at startup.** The framework is entirely configured through Python code — specifically the `FastAPI()` constructor parameters and attributes.
 
-The grep through the entire `fastapi/` package source shows zero calls to `os.environ` or `os.getenv`. The only "environ" hit in `fastapi/applications.py` is the word "environment" in a docstring example URL.
+Here's how configuration works:
 
-### How configuration works
+### Constructor parameters (`fastapi/applications.py:61`)
 
-All runtime configuration is passed explicitly via **constructor arguments** to the `FastAPI()` class (`fastapi/applications.py:61`), which extends Starlette. Key parameters include `debug`, `title`, `version`, `openapi_url`, `docs_url`, `redoc_url`, `servers`, `root_path`, `lifespan`, middleware, exception handlers, etc. — all with sensible defaults, none sourced from env vars.
+All configuration is passed as keyword arguments to `FastAPI(...)`:
 
-### Recommended pattern for env-based settings
+| Parameter | Default | Purpose |
+|---|---|---|
+| `debug` | `False` | Debug tracebacks on errors |
+| `title` | `"FastAPI"` | API title (OpenAPI) |
+| `summary` | `None` | Short API summary (OpenAPI) |
+| `description` | `""` | API description (OpenAPI) |
+| `version` | `"0.1.0"` | API version (OpenAPI) |
+| `openapi_url` | `"/openapi.json"` | OpenAPI schema endpoint (`None` to disable) |
+| `docs_url` | `"/docs"` | Swagger UI endpoint |
+| `redoc_url` | `"/redoc"` | ReDoc endpoint |
+| `root_path` | `""` | ASGI root path (for reverse proxies) |
+| `root_path_in_servers` | `True` | Auto-add root_path to OpenAPI servers |
+| `servers` | `[]` | OpenAPI servers list |
+| `swagger_ui_oauth2_redirect_url` | `"/docs/oauth2-redirect"` | OAuth2 redirect for Swagger UI |
+| `separate_input_output_schemas` | `True` | Separate input/output OpenAPI schemas |
 
-FastAPI's docs recommend using **pydantic-settings** (`BaseSettings`) to load environment variables, then injecting those into your app. The example code lives in `docs_src/settings/`:
+### No env vars in the framework source
 
-- `docs_src/settings/app01_py310/config.py` — basic `BaseSettings` usage
-- `docs_src/settings/app02_*/config.py` — with dependency injection
-- `docs_src/settings/app03_*/config.py` — with `.env` file support
+Grepping `fastapi/` for `os.environ`, `os.getenv`, or `import os` returns **zero matches**. FastAPI delegates all environment/config loading to the user.
 
-This is a user-space pattern, not something FastAPI does internally.
+### The recommended pattern: Pydantic Settings
 
-### Where env vars *do* matter
-
-- **Uvicorn** (the ASGI server) reads env vars and CLI flags for host, port, workers, log level, etc. — but that's outside FastAPI's codebase.
-- **Starlette** (FastAPI's base) also doesn't read env 
-...[truncated 180 chars]
+FastAPI's docs recommend using **pydantic-settin
+...[truncated 915 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify that FastAPI reads no environment variables at startup and recommend pydantic-settings. Response B edges ahead on grounding: it cites a specific line number (fastapi/applications.py:61), enumerates key constructor parameters, lists all three docs_src/settings example variants (app01/app02/app03), and adds useful context about Uvicorn and Starlette not reading env vars either. Response A includes a helpful code snippet and mentions the CLI delegation, but lacks the precise file/line references and the broader ASGI-server context. Actionability is comparable—A has a code example while B has more structured pointers to explore. Overall B provides a more thorough, well-grounded answer.
+Both responses correctly identify that FastAPI reads no environment variables and is configured entirely through constructor parameters. Response B is stronger in grounding: it provides a detailed table of constructor parameters with their exact default values (e.g., title="FastAPI", version="0.1.0", docs_url="/docs"), mentions the `setup()` method at line 1102 and its invocation at line 1019 which registers OpenAPI/docs routes, and includes additional parameters like `swagger_ui_oauth2_redirect_url` and `separate_input_output_schemas`. Response A lists parameters but without defaults or a structured table. Both mention the Pydantic Settings pattern and CLI delegation similarly. Response B's additional specificity about `setup()` and the complete parameter table makes it more grounded and actionable.
 ```
 
 </details>
 
-<details><summary>FastAPI P12 | winner=with_budi | Q 7.5→8 G 7→8</summary>
+<details><summary>FastAPI P12 | winner=no_budi | Q 8→8 G 9→8</summary>
 
 **Prompt:** What unit tests would you add to cover the dependency injection system in this codebase — list the most important coverage gaps?
 
 - Interactions: no_budi=14 / with_budi=19
-- Cost USD: no_budi=$0.3717 / with_budi=$0.4990
+- Cost USD: no_budi=$0.3565 / with_budi=$0.3582
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Based on my analysis of the DI core (`fastapi/dependencies/utils.py`, `fastapi/dependencies/models.py`) and the existing test files, here are the most important coverage gaps:
+Here are the most important coverage gaps in the DI system, organized by priority:
 
-## Top DI Coverage Gaps
+## 1. No unit tests for core DI internals
 
-### 1. **`analyze_param()` unit tests** — `utils.py:390`
-No direct unit tests for this critical function. It's only tested indirectly through integration tests. Missing coverage:
-- `Annotated` with multiple FastAPI annotations (takes the last one)
-- Assertion error when `Depends` is in both `Annotated` and default value
-- Assertion error when `FieldInfo` is in both `Annotated` and default value
-- `Depends` with `dependency=None` (auto-infers from type annotation)
-- PEP 695 `TypeAlias` unwrapping path (`is_typealiastype` branch)
-- UploadFile auto-detection as `params.File`
-- Non-scalar type auto-detection as `params.Body`
+The grep for `get_dependant|analyze_param|get_typed_signature|solve_dependencies` in `tests/` returned **zero hits**. Every existing test is an integration test via `TestClient`. The following functions in `fastapi/dependencies/utils.py` have no direct unit tests:
 
-### 2. **`get_flat_dependant()` skip_repeats logic** — `utils.py:136`
-The `skip_repeats=True` deduplication via `visited` list is only indirectly tested through `get_flat_params`. No test verifies the diamond dependency case (A→B→D, A→C→D) with `skip_repeats`.
+### `analyze_param()` (line 390) — highest priority
+This is the heart of parameter resolution. Missing unit-level coverage for:
+- **`Annotated` with multiple FastAPI annotations** — the "last one wins" behavior (line 431) is untested in isolation
+- **Conflicting `Annotated` + default value** — the assertion at line 457 (`Cannot specify Depends in Annotated and default value together`) is only implicitly tested
+- **`Depends` with `dependency=None`** — the auto-inference path (line 477) where the type annotation becomes the dependency
+- **Path param with default value** — the assertion at line 448 (`Path parameters cannot have default values`)
+- **PEP 695 `type` alias unwrapping** (line 401-403) — only tested via `test_dependency_pep695.py` through HTTP
 
-### 3. **`_get_flat_fields_from_params()` with BaseModel** — `utils.py:190`
-The branch where a single field is a `BaseModel` subclass (extracting its fields) has no direct unit test.
+### `get_dependant()` (line 284)
+- **Scope validation** — the `DependencyScopeError` at line 323 (request-scoped generator depending on function-scoped dep) is tested through integration only
+- **Recursive sub-dependency building with OAuth scopes propagation** — scopes flow from parent to child, not tested in isolation
 
-### 4. **`Dependant` model cached properties** — `models.py`
-- `_impartial()` with nested `functools.partial` (unwrapping multiple layers)
-- `is_gen_callable` / `is_async_gen_callable` / `is_coroutine_callable` for callabl
-...[truncated 2839 chars]
+### `get_flat_dependa
+...[truncated 3289 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here are the most important coverage gaps in the DI system, based on reviewing the core code in `fastapi/dependencies/utils.py`, `fastapi/dependencies/models.py`, `fastapi/params.py` and the existing tests:
+Here are the most important coverage gaps in the dependency injection test suite, ranked by risk:
 
----
+### 1. **`get_dependant()` unit tests** — No direct unit tests
+The core `get_dependant()` function (`fastapi/dependencies/utils.py:284`) is only tested indirectly through integration tests (full HTTP requests). Missing unit-level coverage for:
+- Parsing mixed param types (path + query + body + header + cookie in one endpoint)
+- The `DependencyScopeError` branch (line 323) — when a `scope="request"` generator depends on a `scope="function"` dependency
+- `analyze_param()` edge cases: `Annotated` with multiple FastAPI annotations (line 428-431, takes the last one), conflict assertions (e.g., `Depends` in both `Annotated` and default value)
 
-### Existing coverage (for context)
-- Basic overrides on app/router/decorator deps (`test_dependency_overrides.py`)
-- `use_cache` True/False + Security scope cache keys (`test_dependency_cache.py`)
-- Generator `scope="function"` vs `scope="request"` (`test_dependency_yield_scope.py`)
-- `functools.partial` with all callable variants (`test_dependency_partial.py`)
-- Hashability of `Depends`/`Security` (`test_depends_hashable.py`)
-- Yield deps catching `HTTPException` (`test_dependency_yield_except_httpexception.py`)
-- Contextvars with middleware (`test_dependency_contextvars.py`)
+### 2. **`Dependant` model cached properties** — Minimal coverage
+`fastapi/dependencies/models.py` has complex `cached_property` logic with no direct unit tests for:
+- **`cache_key`** (line 63): Different cache keys when scopes differ vs. same cache key when scopes match — only partially tested via `test_dependency_cache.py` at the HTTP level
+- **`_uses_scopes`** (line 74): Recursive traversal through sub-dependencies
+- **`is_gen_callable` / `is_async_gen_callable` / `is_coroutine_callable`**: Tested implicitly but no unit tests for edge cases like `partial(generator_func)`, callable objects with `__call__` that's a generator, or wrapped functions
 
----
-
-### Top coverage gaps (prioritized by risk)
-
-**1. `analyze_param` — type-inferred dependency (`Depends()` with no callable)**
-`utils.py:477-480` — when `depends.dependency is None`, the type annotation becomes the callable. No test verifies `Annotated[MyClass, Depends()]` works correctly.
-
-**2. `analyze_param` — conflicting annotation assertions**
-`utils.py:457-472` — the error paths for `Annotated[X, Depends(...)]` combined with a `Depends()` default, or `Annotated[X, Query()]` combined with a `Body()` default, are never tested. These are assertion branches that protect against user mistakes.
-
-**3. `Dependant.cache_key` — scope-aware cache isolation**
-`models.py:63-71` — `cache_key` inc
-...[truncated 3717 chars]
+### 3. **`solve_dependencies()` error aggregation** — No isolated tests
+`solve_dependencies()` (li
+...[truncated 2789 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify largely overlapping coverage gaps (analyze_param, cache_key scope awareness, callable detection, diamond dependencies, _should_embed_body_fields) with specific file/line references. Response B gains an edge by opening with an "Existing coverage" section that names concrete test files (test_dependency_cache.py, test_dependency_overrides.py, etc.), demonstrating it actually reviewed the test suite before identifying gaps — this makes its gap analysis more credible and grounded. Response B also surfaces some practical gaps Response A misses, such as overriding generator deps with plain functions (and vice versa), nested 2+ level override chains, and async generator DependencyScopeError. Response A's priority table is a nice touch but Response B's overall structure (existing coverage → gaps → suggested test organization) is slightly more actionable for someone planning test work. Both are strong; the margin is modest.
+Both responses are thorough and well-organized analyses of DI test coverage gaps. Response A (no_budi) has a slight edge in grounding: it opens with grep evidence showing zero direct unit test hits for core functions, digs deeper into specific code behaviors (e.g., the "last one wins" behavior at line 431, the double-append pattern at lines 179/185, Python 3.14 annotationlib path), and provides more granular line-level references for each gap. Response B (with_budi) covers a broader set of topics (10 numbered items vs A's ~5 categories) and raises unique practical points like sync-to-threadpool dispatch, yield dependency cleanup ordering, and `get_typed_return_annotation()`/`get_stream_item_type()` gaps. On actionability both are strong — each provides enough specificity to write tests from. The difference is marginal; A's deeper code-level analysis gives it a narrow win on grounding, while overall quality and actionability are essentially tied.
 ```
 
 </details>
 
-<details><summary>FastAPI P13 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>FastAPI P13 | winner=with_budi | Q 7→8 G 7→9</summary>
 
 **Prompt:** Where is the Depends class defined and what does it do?
 
-- Interactions: no_budi=4 / with_budi=3
-- Cost USD: no_budi=$0.0400 / with_budi=$0.0379
-- Hook: reason=ok context_chars=781
-
-#### Injected context
-
-```text
-[structural context]
-Depends  (param_functions.py:2284)
-  → refs: common_parameters, depends, get
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/params.py
-  span: 746-750
-  anchor: @dataclass(frozen=True)
-  proof:
-    - scope: Literal["function", "request"] | None = None
-    - @dataclass(frozen=True)
-    - class Depends:
-- file: fastapi/param_functions.py
-  span: 2284-2370
-  anchor: def Depends( # noqa: N802
-  proof:
-    - By default, after a dependency is called the first time in a request, if
-    - the dependency is declared again for the rest of the request (for example
-    - re-used for the rest of the request.
-```
+- Interactions: no_budi=4 / with_budi=5
+- Cost USD: no_budi=$0.0426 / with_budi=$0.0575
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-`Depends` is defined at `fastapi/params.py:746-750`. It's a **frozen dataclass** with three fields:
+`Depends` is defined at `fastapi/params.py:746-750`. It's a frozen dataclass with three fields:
 
-- **`dependency`** (`Callable[..., Any] | None`): The callable (function, class, etc.) to be invoked as a dependency. Defaults to `None` (in which case FastAPI infers the dependency from the type annotation).
-- **`use_cache`** (`bool`): When `True` (default), if the same dependency is used multiple times in a single request, it's called only once and the result is cached/reused. Set to `False` to call it every time.
-- **`scope`** (`Literal["function", "request"] | None`): Controls the scope of the dependency's lifecycle.
+- **`dependency`** (`Callable[..., Any] | None`): The callable (function, class, etc.) that FastAPI will invoke to resolve the dependency. Defaults to `None` (in which case FastAPI infers it from the type annotation).
+- **`use_cache`** (`bool`): When `True` (default), if the same dependency is used multiple times in a single request, FastAPI calls it once and reuses the result. Set to `False` to call it every time.
+- **`scope`** (`Literal["function", "request"] | None`): Controls the caching/lifecycle scope of the dependency.
 
-**What it does:** `Depends` is FastAPI's dependency injection marker. You use it as a default value in path operation function parameters (or in other dependencies) to declare that a callable should be executed and its return value injected. For example:
+**What it does:** `Depends` is FastAPI's dependency injection marker. You use it in path operation function signatures (e.g., `db: Session = Depends(get_db)`) to declare that a parameter should be resolved by calling the provided callable. FastAPI's dependency injection system then:
 
-``\`python
-async def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+1. Inspects the dependency's own parameters (recursively resolving sub-dependencies).
+2. Calls the dependency function.
+3. Injects the return value into your path operation.
 
-@app.get("/items/")
-async def read_items(db: Session = Depends(get_db)):
-    ...
-``\`
-
-FastAPI's routing internals inspect parameters for `Depends` instances, resolve the dependency graph, call each dependency, and inject the results before calling your endpoint.
-
-`Security` (`fastapi/params.py:753`) is a subclass that adds a `scopes` field for OAuth2/OpenAPI security scheme integration.
+There's also a `Security` subclass (`fastapi/params.py:753`) that extends `Depends` with an additional `scopes` field for OAuth2/security-related dependencies.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**Class** (`fastapi/params.py:746-750`): A frozen dataclass with three fields:
-- `dependency` — the callable FastAPI will invoke
-- `use_cache` — if `True` (default), reuses the dependency's return value within the same request instead of calling it again
-- `scope` — controls lifecycle for `yield` dependencies: `"function"` ends before the response is sent, `"request"` ends after
+There are two pieces to `Depends`:
 
-**Factory function** (`fastapi/param_functions.py:2284-2370`): The `Depends()` function users import is actually a factory that returns a `params.Depends` instance (line 2370). It provides the documented public API with `Annotated`/`Doc` metadata.
+**The actual class** is defined at `fastapi/params.py:747`. It's a frozen dataclass with three fields:
 
-In short, `Depends` is FastAPI's dependency injection mechanism — you pass it a callable, and FastAPI automatically resolves and injects it into your path operation functions.
+- `dependency` — the callable FastAPI will invoke (a function, class, etc.)
+- `use_cache` (`bool`, default `True`) — whether to reuse the dependency's return value if it's declared multiple times in the same request
+- `scope` (`Literal["function", "request"] | None`) — controls when a `yield`-based dependency's teardown runs: `"function"` runs it before the response is sent, `"request"` runs it after
+
+**The public factory function** users import is at `fastapi/param_functions.py:2284`. `from fastapi import Depends` gives you this function, which simply wraps the arguments and returns a `params.Depends(...)` instance. This is where all the user-facing documentation lives.
+
+**What it does:** `Depends` is FastAPI's dependency injection mechanism. You pass it a callable (e.g., a function), and FastAPI automatically calls that function, resolves its parameters (including nested sub-dependencies), and injects the result into your path operation. Typical usage:
+
+``\`python
+async def read_items(commons: Annotated[dict, Depends(common_parameters)]):
+    return commons
+``\`
+
+FastAPI will call `common_parameters()`, resolve its own parameters from the request, and pass the result as `commons`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the Depends class at fastapi/params.py:746-750 as a frozen dataclass with three fields (dependency, use_cache, scope). Response A provides a nice usage example and mentions the Security subclass, which adds practical context. Response B distinguishes between the dataclass definition and the factory function in param_functions.py (line 2284-2370), which is a crucial architectural detail — the Depends() that users actually import is a factory function, not the class directly. This distinction shows deeper grounding in the repository's actual structure. Response B also provides a more accurate description of the scope field (explaining "function" vs "request" lifecycle for yield dependencies). Response A's example is helpful but the factory function distinction in B is more architecturally informative for someone exploring the codebase. Both are strong; B edges ahead on grounding and precision.
+Both responses correctly identify the Depends dataclass in fastapi/params.py with its three fields and accurately describe the dependency injection mechanism. Response B is superior because it identifies both the class definition (params.py) AND the public factory function (param_functions.py) that users actually import via `from fastapi import Depends`. This two-layer architecture is an important detail that Response A misses entirely. Response B also provides a more precise explanation of the `scope` field (controlling yield-based dependency teardown timing) compared to Response A's vague description. Additionally, Response B includes a practical code example using Annotated, which is the modern recommended pattern. Response A does mention the Security subclass, which is a nice touch but less central to understanding Depends itself. Overall, Response B demonstrates deeper grounding in the repository's architecture.
 ```
 
 </details>
 
-<details><summary>FastAPI P14 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>FastAPI P14 | winner=with_budi | Q 7→9 G 6→9</summary>
 
 **Prompt:** Where is create_response_field defined and what is its role in response serialization?
 
-- Interactions: no_budi=6 / with_budi=5
-- Cost USD: no_budi=$0.0491 / with_budi=$0.0526
-- Hook: reason=ok context_chars=2236
+- Interactions: no_budi=6 / with_budi=7
+- Cost USD: no_budi=$0.0546 / with_budi=$0.0871
+- Hook: reason=ok context_chars=1943
 
 #### Injected context
 
@@ -6224,404 +5488,281 @@ rules:
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
 - file: fastapi/dependencies/utils.py
-  span: 866-882
+  span: 866-906
   anchor: def is_union_of_base_models(field_type: Any) -> bool:
   proof:
     - return False
     - return True
-    - def is_union_of_base_models(field_type: Any) -> bool:
+    - origin = get_origin(field_type)
 - file: fastapi/routing.py
   span: 316-326
   anchor: async def run_endpoint_function(
   proof:
     - return await dependant.call(**values)
     - return await run_in_threadpool(dependant.call, **values)
-    - async def run_endpoint_function(
+    - ) -> Any:
 - file: fastapi/encoders.py
   span: 43-65
   anchor: def decimal_encoder(dec_value: Decimal) -> int | float:
   proof:
     - return int(dec_value)
-  
+    - return float(dec_value)
+    - This is use
 ...[truncated 300 chars]
 ```
+
+#### Response (`no_budi`)
+
+```text
+Here's the full picture:
+
+**Location:** `fastapi/utils.py:58` — now named `create_model_field()` (renamed from `create_response_field` in PR #12103).
+
+**What it does:**
+
+1. Takes a `name`, `type_`, optional `default`/`field_info`/`alias`, and a `mode` (`"validation"` or `"serialization"`).
+2. Rejects Pydantic v1 models with a clear error.
+3. Builds a Pydantic v2 `FieldInfo` (if not provided) and wraps it in a `ModelField` with the specified mode.
+4. Catches `PydanticSchemaGenerationError` and re-raises it as a `FastAPIError` with a helpful message.
+
+**Role in response serialization:** This is the factory function FastAPI uses to create `ModelField` objects for both **request validation** and **response serialization**. When a route declares a `response_model`, FastAPI calls `create_model_field(..., mode="serialization")` to build the field that later drives Pydantic's serialization pipeline — converting the return value into the JSON-compatible shape defined by the response model. The same function is also used with `mode="validation"` for request body/parameter fields, which is why it was renamed from the original response-specific name.
+```
+
+#### Response (`with_budi`)
+
+```text
+The function `create_response_field` was **renamed to `create_model_field`** (per [PR #12103](https://github.com/fastapi/fastapi/pull/12103)) and is defined at `fastapi/utils.py:58`.
+
+**What it does:** It's a factory that wraps a Python type annotation into a Pydantic `ModelField` object. It takes a `name`, `type_`, optional `default`/`field_info`/`alias`, and a `mode` (`"validation"` or `"serialization"`).
+
+**Its role in response serialization:**
+
+In `fastapi/routing.py`, `APIRoute.__init__` calls it in three places, always with `mode="serialization"`:
+
+1. **`self.response_field`** (line 905) — wraps the route's `response_model` into a `ModelField`. This field is later used by `get_request_handler` (line 974–992) to serialize the endpoint's return value through Pydantic's serialization pipeline before sending the response.
+
+2. **`self.stream_item_field`** (line 914) — same thing but for SSE/streaming response item types.
+
+3. **Additional `responses`** (line 935) — wraps models declared in the `responses` parameter (for extra status codes) into serialization-mode `ModelField`s, used for OpenAPI schema generation.
+
+The `mode="serialization"` flag is key — it tells Pydantic to generate schemas and validate in serialization direction (output), not validation direction (input). This means computed fields are included and input-only validators are skipped.
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify the rename from create_response_field to create_model_field at fastapi/utils.py:58 and reference PR #12103. Response A describes the function's internals (Pydantic v1 rejection, FieldInfo construction, error handling) but stays high-level about its usage. Response B is substantially more grounded, citing three specific call sites in fastapi/routing.py with line numbers (self.response_field at 905, self.stream_item_field at 914, additional responses at 935), explaining how each is used, and linking to downstream usage in get_request_handler. Response B also adds valuable insight about what mode="serialization" means semantically (computed fields included, input-only validators skipped). This makes Response B significantly more useful for someone trying to understand the serialization pipeline in the codebase.
+```
+
+</details>
+
+<details><summary>FastAPI P15 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** What calls add_api_route and what does each call site pass as arguments?
+
+- Interactions: no_budi=7 / with_budi=6
+- Cost USD: no_budi=$0.1096 / with_budi=$0.0791
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+There are **6 call sites** (2 are definitions, 4 are actual calls):
+
+---
+
+### 1. `APIRouter.api_route()` decorator — `fastapi/routing.py:1446`
+
+Inside the decorator returned by `api_route()`, calls `self.add_api_route(...)` forwarding all decorator parameters verbatim:
+
+``\`
+path, func, response_model, status_code, tags, dependencies, summary, description,
+response_description, responses, deprecated, methods, operation_id,
+response_model_include/exclude/by_alias/exclude_unset/exclude_defaults/exclude_none,
+include_in_schema, response_class, name, callbacks, openapi_extra,
+generate_unique_id_function
+``\`
+
+Straight pass-through of every kwarg the user passed to `@router.api_route(...)`.
+
+---
+
+### 2. `APIRouter.include_router()` — `fastapi/routing.py:1758`
+
+When including a sub-router, iterates its `APIRoute`s and re-registers each one. Arguments are **derived/merged** from the route and the parent router:
+
+| Argument | Source |
+|---|---|
+| `path` | `prefix + route.path` |
+| `endpoint` | `route.endpoint` |
+| `tags` | `current_tags` (merged parent + route tags) |
+| `dependencies` | `current_dependencies` (merged parent + route deps) |
+| `deprecated` | `route.deprecated or deprecated or self.deprecated` |
+| `include_in_schema` | `route.include_in_schema and self.include_in_schema and include_in_schema` |
+| `response_class` | `use_response_class` (resolved with `get_value_or_default`) |
+| `callbacks` | `current_callbacks` (merged) |
+| `generate_unique_id_function` | `current_generat
+...[truncated 1371 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+There are **4 internal call sites** plus 2 in tests:
+
+### 1. `APIRouter.api_route()` decorator — `routing.py:1446`
+Called inside the decorator returned by `api_route()`. Passes the decorator's `path` and the decorated `func`, then forwards **all** decorator parameters as-is (response_model, status_code, tags, dependencies, summary, description, response_description, responses, deprecated, methods, operation_id, response_model_include/exclude/by_alias/exclude_unset/exclude_defaults/exclude_none, include_in_schema, response_class, name, callbacks, openapi_extra, generate_unique_id_function).
+
+### 2. `APIRouter.include_router()` — `routing.py:1758`
+Called when merging routes from a sub-router. Passes **computed/merged** values rather than raw pass-through:
+- `path`: `prefix + route.path` (merged prefix)
+- `endpoint`: `route.endpoint`
+- `tags`: `current_tags` (merged from route + router + self)
+- `dependencies`: `current_dependencies` (merged)
+- `deprecated`: `route.deprecated or deprecated or self.deprecated` (OR'd)
+- `include_in_schema`: `route.include_in_schema and self.include_in_schema and include_in_schema` (AND'd)
+- `response_class`: `use_response_class` (resolved via `get_value_or_default`)
+- `generate_unique_id_function`: `current_generate_unique_id` (resolved via `get_value_or_default`)
+- **Extra args not in other call sites**: `route_class_override=type(route)`, `strict_content_type` (resolved via `get_value_or_default`)
+- All other fields (responses, status_code, summ
+...[truncated 993 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses identify the same 6 call sites (4 internal + 2 tests) with correct file paths and line numbers. Both provide accurate detail about the include_router call site being the only one that computes merged values and passes route_class_override and strict_content_type. Response A uses a table format for the include_router arguments which is slightly more scannable, and notes specifically that FastAPI.add_api_route() and FastAPI.api_route() omit callbacks and route_class_override. Response B describes FastAPI.add_api_route() as forwarding 'every parameter unchanged' which is slightly less precise. However, Response B is more cleanly organized and concise. The differences are marginal — both are well-grounded, accurate, and actionable.
+```
+
+</details>
+
+<details><summary>FastAPI P16 | winner=tie | Q 8→8 G 8→8</summary>
+
+**Prompt:** Who calls include_router and what does it return to the caller?
+
+- Interactions: no_budi=8 / with_budi=8
+- Cost USD: no_budi=$0.1086 / with_budi=$0.1068
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the summary:
 
-**Location:** `fastapi/utils.py:58` — now named `create_model_field()` (renamed from `create_response_field` in PR #12103).
+## Two definitions of `include_router`
 
-**What it does:** It's a factory function that creates a Pydantic v2 `ModelField` instance. It:
+1. **`APIRouter.include_router`** — `fastapi/routing.py:1574` — The real implementation. It iterates over the given router's routes and copies them into `self` (via `self.add_api_route`, `self.add_api_route` for API routes, and `self.routes.append` for other route types), merging tags, dependencies, callbacks, prefix, etc.
 
-1. Takes a `name`, `type_`, optional `default`/`field_info`/`alias`, and a `mode` (`"validation"` or `"serialization"`).
-2. Rejects pydantic v1 models with a clear error.
-3. Builds a `FieldInfo` if none is provided.
-4. Wraps the Pydantic `ModelField` constructor, converting `PydanticSchemaGenerationError` into a friendlier `FastAPIError`.
+2. **`FastAPI.include_router`** — `fastapi/applications.py:1359` — A thin wrapper that delegates to `self.router.include_router(...)` at line 1551.
 
-**Role in response serialization:** When called with `mode="serialization"`, the resulting `ModelField` is used by FastAPI's routing layer to serialize response data against the declared `response_model`. It's also used in `mode="validation"` for request body/parameter validation — hence the rename from `create_response_field` to `create_model_field`.
+## Return value
+
+Both return **`None`** (annotated `-> None` at `routing.py:1685` and `applications.py:1532`). The method works by side effect — it mutates the router/app's route list in place rather than returning anything.
+
+## Who calls it
+
+**In application/user code** (docs examples, tests): always called as a top-level statement for its side effect:
+- `app.include_router(router)` — registering a router on a `FastAPI` app
+- `router.include_router(other_router)` — nesting one `APIRouter` inside another
+
+**In the framework itself:**
+- `FastAPI.include_router` (`applications.py:1551`) calls `self.router.include_router(...)`, delegating to the `APIRouter` implementation.
+
+**In tests** — extensively used in test setup code, e.g.:
+- `tests/test_strict_content_type_nested.py:22-24` — nesting routers
+- `tests/test_ws_dependencies.py:48-49` — adding routers with dependencies
+- `tests/test_default_response_class_router.py:89-98` — chaining routers with diff
+...[truncated 208 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**`create_response_field`** was renamed to **`create_model_field`** and lives at `fastapi/utils.py:58`.
+Here's the summary:
 
-**What it does:**
+## Who calls `include_router`
 
-It's a factory that constructs a Pydantic `ModelField` instance. It takes a name, type annotation, optional default/alias/field_info, and a `mode` (`"validation"` or `"serialization"`), then returns a `ModelField`.
-
-**Its role in response serialization:**
-
-- When FastAPI registers a route with a `response_model`, it calls `create_model_field` with `mode="serialization"` to build the field that will later drive response serialization (converting the endpoint's return value into JSON-safe output via Pydantic).
-- It also handles validation-mode fields for request parameters/bodies.
-- It guards against unsupported types (pydantic v1 models) and wraps Pydantic schema generation errors into user-friendly `FastAPIError` messages.
-
-The rename from `create_response_field` → `create_model_field` reflects that it's used for both request validation fields and response serialization fields, not just responses.
-```
-
-#### Judge rationale
-
-```text
-Both responses are nearly identical in content and quality. They both correctly identify the function's location at fastapi/utils.py:58, note the rename from create_response_field to create_model_field, explain the mode parameter (validation/serialization), mention pydantic v1 guard and error wrapping, and explain why it was renamed. Response A includes a PR number reference (#12103) which is a nice detail but unverifiable. Response B explains the serialization role slightly more concretely (mentioning 'converting the endpoint's return value into JSON-safe output via Pydantic'). Overall they convey the same information with equivalent accuracy and usefulness.
-```
-
-</details>
-
-<details><summary>FastAPI P15 | winner=with_budi | Q 7→8 G 7→8</summary>
-
-**Prompt:** What calls add_api_route and what does each call site pass as arguments?
-
-- Interactions: no_budi=6 / with_budi=6
-- Cost USD: no_budi=$0.0799 / with_budi=$0.0817
-- Hook: reason=ok context_chars=1492
-
-#### Injected context
-
-```text
-[structural context]
-read_users  (routing.py:1694)
-  ← called by: read_users, read_users, read_users
-  → refs: add_api_route, fastapierror, get
-trace_item  (applications.py:4490)
-  → refs: trace
-generate_operation_id  (utils.py:216)
-  ← called by: generate_operation_id
-  → refs: generate_operation_id, generate_operation_id_for_path
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/routing.py
-  span: 1694-1773
-  anchor: ``\`python
-  proof:
-    - from fastapi import APIRouter, FastAPI
-    - internal_router = APIRouter()
-    - users_router = APIRouter()
-- file: fastapi/routing.py
-  span: 1088-1167
-  anchor: """
-  proof:
-    - router.
-    - routes: Annotated[
-    - list[BaseRoute] | None,
-- file: fastapi/applications.py
-  span: 4490-4561
-  anchor: [FastAPI docs for OpenAPI Callbacks](https://fastapi.tiangolo.com/advanced/openapi-callbacks/).
-  proof:
-    - Callable[[routing.APIRoute], str],
-    - return None
-    - return self.router.trace(
-- file: fastapi/applications.py
-  span: 1419-1498
-  anchor: """
-  proof:
-    - Mark all the *path 
-...[truncated 281 chars]
-```
-
-#### Response (`no_budi`)
-
-```text
-There are **6 call sites** for `add_api_route`:
-
-### 1. `APIRouter.api_route()` decorator — `fastapi/routing.py:1446`
-Called inside the decorator returned by `api_route()`. Passes all decorator parameters through directly: `path`, `func`, `response_model`, `status_code`, `tags`, `dependencies`, `summary`, `description`, `response_description`, `responses`, `deprecated`, `methods`, `operation_id`, `response_model_include/exclude/by_alias/exclude_unset/exclude_defaults/exclude_none`, `include_in_schema`, `response_class`, `name`, `callbacks`, `openapi_extra`, `generate_unique_id_function`.
-
-### 2. `APIRouter.include_router()` — `fastapi/routing.py:1758`
-Called when including a sub-router. Passes merged/computed values from the route and parent router: `prefix + route.path`, `route.endpoint`, fields from the route object, plus **merged** `tags` (`current_tags`), `dependencies` (`current_dependencies`), `callbacks` (`current_callbacks`), `deprecated` (`route.deprecated or deprecated or self.deprecated`), `include_in_schema` (AND of route, self, and parameter), `response_class` (`use_response_class`), `generate_unique_id_function` (`current_generate_unique_id`), `responses` (`combined_responses`). Also passes two arguments the other call sites don't: **`route_class_override=type(route)`** and **`strict_content_type`** (resolved via `get_value_or_default`).
-
-### 3. `FastAPI.add_api_route()` — `fastapi/applications.py:1192`
-A thin delegation to `self.router.add_api_route(...)`. Pass
-...[truncated 1348 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-There are 4 call sites for `add_api_route`:
-
-### 1. `APIRouter.api_route()` — `fastapi/routing.py:1446`
-The decorator method on `APIRouter`. Passes through all its parameters directly (path, func, response_model, status_code, tags, dependencies, summary, description, response_description, responses, deprecated, methods, operation_id, response_model_include/exclude/by_alias/exclude_unset/exclude_defaults/exclude_none, include_in_schema, response_class, name, callbacks, openapi_extra, generate_unique_id_function). A straightforward 1:1 passthrough.
-
-### 2. `APIRouter.include_router()` — `fastapi/routing.py:1758`
-Called when including a sub-router. This is the most complex call site — it **merges** values from the route, the included router, and `self`:
-- `path`: `prefix + route.path`
-- `endpoint`: `route.endpoint`
-- Most fields come from `route.*` directly (response_model, status_code, summary, description, etc.)
-- `tags`: merged list of `self.tags + tags param + route.tags`
-- `dependencies`: merged list of `dependencies param + route.dependencies`
-- `deprecated`: `route.deprecated or deprecated or self.deprecated`
-- `callbacks`: merged list of `callbacks param + route.callbacks`
-- `include_in_schema`: `route.include_in_schema and self.include_in_schema and include_in_schema` (all three must be true)
-- `response_class`: resolved via `get_value_or_default` chain
-- `generate_unique_id_function`: resolved via `get_value_or_default(route, router, generate_unique_id_function, self)`
-...[truncated 665 chars]
-```
-
-#### Judge rationale
-
-```text
-Both responses identify the same 4 core call sites in the FastAPI source code (APIRouter.api_route, APIRouter.include_router, FastAPI.add_api_route, FastAPI.api_route) with correct file paths and line numbers. Response A additionally lists 2 test call sites, which are valid but less important for understanding the codebase architecture. Response B (with_budi) provides more precise detail on the include_router merge logic — specifically detailing how tags, dependencies, callbacks, include_in_schema, response_class, and generate_unique_id_function are resolved, which is more actionable for someone trying to understand the code. Response A's description of include_router is less detailed on the merge semantics. Response B also correctly notes that strict_content_type is missing from both FastAPI call sites (#3 and #4), while Response A only mentions it for #2 without explicitly noting its absence from #3/#4. Response A's claim of 6 call sites by including tests is technically accurate but the test sites add little value. Overall, Response B is more focused and precise on the important architectural details.
-```
-
-</details>
-
-<details><summary>FastAPI P16 | winner=with_budi | Q 8→9 G 7→9</summary>
-
-**Prompt:** Who calls include_router and what does it return to the caller?
-
-- Interactions: no_budi=7 / with_budi=6
-- Cost USD: no_budi=$0.0889 / with_budi=$0.0807
-- Hook: reason=ok context_chars=1827
-
-#### Injected context
-
-```text
-[structural context]
-test_nested_router  (test_annotated.py:103)
-  → refs: get, include_router, query
-make_app  (test_ws_router.py:107)
-  ← called by: test_depend_validation
-  → refs: include_router
-test_redirect_slashes_disabled  (test_router_redirect_slashes.py:24)
-  → refs: get, include_router
-test_router_circular_import  (test_router_circular_import.py:5)
-  → refs: include_router
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/applications.py
-  span: 1479-1558
-  anchor: Read more in the
-  proof:
-    - [FastAPI docs for Custom Response - HTML, Stream, File, others](https://fastapi.tiangolo.com/advanced/custom-response/#default-response-class).
-    - from fastapi.responses import ORJSONResponse
-    - app.include_router(
-- file: tests/test_annotated.py
-  span: 103-118
-  anchor: def test_nested_router():
-  proof:
-    - def test_nested_router():
-    - router = APIRouter(prefix="/nested")
-    - @router.get("/test")
-- file: tests/test_ws_router.py
-  span: 107-112
-  anchor: def make_app(app=None, **kwargs):
-  proof:
-    - app.include
-...[truncated 300 chars]
-```
-
-#### Response (`no_budi`)
-
-```text
 There are **two definitions** of `include_router`:
 
-1. **`APIRouter.include_router`** at `fastapi/routing.py:1574` — the core implementation
-2. **`FastAPI.include_router`** at `fastapi/applications.py:1359` — a thin wrapper that delegates to the `APIRouter` version (since `FastAPI` extends `APIRouter`)
+1. **`APIRouter.include_router`** (`fastapi/routing.py:1574`) — the real implementation.
+2. **`FastAPI.include_router`** (`fastapi/applications.py:1359`) — a thin wrapper that delegates to `self.router.include_router(...)` at line 1551.
 
-### Who calls it?
+**Callers** (from the source code, excluding docs/tests):
+- **`FastAPI.include_router`** calls `APIRouter.include_router` internally (line 1551).
+- **User code** calls either `app.include_router(router)` or `router.include_router(sub_router)` to compose routers.
 
-It's called extensively throughout the codebase — in tests, docs examples, and user application code. The two main patterns are:
+## What it returns
 
-- **`app.include_router(router)`** — a `FastAPI` app instance including an `APIRouter` (most common)
-- **`router.include_router(other_router)`** — one `APIRouter` nesting another
+Both methods return **`None`** (declared `-> None` at `routing.py:1685` and `applications.py:1532`).
 
-### What does it return?
-
-**`None`** — see the return type annotation at `routing.py:1685`:
-
-``\`python
-) -> None:
-``\`
-
-It's a side-effect-only method. It iterates over the given router's routes and copies them into `self` by calling `self.add_api_route()`, `self.add_route()`, `self.add_api_websocket_route()`, or `self.add_websocket_route()` for each route (lines 1728–1817). It also merges startup/shutdown handlers and lifespan context. Callers don't use a return value — they just call it for its side effects of registering routes.
-```
-
-#### Response (`with_budi`)
-
-```text
-Both `include_router` methods return **`None`**.
-
-- **`APIRouter.include_router`** (`fastapi/routing.py:1685`) — the core implementation. It's annotated `-> None`. It copies routes from the given router into `self` by iterating over `router.routes` and calling `self.add_api_route()` / `self.add_api_websocket_route()` for each one, merging prefixes, tags, dependencies, etc.
-
-- **`FastAPI.include_router`** (`fastapi/applications.py:1551`) — a thin wrapper that delegates to `self.router.include_router(...)`. Also returns `None` (implicitly).
-
-**Who calls it:**
-
-1. **User application code** — the primary caller, wiring sub-routers into the app at startup:
-   - `tests/test_modules_same_name_body/app/main.py:1-8` — `app.include_router(a.router, prefix="/a")` / `app.include_router(b.router, prefix="/b")`
-   - `tests/test_annotated.py:103` — `app.include_router(router)` inside `test_nested_router`
-   - `tests/test_ws_router.py:107` — `app.include_router(router)` inside `make_app`
-   - `tests/test_router_redirect_slashes.py:24` — `app.include_router(router)`
-   - `tests/test_router_circular_import.py:5` — tests self-inclusion assertion
-
-2. **Router-to-router nesting** — `APIRouter` instances including other `APIRouter` instances (e.g., `internal_router.include_router(users_router)` as shown in the docstring).
-
-Since it returns `None`, callers use it purely for its side effect of registering routes — they never use a return value.
+The method works entirely via **side effects**: it iterates over the given router's routes and copies each one into `self` by calling `self.add_api_route(...)` (for `APIRoute` instances) or similar methods for websocket/other routes, merging in the provided prefix, tags, dependencies, responses, callbacks, etc.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the two definitions (APIRouter and FastAPI), the None return type, and the side-effect nature of include_router. Response B is more grounded: it cites specific test files as callers (test_modules_same_name_body, test_annotated, test_ws_router, test_router_redirect_slashes, test_router_circular_import) with line numbers, whereas Response A only describes callers generically ("called extensively throughout the codebase"). Response A does provide useful detail about the internal mechanics (listing the four add methods and line range 1728-1817), but the question "who calls it" is better served by concrete caller references, which Response B delivers. Both are accurate and well-structured; Response B edges ahead on grounding and actionability.
+Both responses correctly identify the two definitions (APIRouter.include_router and FastAPI.include_router), the delegation pattern, and that both return None with side-effect-based mutation. They cite the same file paths and line numbers. Response A provides more concrete test file examples as callers, giving slightly more actionability, but Response B is more concise and equally accurate. The core content is essentially the same, making this a tie overall.
 ```
 
 </details>
 
-<details><summary>FastAPI P17 | winner=with_budi | Q 7→8 G 3→8</summary>
+<details><summary>FastAPI P17 | winner=no_budi | Q 8→7 G 7→4</summary>
 
 **Prompt:** What is the execution order for middleware versus dependency injection when a request first arrives?
 
-- Interactions: no_budi=1 / with_budi=5
-- Cost USD: no_budi=$0.0158 / with_budi=$0.0628
-- Hook: reason=ok context_chars=1476
-
-#### Injected context
-
-```text
-[structural context]
-middleware  (applications.py:4601)
-  ← called by: test_depend_validation, test_custom_middleware_exception_not_rai, httpsredirect.py
-  → refs: add_process_time_header, middleware
-_html_safe_json  (docs.py:9)
-  ← called by: get_swagger_ui_html
-_sse_with_checkpoints  (routing.py:593)
-  ← called by: _sse_with_checkpoints
-  → refs: _sse_with_checkpoints
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/applications.py
-  span: 4601-4645
-  anchor: def middleware(
-  proof:
-    - def middleware(
-    - middleware_type: Annotated[
-    - The type of middleware. Currently only supports `http`.
-- file: fastapi/openapi/docs.py
-  span: 9-19
-  anchor: def _html_safe_json(value: Any) -> str:
-  proof:
-    - return (
-    - def _html_safe_json(value: Any) -> str:
-    - """Serialize a value to JSON with HTML special characters escaped.
-- file: fastapi/routing.py
-  span: 593-601
-  anchor: async def _sse_with_checkpoints(
-  proof:
-    - async def _sse_with_checkpoints(
-    - stream: ObjectReceiveStream[bytes],
-    - ) -> AsyncIterato
-...[truncated 265 chars]
-```
+- Interactions: no_budi=8 / with_budi=3
+- Cost USD: no_budi=$0.0860 / with_budi=$0.0371
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-In FastAPI, the execution order when a request arrives is:
+Here's the execution order when a request arrives in FastAPI, traced from the source:
 
-1. **Middleware** (outer → inner, in reverse order of registration)
-2. **Dependency injection** (resolved per-endpoint, before the route handler)
-3. **Route handler**
-4. **Middleware** (inner → outer, for the response path)
+### Request flow (outside → inside)
 
-Concretely:
+1. **`ServerErrorMiddleware`** — outermost, catches unhandled 500s (`applications.py:1035`)
+2. **User middleware** — your `app.add_middleware(...)` in registration order (`applications.py:1036`)
+3. **`ExceptionMiddleware`** — handles registered exception handlers (`applications.py:1039`)
+4. **`AsyncExitStackMiddleware`** — manages file/resource cleanup context (`applications.py:1060`)
+5. **Router** — Starlette routing matches the path to an endpoint (`applications.py:1064`)
+6. **`get_request_handler` / `app()`** — the per-endpoint handler (`routing.py:378`):
+   - Parses the request body (`routing.py:398-445`)
+   - **`solve_dependencies()`** — resolves all `Depends(...)` including sub-dependencies (`routing.py:453`)
+   - Runs the endpoint function (`routing.py:670`)
+   - Serializes/validates the response
 
-``\`python
-app = FastAPI()
+### Key takeaway
 
-app.add_middleware(MidA)  # runs first on request, last on response
-app.add_middleware(MidB)  # runs second on request, second-to-last on response
-
-@app.get("/items")
-async def get_items(db: Session = Depends(get_db)):  # resolved after all middleware
-    ...
-``\`
-
-The flow is:
-
-``\`
-Request → MidA → MidB → Dependency Resolution (get_db) → Route Handler
-Response ← MidA ← MidB ← Route Handler return
-``\`
-
-Key implications:
-
-- **Middleware cannot access resolved dependencies** — it runs before DI. If you need access to, say, the current user in middleware, you'd need to resolve it yourself (e.g., parse the token manually).
-- **Dependencies can't see middleware-added state easily** — unless middleware attaches data to `request.state`, which dependencies can then read via the `Request` object.
-- **Exception handlers** sit between middleware and the route layer — exceptions raised in dependencies or route handlers are caught by exception handlers before propagating back through middleware.
+**All middleware runs before dependency injection.** Middleware wraps the entire ASGI app as an onion (built in `build_middleware_stack` at `applications.py:1064-1066`). Dependencies are only resolved later, inside the matched route handler. So middleware cannot access `Depends`-provided values, and dependencies can observe any state that middleware sets on `request.state` or the scope.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The execution order is **middleware first, then dependency injection**.
+**Middleware runs first, dependency injection runs second.**
 
-Here's how it works in this codebase:
+The execution order for an incoming request is:
 
-1. **Middleware runs first** — When a request arrives, it passes through the ASGI middleware stack (outermost to innermost). Each middleware registered via `@app.middleware("http")` (`applications.py:4601`) wraps around `call_next`, which forwards the request down the stack.
+1. **Middleware** — Each middleware wraps the entire request/response cycle. When a request arrives, it passes through the middleware stack (outermost first) before routing even occurs. Middleware calls `await call_next(request)` to pass control inward (`applications.py:4634`).
 
-2. **Routing/matching happens next** — After all middleware layers, Starlette's router matches the request to a route.
+2. **Routing** — Starlette's router matches the request to a path operation.
 
-3. **Dependencies are solved last** — Inside the matched route's request handler (`routing.py:447-460`), `solve_dependencies()` is called to resolve all `Depends()` parameters. This happens *inside* the innermost middleware's `call_next`.
+3. **Dependency injection** — Inside the matched route handler, `solve_dependencies()` is called to resolve all `Depends(...)` parameters (`routing.py:453`). This happens *after* the request has already passed through all middleware layers.
 
-So the flow is:
+4. **Path operation function** — The endpoint runs with the resolved dependencies.
 
-``\`
-Request arrives
-  → Middleware 1 (before call_next)
-    → Middleware 2 (before call_next)
-      → Route matching
-        → Body parsing
-          → solve_dependencies()  ← DI happens here
-            → endpoint function
-          ← response
-        ← 
-      ← 
-    → Middleware 2 (after call_next)
-  → Middleware 1 (after call_next)
-Response sent
-``\`
+5. **Middleware (response path)** — On the way back out, each middleware can inspect/modify the response (e.g., adding headers after `call_next` returns).
 
-Key implication: middleware **cannot** access resolved dependencies, and dependencies **cannot** modify middleware behavior. If you need shared state, use `request.state` in middleware and read it in dependencies.
+So the flow is: **Request → Middleware stack → Router → Dependency resolution → Endpoint → Middleware stack → Response**.
+
+This means middleware cannot access resolved dependencies (they don't exist yet), and dependencies cannot alter middleware behavior for the current request.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly explain that middleware executes before dependency injection. Response A provides accurate general FastAPI knowledge with a nice code example and covers exception handlers as a bonus. However, it contains no references to the actual codebase. Response B references specific files and lines (applications.py:4601, routing.py:447-460) and mentions the concrete function solve_dependencies(), grounding the explanation in the repository. Response B also provides a more detailed flow diagram that includes intermediate steps like route matching and body parsing. Response A's mention of exception handler ordering is a useful addition that B lacks, but B's repository-grounded explanation is more valuable when working in this specific codebase.
+Both responses correctly explain that middleware executes before dependency injection. Response A provides a more detailed, granular breakdown of the middleware stack order (ServerErrorMiddleware → User middleware → ExceptionMiddleware → AsyncExitStackMiddleware → Router → solve_dependencies) with plausible line references for a ~1000-line applications.py file. Response B has a cleaner bidirectional flow explanation including the response path, but cites applications.py:4634 — a line number that almost certainly doesn't exist in FastAPI's applications.py (typically ~1000-1100 lines), which is a significant grounding error. Response A's more detailed and plausibly-grounded analysis wins despite Response B's slightly more polished conceptual presentation.
 ```
 
 </details>
@@ -6630,67 +5771,65 @@ Both responses correctly explain that middleware executes before dependency inje
 
 **Prompt:** How does FastAPI decide which error handler to call when a validation error occurs — trace the path from ValidationError to the response?
 
-- Interactions: no_budi=11 / with_budi=14
-- Cost USD: no_budi=$0.1548 / with_budi=$0.1807
-- Hook: reason=ok context_chars=1916
-
-#### Injected context
-
-```text
-[structural context]
-exception_handler  (applications.py:4647)
-  ← called by: validation_exception_handler, request_validation_handler, validation_exception_handler
-  → refs: exception_handler, unicorn_exception_handler
-Default  (datastructures.py:174)
-  → refs: defaultplaceholder
-_html_safe_json  (docs.py:9)
-  ← called by: get_swagger_ui_html
-middleware  (applications.py:4601)
-  ← called by: test_depend_validation, test_custom_middleware_exception_not_rai, httpsredirect.py
-  → refs: add_process_time_header, middleware
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastapi/applications.py
-  span: 4647-4692
-  anchor: def exception_handler(
-  proof:
-    - def exception_handler(
-    - Add an exception handler to the app.
-    - from fastapi import FastAPI, Request
-- file: fastapi/sse.py
-  span: 20-33
-  anchor: class EventSourceResponse(StreamingResponse):
-  proof:
-    - class EventSourceResponse(StreamingResponse):
-    - """Streaming response with `text/event-stream` media type.
-    - Use as `response_class=EventSourceResponse` on a *path o
-...[truncated 300 chars]
-```
+- Interactions: no_budi=12 / with_budi=9
+- Cost USD: no_budi=$0.1799 / with_budi=$0.1198
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
+Here's the full trace:
+
+## Validation Error → Response: the complete path
+
+### 1. Error originates in the route handler
+
+In `fastapi/routing.py`, the function `get_request_handler()` returns an inner `app()` coroutine. Two main sites raise `RequestValidationError`:
+
+- **JSON decode failure** (line ~424): A `json.JSONDecodeError` is caught and wrapped into a `RequestValidationError`, then re-raised.
+- **Parameter/body validation failure** (line ~716): After `solve_dependencies()` runs, if `errors` is non-empty, a `RequestValidationError` is raised with those errors.
+
+Both use the `RequestValidationError` class from `fastapi/exceptions.py:212`, which extends `ValidationException` — a plain Python `Exception` (not an `HTTPException`).
+
+### 2. Handler registration at app init
+
+In `FastAPI.__init__()` (`fastapi/applications.py:1002-1013`):
+
+``\`python
+self.exception_handlers.setdefault(HTTPException, http_exception_handler)
+self.exception_handlers.setdefault(
+    RequestValidationError, request_validation_exception_handler
+)
+``\`
+
+This registers `request_validation_exception_handler` as the default handler for `RequestValidationError`. Users can override this by passing their own `exception_handlers` dict to `FastAPI()` — `setdefault` means user-provided handlers take priority.
+
+### 3. Middleware stack wiring
+
+In `build_middleware_stack()` (`fastapi/applications.py:1021-1039`), the exception handlers dict is passed to Starlette's `ExceptionMiddleware`:
+
+``\`python
+Middleware(Exceptio
+...[truncated 1596 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
 Here's the full trace from validation error to HTTP response:
 
-## 1. Error is raised in the route handler
+## 1. Validation errors are raised in the route handler
 
-In `fastapi/routing.py`, the `get_request_handler` function creates the ASGI `app` callable. When a request arrives:
+In `fastapi/routing.py`, the `get_request_handler()` function creates the inner `app()` coroutine that processes each request. Validation errors originate from two places:
 
-- **JSON decode failure** (line 424): A `RequestValidationError` is raised immediately.
-- **Dependency solving / parameter validation** (line 453): `solve_dependencies()` runs pydantic validation on path params, query params, headers, body, etc. It collects errors into `solved_result.errors`.
-- **If errors exist** (line 715–719): A `RequestValidationError` is raised with those errors:
-  ``\`python
-  raise RequestValidationError(errors, body=body, endpoint_ctx=endpoint_ctx)
-  ``\`
-- **WebSocket routes** (line 754–758): raise `WebSocketRequestValidationError` instead.
+- **JSON decode failure** (`routing.py:424-437`): A `json.JSONDecodeError` is caught and wrapped into a `RequestValidationError`, then re-raised.
+- **Parameter/body validation failure** (`routing.py:715-719`): After `solve_dependencies()` runs, if `errors` is non-empty, a `RequestValidationError` is raised with the accumulated errors.
+
+For WebSockets, `WebSocketRequestValidationError` is raised instead (`routing.py:755`).
 
 ## 2. Default handlers are registered at app init
 
-In `fastapi/applications.py:1002–1013`, `FastAPI.__init__` populates `self.exception_handlers` with defaults (using `setdefault` so user-provided handlers take priority):
+In `FastAPI.__init__()` (`applications.py:1002-1013`), three default exception handlers are registered via `setdefault`:
 
 ``\`python
 self.exception_handlers.setdefault(HTTPException, http_exception_handler)
@@ -6698,146 +5837,119 @@ self.exception_handlers.setdefault(RequestValidationError, request_validation_ex
 self.exception_handlers.setdefault(WebSocketRequestValidationError, websocket_request_validation_exception_handler)
 ``\`
 
-## 3. Starlette's `ExceptionMiddleware` dispatches the handler
+`setdefault` means user-provided handlers in the `exception_handlers` constructor arg take precedence.
 
-In `build_middleware_stack` (line 1021), FastAPI builds the ASGI middleware chain. The `exception_handlers` dict (
-...[truncated 1616 chars]
-```
+## 3. Handlers are installed into Starlette's `ExceptionMiddleware`
 
-#### Response (`with_budi`)
-
-```text
-I have enough to trace the full path. Here's the complete flow:
-
----
-
-## Validation Error → Response: The Full Path
-
-### 1. Parameter validation happens in `solve_dependencies`
-
-When a request arrives, the route handler in `fastapi/routing.py` calls `solve_dependencies()` (`fastapi/dependencies/utils.py`). This function validates path, query, header, cookie, and body parameters using Pydantic model fields. Each `_validate_value_with_model_field()` call returns individual error dicts. These are **not** Pydantic `ValidationError` exceptions — they're collected into a plain `errors: list[dict]` and returned as part of the `SolvedDependency` result.
-
-### 2. Errors are raised as `RequestValidationError`
-
-Back in `fastapi/routing.py`, two places create the exception:
-
-- **JSON decode failure** (line ~424): A `json.JSONDecodeError` is caught and wrapped into a `RequestValidationError` with a `json_invalid` error dict.
-- **Parameter/body validation failures** (line ~716): If `errors` is non-empty after `solve_dependencies` returns:
-  ``\`python
-  validation_error = RequestValidationError(
-      errors, body=body, endpoint_ctx=endpoint_ctx
-  )
-  raise validation_error
-  ``\`
-
-`RequestValidationError` (`fastapi/exceptions.py:212`) extends `ValidationException`, which is a plain `Exception` subclass (not Pydantic's `ValidationError`). It stores the list of error dicts and the request body.
-
-### 3. The middleware stack catches the exception
-
-In `FastAPI.build_middleware_stack()` (`applicat
-...[truncated 2051 chars]
+In `build_middleware_stack()` (`applications.py:1021-1039`), FastAPI iterates `self.exception_handlers` and passes them to Starlette
+...[truncated 1678 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the same 5-step path (validation in solve_dependencies → RequestValidationError raised → default handlers registered → ExceptionMiddleware dispatch → 422 response) with accurate file/line references. Response B edges ahead with several additional technical details: it clarifies that collected errors are plain dicts (not Pydantic ValidationError exceptions), notes the inheritance chain (RequestValidationError → ValidationException → Exception), provides a clear middleware stack layering diagram, and explains MRO-based isinstance matching for parent class handlers. Response A is well-organized with a nice summary flow diagram and mentions WebSocket handling, but is slightly less precise on the internal mechanics. Both are well-grounded in the actual codebase with correct file paths and line references. Actionability is comparable — both explain how to override the default handler.
+Both responses trace the same core path accurately: RequestValidationError raised in routing.py → registered in FastAPI.__init__ via setdefault → wired through ExceptionMiddleware in build_middleware_stack → request_validation_exception_handler returns 422 JSON. They cite the same line ranges and code snippets. Response B edges ahead in three ways: (1) it mentions WebSocketRequestValidationError and the third default handler registration, which is part of the actual code at applications.py:1002-1013 and adds completeness; (2) it includes a practical "Overriding the handler" section showing both constructor and decorator approaches with a line reference to applications.py:4647, making it more actionable; (3) the note about RequestValidationError extending ValidationException in Response A is accurate but less useful than B's practical override guidance. Response A's closing insight about ExceptionMiddleware vs route-level try/except is nice but already implicit in both explanations. Overall B is slightly more complete, more grounded, and more actionable.
 ```
 
 </details>
 
 ### Fastify
 
-<details><summary>Fastify P1 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Fastify P1 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** What are the entry points of this Fastify application and how is the server instance created at startup?
 
-- Interactions: no_budi=6 / with_budi=6
-- Cost USD: no_budi=$0.1800 / with_budi=$0.1832
+- Interactions: no_budi=5 / with_budi=6
+- Cost USD: no_budi=$0.2433 / with_budi=$0.1868
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how Fastify's entry points and server creation work:
+This is the **Fastify framework library itself** (v5.8.2), not an application. Here's how it works:
 
 ## Entry Point
 
-**`fastify.js`** (line 88) — the single entry point, declared as `"main"` in `package.json`. It exports the `fastify()` factory function in multiple ways to support both CJS and ESM consumers (lines 982–985):
+**`fastify.js`** (line 982–985) — the `"main"` field in `package.json`. It exports the `fastify()` factory function in multiple ways:
 
 ``\`js
-module.exports = fastify
-module.exports.fastify = fastify
-module.exports.default = fastify
+module.exports = fastify           // const fastify = require('fastify')
+module.exports.fastify = fastify   // const { fastify } = require('fastify')
+module.exports.default = fastify   // import fastify from 'fastify'
 ``\`
 
 ## Server Instance Creation Flow
 
-When you call `fastify(options)`, the following happens in order:
+When a user calls `fastify(options)`, the `fastify()` function at `fastify.js:88` orchestrates this sequence:
 
-1. **`processOptions()`** (`fastify.js:824`) — validates and normalizes user options (body limits, query string parser, AJV settings, logger, router options, timeouts, etc.), merging with defaults from `defaultInitOptions`.
+1. **`processOptions()`** (`fastify.js:824`) — validates and normalizes options (body limit, logger, router config, AJV settings, timeouts, etc.)
 
-2. **`buildRouting()`** (`fastify.js:98`) — creates the router (backed by `find-my-way`).
+2. **`buildRouting()`** (`fastify.js:98`) — creates the URL router (powered by `find-my-way`)
 
-3. **`build404()`** (`fastify.js:101`) — creates the 404 fallback router.
+3. **`build404()`** (`fastify.js:101`) — sets up the 404/not-found routing layer
 
-4. **`wrapRouting()`** (`fastify.js:104, 774`) — wraps the router in a `preRouting` function that handles URL rewriting and async constraint errors. This becomes the `httpHandler`.
+4. **`wrapRouting()`** (`fastify.js:104`) — wraps the router into an `httpHandler(req, res)` function that handles URL rewriting and async constraints
 
-5. **`createServer()`** (`lib/server.js:27`) — creates the actual Node.js HTTP server. Delegates to **`getServerInstance()`** (`lib/server.js:309`) which picks one of three paths:
-   - **Custom server**: if `options.serverFactory` is provided, it calls `serverFactory(httpHandler, options)` — user provides their own server
-   - **HTTP/2**: uses `http2.createSecureServer()` or `http2.createServer()` depending on `options.https`
-   - **
-...[truncated 1159 chars]
+5. **`createServer()`** (`lib/server.js:27`) — creates the actual Node.js HTTP server. Delegates to `getServerInstance()` (`lib/server.js:309`) which picks the right server type:
+   - **Custom**: `options.serverFactory(httpHandler, options)` if provided
+   - **HTTP/2 + TLS**: `http2.createSecureServer()`
+   - **HTTP/2**: `http2.createServer()`
+   - **HTTPS**: `https.createServer()`
+   - **HTTP**
+...[truncated 822 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's how Fastify's entry points and server creation work:
+Here's how this Fastify repository is structured at startup:
 
 ## Entry Point
 
-**`fastify.js`** (line 982–985) — the single entry point, declared as `"main"` in `package.json`. It exports the `fastify()` factory function in multiple ways to support both CJS and ESM consumers:
+**`fastify.js`** (line 88) — the single entry point, declared as `"main"` in `package.json:5`. It exports the `fastify()` factory function:
 
 ``\`js
-module.exports = fastify
-module.exports.fastify = fastify
-module.exports.default = fastify
+module.exports = fastify        // require('fastify')
+module.exports.fastify = fastify // const { fastify } = require('fastify')
+module.exports.default = fastify // import fastify from 'fastify'
 ``\`
 
 ## Server Instance Creation Flow
 
-When you call `fastify(options)`, here's what happens in order:
+When a user calls `fastify(options)`, the following happens in order:
 
-1. **Options processing** (`fastify.js:824` — `processOptions()`) — validates and normalizes user options (body limits, logger, AJV settings, router options, timeouts, etc.), merging with `defaultInitOptions`.
+1. **`processOptions()`** (`fastify.js:824`) — validates and normalizes user options (body limit, logger, timeouts, AJV config, router options, etc.), merging with `defaultInitOptions`.
 
-2. **Router creation** (`fastify.js:98`) — `buildRouting(options.routerOptions)` creates the find-my-way based router.
+2. **`buildRouting()`** (`fastify.js:98`) — creates the router (powered by `find-my-way`).
 
-3. **404 handler** (`fastify.js:101`) — `build404(options)` sets up the encapsulated not-found handling.
+3. **`build404()`** (`fastify.js:101`) — creates the 404 handler subsystem.
 
-4. **HTTP handler** (`fastify.js:104`) — `wrapRouting(router, options)` creates the `preRouting` function that serves as the Node.js HTTP request handler. It handles URL rewriting and delegates to the router.
+4. **`wrapRouting()`** (`fastify.js:104`) — wraps the router into an `httpHandler` function `(req, res) => ...` that handles URL rewriting and async constraint errors before delegating to the router.
 
-5. **Server instance** (`fastify.js:106–113`) — `createServer(options, httpHandler)` in `lib/server.js` calls `getServerInstance()` (`lib/server.js:309–348`) which creates the actual Node.js server based on options:
-   - **Custom server**: if `options.serverFactory` is set, it delegates entirely to the user's factory
-   - **HTTP/2 + HTTPS**: `http2.createSecureServer()`
+5. **`createServer()`** (`lib/server.js:27`) — creates the actual Node.js HTTP server via `getServerInstance()` (`lib/server.js:309`):
+   - If `options.serverFactory` is provided → uses the user's custom factory
+   - If `options.http2` → `http2.createSecureServer()` or `http2.createServer()`
+   - If `options.https` → `https.createServer()`
+   - Otherwise → `http.createServer()`
    
-...[truncated 998 chars]
+   It also returns the `list
+...[truncated 1207 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, accuracy, and depth. They cover the same flow: entry point in fastify.js, processOptions, buildRouting, build404, wrapRouting, createServer/getServerInstance, Avvio bootstrap, and the listen phase. Both cite specific line numbers and file paths grounded in the repository. Response A notes line 88 for the factory function definition while B references lines 982-985 (the exports); both are valid references. Response B adds minor extra detail (onReady/onListen hooks, slightly more granular server type breakdown), while Response A mentions specific timeout config names. These differences are negligible — both are comprehensive, well-grounded, and equally actionable.
+Both responses are excellent and cover the same core flow with accurate line references. Response B (with_budi) is slightly more complete: it includes steps 8-10 (404/router finalization, clientError handler, diagnostics channel at fastify.js:446-449) which are real parts of the initialization sequence. It also correctly notes that createServer returns connection-tracking utilities alongside listen(). Response A includes a useful detail about multipleBindings() in the Listening section. Both correctly identify fastify.js as the entry point, the export patterns, and the key initialization steps with accurate line numbers. Response B's additional coverage of the full initialization tail (steps 8-10) gives it the edge in completeness and grounding.
 ```
 
 </details>
 
-<details><summary>Fastify P2 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Fastify P2 | winner=tie | Q 8→8 G 8→8</summary>
 
 **Prompt:** Describe the module layout of this Fastify codebase — which files own which concerns (routing, hooks, reply, request, plugins)?
 
 - Interactions: no_budi=15 / with_budi=11
-- Cost USD: no_budi=$0.1785 / with_budi=$0.1311
+- Cost USD: no_budi=$0.1605 / with_budi=$0.1303
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
@@ -6847,481 +5959,378 @@ Here's the module layout of the Fastify codebase:
 
 ## Entry point
 
-- **`fastify.js`** — The main entry point. Constructs the Fastify instance, wires together all subsystems (Avvio for plugin loading, find-my-way for routing, hooks, schemas, etc.), and exposes the public API (`fastify()`, `.register()`, `.listen()`, `.route()`, shorthand methods, decorators, etc.).
+- **`fastify.js`** — The main module. Creates the Fastify instance, wires together all subsystems (Avvio for plugin loading, find-my-way for routing, hooks, Reply/Request prototypes, etc.), and exports the factory function.
 
-## Core `lib/` modules
+## Core lib/ modules by concern
 
-### Routing & Request Handling
-- **`lib/route.js`** — Route registration. Uses `find-my-way` (radix-tree router). Builds the routing table, validates route options, compiles schemas for validation/serialization, and wires up per-route hooks and context.
-- **`lib/handle-request.js`** — The hot path: called once a route is matched. Orchestrates content-type parsing, runs `preValidation`/`preHandler` hooks, invokes the user handler, and dispatches errors.
-- **`lib/head-route.js`** — Auto-generates HEAD routes from GET routes.
-- **`lib/four-oh-four.js`** — 404 handling. Manages a separate `find-my-way` router for not-found handlers, per-encapsulation-context.
-- **`lib/context.js`** — The per-route **Context** object. Holds the handler, schema, config, error handler, body limit, log level, serializers, and cached validation/serialization functions for a single route.
+### Routing
+- **`lib/route.js`** — Route registration logic. Uses `find-my-way` (radix-tree router). Builds the router, validates route options, compiles schemas for validation/serialization, and connects routes to their `Context`.
+- **`lib/head-route.js`** — Automatically generates HEAD routes from GET routes.
+- **`lib/handle-request.js`** — The per-request dispatch pipeline. Called after routing matches. Handles content-type negotiation, body parsing, runs preValidation/preHandler hooks, then calls the user handler. This is the heart of the request lifecycle.
+- **`lib/four-oh-four.js`** — 404 handler setup. Creates a dedicated `find-my-way` instance and `Context` for not-found routes, supporting per-prefix custom 404 handlers.
 
-### Request & Reply
-- **`lib/request.js`** — The `Request` class. Wraps Node's `IncomingMessage` with properties like `params`, `query`, `body`, `headers`, `ip`, `hostname`, and per-request validation via the schema controller.
-- **
-...[truncated 3280 chars]
+### Hooks
+- **`lib/hooks.js`** — Defines all supported hooks (both **application-level**: `onRoute`, `onRegister`, `onReady`, `onListen`, `preClose`, `onClose`; and **request lifecycle**: `onRequest`, `preParsing`, `preValidation`, `preHandler`, `preSerialization`, `onSend`, `onResponse`, `onError`, `onTimeout`, `onRequestAbort`). Provides the `Hooks` constructor, `buildHooks` for cloning, and all the hook runner functions.
+
+### Re
+...[truncated 3644 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the module layout:
+Here's the module layout of the Fastify codebase:
 
-### Entry point
+## Entry point
 
-- **`fastify.js`** — The main entry point and "god object." Creates the Fastify instance, wires together all subsystems (Avvio for plugin loading, find-my-way for routing, hooks, schemas, etc.), and exposes the public API (`listen`, `register`, `route`, `get`/`post`/etc., `inject`, `close`, decorators).
+- **`fastify.js`** — The main entry point. Creates the Fastify instance, wires together all subsystems (Avvio for plugin loading, find-my-way for routing, hooks, schemas, etc.), and exposes the public API (`listen`, `register`, `route`, `get`/`post`/etc., `decorate`, `inject`, `close`).
 
-### `lib/` — Core modules by concern
+## Core `lib/` modules by concern
 
-**Routing & request dispatch**
-- **`route.js`** — Route registration. Wraps `find-my-way` (the radix-tree router). Exports `buildRouting` which adds `.route()`, HTTP method shortcuts, and route compilation (schema compilation, hook merging). Validates route options and builds the per-route `Context`.
-- **`handle-request.js`** — The hot path that runs after routing matches. Orchestrates content-type parsing, schema validation (`preValidation`), then calls `preHandler` hooks and the user handler.
-- **`head-route.js`** — Synthesizes automatic HEAD routes from GET routes.
-- **`four-oh-four.js`** — 404 handling. Builds a separate router instance for not-found routes and the default 404 handler.
-- **`context.js`** — The per-route `Context` object that bundles everything a request needs at runtime: handler, schema, hooks, error handler, body limit, serializers, config, etc.
+### Routing
+- **`lib/route.js`** — Route registration logic. Uses `find-my-way` (radix-tree router). Compiles schemas, builds route contexts, and handles route-level hooks. Exports `buildRouting`, `validateBodyLimitOption`, `buildRouterOptions`.
+- **`lib/head-route.js`** — Auto-generates HEAD routes from GET routes (`parseHeadOnSendHandlers`).
+- **`lib/four-oh-four.js`** — 404 handler setup. Builds the fallback route context for unmatched requests.
+- **`lib/handle-request.js`** — The per-request dispatch function. Sits between routing and the handler — runs content-type parsing, `preValidation`/`preHandler` hooks, schema validation, then calls the user handler. This is the core request lifecycle orchestrator.
 
-**Hooks**
-- **`hooks.js`** — Defines all supported hook names (application hooks like `onRoute`/`onReady`/`onClose` and lifecycle hooks like `onRequest`/`preParsing`/`preValidation`/`preHandler`/`onSend`/`onResponse`/`onError`/`onR
-...[truncated 3540 chars]
+### Hooks
+- **`lib/hooks.js`** — Defines all supported hooks (application-level: `onRoute`, `onRegister`, `onReady`, `onListen`, `preClose`, `onClose`; lifecycle: `onRequest`, `preParsing`, `preValidation`, `preHandler`, `preSerialization`, `onSend`, `onResponse`, `onError`, `onTimeout`, `onRequestAbort`). Exports hook runners that iterate through hook arrays.
+
+### Reply / Response
+- **
+...[truncated 3733 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are remarkably similar in structure, accuracy, and depth. They cover the same core concerns (routing, hooks, reply, request, plugins, schema/validation, content-type parsing, error handling, decorators, logging, server lifecycle) with nearly identical descriptions and the same level of technical detail. Both correctly identify key patterns like Avvio for plugin loading, find-my-way for routing, the encapsulation engine in plugin-override.js, and the per-route Context object. Response A includes slightly more granular items (config-validator.js, initial-config-validation.js as separate entries) while Response B mentions logger-pino.js explicitly. Both are truncated, making it hard to compare their full coverage. The quality difference is negligible — this is a clear tie.
+Both responses are comprehensive, well-organized overviews of the Fastify module layout that correctly identify the key files and their responsibilities. They share the same high-level structure (entry point, routing, hooks, reply/request, plugins, schema/validation, context) and reference actual lib/ files with accurate descriptions. Response A provides slightly richer per-file detail (e.g., mentioning Object.create(old) in plugin-override, naming the per-request dispatch pipeline explicitly) and cleanly separates error handling into its own section. Response B covers a few additional files (config-validator, initial-config-validation, logger-factory, content-type.js) and separates content-type parsing as its own concern. Both are truncated. The differences are marginal — neither response is meaningfully more accurate, grounded, or actionable than the other.
 ```
 
 </details>
 
-<details><summary>Fastify P3 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Fastify P3 | winner=no_budi | Q 9→7 G 9→8</summary>
 
 **Prompt:** Where is handleRequest defined and what does it do when a new HTTP request arrives?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0453 / with_budi=$0.0384
-- Hook: reason=ok context_chars=496
-
-#### Injected context
-
-```text
-[structural context]
-handleRequest  (handle-request.js:19)
-  → refs: handler, send, tostring
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/handle-request.js
-  span: 19-66
-  anchor: function handleRequest (err, request, reply) {
-  proof:
-    - function handleRequest (err, request, reply) {
-    - if (reply.sent === true) return
-    - return
-```
+- Cost USD: no_budi=$0.0502 / with_budi=$0.0303
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
-
-```text
-`handleRequest` is defined at `lib/handle-request.js:19`. Here's what it does when an HTTP request arrives:
-
-### `handleRequest(err, request, reply)` — Entry Point (line 19)
-
-1. **Early exit** — If the reply is already sent, return immediately (line 20).
-2. **Error passthrough** — If called with an error (from earlier hooks like `onRequest`/`preParsing`), it sends the error as the response (lines 21–25).
-3. **Bodyless methods** (GET, HEAD, DELETE, etc.) — Skips body parsing entirely and jumps straight to the `handler` function (lines 29–32).
-4. **Body-carrying methods** (POST, PUT, PATCH, etc.) — Inspects `content-type` and `content-length`/`transfer-encoding` headers:
-   - **No `content-type` + empty body** → skip parsing, go to `handler` (lines 38–48).
-   - **No `content-type` + has body** → runs the content-type parser with an empty string (line 50).
-   - **Has `content-type`** → validates it (returns 415 if invalid), then runs the content-type parser (lines 54–61).
-5. **Unknown methods** — Falls through to `handler` (returns 404 via the route context).
-
-### Internal pipeline after body parsing
-
-The `handler` function (line 68) kicks off a sequential pipeline:
-
-1. **`preValidation` hooks** → runs registered preValidation hooks via `preValidationHookRunner` (line 70).
-2. **Schema validation** → `validateSchema` validates the request against the route's JSON Schema (line 94). Supports async validators.
-3. **`preHandler` hooks** → runs registered preHandler hooks via `preHand
-...[truncated 462 chars]
-```
-
-#### Response (`with_budi`)
 
 ```text
 `handleRequest` is defined at `lib/handle-request.js:19`. Here's what it does when a new HTTP request arrives:
 
-1. **Early exit** (line 20) — if the reply was already sent, it returns immediately.
-2. **Error check** (lines 21–25) — if an error was passed in (e.g. from an earlier hook), it marks the reply as an error and sends it.
-3. **Bodyless methods** (lines 29–32) — for methods like GET/HEAD/DELETE (those in `kSupportedHTTPMethods.bodyless`), it skips body parsing and jumps straight to the `handler` function.
-4. **Body-carrying methods** (lines 34–61) — for methods like POST/PUT/PATCH:
-   - If no `Content-Type` header exists, it checks whether the body is truly empty (no `Transfer-Encoding`, `Content-Length` is 0 or absent). Empty bodies skip parsing; non-empty ones run the content-type parser with an empty string.
-   - If a `Content-Type` header exists but is invalid, it responds with **415 Unsupported Media Type**.
-   - Otherwise, it runs the route's **content-type parser** with the parsed content type.
-5. **Fallback** (lines 64–65) — any other HTTP method falls through to the `handler` (which will ultimately hit a 404 route context).
+### Entry point (`handleRequest`, line 19)
 
-The internal `handler` function (line 68) then drives the rest of the lifecycle: **preValidation hooks → schema validation → preHandler hooks → route handler invocation**, with diagnostics channel tracing around the final handler call.
+Takes `(err, request, reply)`. First checks if the reply was already sent or if there's an upstream error (from earlier hooks like `onRequest`/`preParsing`). Then branches based on HTTP method:
+
+1. **Bodyless methods** (GET, HEAD, etc.) — skips body parsing, goes straight to `handler()`.
+2. **Body methods** (POST, PUT, etc.) — inspects `content-type` and `content-length`/`transfer-encoding` headers:
+   - No `content-type` + empty body → skips parsing, calls `handler()`.
+   - No `content-type` + non-empty body → runs the content-type parser with an empty string.
+   - Has `content-type` → validates it (returns 415 if invalid), then runs the content-type parser.
+3. **Any other method** — falls through to `handler()` (returns 404 rather than 405, per design decision).
+
+### Processing pipeline after parsing
+
+The internal functions chain through Fastify's lifecycle hooks:
+
+1. **`handler`** (line 68) — runs **preValidation** hooks if any, otherwise skips to callback.
+2. **`preValidationCallback`** (line 85) — runs **schema validation** on the request (params, query, body, headers). Supports async validators.
+3. **`validationCompleted`** (line 105) — if validation fails and `attachValidation` is false, sends the error. Otherwise attaches it to the request and runs **preHandler** hooks.
+4. **`preHandlerCallback`** (line 128) — sets
+...[truncated 434 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+`handleRequest` is defined at **`lib/handle-request.js:19`**.
+
+When a new HTTP request arrives, it does the following:
+
+1. **Short-circuits if already sent** (line 20) — if the reply was already sent, it returns immediately.
+2. **Error handling** (lines 21–25) — if an error was passed in (e.g. from a preceding hook), it marks the reply as an error and sends it.
+3. **Bodyless methods** (lines 29–32) — for methods like GET/HEAD/DELETE (in `kSupportedHTTPMethods.bodyless`), it skips body parsing and calls the route `handler` directly.
+4. **Body-carrying methods** (lines 34–61) — for methods like POST/PUT/PATCH:
+   - **No `Content-Type` header** — checks `Content-Length` and `Transfer-Encoding` to determine if the body is empty. If empty, calls `handler` directly; otherwise runs the content-type parser with an empty string.
+   - **Has `Content-Type`** — parses it via `ContentType`. If invalid, responds with **415 Unsupported Media Type**. If valid, runs the route's content-type parser with the parsed type.
+5. **Fallback** (lines 64–65) — for any other unrecognized method, it calls `handler` directly (returning a 404 rather than 405, per the linked discussion).
+
+In all successful paths, control eventually reaches `handler(request, reply)`, which invokes the route's handler function.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify handleRequest at lib/handle-request.js:19 and accurately describe the same request lifecycle. Response A provides more detail on the internal pipeline (preValidation, schema validation, preHandler, handler invocation with specific line numbers), while Response B is more concise but still mentions the pipeline in summary form. Both are well-grounded with accurate line references. Response A is slightly more actionable due to the expanded pipeline detail, but Response B is cleaner and equally correct. Overall they are very close in quality.
+Both responses correctly identify handleRequest at lib/handle-request.js:19 and describe the same core flow: short-circuit if already sent, error handling, bodyless vs body-carrying method branching, content-type parsing, and the fallback path. Both mention the 404-not-405 design decision. Response A (no_budi) is significantly more comprehensive — it continues beyond the initial request handling to describe the full processing pipeline: preValidation hooks, schema validation, preHandler hooks, diagnostics channel tracing, and the final invocation of the user's route handler. It references specific internal function names (handler, preValidationCallback, validationCompleted, preHandlerCallback, preHandlerCallbackInner) with line numbers, giving a complete picture of what happens when a request arrives. Response B (with_budi) stops at the initial dispatch logic and only briefly mentions that control reaches the route's handler function. While accurate and well-structured with line references, it answers only half the question — it explains how the request is received but not what the full lifecycle looks like. For a question asking "what does it do when a new HTTP request arrives," the deeper pipeline coverage in Response A is substantially more useful.
 ```
 
 </details>
 
-<details><summary>Fastify P4 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>Fastify P4 | winner=with_budi | Q 8→9 G 7→8</summary>
 
 **Prompt:** Where is buildRouting defined and how does it set up the router for incoming requests?
 
-- Interactions: no_budi=9 / with_budi=6
-- Cost USD: no_budi=$0.0952 / with_budi=$0.0740
-- Hook: reason=ok context_chars=1326
-
-#### Injected context
-
-```text
-[structural context]
-fourOhFour  (four-oh-four.js:31)
-  → refs: _onbadurlhandler, builderrorhandler, done
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastify.js
-  span: 98-98
-  anchor: const router = buildRouting(options.routerOptions)
-  proof:
-    - const router = buildRouting(options.routerOptions)
-- file: fastify.js
-  span: 50-50
-  anchor: const { buildRouting, validateBodyLimitOption, buildRouterOptions } = require('./lib/route')
-  proof:
-    - const { buildRouting, validateBodyLimitOption, buildRouterOptions } = require('./lib/route')
-- file: lib/four-oh-four.js
-  span: 31-188
-  anchor: function fourOhFour (options) {
-  proof:
-    - const { logger, disableRequestLogging } = options
-    - const router = FindMyWay({ onBadUrl: createOnBadUrl(), defaultRoute: fourOhFourFallBack })
-    - let _onBadUrlHandler = null
-- file: test/types/content-type-parser.test-d.ts
-  span: 1-72
-  anchor: import fastify, { FastifyBodyParser } from '../../fastify'
-  proof:
-    - import { FastifyRequest } from '../../types/request'
-    - expectType<void>(
-...[truncated 123 chars]
-```
+- Interactions: no_budi=10 / with_budi=7
+- Cost USD: no_budi=$0.1672 / with_budi=$0.1568
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full picture:
+Here's the overview:
 
-**Definition:** `buildRouting` is defined at `lib/route.js:75`.
+### Definition
 
-**How it sets up the router:**
+`buildRouting` is defined at **`lib/route.js:75`** and is called from **`fastify.js:98`**.
 
-1. **Creates a `find-my-way` router** (line 76): `const router = FindMyWay(options)` — this is the core HTTP router that matches URLs to handlers using a radix tree.
+### How it works
 
-2. **Returns an object** (lines 94–129) with these key members:
-   - **`routing`** (line 118): Bound to `router.lookup` — this is the function called for every incoming HTTP request to find and invoke the matching route handler.
-   - **`setup()`** (line 99): Called later by `fastify.js` to inject runtime dependencies (avvio, 404 handler, logger, etc.).
-   - **`route()`** (line 119): Registers a new route definition into the `find-my-way` router.
-   - **`prepareRoute()`** (line 121): Normalizes shorthand route declarations (e.g., `fastify.get()`) into full route options, then delegates to `route()`.
-   - **`routeHandler()`** (line 122): The per-request handler that `find-my-way` invokes when a match is found.
-   - Helper methods: `hasRoute`, `findRoute`, `closeRoutes`, `printRoutes`, `addConstraintStrategy`, etc.
+1. **Creates the underlying router** — It instantiates a [`find-my-way`](https://github.com/delvedor/find-my-way) router (`lib/route.js:76`):
+   ``\`js
+   const router = FindMyWay(options)
+   ``\`
 
-3. **`routeHandler`** (line 459) is the heart of request processing:
-   - Generates a request ID
-   - Creates a child logger
-   - If the server is closing, returns 503
-   - Tracks keep-alive connections
-   - Constructs `FastifyRequest` and `FastifyReply` objects (lines 513–514)
-   - Logs the incoming request
-   - Sets up handler timeout (if configured)
-   - Hands off to the lifecycl
-...[truncated 280 chars]
+2. **Returns an object with router methods** (`lib/route.js:94–129`). The key members:
+   - **`routing`** — `router.lookup.bind(router)` — this is the function Fastify uses as the HTTP request listener. When a request arrives, `lookup` matches the URL/method against registered routes.
+   - **`route`** — registers a new route definition (validates options, normalizes methods, handles prefix logic, and calls `router.on()` to insert it into the find-my-way trie).
+   - **`setup`** — called later to inject runtime dependencies (avvio, 404 handler, logger, etc.) that aren't available at construction time.
+   - **`routeHandler`** — the actual handler passed to `router.on()` for every route (`lib/route.js:363`). This is what find-my-way calls when a URL matches.
+   - Other utilities: `hasRoute`, `findRoute`, `prepareRoute`, `closeRoutes`, `printRoutes`, constraint strategy management.
+
+3. **Route registration flow** (`route()` at line 208):
+   - Validates handler, body limit, method
+   - Normalizes the URL with prefix handling and trailing slash logic
+   - Calls `addNewRoute()` (line 279), which prepends the encapsulation prefix, runs `onRoute` h
+...[truncated 834 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's how `buildRouting` works:
+Here's how it all fits together:
 
-**Definition:** `lib/route.js:75` — `function buildRouting(options)`
+## `buildRouting` — defined at `lib/route.js:75`
 
-**Router creation:**
-At line 76, it instantiates the core router using [find-my-way](https://github.com/delvedor/find-my-way), a fast HTTP radix-tree router:
+It creates the core routing infrastructure by wrapping **[find-my-way](https://github.com/delvedor/find-my-way)**, a radix-tree HTTP router:
+
+### Construction (`lib/route.js:76`)
 ``\`js
 const router = FindMyWay(options)
 ``\`
+A `find-my-way` instance is created with the user-supplied `routerOptions`.
 
-**What it returns** (lines 94–129): an object with these key members:
+### Returned object (`lib/route.js:94-129`)
+`buildRouting` returns an object with:
 
-| Member | Purpose |
+| Property | Purpose |
 |---|---|
-| `setup(options, fastifyArgs)` | Deferred initialization — captures references to `avvio`, `fourOhFour`, logger, and various config flags (`return503OnClosing`, `exposeHeadRoutes`, etc.) |
-| `routing` | Bound to `router.lookup` — this is the function that matches an incoming `req`/`res` to a registered handler |
-| `route` | Registers a new route into the find-my-way radix tree |
-| `prepareRoute` | Normalizes shorthand calls (e.g. `fastify.get(url, handler)`) into full route options, then delegates to `route` |
-| `closeRoutes` | Sets a `closing` flag to reject new requests during shutdown |
-| `printRoutes` | Bound to `router.prettyPrint` for debugging |
+| `routing` | **`router.lookup.bind(router)`** — the core dispatch function that matches an incoming `req` to its handler |
+| `route` | Registers a new route in the radix tree |
+| `prepareRoute` | Normalizes shorthand calls (e.g. `fastify.get(...)`) into full route options, then calls `route` |
+| `setup()` | Deferred initialization — receives the Fastify instance's avvio, 404 handler, logger, etc. |
+| `closeRoutes` | Sets a `closing` flag |
+| `printRoutes` | Pretty-prints the route tree |
 
-**How incoming requests reach it:**
+### How it handles incoming requests
 
-In `fastify.js:789`, the server's request handler calls:
-``\`js
-router.routing(req, res, buildAsyncConstraintCallback(isAsync, req, res))
-``\`
+1. **`fastify.js:98`** — `buildRouting` is called with `options.routerOptions`.
 
-This invokes `find-my-way`'s `lookup()`, which walks its radix tree to match `req.url` and `req.method`, then calls the registered `routeHandler` for that route. If no match is found, it falls through to the `fourOhFour` handler (set up in `lib/four
-...[truncated 101 chars]
+2. **`fastify.js:104`** — The router is wrapped by `wrapRouting(router, options)`, which returns `httpHandler` — the function passed to Node's HTTP server.
+
+3. **`fastify.js:789`** — When a request arrives, `wrapRouting`'s `preRouting` function optionally rewrites the URL, then calls:
+   ``\`js
+   router.routing(req, res, buildAsyncConstraintCallback(isAsync, req, res))
+   ``\`
+   Thi
+...[truncated 480 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify buildRouting at lib/route.js:75 and accurately describe the find-my-way router instantiation, the returned object members, and how the routing integrates with fastify.js. Response A provides more detail on routeHandler internals (request ID generation, 503 on closing, FastifyRequest/Reply construction, lifecycle hooks), which is useful context. Response B provides a cleaner table format and includes the specific line in fastify.js (789) where router.routing is called with buildAsyncConstraintCallback, plus mentions the four-oh-four fallback with its own FindMyWay instance. Both are well-grounded with specific line references. Response A goes deeper on the per-request handler flow; Response B goes wider on the dispatch path and 404 handling. These are complementary strengths that balance out to roughly equal quality.
+Both responses correctly identify buildRouting at lib/route.js:75 and describe the find-my-way router creation. Response A provides solid detail about route registration flow and the routeHandler internals (request ID generation, 503 on close, lifecycle pipeline). Response B provides better end-to-end tracing of the request flow by covering wrapRouting in fastify.js, the preRouting URL rewrite step, and the 404 fallback via four-oh-four.js — these are critical pieces of how the router actually handles incoming requests. Response B's table format for the returned object is clearer and more scannable. Response B more directly answers "how does it set up the router for incoming requests" by tracing the full path from HTTP request through preRouting to find-my-way lookup to handler, including the 404 fallback. Response A focuses more on internal implementation details of routeHandler which, while useful, is slightly less targeted to the question. Both are well-grounded with specific line references; Response B covers more of the cross-file integration (fastify.js lines 104, 789, 635) which shows broader repository understanding.
 ```
 
 </details>
 
-<details><summary>Fastify P5 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>Fastify P5 | winner=no_budi | Q 9→8 G 9→8</summary>
 
 **Prompt:** Where is the Reply send method defined and what steps does it take to serialize and send the response?
 
-- Interactions: no_budi=7 / with_budi=6
-- Cost USD: no_budi=$0.1089 / with_budi=$0.1003
-- Hook: reason=ok context_chars=394
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/reply.js
-  span: 64-76
-  anchor: function Reply (res, request, log) {
-  proof:
-    - function Reply (res, request, log) {
-    - this[kReplyErrorHandlerCalled] = false
-    - this.request = request
-```
+- Interactions: no_budi=9 / with_budi=4
+- Cost USD: no_budi=$0.1160 / with_budi=$0.0566
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-The `Reply.prototype.send` method is defined at `lib/reply.js:139`. Here's the full pipeline:
+The `Reply.prototype.send` method is defined at `lib/reply.js:139`. Here's the full pipeline from call to bytes-on-the-wire:
 
-## 1. Guard checks (lines 140–153)
-- Throws if called inside an `onError` hook
-- Warns and returns early if the response was **already sent**
-- If the payload is an `Error`, delegates to `onErrorHook` → `onSendHook`
+---
 
-## 2. Content-type detection & fast paths (lines 155–191)
-- **`undefined` payload** → skip straight to `onSendHook`
-- **Streams** (Node.js streams, web ReadableStream, or `Response` objects) → skip straight to `onSendHook`
-- **Buffer / TypedArray** → sets `content-type: application/octet-stream` if missing, converts to Buffer, then `onSendHook`
-- **String** (no content-type set) → sets `content-type: text/plain`, then `onSendHook`
+### 1. Guard checks (lines 140–153)
+- Throws if called inside an `onError` hook.
+- If the response was **already sent**, logs a warning and returns early.
+- If the payload is an **Error** (or `kReplyIsError` is set), routes through `onErrorHook` → `handleError` instead of the normal path.
 
-## 3. Serialization (lines 194–220)
-For non-string payloads that aren't streams/buffers:
-- If a **custom route serializer** (`kReplySerializer`) is set, it's used
-- Otherwise, if no content-type or content-type contains `"json"`, the payload is treated as JSON:
-  - Sets `content-type: application/json; charset=utf-8` if missing
-  - Calls **`preSerializationHook`** (line 500) which runs user `preSerialization` hooks, then in `preSerializationHookEnd` (line 514) serializes via:
-    1. Custom reply serializer (`kReplySerializer`), or
-    2. Route-level default serializer (`kReplySerializerDefault`), or
-    3. Schema-based `serialize()` (using `fast-json-stringify` compiled schemas)
+### 2. Content-type detection & early exits (lines 155–191)
+For non-error payloads, the method inspects the payload type and sets the `content-type` header if one hasn't been set:
 
-## 4. `onSendHook` (line 541)
-Runs user-registered `onSend` hoo
-...[truncated 1098 chars]
+| Payload type | Content-Type set | Serialization? |
+|---|---|---|
+| `undefined` | (none) | skipped — goes straight to `onSendHook` |
+| **Stream** (Node or Web) / **`Response`** | (none) | skipped — piped later |
+| **Buffer / TypedArray** | `application/octet-stream` | skipped — converted to Buffer |
+| **string** (no content-type) | `text/plain; charset=utf-8` | skipped |
+
+### 3. JSON serialization path (lines 194–220)
+If none of the above matched (typically a plain object/array):
+
+- If a **reply-level serializer** (`kReplySerializer`) exists **and** the payload is not already a string → go to step 4 (preSerialization hook).
+- Otherwise, if content-type is unset or contains `"json"`, set `application/json; charset=utf-8` and → go to step 4.
+
+### 4. `preSerializationHook` (line 500)
+Runs the route's `preSerialization` hook chain (if any), giving plugins a chance to transform the payloa
+...[truncated 1630 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The `Reply.prototype.send` method is defined at `lib/reply.js:139`. Here's the pipeline it follows:
+The `Reply.prototype.send` method is defined at `lib/reply.js:139`. Here's the step-by-step flow:
 
-### 1. Guard checks (lines 140–153)
-- Throws if called inside an `onError` hook
-- Warns and returns early if the response was already sent
-- If the payload is an `Error`, delegates to `onErrorHook` → `onSendHook`
+1. **Guard: error hook re-entrance** (line 140) — Throws `FST_ERR_SEND_INSIDE_ONERR` if called inside an `onError` hook.
 
-### 2. Payload type detection & content-type inference (lines 155–192)
-- **`undefined`** — skips straight to `onSendHook`
-- **Streams** (Node.js `pipe`, web `getReader`, or `Response` object) — forwards as-is to `onSendHook`
-- **ArrayBuffer-backed** (Buffer/TypedArray) — sets `content-type: application/octet-stream` if missing, converts to Buffer, then `onSendHook`
-- **String** (no content-type set) — sets `content-type: text/plain`, then `onSendHook`
+2. **Guard: already sent** (line 144) — If the response was already sent, logs a warning and returns early.
 
-### 3. Serialization (lines 194–220)
-For non-string payloads that didn't match the above fast paths:
-- If a **custom reply serializer** (`kReplySerializer`) is set, it's used directly
-- Otherwise, if content-type is missing or contains `"json"`, it sets `content-type: application/json` (with charset) and routes through **`preSerializationHook`** (line 500)
+3. **Error payload** (line 149) — If `kReplyIsError` is set or the payload is an `Error`, delegates to `onErrorHook(this, payload, onSendHook)` which runs the error handling pipeline.
 
-`preSerializationHookEnd` (line 514) performs the actual serialization using one of:
-1. The reply-level serializer (`kReplySerializer`)
-2. The route-level default serializer (`kReplySerializerDefault`)
-3. The schema-based `serialize()` function (which uses `fast-json-stringify` if a schema is defined, otherwise `JSON.stringify`)
+4. **Undefined payload** (line 155) — Skips all serialization and goes straight to `onSendHook`.
 
-### 4. `onSend` hook (line 541)
-Runs
-...[truncated 696 chars]
+5. **Stream / Web stream / Response** (lines 163–174) — If the payload has `.pipe()` (Node stream), `.getReader()` (web stream), or is a `Response` object, it skips serialization and goes to `onSendHook`.
+
+6. **Buffer / TypedArray** (lines 176–185) — Sets `content-type` to `application/octet-stream` if not already set, converts to a proper `Buffer`, then calls `onSendHook`.
+
+7. **Plain string (no content-type set)** (lines 187–191) — Sets `content-type` to `text/plain` and calls `onSendHook` without further serialization.
+
+8. **Custom serializer** (lines 194–199) — If `kReplySerializer` is set:
+   - Non-string payloads go through `preSerializationHook` (which eventually serializes via the custom serializer).
+   - String payloads are run through `this[kReplySerializer](payload)` directly.
+
+9. **JSON (default path)** (lines 202–220) — If no content-type is set, or the content-
+...[truncated 799 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, accuracy, and grounding. They correctly identify the method at lib/reply.js:139 and walk through the same pipeline: guard checks, payload type detection, serialization, onSend hooks, and actual response writing. Response A provides slightly more detail with additional line references (sendStream at 768, sendWebStream at 695) and a dedicated sendTrailer section (line 823). Response B adds the useful detail that serialization falls back to JSON.stringify when no schema is defined and references RFC 7230. These small differences balance out, making this essentially a tie.
+Both responses correctly identify `Reply.prototype.send` at `lib/reply.js:139` and walk through the same pipeline. Response A (no_budi) is more thorough and provides deeper coverage: it follows the entire chain past `onSendHook` into `onSendEnd` (line 575+), detailing how headers are written, how streams are piped, how trailers work, how `safeWriteHead` operates, and how content-length is computed — the actual "send the response" part of the question. It also references specific internal functions like `preSerializationHookEnd`, `sendStream`, `sendWebStream`, and `safeWriteHead` with line numbers. Response B (with_budi) is accurate and well-structured but stops at step 10 with a vague "ultimately calls the internal function that writes headers and the body" without detailing that final write phase, which is a key part of the question ("serialize and send the response"). Response B does add a nice touch mentioning the constructor defaults, but this is minor compared to the missing send-phase detail. Both are well-grounded in the repo with specific line references, but A covers more of the actual code path end-to-end.
 ```
 
 </details>
 
-<details><summary>Fastify P6 | winner=tie | Q 8.5→8.5 G 8→8</summary>
+<details><summary>Fastify P6 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Trace the call chain from an incoming HTTP request to the route handler function — what functions are called in order?
 
-- Interactions: no_budi=10 / with_budi=14
-- Cost USD: no_budi=$0.2675 / with_budi=$0.2320
-- Hook: reason=ok context_chars=972
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/route.js
-  span: 184-202
-  anchor: function findRoute (options) {
-  proof:
-    - function findRoute (options) {
-    - const route = router.find(
-    - if (route) {
-- file: lib/warnings.js
-  span: 30-35
-  anchor: const FSTWRN004 = createWarning({
-  proof:
-    - message: 'It seems that you are overriding an errorHandler in the same scope, which can lead to subtle bugs.',
-    - const FSTWRN004 = createWarning({
-    - name: 'FastifyWarning',
-- file: lib/reply.js
-  span: 563-573
-  anchor: function safeWriteHead (reply, statusCode) {
-  proof:
-    - reply.log.warn(`Reply was already sent, did you forget to "return reply" in the "${reply.request.raw.url}" (${reply.request.raw.method}) route?`)
-    - function safeWriteHead (reply, statusCode) {
-    - const res = reply.raw
-```
+- Interactions: no_budi=7 / with_budi=8
+- Cost USD: no_budi=$0.1508 / with_budi=$0.2627
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Now I have the complete picture. Here's the full call chain:
+Now I have the full picture. Here's the complete call chain:
 
 ---
-
-## Request Call Chain: HTTP Request → Route Handler
-
-### 1. `preRouting(req, res)` — `fastify.js:776`
-The Node.js HTTP server emits a `request` event. The handler is `wrapRouting()` which returns the `preRouting` function. This is the entry point for every request. It:
-- Checks for async constraints
-- Optionally rewrites the URL (`rewriteUrl` option)
-- Calls `router.routing(req, res)` (find-my-way's `lookup`)
-
-### 2. `router.routing(req, res)` — find-my-way lookup
-The [find-my-way](https://github.com/delvedor/find-my-way) router matches the URL and method against registered routes. If no match is found, it calls `defaultRoute` → `fourOhFour.router.lookup`. On match, it invokes the stored handler:
-
-### 3. `routeHandler(req, res, params, context, query)` — `lib/route.js:459`
-The per-route callback registered with find-my-way. This function:
-- Generates a request ID
-- Creates a child logger
-- Constructs `Request` and `Reply` objects
-- Sets up handler timeout (if configured)
-- Sets up response listeners
-
-Then enters the **hook chain**:
-
-### 4. **`onRequest` hooks** — `lib/route.js:556`
-Runs `onRequestHookRunner(context.onRequest, ...)` with callback `runPreParsing`.
-
-### 5. `runPreParsing(err, request, reply)` — `lib/route.js:638`
-Sets `request[kRequestPayloadStream] = request.raw`, then:
-
-### 6. **`preParsing` hooks** — `lib/route.js:648`
-Runs `preParsingHookRunner(context.preParsing, ...)` with callback `handleR
-...[truncated 2048 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Now I have the complete picture. Here's the call chain:
 
 ## HTTP Request → Route Handler Call Chain
 
 ### 1. `preRouting(req, res)` — `fastify.js:776`
-The Node.js HTTP server calls this function (aliased as `httpHandler`) for every incoming request. It optionally rewrites the URL, then calls into the router.
+The Node.js HTTP server calls this as its `requestListener`. It handles `rewriteUrl` if configured, then delegates to the router.
 
-### 2. `router.routing(req, res, ...)` — `lib/route.js:118`
-This is `find-my-way`'s `router.lookup()`. It matches the URL/method against registered routes and invokes the matched route's handler — which is `routeHandler`.
+### 2. `router.routing(req, res)` — find-my-way's `lookup()`  — `lib/route.js:118`
+The `find-my-way` router matches the URL + method + constraints to a registered route and calls the route's stored handler with the matched context.
 
 ### 3. `routeHandler(req, res, params, context, query)` — `lib/route.js:459`
-The core per-request entry point. It:
+The per-request entry point after routing. This function:
 - Generates a request ID
 - Creates a child logger
 - Handles server-closing (503) logic
-- Constructs `Request` and `Reply` objects
+- Constructs `new context.Request(...)` and `new context.Reply(...)`
 - Sets up handler timeout if configured
 - Sets up response listeners
-- Then enters the hook chain:
+- Kicks off the **onRequest** hooks
 
-### 4. **onRequest hooks** — `lib/route.js:556-564`
-Runs `onRequestHookRunner(context.onRequest, ...)` if any `onRequest` hooks are registered, with `runPreParsing` as the callback.
+### 4. `onRequestHookRunner(...)` → `runPreParsing(err, request, reply)` — `lib/route.js:638`
+Runs `onRequest` hooks (if any), then calls `runPreParsing` as the callback.
 
-### 5. `runPreParsing(err, request, reply)` — `lib/route.js:638`
-Sets `request[kRequestPayloadStream]`, then:
+### 5. `preParsingHookRunner(...)` → `handleRequest(err, request, reply)` — `lib/route.js:648–651`
+Runs `preParsing` hooks (if any), sets the payload stream, then calls `handleRequest`.
 
-### 6. **preParsing hooks** — `lib/route.js:648-651`
-Runs `preParsingHookRunner(...)` if registered, otherwise calls `handleRequest` directly.
+### 6. `handleRequest(err, request, reply)` — `lib/handle-request.js:19`
+Determines whether the request has a body:
+- **Bodyless methods** (GET, HEAD, etc.) → go straight to `handler()`
+- **Body methods** (POST, PUT, etc
+...[truncated 1766 chars]
+```
 
-### 7. `handleRequest(err, request, reply)` — `lib/handle-request.js:19`
-Determines if the request has a body:
-- **Bodyless methods** (GET, HEAD, etc.): calls `handler()` directly
-- **
-...[truncated 1359 chars]
+#### Response (`with_budi`)
+
+```text
+Here's the complete call chain from incoming HTTP request to route handler:
+
+## Request Call Chain
+
+### 1. `preRouting` — `fastify.js:776`
+The Node.js HTTP server receives the request and calls `httpHandler`, which is the `preRouting` function created by `wrapRouting()`. It optionally rewrites the URL, then calls:
+
+### 2. `router.routing` (find-my-way `lookup`) — `lib/route.js:118`
+This is `find-my-way`'s `router.lookup()`. It matches the URL/method against registered routes and invokes the stored handler for that route, which is always:
+
+### 3. `routeHandler` — `lib/route.js:459`
+The per-request entry point after routing. It:
+- Generates a request ID
+- Creates a child logger
+- Handles server closing (503)
+- Tracks keep-alive connections
+- Constructs `Request` and `Reply` objects
+- Sets up handler timeout (if configured)
+- Sets up response listeners
+- Runs **onRequest** hooks → then calls `runPreParsing`
+
+### 4. `onRequestHookRunner` → `runPreParsing` — `lib/route.js:638`
+Runs all `onRequest` hooks sequentially. On completion, calls `runPreParsing` which:
+- Sets `request[kRequestPayloadStream]`
+- Runs **preParsing** hooks (if any) → then calls `handleRequest`
+
+### 5. `handleRequest` — `lib/handle-request.js:19`
+- For **bodyless methods** (GET, HEAD, TRACE): skips body parsing, goes straight to `handler()`
+- For **body methods** (POST, PUT, etc.): runs the content-type parser (`contentTypeParser.run()`) to parse the body → then calls `handler()`
+
+### 6. `handler` — `lib/handle
+...[truncated 1637 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the same call chain with nearly identical accuracy, referencing the same file paths, line numbers, and function names. Response A uses 14 steps with slightly more granular separation (e.g., preValidation hooks and validateSchema as distinct steps) and provides a nicely indented ASCII summary showing nesting depth. Response B consolidates into 12 steps and is slightly more concise, while adding a useful detail about server-closing (503) logic. Both correctly identify the key path: preRouting → find-my-way lookup → routeHandler → onRequest hooks → preParsing hooks → handleRequest → body parsing → preValidation hooks → schema validation → preHandler hooks → context.handler. The differences are stylistic rather than substantive — both are well-grounded in the actual codebase with accurate line references and provide equally actionable explanations of the request lifecycle.
+Both responses are nearly identical in content, accuracy, and structure. They trace the same call chain with the same file paths and line numbers (fastify.js:776, lib/route.js:459, lib/route.js:638, lib/handle-request.js:19/68/85/105/128/168). Both correctly identify all lifecycle hooks (onRequest, preParsing, preValidation, preHandler) and the key functions (preRouting, routeHandler, handleRequest, etc.). Response A uses 11 steps (splitting preHandlerCallback) while B uses 10; A's summary uses nested indentation showing the callback nesting while B uses flat indentation with inline annotations. These are stylistic differences with no meaningful quality gap. Both are equally well-grounded in the repository and equally actionable.
 ```
 
 </details>
 
-<details><summary>Fastify P7 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>Fastify P7 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Trace what happens when a route handler throws an exception — how does Fastify catch and convert it to an error response?
 
-- Interactions: no_budi=15 / with_budi=10
-- Cost USD: no_budi=$0.1605 / with_budi=$0.1689
-- Hook: reason=ok context_chars=2488
+- Interactions: no_budi=10 / with_budi=8
+- Cost USD: no_budi=$0.1270 / with_budi=$0.1366
+- Hook: reason=ok context_chars=1978
 
 #### Injected context
 
@@ -7335,24 +6344,32 @@ evidence_cards:
   span: 360-439
   anchor: addHook<
   proof:
+    - >(
+    - addHook(
     - RouteGeneric extends RouteGenericInterface = RouteGenericInterface,
-    - Fn extends onErrorHookHandler<RawServer, RawRequest, RawReply, RouteGeneric, ContextConfig, FastifyError, SchemaCompiler, TypeProvider, Logger> | onErrorAsyncHookHandler<RawServ...
-    - hook: Fn extends unknown ? Fn extends AsyncFunction ? onErrorAsyncHookHandler<RawServer, RawRequest, RawReply, RouteGeneric, ContextConfig, FastifyError, SchemaCompiler, TypePro...
-- file: lib/handle-request.js
-  span: 17-17
+- file: lib/wrap-thenable.js
+  span: 10-10
   anchor: const channels = diagnostics.tracingChannel('fastify.request.handler')
   proof:
-    - const channels = diagnostics.tracingChannel('fastify.request.handler')
+    - (no concise proof line found)
 - file: lib/handle-request.js
   span: 68-83
   anchor: function handler (request, reply) {
   proof:
-    - function handler (request, reply) {
+    - } catch (err) {
     - if (request[kRouteContext].preValidation !== null) {
     - request[kRouteContext].preValidation,
+- file: types/schema.d.ts
+  span: 35-43
+  anchor: export type FastifySchemaCompiler<T> = (routeSchema: FastifyRouteSchemaDef<T>) => FastifyValidationResult
+  proof:
+    - export interface FastifyValidationResult {
+    - (data: any): boolean | SafePromiseLike<any> | { error?: Error | FastifySchemaValidationError[], value?: any }
+    - errors?: FastifySchemaValidationError[] | null;
 - file: types/request.d.ts
-  span: 23-3
-...[truncated 300 chars]
+  span: 23-37
+  anchor: export interface
+...[truncated 298 chars]
 ```
 
 #### Response (`no_budi`)
@@ -7360,75 +6377,27 @@ evidence_cards:
 ```text
 Here's the complete trace of what happens when a route handler throws:
 
-## Exception Flow: Handler Throw → Error Response
-
-### 1. Handler invocation and catch (`lib/handle-request.js:167-180`)
-
-The handler is called inside a `try/catch` in `preHandlerCallbackInner`:
-
-``\`js
-try {
-  result = context.handler(request, reply)  // line 168
-} catch (err) {                              // line 169
-  // publish to diagnostics channel if tracing
-  reply[kReplyIsError] = true                // line 177 — marks this as an error
-  reply.send(err)                            // line 178 — enters reply.send with the error
-  return
-}
-``\`
-
-If the handler returns a **promise** that rejects (async handler), `wrapThenable` (`lib/wrap-thenable.js:53-81`) catches it via the `.then(_, onRejected)` rejection handler, which similarly sets `kReplyIsError = true` and calls `reply.send(err)`.
-
-### 2. `reply.send()` detects the error (`lib/reply.js:139-153`)
-
-``\`js
-Reply.prototype.send = function (payload) {
-  if (this[kReplyIsError] || payload instanceof Error) {  // line 149
-    this[kReplyIsError] = false
-    onErrorHook(this, payload, onSendHook)  // → enters error path
-    return this
-  }
-  // ... normal path
-}
-``\`
-
-The `kReplyIsError` flag (set in step 1) ensures this branch is taken even if someone threw a non-Error value.
-
-### 3. `onError` hooks run (`lib/reply.js:882-895`)
-
-``\`js
-function onErrorHook (reply, error, cb) {
-  if (reply[kRouteContext].onError !== null && !reply[kReplyNextErrorHandler
-...[truncated 3167 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Here's the complete flow when a route handler throws:
-
 ---
 
-## Error Flow: Handler Exception → Error Response
+## Step 1: Handler invocation & catch
 
-### 1. Exception is caught (`lib/handle-request.js:167-180`)
-
-The handler is invoked inside a `try/catch` in `preHandlerCallbackInner`:
+In `lib/handle-request.js:167-180`, the route handler is called inside a `try/catch`:
 
 ``\`js
 try {
-  result = context.handler(request, reply)  // line 168
-} catch (err) {                              // line 169
-  // publish to diagnostics channel
-  reply[kReplyIsError] = true               // line 177
-  reply.send(err)                           // line 178
+  result = context.handler(request, reply)   // line 168
+} catch (err) {                               // line 169
+  reply[kReplyIsError] = true                 // line 177
+  reply.send(err)                             // line 178
   return
 }
 ``\`
 
-For **async handlers** that return a rejected promise, `wrapThenable` (`lib/wrap-thenable.js:53-70`) catches the rejection in the `.then(_, onReject)` callback and does the same: sets `kReplyIsError = true`, calls `reply.send(err)`.
+If the handler is **async** (returns a promise), the catch won't fire. Instead, `wrapThenable` (`lib/wrap-thenable.js:12`) attaches a rejection handler that does the same thing — sets `kReplyIsError = true` and calls `reply.send(err)` (line 68-70).
 
-### 2. `reply.send()` detects the error (`lib/reply.js:149-152`)
+## Step 2: `reply.send()` detects it's an error
+
+In `lib/reply.js:149-152`, `send()` checks the `kReplyIsError` flag (or if payload is an `Error`):
 
 ``\`js
 if (this[kReplyIsError] || payload instanceof Error) {
@@ -7438,24 +6407,78 @@ if (this[kReplyIsError] || payload instanceof Error) {
 }
 ``\`
 
-Because `kReplyIsError` was set to `true`, the send path branches into error handling instead of normal serialization.
+This diverts to error handling instead of normal serialization.
 
-### 3. `onError` hooks run (`lib/reply.js:882-895`)
+## Step 3: `onError` lifecycle hooks
 
-`onErrorHook` checks if any `onError` hooks are registered. If so, they run first (giving user code a chance to observe/log the error). Then it calls `handleError()`.
+`onErrorHook` (`lib/reply.js:882-895`) runs any registered `onError` hooks first, then calls `handleError`:
 
-### 4. Error handler is invoked (`lib/error-handler.js:30-80`)
+``\`js
+function onErrorHook (reply, error, cb) {
+  if (reply[kRouteContext].onError !== null && !reply[kReplyNextErrorHandler]) {
+    reply[kReplyIsRunningOnErrorHook] = true
+    onSendHookRunner(reply[kRouteContext].onError, reply.request, reply, error,
+      () => handleEr
+...[truncated 2110 chars]
+```
 
-`handleError` walks the **error handler chain** (built via `setErrorHandler()`):
+#### Response (`with_budi`)
 
-- It looks up `reply[kR
-...[truncated 2284 chars]
+```text
+Here's the full trace of what happens when a route handler throws:
+
+## 1. Handler invocation & catch (`lib/handle-request.js:167-180`)
+
+The route handler is called inside a `try/catch` in `preHandlerCallbackInner`:
+
+``\`js
+try {
+  result = context.handler(request, reply)  // line 168
+} catch (err) {                              // line 169
+  // publish to diagnostics channel if tracing is active
+  reply[kReplyIsError] = true                // line 177
+  reply.send(err)                            // line 178
+  return
+}
+``\`
+
+If the handler is **async** and the returned promise rejects, the catch doesn't fire — instead `wrapThenable` handles it (line 184 calls `wrapThenable(result, reply, store)`).
+
+## 2. Async rejection path (`lib/wrap-thenable.js:53-81`)
+
+The `.then(onFulfilled, onRejected)` rejection handler does the same thing:
+
+``\`js
+reply[kReplyIsError] = true   // line 68
+reply.send(err)                // line 70
+``\`
+
+## 3. `reply.send()` detects the error flag (`lib/reply.js:149-152`)
+
+Inside `send()`, when `kReplyIsError` is `true` or the payload is an `Error`:
+
+``\`js
+if (this[kReplyIsError] || payload instanceof Error) {
+  this[kReplyIsError] = false
+  onErrorHook(this, payload, onSendHook)
+  return this
+}
+``\`
+
+## 4. `onError` hooks run (`lib/reply.js:882-895`)
+
+`onErrorHook` runs any registered `onError` hooks, then calls into the error handler:
+
+``\`js
+function onErrorHook (reply, error, cb) {
+  if (reply[kRouteContext].onError !== null && !reply[kReplyNextErrorHandler
+...[truncated 2045 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace essentially the same error handling flow with identical file references, line numbers, and code snippets. They cover the same key steps: try/catch in preHandlerCallbackInner (handle-request.js:167-180), kReplyIsError detection in reply.send (reply.js:149), onError hooks (reply.js:882-895), error handler chain (error-handler.js:30-80), default error handler (error-handler.js:82-101), status code resolution (error-status.js:7-12), and fallback serialization (error-handler.js:103-140). Response A includes additional steps about onSend hooks and final response writing, plus a "Key Design Points" section (truncated). Response B includes a useful summary diagram showing the complete flow. These are minor presentation differences — the core technical content, accuracy, and grounding in the codebase are equivalent. Both correctly describe the prototype chain mechanism for error handlers, async handler rejection via wrapThenable, and the fallback serialization path.
+Both responses trace the identical flow through the same files and line numbers: handle-request.js try/catch → wrapThenable for async → reply.send() detecting kReplyIsError → onErrorHook → handleError with prototype chain → defaultErrorHandler → fallbackErrorHandler serialization. They reference the same code snippets, the same line numbers, and explain the same mechanisms (prototype chain for error handlers, statusCode resolution, JSON serialization shape). Response B adds a nice ASCII summary flow diagram and separates status code resolution into its own step, while Response A mentions the schema serializer fallback detail. These are minor stylistic differences that balance out. Both are highly grounded in repository specifics and equally actionable.
 ```
 
 </details>
@@ -7464,47 +6487,36 @@ Both responses trace essentially the same error handling flow with identical fil
 
 **Prompt:** What calls handleRequest and what arguments does each call site pass?
 
-- Interactions: no_budi=4 / with_budi=3
-- Cost USD: no_budi=$0.0444 / with_budi=$0.0342
-- Hook: reason=ok context_chars=1005
-
-#### Injected context
-
-```text
-[structural context]
-runPreParsing  (route.js:638)
-  → refs: preparsinghookrunner, send
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: test/internals/handle-request.test.js
-  span: 4-4
-  anchor: const handleRequest = require('../../lib/handle-request')
-  proof:
-    - const handleRequest = require('../../lib/handle-request')
-- file: lib/route.js
-  span: 5-5
-  anchor: const handleRequest = require('./handle-request.js')
-  proof:
-    - const handleRequest = require('./handle-request.js')
-- file: test/types/request.test-d.ts
-  span: 47-47
-  anchor: type Handler = RouteHandler<RequestData>
-  proof:
-    - type Handler = RouteHandler<RequestData>
-- file: lib/route.js
-  span: 638-653
-  anchor: function runPreParsing (err, request, reply) {
-  proof:
-    - function runPreParsing (err, request, reply) {
-    - if (reply.sent === true) return
-    - return
-```
+- Interactions: no_budi=5 / with_budi=4
+- Cost USD: no_budi=$0.0540 / with_budi=$0.0477
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
+
+```text
+There are **two call sites** in `lib/route.js` (lines 649 and 651), both inside the same function:
+
+1. **Line 649** — as a `preParsingHookRunner` callback:
+   ``\`js
+   preParsingHookRunner(request[kRouteContext].preParsing, request, reply, handleRequest.bind(request.server))
+   ``\`
+   Passed as a bound callback. The hook runner will invoke it with `(err, request, reply)`, and `this` is bound to `request.server`.
+
+2. **Line 651** — direct call (when no preParsing hooks exist):
+   ``\`js
+   handleRequest.call(request.server, null, request, reply)
+   ``\`
+   Called with `this = request.server` and arguments `(null, request, reply)` — `null` for the error, plus the request and reply.
+
+The signature at `lib/handle-request.js:19` is:
+``\`js
+function handleRequest(err, request, reply)
+``\`
+
+Both call sites pass the same three arguments (`err`, `request`, `reply`) with `this` set to the Fastify server instance. The only difference is that the hook-runner path may pass a non-null `err` if a preParsing hook failed.
+```
+
+#### Response (`with_budi`)
 
 ```text
 There are **two call sites** in `lib/route.js` (lines 649 and 651), both inside the same function:
@@ -7521,42 +6533,13 @@ There are **two call sites** in `lib/route.js` (lines 649 and 651), both inside 
    ``\`
    Called directly with `this = request.server` and arguments `(null, request, reply)` — `null` for the error, plus the request and reply objects.
 
-Both call sites pass the same three arguments matching the signature at `lib/handle-request.js:19`:
-
-``\`js
-function handleRequest(err, request, reply)
-``\`
-
-The only difference is the first path goes through `preParsingHookRunner` which may pass a non-null `err`, while the direct path always passes `null`.
-```
-
-#### Response (`with_budi`)
-
-```text
-Two call sites, both in `lib/route.js` inside `runPreParsing`:
-
-1. **Line 649** — as a hook callback:
-   ``\`js
-   preParsingHookRunner(request[kRouteContext].preParsing, request, reply, handleRequest.bind(request.server))
-   ``\`
-   `handleRequest` is bound to `request.server` and passed as the final callback to `preParsingHookRunner`. The hook runner will invoke it with `(err, request, reply)`.
-
-2. **Line 651** — direct call (no preParsing hooks):
-   ``\`js
-   handleRequest.call(request.server, null, request, reply)
-   ``\`
-   Called with `this = request.server` and arguments `(null, request, reply)` — `null` for the `err` parameter.
-
-Both paths pass the same three arguments `(err, request, reply)` with `this` set to `request.server`, matching the signature at `lib/handle-request.js:19`:
-``\`js
-function handleRequest (err, request, reply) {
-``\`
+Both paths pass the same three arguments (`err`, `request`, `reply`) and bind `this` to `request.server`. The only difference is whether the call goes through the preParsing hook pipeline first (which may produce a non-null `err`).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are essentially identical in content, accuracy, and structure. They identify the same two call sites at lines 649 and 651 in lib/route.js, explain the arguments correctly, reference the signature at lib/handle-request.js:19, and note the difference between the hook callback path and the direct call path. Response B adds the detail that both sites are inside `runPreParsing`, which is marginally more specific, but Response A notes the hook runner may pass a non-null err, which is a useful clarification. These minor differences cancel out.
+Both responses are nearly identical in substance. They identify the same two call sites at lib/route.js lines 649 and 651, show the same code snippets, explain the same binding of `this` to `request.server`, and note the same difference about error handling through the preParsing hook pipeline. Response A includes a minor extra detail about the function signature location at lib/handle-request.js:19, while Response B uses slightly cleaner file:line reference formatting. These are negligible differences; both are accurate, well-grounded, and equally actionable.
 ```
 
 </details>
@@ -7565,73 +6548,41 @@ Both responses are essentially identical in content, accuracy, and structure. Th
 
 **Prompt:** What calls handleError and when is it triggered relative to the route handler?
 
-- Interactions: no_budi=9 / with_budi=8
-- Cost USD: no_budi=$0.0924 / with_budi=$0.0889
-- Hook: reason=ok context_chars=973
-
-#### Injected context
-
-```text
-[structural context]
-onErrorHook  (reply.js:882)
-  → refs: handleerror, onsendhookrunner
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/reply.js
-  span: 39-39
-  anchor: const { handleError } = require('./error-handler')
-  proof:
-    - const { handleError } = require('./error-handler')
-- file: lib/reply.js
-  span: 882-895
-  anchor: function onErrorHook (reply, error, cb) {
-  proof:
-    - if (reply[kRouteContext].onError !== null && !reply[kReplyNextErrorHandler]) {
-    - reply[kRouteContext].onError,
-    - reply.request,
-- file: lib/route.js
-  span: 631-636
-  anchor: function validateHandlerTimeoutOption (handlerTimeout) {
-  proof:
-    - function validateHandlerTimeoutOption (handlerTimeout) {
-    - if (handlerTimeout === undefined) return
-    - if (!Number.isInteger(handlerTimeout) || handlerTimeout <= 0) {
-```
+- Interactions: no_budi=7 / with_budi=7
+- Cost USD: no_budi=$0.0859 / with_budi=$0.0893
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how `handleError` fits into the request lifecycle:
+Here's the full picture:
 
-## Who calls `handleError`
+## `handleError` (`lib/error-handler.js:30`)
+
+### What calls it
 
 Only **`onErrorHook`** (`lib/reply.js:882`) calls `handleError`. It either:
-1. Runs the `onError` hooks first, then calls `handleError` as the callback (line 890)
-2. Calls `handleError` directly if there are no `onError` hooks or if we're already inside a next-error-handler chain (line 893)
+1. Runs the `onError` hooks first, then calls `handleError` as the final callback, or
+2. Calls `handleError` directly if there are no `onError` hooks (or if we're already in a nested error handler via `kReplyNextErrorHandler`).
 
-## When is it triggered (relative to the route handler)
+### What triggers `onErrorHook` (and thus `handleError`)
 
-`handleError` is always **after** the route handler. It's invoked whenever an error occurs during the response pipeline. The call sites for `onErrorHook` (which wraps `handleError`) are:
+`onErrorHook` is called whenever an error surfaces during the reply lifecycle — always **after** the route handler:
 
 | Call site | Trigger |
 |---|---|
-| `reply.send()` (line 151) | Route handler (or any code) sends an `Error` object via `reply.send(error)` |
-| `preSerializationHookEnd` (line 516) | `preSerialization` hook returns an error |
-| `preSerializationHookEnd` (line 530) | Serialization of the payload throws |
-| `wrapOnSendEnd` (line 557) | `onSend` hook returns an error |
-| Lines 761, 785 | Errors during payload streaming/writing |
+| `reply.js:151` — inside `Reply.send()` | The payload **is an `Error`** (e.g. handler called `reply.send(new Error(...))` or threw) |
+| `reply.js:516` — `preSerializationHookEnd` | A `preSerialization` hook returned an error |
+| `reply.js:530` — serialization | Serialization of the payload threw |
+| `reply.js:557` — `wrapOnSendEnd` | An `onSend` hook returned an error |
+| `reply.js:761, 785` — stream handling | A stream payload emitted an error during send |
 
-## What `handleError` does
+### What `handleError` does
 
-1. Walks the **error handler chain** (`reply[kReplyNextErrorHandler]` → `context.errorHandler`), which is built via `setErrorHandler()` with prototype-based inheritance (`lib/error-handler.js:142-149`).
-2. Clears `content-type` and `content-length` headers so the error handler can set its own.
-3. Calls the user's error handler function: `func(error, request, reply)`.
-4. If no more custom handlers remain (`kReplyN
-...[truncated 384 chars]
+1. Walks the **error handler chain** — it looks up the current context's `errorHandler` (set via `fastify.setErrorHandler()`), and sets `kReplyNextErrorHandler` to the parent so that if the error handler itself throws, the next handler up the chain is used.
+2. Clears `content-type` and `content-length` headers so they can be re-set by the error handler.
+3. Invokes `errorHandler.func(error, request,
+...[truncated 769 chars]
 ```
 
 #### Response (`with_budi`)
@@ -7639,288 +6590,280 @@ Only **`onErrorHook`** (`lib/reply.js:882`) calls `handleError`. It either:
 ```text
 Here's the flow:
 
-**Who calls `handleError`:**
+## `handleError` call sites
 
-Only `onErrorHook` (`lib/reply.js:882`) calls `handleError` (`lib/error-handler.js:30`). It either runs the `onError` hooks first (if any are registered), then calls `handleError` as the callback, or calls `handleError` directly if there are no `onError` hooks.
+`handleError` (`lib/error-handler.js:30`) is only called from **`onErrorHook`** (`lib/reply.js:882`):
 
-**When it's triggered relative to the route handler:**
+- If `onError` hooks exist → runs them first, then calls `handleError` as the final callback (line 890)
+- If no `onError` hooks → calls `handleError` directly (line 893)
 
-`handleError` runs **after** the route handler, when an error occurs during the response lifecycle. The trigger points via `onErrorHook` are:
+## When `onErrorHook` is triggered (all post-handler)
 
-1. **`reply.send()` with an Error** (`reply.js:149-151`) — when the handler (or any hook) calls `reply.send(error)` or when `kReplyIsError` is set.
-2. **preSerialization hook error** (`reply.js:516`) — if the `preSerialization` hook fails after the handler returns.
-3. **Serialization failure** (`reply.js:530`) — if serializing the response payload throws.
-4. **onSend hook error** (`reply.js:557`) — if an `onSend` hook fails.
-5. **Stream read errors** (`reply.js:761, 785`) — if a response stream errors before headers are sent.
+| Trigger | File:Line | When |
+|---|---|---|
+| `reply.send()` with an Error | `reply.js:151` | Handler (or any hook) calls `reply.send(error)` or `reply[kReplyIsError]` is set |
+| `preSerialization` hook error | `reply.js:516` | A preSerialization hook fails after the handler returned |
+| Serialization failure | `reply.js:530` | `serialize()` throws during response serialization |
+| `onSend` hook error | `reply.js:557` | An onSend hook fails |
+| Internal send errors | `reply.js:761,785` | Errors during `onSendEnd` (e.g., payload writing) |
 
-**What `handleError` does:**
+## Relative to the route handler
 
-It walks the error handler chain (`lib/error-handler.js:30-80`). It finds the current error handler (custom or default), sets the next handler in the prototype chain as the fallback (in case the error handler itself throws), and invokes `errorHandler.func(error, request, reply)`. If no custom handler exists or the chain is exhausted (`kReplyNextErrorHandler === false`), it falls through to `fallbackErrorHandler` which seria
-...[truncated 59 chars]
+The sequence is:
+
+1. **Route handler** executes → calls `reply.send(payload)` or throws/returns a rejected promise
+2. If the payload is an `Error` → **`onErrorHook`** is invoked immediately inside `send()`
+3. `onErrorHook` runs any registered **`onError` hooks** first
+4. Then **`handleError`** runs the **error handler** (custom via `setErrorHandler()` or the built-in `defaultErrorHandler`)
+5. The error handler typically calls `reply.send(serializedError)` which continues through the normal `preSerialization` → `onSend` → write pipeline
+
+
+...[truncated 228 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in content, accuracy, and grounding. They identify the same caller (onErrorHook at reply.js:882), the same trigger points (reply.send with error, preSerialization hook error, serialization failure, onSend hook error, stream errors), and the same behavior of handleError (walking the error handler chain, falling back to fallbackErrorHandler). Response A uses a table format and provides slightly more detail on header clearing; Response B references the error-handler.js line range (30-80) more precisely. These are cosmetic differences. Both are well-grounded in specific file paths and line numbers from the repository and equally actionable.
+Both responses are nearly identical in quality and coverage. They correctly identify handleError at lib/error-handler.js:30, its sole caller onErrorHook at lib/reply.js:882, and the same set of trigger points (reply.send with Error, preSerialization hook error, serialization failure, onSend hook error, stream/send errors). Both correctly explain timing as always post-handler. Response A adds slightly more internal detail (error handler chain walking, header clearing, fallback handler, ASCII flow diagram), while Response B adds a useful note about the error handler's reply.send continuing through the normal pipeline. These are complementary strengths that balance out. Both are well-grounded with specific file:line references and both are highly actionable for understanding the error flow.
 ```
 
 </details>
 
-<details><summary>Fastify P10 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>Fastify P10 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** How does Fastify load and validate its configuration options — trace from server creation to config values being available?
 
-- Interactions: no_budi=12 / with_budi=10
-- Cost USD: no_budi=$0.2991 / with_budi=$0.3179
-- Hook: reason=ok context_chars=1760
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: types/instance.d.ts
-  span: 480-559
-  anchor: childLoggerFactory: FastifyChildLoggerFactory<RawServer, RawRequest, RawReply, Logger, TypeProvider>;
-  proof:
-    - childLoggerFactory: FastifyChildLoggerFactory<RawServer, RawRequest, RawReply, Logger, TypeProvider>;
-    - setChildLoggerFactory(factory: FastifyChildLoggerFactory<RawServer, RawRequest, RawReply, Logger, TypeProvider>): FastifyInstance<RawServer, RawRequest, RawReply, Logger, TypePr...
-    - setValidatorCompiler<T = FastifySchema>(schemaCompiler: FastifySchemaCompiler<T>): FastifyInstance<RawServer, RawRequest, RawReply, Logger, TypeProvider>;
-- file: lib/initial-config-validation.js
-  span: 3-3
-  anchor: const validate = require('./config-validator')
-  proof:
-    - const validate = require('./config-validator')
-- file: fastify.js
-  span: 427-430
-  anchor: const onBadUrlContext = new Context({
-  proof:
-    - const onBadUrlContext = new Context({
-    - server: fastify,
-    - config: {}
-- file: test/types/hooks.test-d.ts
-  span: 24
-...[truncated 300 chars]
-```
+- Interactions: no_budi=8 / with_budi=18
+- Cost USD: no_budi=$0.3255 / with_budi=$0.3894
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the complete trace of how Fastify loads and validates configuration:
 
----
+## Configuration Flow
 
-## Configuration Flow: Server Creation to Available Config
+### 1. Entry: `fastify(serverOptions)` — `fastify.js:88`
 
-### 1. Schema Definition & Build-Time Compilation
+The user calls `fastify({ ... })`. This immediately calls `processOptions()`.
 
-**`build/build-validation.js`** defines the canonical source of truth:
+### 2. `processOptions()` — `fastify.js:824-908`
 
-- A `defaultInitOptions` object with all defaults (lines 25-55)
-- A JSON Schema (`schema`, lines 57-140) where each property references those defaults
-- At build time, `@fastify/ajv-compiler/standalone` compiles this schema into a standalone validator function with AJV options: `removeAdditional: true`, `useDefaults: true`, `coerceTypes: true`
-- The output is written to **`lib/config-validator.js`** — an autogenerated file containing the `validate10` function and the `defaultInitOptions` export
+This function does **two layers** of validation and normalization:
 
-### 2. Entry Point: `fastify(serverOptions)`
+**Layer A — Manual/imperative checks** (lines 826–866):
+- Ensures `options` is an object (or throws `FST_ERR_OPTIONS_NOT_OBJ`)
+- Shallow-copies options to prevent external mutation
+- Validates `querystringParser` is a function
+- Validates `schemaController.bucket` is a function
+- Validates `bodyLimit` via `validateBodyLimitOption()`
+- Validates `ajv.customOptions` is a plain object and `ajv.plugins` is an array
 
-**`fastify.js:88`** — the user calls `fastify({ ... })`.
+These check options that the **schema validator can't handle** (functions, complex objects, logger config).
 
-It immediately delegates to `processOptions()` (line 95).
+**Layer B — Defaults applied** (lines 849–899):
+- Normalizes `requestIdHeader` (lowercased string or `false`)
+- Creates the request ID generator via `reqIdGenFactory()`
+- Fills in defaults from `defaultInitOptions` for `bodyLimit`, `connectionTimeout`, `keepAliveTimeout`, etc.
+- Creates the logger via `createLogger(options)`
+- Sets `clientErrorHandler` default
+- Calls `getSecuredInitialConfig(options)` — **this is the schema validation step**
 
-### 3. `processOptions()` — Manual Validation & Normalization
+### 3. Schema Validation: `getSecuredInitialConfig()` — `lib/initial-config-validation.js:7-17`
 
-**`fastify.js:824-908`** performs imperative checks that the JSON Schema can't express:
-
-1. **Type gate** (line 826): Throws `FST_ERR_OPTIONS_NOT_OBJ` if options isn't an object
-2. **Shallow copy** (line 830): `Object.assign({}, options)` to avoid mutating the caller's object
-3. **Function-type checks**: `querystringParser`, `schemaController.bucket` must be functions if provided
-4. **`bodyLimit` validation** via `validateBodyLimitOption()`
-5. **Derived values**: `requestIdHeader` is lowercased/normaliz
-...[truncated 3498 chars]
+This function:
+1. **Deep-clones** the options with `rfdc` (to isolate the v
+...[truncated 3324 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the complete configuration loading and validation flow:
+Here's the full trace of how Fastify loads and validates configuration:
 
-## Trace: Server Creation → Config Validation → Config Availability
+---
 
-### 1. Entry point: `fastify(serverOptions)` — `fastify.js:88`
+## Configuration loading pipeline
 
-The user calls `fastify({ ... })`. The options object is immediately passed to `processOptions()`.
+### 1. Entry point: `fastify(serverOptions)`
+`fastify.js:88` — The user calls `fastify({ ... })`. The options object is immediately passed to `processOptions()`.
 
-### 2. Pre-validation checks: `processOptions()` — `fastify.js:824`
+### 2. `processOptions()` — manual validation + defaults
+`fastify.js:824-907` — This function does two things in sequence:
 
-Before schema validation, several imperative checks run:
-- **Type check** (line 826): options must be an object or `FST_ERR_OPTIONS_NOT_OBJ` is thrown
-- **Shallow copy** (line 830): `Object.assign({}, options)` — prevents external mutation
-- **querystringParser** (lines 833–841): must be a function if provided
-- **schemaController.bucket** (line 843): must be a function if provided
-- **bodyLimit** (line 847): validated via `validateBodyLimitOption()`
-- **ajv options** (lines 860–865): `customOptions` must be a plain object, `plugins` must be an array
+**a) Imperative type checks** (lines 826–865):
+- Options must be an object (`FST_ERR_OPTIONS_NOT_OBJ`)
+- Shallow-copies the options to prevent external mutation
+- Validates `querystringParser` is a function
+- Validates `schemaController.bucket` is a function
+- Validates `bodyLimit` via `validateBodyLimitOption()`
+- Validates `ajv.customOptions` is an object and `ajv.plugins` is an array
 
-### 3. Schema validation: `getSecuredInitialConfig(options)` — `fastify.js:882`
+**b) Default merging** (lines 849–881):
+- Applies defaults from `defaultInitOptions` for fields like `bodyLimit`, `connectionTimeout`, `keepAliveTimeout`, `requestTimeout`, `clientErrorHandler`, etc., using `||` fallback patterns.
+- Creates the logger via `createLogger(options)`.
 
-This calls `lib/initial-config-validation.js:7`, which:
+### 3. `getSecuredInitialConfig(options)` — JSON Schema validation + freeze
+`fastify.js:882` calls `validateInitialConfig()` from `lib/initial-config-validation.js:7`.
 
-1. **Deep clones** the options via `rfdc` (line 8) — the validated copy is separate from the working `options`
-2. **Runs the AJV-compiled validator** `lib/config-validator.js` against the clone (line 10). This autogenerated validator (built by `build/build-validation.js`) enforces a JSON Schema (`schema11` on line 6) that:
-   - **Sets defaults** for missing properties (e.g., `bodyLimit: 1048576`, `keepAliveTimeout: 72000`, `pluginTime
-...[truncated 3126 chars]
+This function:
+1. **Deep-clones** the options via `rfdc` (line 8)
+2. **Validates** the clone against a pre-compiled AJV validator (`lib/config-validator.js:10` — the `validate10` function)
+3. If validation fails, throws `FST_ERR_INIT_OPTS_INVALID` with the A
+...[truncated 3320 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses provide excellent, well-structured traces of the configuration flow. Response A includes a nice detail about the build-time compilation step and a summary diagram. Response B edges ahead in three ways: (1) more granular line references for individual checks within processOptions, (2) a clear table distinguishing kOptions (internal mutable) from initialConfig (public frozen), and (3) a critical section on how config flows into subsystems (server creation, router, content type parser, request/reply, 404 handler) with specific line numbers — which completes the "trace to config values being available" part of the question more thoroughly. Response B's mention of schema11 (vs A's validate10) and the defaultInitOptions export location (config-validator.js:1265) show slightly deeper grounding in the actual codebase.
+Both responses trace the identical configuration pipeline with nearly the same structure: entry at fastify.js:88, processOptions() with manual checks and default merging, getSecuredInitialConfig() with AJV validation, the auto-generated config-validator.js, and config availability on the instance. Both cite specific line numbers (fastify.js:824-908, lib/initial-config-validation.js:7-17, build/build-validation.js:57-140) and explain the AJV options (removeAdditional, useDefaults, coerceTypes). Response A provides a slightly more detailed table of how config values spread to internal symbols (kBodyLimit, kHandlerTimeout, kChildLoggerFactory, etc.), while Response B adds a useful note about runtime consumption (lib/request.js:182 reading initialConfig.bodyLimit). These are complementary strengths that balance out. Both are well-grounded in repository specifics and equally actionable for understanding the config flow.
 ```
 
 </details>
 
-<details><summary>Fastify P11 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>Fastify P11 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Which environment variables or node options does Fastify read at startup and how do they affect runtime behavior?
 
-- Interactions: no_budi=6 / with_budi=5
-- Cost USD: no_budi=$0.0457 / with_budi=$0.0363
+- Interactions: no_budi=5 / with_budi=4
+- Cost USD: no_budi=$0.0425 / with_budi=$0.0390
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-**Fastify itself does not read any environment variables at startup.** There are zero `process.env` references in the core library code (`lib/` and `fastify.js`).
+**Fastify itself does not read any environment variables or Node options at startup.**
 
-This is by design — Fastify is configured entirely through its programmatic API (the options object passed to `fastify()`). Here's what you'll find in the repo:
+The core library (everything under `lib/` and the main entry point) contains zero references to `process.env`. Fastify is configured entirely through its programmatic API — the options object you pass to `fastify()` and the methods you call on the instance.
 
-- **`process.env` in docs** — The serverless guide (`docs/Guides/Serverless.md`) shows _user-land_ patterns like `process.env.PORT` or `process.env.NODE_ENV`, but these are examples for your application code, not Fastify internals.
-- **`process.env.GITHUB_TOKEN`** — Used only in the ecosystem link validation script (CI tooling, not runtime).
-- **`process.env.CITGM` / `process.env.PREPUBLISH`** — Used only in test harnesses.
-- **`NODE_OPTIONS: no-network-family-autoselection`** — Set in CI workflows for compatibility with certain Node.js versions; not a Fastify concern.
+What you'll find in the repository are only:
 
-### What does affect runtime behavior
+- **Documentation examples** — e.g., `process.env.PORT` or `process.env.NODE_ENV` in the Serverless guide (`docs/Guides/Serverless.md`), which are patterns for *your* application code, not Fastify internals.
+- **CI configuration** — `NODE_OPTIONS: no-network-family-autoselection` in GitHub Actions workflows, which is a Node.js flag for test environments, not something Fastify consumes.
+- **Test helpers** — `process.env.CITGM` and `process.env.PREPUBLISH` used only in test scaffolding.
+- **Tooling scripts** — `process.env.GITHUB_TOKEN` in the ecosystem link validator.
+- **Warnings docs** (`docs/Reference/Warnings.md`) — suggests setting `NODE_OPTIONS=no-warnings` to suppress Node's experimental warning output, which is a Node.js feature, not Fastify-specific.
 
-All configuration is passed explicitly via the options object:
-
-``\`js
-const fastify = require('fastify')({
-  logger: true,          // logging
-  trustProxy: true,      // proxy headers
-  maxParamLength: 200,   // URL param limits
-  bodyLimit: 1048576,    // request body size
-  // ... etc
-})
-``\`
-
-The one `NODE_OPTIONS` mention relevant to users is in `docs/Reference/Warnings.md` — you can set `NODE_OPTIONS=--no-warnings` to suppress Fastify's deprecation warnings at the Node.js level, but that's a Node.js feature, not something Fastify reads.
-
-**TL;DR:*
-...[truncated 115 chars]
+All runtime behavior (logger, trust proxy, body limit, HTTP version, plugin timeouts, etc.) is controlled via the constructor options and plugin registration.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-**Fastify's core library does not read any environment variables or Node options at startup.**
+**Fastify itself does not read any environment variables or Node options at startup.**
 
-There are zero references to `process.env` in `lib/` or `fastify.js`. All behavior is configured explicitly through the options object passed to `fastify()` (e.g., `logger`, `trustProxy`, `connectionTimeout`, etc.).
+The core library (`lib/`) contains zero references to `process.env`. Fastify is configured entirely through the options object you pass to `fastify()` (logger, trustProxy, bodyLimit, etc.).
 
-The `process.env` references in the repository are limited to:
+What you'll find in the repository are:
 
-- **`test/`** — test-specific flags like `process.env.CITGM` and `process.env.PREPUBLISH`
-- **`scripts/`** — build/CI tooling (`GITHUB_TOKEN`)
-- **`docs/`** — examples in serverless deployment guides (e.g., `PORT`, `K_SERVICE`, `NODE_ENV`), but these are user-land code, not Fastify internals
+- **Documentation examples** — e.g., `process.env.PORT` or `process.env.NODE_ENV` in the Serverless guide, but those are user-land patterns, not Fastify internals.
+- **`NODE_OPTIONS: no-network-family-autoselection`** — used only in CI workflows to work around Node.js networking quirks, not by Fastify itself.
+- **`NODE_OPTIONS` with `no-warnings`** — mentioned in `docs/Reference/Warnings.md` as a way to suppress Node.js deprecation warnings emitted by Fastify, but this is a Node.js flag, not something Fastify reads.
+- **`GITHUB_TOKEN`** — used by the ecosystem link validation script (`scripts/validate-ecosystem-links.js`), a dev-only tool.
+- **`CITGM` / `PREPUBLISH`** — test-only flags, not part of the runtime.
 
-This is by design — Fastify follows an explicit configuration approach where everything is passed programmatically, making it predictable and free of hidden environment-driven behavior.
+In short, all runtime behavior is controlled via the `Fastify(options)` constructor and method calls — there are no hidden env-var switches.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses arrive at the same correct conclusion: Fastify core reads no environment variables at startup and is configured entirely through its programmatic API. Both correctly identify the same process.env references in the repo (test flags like CITGM/PREPUBLISH, CI tooling GITHUB_TOKEN, and doc examples). Response A adds slightly more actionable detail — it includes a code example of constructor options, mentions NODE_OPTIONS=--no-warnings from the Warnings docs, and the CI workflow's no-network-family-autoselection — but these are minor extras. Response B is more concise and equally accurate. The core answer and grounding are effectively identical, making this a tie.
+Both responses are nearly identical in substance, structure, and accuracy. They correctly identify that Fastify's core library does not read any environment variables at startup, and both enumerate the same set of env-var/node-option references found in the repo (docs examples, CI config, test helpers, tooling scripts, warnings docs). The grounding is equivalent — both reference specific files and variables from the repository. Response A is marginally more verbose with an extra sentence about constructor options at the end; Response B is slightly more concise with a cleaner closing. The differences are cosmetic and do not meaningfully affect quality, grounding, or actionability.
 ```
 
 </details>
 
-<details><summary>Fastify P12 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>Fastify P12 | winner=tie | Q 8→8 G 7→7</summary>
 
 **Prompt:** What unit tests cover the hooks lifecycle and where do they live in the repo?
 
-- Interactions: no_budi=3 / with_budi=4
-- Cost USD: no_budi=$0.0298 / with_budi=$0.0288
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0321 / with_budi=$0.0311
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
-
-```text
-Here are the main test files covering hooks lifecycle:
-
-### Core hooks tests (`test/`)
-| File | Description |
-|------|-------------|
-| `test/hooks.test.js` | Main hooks test suite — request/reply lifecycle hooks (`onRequest`, `preParsing`, `preValidation`, `preHandler`, `preSerialization`, `onSend`, `onResponse`, `onError`) |
-| `test/hooks-async.test.js` | Async/await versions of the same lifecycle hooks |
-| `test/hooks.on-ready.test.js` | `onReady` server lifecycle hook |
-| `test/hooks.on-listen.test.js` | `onListen` server lifecycle hook |
-| `test/route-hooks.test.js` | Hooks defined at the route level |
-
-### Internal hooks machinery (`test/internals/`)
-| File | Description |
-|------|-------------|
-| `test/internals/hooks.test.js` | Unit tests for the `Hooks` class itself (registration, ordering) |
-| `test/internals/hook-runner.test.js` | Tests for the hook runner that executes hook chains |
-
-### Type-level tests
-| File | Description |
-|------|-------------|
-| `test/types/hooks.test-d.ts` | TypeScript type assertions for hook signatures |
-
-### Related / peripheral
-- `test/async_hooks.test.js` — Node.js `async_hooks` (AsyncLocalStorage) integration
-- `test/encapsulated-error-handler.test.js`, `test/500s.test.js`, `test/404s.test.js` — error paths that exercise `onError` and other hooks
-- `test/skip-reply-send.test.js` — tests around skipping hooks via early reply
-
-The bulk of the lifecycle coverage lives in `test/hooks.test.js` and `test/hooks-async.test.js`, while the lower
-...[truncated 47 chars]
-```
-
-#### Response (`with_budi`)
 
 ```text
 Here are the test files covering hooks lifecycle:
 
-### Main hooks tests (`test/`)
-| File | Description |
+### Core hooks tests (`test/`)
+
+| File | Focus |
 |---|---|
-| `test/hooks.test.js` | Core hooks lifecycle tests (onRequest, preParsing, preValidation, preHandler, preSerialization, onSend, onResponse, onError, etc.) |
-| `test/hooks-async.test.js` | Async/await variants of the hook lifecycle |
+| `test/hooks.test.js` | Main hooks test suite — callback-style lifecycle hooks (`onRequest`, `preParsing`, `preValidation`, `preHandler`, `preSerialization`, `onSend`, `onResponse`, etc.) |
+| `test/hooks-async.test.js` | Async/await versions of the same lifecycle hooks |
 | `test/hooks.on-ready.test.js` | `onReady` hook specifically |
 | `test/hooks.on-listen.test.js` | `onListen` hook specifically |
-| `test/route-hooks.test.js` | Route-level hook configuration |
-| `test/async_hooks.test.js` | Node.js `async_hooks` integration (AsyncLocalStorage, request tracking) |
+| `test/route-hooks.test.js` | Hooks defined at the route level (per-route `onRequest`, `preHandler`, etc.) |
 
-### Internal implementation tests (`test/internals/`)
-| File | Description |
+### Internal hooks machinery (`test/internals/`)
+
+| File | Focus |
 |---|---|
-| `test/internals/hooks.test.js` | Low-level `Hooks` class unit tests (add/remove/list hooks) |
-| `test/internals/hook-runner.test.js` | Hook runner execution engine tests |
+| `test/internals/hooks.test.js` | Low-level `Hooks` class — adding, listing, and managing hook arrays |
+| `test/internals/hook-runner.test.js` | The hook runner that iterates through registered hooks |
+
+### Type-level tests
+
+| File | Focus |
+|---|---|
+| `test/types/hooks.test-d.ts` | TypeScript type assertions for hook signatures |
+
+### Related files that exercise hooks indirectly
+
+- `test/async_hooks.test.js` — Node `async_hooks` integration
+- `test/encapsulated-error-handler.test.js` — error handlers interacting with hooks
+- `test/404s.test.js` / `test/500s.test.js` — hooks behavior on error paths
+- `test/skip-reply-send.test.js` — short-circuiting within hooks
+
+The bulk of the lifecycle coverage lives in **`test/hooks.test.js`** and **`test/hooks-async.test.js`**, with the internal pl
+...[truncated 35 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here are the test files covering the hooks lifecycle:
+
+### Primary hooks tests (`test/`)
+
+| File | Focus |
+|---|---|
+| `test/hooks.test.js` | Main hooks lifecycle tests (onRequest, preParsing, preValidation, preHandler, preSerialization, onSend, onResponse, onError, etc.) |
+| `test/hooks-async.test.js` | Async/await variants of all hook types |
+| `test/hooks.on-ready.test.js` | `onReady` hook specifically |
+| `test/hooks.on-listen.test.js` | `onListen` hook specifically |
+| `test/route-hooks.test.js` | Route-level hook registration and execution |
+
+### Internal / low-level tests (`test/internals/`)
+
+| File | Focus |
+|---|---|
+| `test/internals/hooks.test.js` | Internal `Hooks` class (add/get hooks, validation) |
+| `test/internals/hook-runner.test.js` | The hook runner that sequences hook execution |
+
+### Related tests
+
+| File | Focus |
+|---|---|
+| `test/async_hooks.test.js` | Node.js `async_hooks` / AsyncLocalStorage integration |
+| `test/skip-reply-send.test.js` | Skipping reply.send in hooks |
+| `test/encapsulated-error-handler.test.js` | Error handler interaction with hooks |
 
 ### Type tests
-| File | Description |
-|---|---|
-| `test/types/hooks.test-d.ts` | TypeScript type-checking tests for hook signatures |
 
-The bulk of lifecycle coverage (request/response hook ordering, error propagation, encapsulation) lives in `test/hooks.test.js` and `test/hooks-async.test.js`. The internals tests focus on the hook registration machinery and runner logic.
+| File | Focus |
+|---|---|
+| `test/types/hooks.test-d.ts` | TypeScript type definitions for hooks |
+
+The core lifecycle coverage is in `test/hooks.test.js` and `test/hooks-async.test.js`, while the internal mechanics (hook registration, ordering, runner) are in `test/internals/`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify the same core set of test files: hooks.test.js, hooks-async.test.js, hooks.on-ready.test.js, hooks.on-listen.test.js, route-hooks.test.js, internals/hooks.test.js, internals/hook-runner.test.js, and types/hooks.test-d.ts. They use nearly identical table formatting and descriptions. Response A includes a few extra "related/peripheral" files (encapsulated-error-handler, 500s, 404s, skip-reply-send) which adds marginal value, while Response B integrates async_hooks.test.js into its main table rather than as a peripheral mention. Both correctly summarize that the bulk of lifecycle coverage is in hooks.test.js and hooks-async.test.js. The differences are minimal and neither response is meaningfully better than the other.
+Both responses are nearly identical in structure, content, and quality. They list the same core test files (hooks.test.js, hooks-async.test.js, hooks.on-ready.test.js, hooks.on-listen.test.js, route-hooks.test.js), the same internal test files (internals/hooks.test.js, internals/hook-runner.test.js), and the same type test file. Both include related tests like async_hooks, skip-reply-send, and encapsulated-error-handler. Response A adds 404s.test.js and 500s.test.js as indirect hook exercisers, which is a minor extra. Response B formats the related tests as a table rather than a bullet list. The differences are cosmetic. Both appear well-grounded in the actual repo structure and equally actionable.
 ```
 
 </details>
@@ -7930,398 +6873,255 @@ Both responses identify the same core set of test files: hooks.test.js, hooks-as
 **Prompt:** Where is ContentTypeParser defined and what does it do when parsing request bodies?
 
 - Interactions: no_budi=4 / with_budi=2
-- Cost USD: no_budi=$0.0723 / with_budi=$0.0589
-- Hook: reason=ok context_chars=668
-
-#### Injected context
-
-```text
-[structural context]
-ContentTypeParser  (content-type-parser.js:33)
-  → refs: getdefaultjsonparser, parser
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/content-type-parser.js
-  span: 33-42
-  anchor: function ContentTypeParser (bodyLimit, onProtoPoisoning, onConstructorPoisoning) {
-  proof:
-    - function ContentTypeParser (bodyLimit, onProtoPoisoning, onConstructorPoisoning) {
-    - this[kDefaultJsonParse] = getDefaultJsonParser(onProtoPoisoning, onConstructorPoisoning)
-    - this.customParsers = new Map()
-```
+- Cost USD: no_budi=$0.0764 / with_budi=$0.0632
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-`ContentTypeParser` is defined at `lib/content-type-parser.js:33` as a constructor function. Here's what it does when parsing request bodies:
+`ContentTypeParser` is defined at `lib/content-type-parser.js:33`. Here's what it does when parsing request bodies:
 
 ## Construction (line 33)
-Initializes with:
-- A default **JSON parser** (using `secure-json-parse` for prototype poisoning protection)
-- Two built-in parsers: `application/json` and `text/plain`
-- A `Map` of custom parsers, a parser list, a regex parser list, and a **Fifo cache** (100 entries) for fast content-type lookups
+Creates a parser registry with two built-in parsers:
+- **`application/json`** — uses `secure-json-parse` with proto-poisoning protection
+- **`text/plain`** — passes the body through as-is
+
+It maintains a `Map` of custom parsers, ordered parser lists (string and RegExp), and a FIFO cache (100 entries) for fast content-type → parser lookups.
 
 ## Body parsing flow — `run()` (line 185)
-This is the main entry point, called with the request's content type:
 
-1. **Resolve parser** via `getParser()` — looks up by exact content-type string, then media-type only, then regex matches, then falls back to a catch-all (`*`) parser. Results are cached.
+1. **Resolve parser** via `getParser()` — checks cache, then exact match, then media-type match, then RegExp list, then the catch-all (`*`) parser. Returns `FST_ERR_CTP_INVALID_MEDIA_TYPE` if nothing matches.
 
-2. **No parser found** → sends `FST_ERR_CTP_INVALID_MEDIA_TYPE` error (415), unless it's a 404 route.
+2. **Two parsing paths:**
+   - **`asString` or `asBuffer`** (line 202): Delegates to `rawBody()`, which streams the request payload, enforces `bodyLimit`, then passes the collected body to the parser function.
+   - **Custom stream parser** (line 213): Passes the raw payload stream directly to the parser function. Supports both callback and async/promise styles.
 
-3. **Parser with `parseAs` (string/buffer)** → delegates to `rawBody()` (line 233), which:
-   - Checks `Content-Length` against the body limit upfront
-   - Streams data chunks, accumulating as string or buffer
-   - Guards against **zip bombs** by tracking both received and encoded lengths
-   - Validates that final received length matches `Content-Length`
-   - Passes the collected body to the parser function
+3. **`onDone` callback** (line 218): On success, sets `request.body` and calls the route handler. On error, sets `connection: close` and sends the error response.
 
-4. **Custom parser (no `parseAs`)** → calls `parser.fn(request, payloadStream, done)` directly, giving the raw stream to the user's function. Supports both callback and async/promise styles.
+## `rawBody()` (line 233) — the body collection engine
 
-5. **On completion** (
-...[truncated 723 chars]
+- Enforces body size limits in two places: `Content-Length` header check upfront, and byte-counting during streaming (also checks `receivedEncodedLength` to protect against zip
+...[truncated 746 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`ContentTypeParser` is defined at `lib/content-type-parser.js:33`.
+`ContentTypeParser` is defined at `lib/content-type-parser.js:33`. Here's what it does:
 
-**Construction** (lines 33–42): It initializes with:
-- A default JSON parser (via `secure-json-parse` with proto/constructor poisoning protection)
-- A `Map` of custom parsers, pre-populated with `application/json` and `text/plain`
-- A `parserList` (string content types), `parserRegExpList` (RegExp content types), and a `Fifo` LRU cache (100 entries) for parser lookups
+**Construction (line 33–42):**
+- Creates a secure JSON parser via `getDefaultJsonParser` using prototype poisoning settings
+- Initializes a `Map` of custom parsers (not a plain object, to avoid prototype hijack attacks)
+- Registers two default parsers: `application/json` and `text/plain`
+- Maintains a `parserList` (strings), `parserRegExpList` (RegExp patterns), and a `Fifo` cache (100 entries) for fast lookup
 
-**Request body parsing flow** — `run()` (lines 185–231):
-1. **Looks up a parser** for the request's content type via `getParser()`, which checks the cache, then exact match, then media-type match, then RegExp patterns, and finally a catch-all (`*`) parser.
-2. If **no parser found**: 404 requests pass through; otherwise it responds with `FST_ERR_CTP_INVALID_MEDIA_TYPE`.
-3. If the parser expects **string or buffer** (`parseAs` option): calls `rawBody()` which streams the request payload, enforces `bodyLimit` (checking both `content-length` header upfront and accumulated bytes during streaming to guard against zip bombs), then passes the collected body to the parser function.
-4. If the parser is a **custom stream parser**: passes the raw payload stream directly to the parser function, supporting both callback and promise-based parsers.
-5. **On completion**: sets `request.body` to the parsed result and calls the route handler. On error, it sets `connection: close` and sends the error.
+**Request body parsing flow — `run()` (line 185–231):**
+1. Looks up the parser for the request's content type via `getParser()`, which checks the cache, then exact matches, then media-type matches, then RegExp matches, and finally falls back to a catch-all (`'*'`) parser
+2. If no parser is found, it sends a `415 Invalid Media Type` error (unless it's a 404 route)
+3. If the parser expects string or buffer (`asString`/`asBuffer`), it delegates to `rawBody()` to stream and accumulate the payload
+4. Otherwise, it passes the raw stream directly to the parser function, supporting both callback and promise-based parsers
+5. On completion, sets `request.body` and calls the route handler
 
-**Default JSON parser** (lines 306–322): Rejects empty bodies, 
-...[truncated 103 chars]
+**`rawBody()` (line 233–304):**
+- Checks `content-length` against the body limit upfront
+- Streams the payload, accumulating chunks as a string or buffer array
+- Enforces the body limit on both received and encoded length (zip bomb protection)
+- Validates that the actual received length matches `content-len
+...[truncated 294 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are highly similar in structure, accuracy, and grounding. They correctly identify the definition location (lib/content-type-parser.js:33), describe construction with the same details (secure-json-parse, Map of parsers, Fifo cache), and walk through the run() parsing flow in nearly identical steps. Response A includes a couple of extra details (AsyncResource wrapping, FSTSEC001 RegExp warning, plain text parser description) giving it marginally more completeness, while Response B is slightly more concise with accurate line references (lines 33-42, 185-231). The differences are too minor to warrant a winner — both are well-grounded, accurate, and actionable.
+Both responses correctly identify ContentTypeParser at lib/content-type-parser.js:33 and provide accurate, well-structured explanations of the parsing flow. They cover the same key areas: construction with default parsers, the run() method flow, rawBody() body collection, and the default JSON parser with secure-json-parse. Response A includes slightly more detail (e.g., mentioning the add() method for parser registration, the FSTSEC001 warning for unanchored RegExp, and the connection:close behavior on error), giving it a minor edge in actionability. Response B is slightly more concise but equally accurate. Both are well-grounded in repository specifics with correct line references and accurate descriptions of the caching, body limit enforcement, and zip bomb protection mechanisms. The differences are marginal enough to call it a tie overall.
 ```
 
 </details>
 
-<details><summary>Fastify P14 | winner=no_budi | Q 9→7 G 9→8</summary>
+<details><summary>Fastify P14 | winner=tie | Q 9→8 G 9→9</summary>
 
 **Prompt:** Where is the decorate function defined and how does it attach properties to the Fastify instance?
 
 - Interactions: no_budi=4 / with_budi=2
-- Cost USD: no_budi=$0.0492 / with_budi=$0.0394
-- Hook: reason=ok context_chars=1572
-
-#### Injected context
-
-```text
-[structural context]
-decorateFastify  (decorate.js:75)
-  → refs: assertnotstarted, decorate
-decorate  (decorate.js:19)
-  ← called by: addHttpMethod, decorateFastify, reply.js
-  → refs: checkdependencies
-registerPlugin  (plugin-utils.js:147)
-  → refs: shouldskipoverride
-addHttpMethod  (fastify.js:800)
-  → refs: decorate
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/decorate.js
-  span: 75-79
-  anchor: function decorateFastify (name, fn, dependencies) {
-  proof:
-    - return this
-    - function decorateFastify (name, fn, dependencies) {
-    - assertNotStarted(this, name)
-- file: lib/decorate.js
-  span: 19-34
-  anchor: function decorate (instance, name, fn, dependencies) {
-  proof:
-    - function decorate (instance, name, fn, dependencies) {
-    - if (Object.hasOwn(instance, name)) {
-    - throw new FST_ERR_DEC_ALREADY_PRESENT(name)
-- file: lib/plugin-utils.js
-  span: 147-154
-  anchor: function registerPlugin (fn) {
-  proof:
-    - const pluginName = registerPluginName.call(this, fn) || getPluginName(fn)
-    - checkPluginHealthiness.cal
-...[truncated 300 chars]
-```
+- Cost USD: no_budi=$0.0500 / with_budi=$0.0375
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-The `decorate` function is defined in `lib/decorate.js:19`. Here's how it works:
+The `decorate` function is defined in `lib/decorate.js:19`. Here's how the decoration system works:
 
 **Core `decorate` function (line 19–34)**
 
-It takes `(instance, name, fn, dependencies)` and attaches `fn` to the instance in one of two ways:
+It takes `(instance, name, fn, dependencies)` and attaches `fn` to the `instance` in one of two ways:
 
-1. **Getter/setter** — If `fn` has a `getter` or `setter` function, it uses `Object.defineProperty` to create an accessor property on the instance (line 27–30).
-2. **Direct assignment** — Otherwise, it simply does `instance[name] = fn` (line 32).
+1. **Getter/setter** — if `fn` has a `.getter` or `.setter` function, it uses `Object.defineProperty` to create an accessor property on the instance (line 27–30).
+2. **Direct assignment** — otherwise, it simply does `instance[name] = fn` (line 32).
 
-Before attaching, it:
-- Throws `FST_ERR_DEC_ALREADY_PRESENT` if the property already exists (line 20–21).
-- Calls `checkDependencies` to verify all declared dependencies are already present on the instance (line 24).
+Before attaching, it checks:
+- The property doesn't already exist (`FST_ERR_DEC_ALREADY_PRESENT`)
+- All declared `dependencies` are present on the instance (`checkDependencies`, line 106–120)
 
-**Three public decorators are exposed:**
+**Three decoration targets:**
 
-| Method | Function | Target |
+| Method | Target | Entry point |
 |---|---|---|
-| `fastify.decorate()` | `decorateFastify` (line 75) | The Fastify instance itself — calls `decorate(this, name, fn, deps)` |
-| `fastify.decorateRequest()` | `decorateRequest` (line 129) | The Request constructor via `decorateConstructor(this[kRequest], ...)` |
-| `fastify.decorateReply()` | `decorateReply` (line 122) | The Reply constructor via `decorateConstructor(this[kReply], ...)` |
+| `decorateFastify` (line 75) | The Fastify instance itself | Exported as `add`; calls `decorate(this, name, fn, deps)` directly |
+| `decorateRequest` (line 129) | `Request` constructor prototype via `this[kRequest]` | Uses `decorateConstructor` |
+| `decorateReply` (line 122) | `Reply` constructor prototype via `this[kReply]` | Uses `decorateConstructor` |
 
-**`decorateConstructor` (line 48–67)** handles Request/Reply differently:
-- Functions and getter/setters go on the **prototype** (`konstructor.prototype`).
-- Non-function values (primitives, null) are pushed into `konstructor.props` as `{ key, value }` pairs, which get copied onto each new instance (avoiding shared-reference bug
-...[truncated 425 chars]
+**`decorateConstructor` (line 48–67)** differs from the base `decorate`:
+- It operates on `konstructor.prototype` for functions and getter/setters
+- For non-function values (like objects, strings, numbers), it pushes `{ key, value }` into `konstructor.props` (line 65) — these are later copied per-instance so each request/reply gets its own copy rather than sharing a pr
+...[truncated 294 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The `decorate` function is defined at `lib/decorate.js:19` and is a private helper. The public entry point is `decorateFastify` at `lib/decorate.js:75`, exported as `add`.
+The `decorate` function is defined at `lib/decorate.js:19`. It attaches properties to the Fastify instance via two mechanisms:
 
-Here's how it works:
+1. **Getter/setter pair** (line 26–31) — If `fn` is an object with a `getter` or `setter` function, it uses `Object.defineProperty` to define an accessor property on the instance.
 
-1. **`decorateFastify`** (line 75) — the method exposed as `fastify.decorate()`. It:
-   - Calls `assertNotStarted` to prevent decorating after the server has started (throws `FST_ERR_DEC_AFTER_START`).
-   - Delegates to the internal `decorate()`.
-   - Returns `this` for chaining.
+2. **Direct assignment** (line 32) — Otherwise, it simply sets `instance[name] = fn`.
 
-2. **`decorate`** (line 19) — the core logic that attaches a property to the instance:
-   - **Duplicate check** (line 20): throws `FST_ERR_DEC_ALREADY_PRESENT` if the property already exists via `Object.hasOwn`.
-   - **Dependency check** (line 24): calls `checkDependencies` which verifies all entries in the `dependencies` array already exist on the instance; throws `FST_ERR_DEC_MISSING_DEPENDENCY` if any are missing.
-   - **Attachment** (lines 26–33): two paths:
-     - If `fn` has a `getter` or `setter` function, it uses `Object.defineProperty` to create an accessor property.
-     - Otherwise, it does a simple assignment: `instance[name] = fn`.
+Before attaching anything, it:
+- **Guards against duplicates** (line 20) — throws `FST_ERR_DEC_ALREADY_PRESENT` if the name already exists on the instance.
+- **Validates dependencies** (line 24) — `checkDependencies` (line 106) iterates the `dependencies` array and throws `FST_ERR_DEC_MISSING_DEPENDENCY` if any required decoration hasn't been registered yet.
 
-So for a typical call like `fastify.decorate('utility', myFunc)`, the value is assigned directly as `this['utility'] = myFunc`. For getter/setter decorators like `fastify.decorate('config', { getter: () => ... })`, it uses `Object.defineProperty` instead.
+The public entry point is `decorateFastify` at line 75, exported as `add`. It first calls `assertNotStarted` (line 136) to prevent decorating after the server has started, then delegates to `decorate`, and returns `this` for chaining.
+
+For Request/Reply decorations, `decorateRequest` and `decorateReply` (lines 129, 122) take a different path through `decorateConstructor` (line 48), which attaches to the constructor's `prototype` (for functions) or pushes to a `props` array (for non-function values that get copied per-instance).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the core `decorate` function at `lib/decorate.js:19` and accurately describe its duplicate check, dependency check, and two attachment paths (getter/setter via Object.defineProperty vs direct assignment). However, Response A is significantly more comprehensive: it covers all three public decorators (decorate, decorateRequest, decorateReply), explains `decorateConstructor` and its prototype vs props distinction, and documents guard rails like `checkReferenceType` that prevents shared mutable state on Request/Reply. Response B only covers `decorateFastify` and the core `decorate` function, omitting the Request/Reply decoration mechanics entirely. Since the prompt asks broadly about how properties are attached to the Fastify instance, the fuller picture in Response A is more useful and better grounded in the codebase. Both are accurate in what they do cover.
+Both responses are accurate and well-grounded, agreeing on all key details: decorate at line 19, getter/setter vs direct assignment, duplicate guards, dependency checking, decorateFastify as the public entry point, assertNotStarted, and decorateConstructor for Request/Reply. Response A is slightly more thorough—it includes a helpful table, details on checkReferenceType preventing cross-request mutation, and explains the props array copying mechanism. Response B is cleaner and more concise, mentioning return this for chaining, but omits checkReferenceType which is an important detail for understanding decoration safety. The difference is marginal; both effectively answer the question with specific line references and accurate descriptions of the decoration system.
 ```
 
 </details>
 
-<details><summary>Fastify P15 | winner=with_budi | Q 8→9 G 7→9</summary>
+<details><summary>Fastify P15 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** What calls preHandlerHookRunner and what does each call site pass as arguments?
 
-- Interactions: no_budi=4 / with_budi=4
-- Cost USD: no_budi=$0.0386 / with_budi=$0.0541
-- Hook: reason=ok context_chars=1863
-
-#### Injected context
-
-```text
-[structural context]
-notFound  (reply.js:985)
-  → refs: prehandlercallback, prehandlerhookrunner, send
-validationCompleted  (handle-request.js:105)
-  → refs: prehandlercallback, prehandlerhookrunner, send
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/hooks.js
-  span: 274-274
-  anchor: const preHandlerHookRunner = hookRunnerGenerator(hookIterator)
-  proof:
-    - const preHandlerHookRunner = hookRunnerGenerator(hookIterator)
-- file: lib/reply.js
-  span: 985-1005
-  anchor: function notFound (reply) {
-  proof:
-    - if (reply[kRouteContext][kFourOhFourContext] === null) {
-    - reply.log.warn('Trying to send a NotFound error inside a 404 handler. Sending basic 404 response.')
-    - return
-- file: lib/handle-request.js
-  span: 7-7
-  anchor: const { preValidationHookRunner, preHandlerHookRunner } = require('./hooks')
-  proof:
-    - const { preValidationHookRunner, preHandlerHookRunner } = require('./hooks')
-- file: lib/handle-request.js
-  span: 105-126
-  anchor: function validationCompleted (request, reply, validationErr) {
-  proof:
-    
-...[truncated 300 chars]
-```
+- Interactions: no_budi=4 / with_budi=2
+- Cost USD: no_budi=$0.0404 / with_budi=$0.0317
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-There are **two call sites** for `preHandlerHookRunner`:
+There are **two call sites**, both passing the same signature `(hooks, request, reply, callback)`:
 
 ### 1. `lib/handle-request.js:117` — normal request flow
 ``\`js
 preHandlerHookRunner(
-  request[kRouteContext].preHandler,  // hooks array from the route context
-  request,                            // the Request object
-  reply,                              // the Reply object
-  preHandlerCallback                  // local callback defined at line 128
+  request[kRouteContext].preHandler,  // the route's preHandler hooks array
+  request,                             // the Request object
+  reply,                               // the Reply object
+  preHandlerCallback                   // callback defined at line 128 in handle-request.js
 )
 ``\`
-Called after validation completes (or fails) as part of the standard request lifecycle.
+Called after validation completes during regular request handling.
 
-### 2. `lib/reply.js:996` — 404 handling flow
+### 2. `lib/reply.js:996` — 404 (not-found) flow
 ``\`js
 preHandlerHookRunner(
-  reply[kRouteContext].preHandler,    // hooks array from the 404 route context
-  reply.request,                     // the Request object (accessed via reply)
-  reply,                             // the Reply object
-  internals.preHandlerCallback       // callback from the internals module
+  reply[kRouteContext].preHandler,     // the 404 context's preHandler hooks array
+  reply.request,                       // the Request object (accessed via reply)
+  reply,                               // the Reply object
+  internals.preHandlerCallback         // the imported preHandlerCallback from handle-request.js
 )
 ``\`
-Called inside the 404 handler path after switching the route context to `kFourOhFourContext`.
+Called inside the 404 handler path (`reply.js`) after switching `kRouteContext` to the `kFourOhFourContext`.
 
-Both call sites pass the **same four positional arguments** — `(hooks, request, reply, callback)` — but they differ in:
-- **Source of hooks/request**: the normal path reads from `request[kRouteContext]`, the 404 path reads from `reply[kRouteContext][kFourOhFourContext]`.
-- **Callback**: the normal path uses a local `preHandlerCallback` (line 128), while the 404 path uses `internals.preHandlerCallback`.
+Both pass the same four positional arguments — the only differences are:
+- **Where the hooks array comes from**: the matched route context vs. the 404 fallback context.
+- **How `request` is referenced**: directly vs. via `reply.request`.
+- **The callback reference**: local `preHandlerCallback` vs. `internals.preHandlerCallback` (same function, imported).
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There are **two call sites** for `preHandlerHookRunner`. Both pass the same four positional arguments but from slightly different sources:
+Two call sites, both passing the same four-argument shape:
 
 ### 1. `lib/handle-request.js:117` — inside `validationCompleted`
 
 ``\`js
 preHandlerHookRunner(
-  request[kRouteContext].preHandler,  // hooks array
-  request,                            // request object
-  reply,                              // reply object
-  preHandlerCallback                  // local callback (handle-request.js:128)
+  request[kRouteContext].preHandler,   // hooks array
+  request,                             // request object
+  reply,                               // reply object
+  preHandlerCallback                   // callback (module-level function)
 )
 ``\`
 
-Called after validation succeeds on a normal matched route.
+Called after validation succeeds (or after attaching the validation error to `reply.request.validationError`). The callback `preHandlerCallback` is defined in the same file.
 
 ### 2. `lib/reply.js:996` — inside `notFound`
 
 ``\`js
 preHandlerHookRunner(
-  reply[kRouteContext].preHandler,    // hooks array (from the 404 context)
-  reply.request,                     // request object (via reply)
-  reply,                             // reply object
-  internals.preHandlerCallback       // callback from reply's internals
+  reply[kRouteContext].preHandler,     // hooks array
+  reply.request,                       // request object
+  reply,                               // reply object
+  internals.preHandlerCallback         // callback (from a local `internals` object)
 )
 ``\`
 
-Called when a 404 handler is being invoked. The route context is swapped to `kFourOhFourContext` on line 992 before the runner is called.
+Called when handling a 404 route. The callback is `internals.preHandlerCallback`, which is scoped to the `notFound` function's closure.
 
-Both sites guard the call with a `!== null` check on `preHandler` and fall back to calling the callback directly with `(null, request, reply)` if there are no preHandler hooks.
+---
+
+Both sites guard the call with `if (…preHandler !== null)` and pass identical argument types: **(hooks, request, reply, callback)**. The runner itself is generated in `lib/hooks.js:274`:
+
+``\`js
+const preHandlerHookRunner = hookRunnerGenerator(hookIterator)
+``\`
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the two call sites at lib/handle-request.js:117 and lib/reply.js:996 with matching arguments. However, Response A inaccurately describes the 404 path's hook source as `reply[kRouteContext][kFourOhFourContext]`, implying a nested property access, when in reality the route context is swapped first (line 992) and then `.preHandler` is read from the already-swapped context. Response B correctly describes this: "The route context is swapped to kFourOhFourContext on line 992 before the runner is called." Response B also adds the practical detail about the `!== null` guard check and the fallback behavior at both call sites, which is a grounded and useful observation for anyone trying to understand the control flow.
+Both responses correctly identify the two call sites (handle-request.js:117 and reply.js:996) with accurate argument descriptions. Response B edges ahead by including: (1) the null guard condition both sites use before calling the runner, (2) the origin of preHandlerHookRunner in hooks.js via hookRunnerGenerator, and (3) more precise descriptions of when each call site triggers (validation error attachment, notFound closure scoping). These additions provide meaningful extra context without being verbose. Response A's summary of differences is nice but Response B's additional grounding in the codebase (hooks.js generation, null guard) makes it slightly more complete and useful.
 ```
 
 </details>
 
-<details><summary>Fastify P16 | winner=with_budi | Q 8→9 G 8→8</summary>
+<details><summary>Fastify P16 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** What calls onSendHookRunner and what does it do to the response before sending it to the client?
 
 - Interactions: no_budi=5 / with_budi=6
-- Cost USD: no_budi=$0.0532 / with_budi=$0.0714
-- Hook: reason=ok context_chars=1579
-
-#### Injected context
-
-```text
-[structural context]
-onSendHook  (reply.js:541)
-  → refs: onsendend, onsendhookrunner
-notFound  (reply.js:985)
-  → refs: prehandlercallback, prehandlerhookrunner, send
-runBadClientCall  (issue-4959.test.js:14)
-  → refs: error, promise
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/reply.js
-  span: 541-553
-  anchor: function onSendHook (reply, payload) {
-  proof:
-    - if (reply[kRouteContext].onSend !== null) {
-    - reply[kRouteContext].onSend,
-    - reply.request,
-- file: lib/hooks.js
-  span: 323-323
-  anchor: const preSerializationHookRunner = onSendHookRunner
-  proof:
-    - const preSerializationHookRunner = onSendHookRunner
-- file: lib/reply.js
-  span: 985-1005
-  anchor: function notFound (reply) {
-  proof:
-    - if (reply[kRouteContext][kFourOhFourContext] === null) {
-    - reply.log.warn('Trying to send a NotFound error inside a 404 handler. Sending basic 404 response.')
-    - return
-- file: test/issue-4959.test.js
-  span: 14-58
-  anchor: function runBadClientCall (reqOptions, payload, waitBeforeDestroy) {
-  proof:
-    - cons
-...[truncated 300 chars]
-```
+- Cost USD: no_budi=$0.0570 / with_budi=$0.0692
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the summary:
+Here's the breakdown:
 
 ## What calls `onSendHookRunner`
 
-There are **two call sites** in `lib/reply.js`:
+Two places in `lib/reply.js`:
 
-1. **`onSendHook()` at line 543** — This is the primary caller. After the response payload has been serialized, `onSendHook` runs all registered `onSend` hooks before the response is actually written to the client.
+1. **`onSendHook()`** (`lib/reply.js:543`) — the primary call site. After the response payload has been serialized, `onSendHook` runs the registered `onSend` hooks before the response is written to the socket.
 
-2. **`onErrorHook()` at line 885** — Reuses the same runner to execute `onError` hooks when an error occurs during the reply lifecycle.
+2. **`onErrorHook()`** (`lib/reply.js:885`) — reuses the same runner to iterate the `onError` hooks when an error occurs during the reply lifecycle.
 
-Additionally, at `lib/hooks.js:323`, `preSerializationHookRunner` is just an alias for `onSendHookRunner` — the same function is reused for the `preSerialization` hook phase since the signature is identical.
+Additionally, at `lib/hooks.js:323`, `preSerializationHookRunner` is just an alias for the same function, used for the `preSerialization` hook (which has the same signature — hooks that receive and can replace a payload).
 
 ## What it does to the response
 
-The runner (`lib/hooks.js:278-321`) iterates through the hook functions sequentially, and **allows each hook to transform the payload**:
+The implementation is at `lib/hooks.js:278`. It iterates through an array of hook functions, calling each with `(request, reply, payload, next)`:
 
-- Each hook receives `(request, reply, payload, next)` and can call `next(err, newPayload)` or return a promise resolving to a new payload.
-- **If a hook returns a new payload** (via callback or resolved promise), it **replaces the current payload** for subsequent hooks and the final send (line 287-289).
-- **If a hook produces an error**, iteration stops immediately and the callback is invoked with the error (line 282-284), which in the `onSend` case triggers `onErrorHook` (line 556-558 in `wrapOnSendEnd`).
-- If all hooks complete without error, the final (possibly transformed) payload is passed to `onSendEnd`, which writes it to the HTTP response.
-
-In sh
-...[truncated 211 chars]
+- **Payload replacement** — if a hook calls `next(null, newPayload)` or resolves a promise with a new value, that value **replaces the current payload** going forward through the chain (`lib/hooks.js:287-289`). This lets hooks transform, compress, or completely swap the response body.
+- **Error short-circuit** — if a hook calls `next(err)` or rejects its promise, iteration stops immediately and the callback is invoked with the error (`lib/hooks.js:282-284`). In the `onSend` path, this routes to `onErrorHook` via `wrapOnSendEnd` (`lib/reply.js:555-560`).
+- **Final handoff** — once all hooks complete without error, the (possibly transformed) 
+...[truncated 313 chars]
 ```
 
 #### Response (`with_budi`)
@@ -8331,204 +7131,155 @@ Here's the breakdown:
 
 ## What calls `onSendHookRunner`
 
-There are **3 call sites** in production code:
+Two places in `lib/reply.js`:
 
-1. **`onSendHook`** (`lib/reply.js:543`) — The primary caller. Runs the registered `onSend` hooks for the route, then calls `wrapOnSendEnd` as the callback.
+1. **`onSendHook`** (`lib/reply.js:541`) — the normal send path. If the route has registered `onSend` hooks, it runs them via `onSendHookRunner`; otherwise it skips straight to `onSendEnd`.
 
-2. **`onErrorHook`** (`lib/reply.js:885`) — Reuses `onSendHookRunner` to run the `onError` hooks (same iteration pattern, different hook array). After all error hooks run, it calls `handleError`.
+2. **`onErrorHook`** (`lib/reply.js:882`) — the error path. If the route has `onError` hooks (and we're not in a next-error-handler), it runs them via the same runner, then falls through to `handleError`.
 
-3. **`preSerializationHookRunner`** (`lib/hooks.js:323`) — This is literally an alias: `const preSerializationHookRunner = onSendHookRunner`. It's used to run `preSerialization` hooks with the same runner logic.
+Additionally, `lib/hooks.js:323` aliases it:
+``\`js
+const preSerializationHookRunner = onSendHookRunner
+``\`
+So `preSerialization` hooks use the exact same runner function.
 
 ## What it does to the response
 
-`onSendHookRunner` (`lib/hooks.js:278–321`) iterates through an array of hook functions, passing `(request, reply, payload, next)` to each. Its key behavior:
+The runner (`lib/hooks.js:278–321`) iterates through an array of hook functions, passing each one the `(request, reply, payload, next)` arguments. The key behavior:
 
-- **Payload mutation**: Each hook can return a new payload (via `next(null, newPayload)` or by resolving a promise with a value). If `newPayload !== undefined`, it **replaces the current payload** (line 287–289). This lets hooks transform, compress, or replace the response body before it's sent.
-- **Error short-circuit**: If any hook calls `next(err)` or rejects its promise, the runner immediately stops and invokes the callback with the error — skipping remaining hooks.
-- **Promise support**: If a hook returns a thenable, the runner awaits it (line 303–304), allowing async hooks.
-
-## The flow
-
-``\`
-Reply.send() 
-  → onSendHook()
-...[truncated 533 chars]
+- **Payload replacement** — if a hook calls `next(null, newPayload)` or returns a promise that resolves with a new value, that new payload **replaces** the current one (`lib/hooks.js:287–289`). This lets hooks transform, compress, or rewrite the response body before it's sent.
+- **Error short-circuit** — if a hook calls `next(err)` or its promise rejects, the runner stops immediately and passes the error to the callback (which in the `onSend` path triggers `onErrorHook` via `wrapOnSendEnd` at `lib/reply.js:555–561`).
+- **Sequential execution** — hooks run one at a time in registration order, each receiving the (possibly modified) payloa
+...[truncated 239 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-grounded in the codebase, identifying the same three usages of onSendHookRunner and correctly describing its payload mutation and error short-circuit behavior. Response B edges ahead with a clear flow diagram (Reply.send → onSendHook → onSendHookRunner → wrapOnSendEnd → onSendEnd) that makes the lifecycle much more actionable for a developer trying to understand the code path. Response B also more cleanly enumerates the 3 call sites (counting the alias as a distinct usage) and explicitly calls out promise/thenable support as a separate feature. Both cite specific line numbers that appear consistent with the codebase.
+Both responses are very similar in structure, accuracy, and coverage. They identify the same two call sites (onSendHook and onErrorHook in lib/reply.js) and the preSerializationHookRunner alias in lib/hooks.js. Both correctly describe payload replacement, error short-circuit, and final handoff to onSendEnd. Response B edges ahead slightly by: (1) including an actual code snippet of the alias, (2) explicitly noting sequential execution order, (3) providing more detail about what onSendEnd handles (trailers, Response objects), and (4) being slightly more precise about the error path behavior ("falls through to handleError"). These are minor differences but collectively make Response B marginally more informative and grounded.
 ```
 
 </details>
 
-<details><summary>Fastify P17 | winner=with_budi | Q 7→8 G 7→7</summary>
+<details><summary>Fastify P17 | winner=with_budi | Q 7→8 G 8→8</summary>
 
 **Prompt:** I want to add a new lifecycle hook that runs after route matching but before content-type parsing. What files and functions would I need to modify?
 
-- Interactions: no_budi=16 / with_budi=12
-- Cost USD: no_budi=$0.2263 / with_budi=$0.1928
+- Interactions: no_budi=13 / with_budi=25
+- Cost USD: no_budi=$0.2039 / with_budi=$0.3645
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full breakdown. The current lifecycle order (after route matching) is:
-
-``\`
-onRequest → preParsing → [content-type parsing] → preValidation → preHandler → handler
-``\`
-
-Your new hook would slot between `onRequest` and `preParsing` (since `preParsing` already runs before parsing but after `onRequest`). However, looking more carefully at your description — **after route matching but before content-type parsing** — that's exactly where `preParsing` already lives. If you want a hook *between* `onRequest` and `preParsing`, here are the files you'd modify:
+Now I have a complete picture. Here's the summary:
 
 ---
 
-### Files to modify
+The Fastify lifecycle after route matching is: **onRequest → preParsing → [content-type parsing] → preValidation → ...**
 
-**1. `lib/hooks.js`** — Hook registration and runners
-- Add the hook name to the `lifecycleHooks` array (line 11), e.g. between `'onRequest'` and `'preParsing'`
-- Add `this.<hookName> = []` in the `Hooks` constructor (line 40)
-- Add `hooks.<hookName> = h.<hookName>.slice()` in `buildHooks()` (line 73)
-- Create a runner (or reuse `hookRunnerGenerator(hookIterator)`) and export it
+Your new hook would sit between `onRequest` and `preParsing`. Here are the files and functions you'd need to modify:
 
-**2. `lib/context.js`** — Route context object
-- Add `this.<hookName> = null` in the `Context` constructor (around line 49) so each route context has a slot for the hook
+### 1. `lib/hooks.js` — Hook definition and runner
 
-**3. `lib/route.js`** — Route setup and request lifecycle wiring
-- In `runPreParsing()` (line 638): insert your hook runner call *before* `preParsingHookRunner`. Currently `onRequest` → `runPreParsing` → `preParsing` → `handleRequest`. You'd change `runPreParsing` to first run your new hook, then proceed to `preParsing`
-- The hook validation logic at
-...[truncated 1768 chars]
+- **`lifecycleHooks` array** (line 11): Add your hook name (e.g. `'preRouting'`) between `'onRequest'` and `'preParsing'`
+- **`Hooks` constructor** (line 40): Add `this.preRouting = []`
+- **`buildHooks()`** (line 73): Add `hooks.preRouting = h.preRouting.slice()`
+- **Exports** (line 411): Create and export a runner, e.g. `const preRoutingHookRunner = hookRunnerGenerator(hookIterator)` — same pattern as `onRequestHookRunner`
+
+### 2. `lib/context.js` — Per-route context object
+
+- **`Context` constructor** (line 49 area): Add `this.preRouting = null` alongside the other hook slots
+
+### 3. `lib/route.js` — Request lifecycle wiring
+
+- **`runPreParsing()`** (line 638): This is called after `onRequest` completes. You'd insert your hook runner here — run your new hook *before* setting `kRequestPayloadStream` and calling `preParsingHookRunner`. The flow becomes: `onRequest → preRouting → preParsing → handleRequest`
+- **Import** (line 6): Import your new runner from `./hooks`
+- **Hook validation** (line 303–329): The `lifecycleHooks` loop auto-handles validation, but check if your hook needs the 4-arg async check (like `preParsing`) or the 3-a
+...[truncated 1420 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's a complete breakdown of the files and functions you'd need to modify. The new hook (let's call it `preRouting` or similar) would sit **after route matching / `onRequest`** but **before content-type parsing (`preParsing`)**.
-
-## Current lifecycle flow (relevant section)
-
-``\`
-Route matched → onRequest → preParsing → content-type parsing (handleRequest) → preValidation → ...
-``\`
-
-Your new hook would slot in between `onRequest` and `preParsing`:
-
-``\`
-Route matched → onRequest → [NEW HOOK] → preParsing → content-type parsing → ...
-``\`
+Now I have the full picture. Here's what you'd need to modify:
 
 ---
 
-## Files to modify
+## Files to modify for a new lifecycle hook (e.g., `preContentParsing`)
 
-### 1. `lib/hooks.js` — Define the hook
-- **Line 11-22**: Add your hook name to the `lifecycleHooks` array (between `'onRequest'` and `'preParsing'`)
-- **Line 41-56** (`Hooks` constructor): Add `this.yourHook = []`
-- **Line 73-91** (`buildHooks`): Add `hooks.yourHook = h.yourHook.slice()`
-- **Lines 272-276**: Create a runner, e.g. `const yourHookRunner = hookRunnerGenerator(hookIterator)` (same pattern as `onRequestHookRunner`)
-- **Line 411-429** (exports): Export the new runner
+The hook sits between `onRequest` → `preParsing` → **new hook** → content-type parsing (`handleRequest`).
 
-### 2. `lib/context.js` — Add hook slot to route context
-- **Line 49-56**: Add `this.yourHook = null` alongside the other hook properties
+### 1. `lib/hooks.js` — Register the hook
 
-### 3. `lib/route.js` — Wire it into the request lifecycle
-- **Line 6**: Import your new runner
-- **Line 556-565** (`routeHandler` function): Currently `onRequest` calls `runPreParsing` as its callback. Change it to call your new hook's runner, which then calls `runPreParsing`
-- **Line 638-653** (`runPrePa
-...[truncated 2245 chars]
+- **`lifecycleHooks` array** (line 11): Add your hook name, e.g. `'preContentParsing'`, between `'preParsing'` and `'preValidation'` (order matters for documentation/intent, but execution order is controlled by wiring).
+- **`Hooks` constructor** (line 40): Add `this.preContentParsing = []`
+- **`buildHooks` function** (line 73): Add `hooks.preContentParsing = h.preContentParsing.slice()`
+- **Hook runner**: Either reuse an existing runner via `hookRunnerGenerator(hookIterator)` (like `onRequestHookRunner`) or write a custom one. Then export it.
+- **`module.exports`** (line 411): Export the new runner.
+
+### 2. `lib/context.js` — Add the slot on the route context
+
+- **`Context` constructor** (line 49 area): Add `this.preContentParsing = null` alongside the other hook slots.
+
+### 3. `lib/route.js` — Wire the hook into the request lifecycle
+
+- The generic loop at **line 392–396** already iterates all `lifecycleHooks` and assigns them to the context, so adding it to the `lifecycleHooks` array handles that automatically.
+- **`runPreParsing` function** (line 638): This is where `preParsing` hooks run and then call `handleRequest`. You'd insert your new hook **after** `preParsing` completes and **be
+...[truncated 1740 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify the same core set of files (lib/hooks.js, lib/context.js, lib/route.js, type definition files) and reference similar line numbers for the lifecycleHooks array, Hooks constructor, buildHooks, and the routeHandler/runPreParsing wiring in route.js. Both correctly describe the Fastify lifecycle order (onRequest → preParsing → content-type parsing → preValidation → ...).
-
-Response A provides a more nuanced architectural analysis, noting that preParsing already occupies the "after route matching, before parsing" slot and presenting two possible insertion points (between onRequest/preParsing vs between preParsing/content-type-parsing in handle-request.js). This is a valuable insight but leaves the user to decide without concrete implementation guidance.
-
-Response B is more actionable: it provides actual code snippets showing the runYourHook function implementation with error handling, reply.sent checks, and the wiring pattern that chains onRequest → newHook → preParsing. It also mentions the need for tests (hooks.test.js) with specific test scenarios. The concrete code example significantly reduces ambiguity about how to implement the change.
-
-Grounding is similar for both — they reference the same files and similar line numbers that appear consistent with Fastify's codebase structure. Neither can be fully verified without reading the actual source, but the structural references (lifecycleHooks array, Hooks constructor, buildHooks, routeHandler function) alig
-...[truncated 124 chars]
+Both responses are well-grounded, referencing the same key files (hooks.js, context.js, route.js) with specific line numbers and functions. The critical difference is placement and naming. Response A places the hook between onRequest and preParsing, naming it "preRouting" — but routing has already happened at this point, making the name misleading. Response B places it between preParsing and handleRequest (where content-type parsing actually occurs), naming it "preContentParsing," which more precisely fulfills the user's request for "after route matching but before content-type parsing." Response B also mentions documentation files (Lifecycle.md, Hooks.md) and clarifies that handle-request.js needs no changes, adding useful context. Both are actionable and detailed, but Response B's more accurate lifecycle placement gives it an edge.
 ```
 
 </details>
 
-<details><summary>Fastify P18 | winner=tie | Q 9→8.5 G 9→9</summary>
+<details><summary>Fastify P18 | winner=tie | Q 9→9 G 8→8</summary>
 
 **Prompt:** How does Fastify decide which error handler to call when an error occurs — trace from the error to the registered handler?
 
-- Interactions: no_budi=12 / with_budi=9
-- Cost USD: no_budi=$0.1557 / with_budi=$0.1303
-- Hook: reason=ok context_chars=1255
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: fastify.js
-  span: 741-757
-  anchor: function setErrorHandler (func) {
-  proof:
-    - function setErrorHandler (func) {
-    - throwIfAlreadyStarted('Cannot call "setErrorHandler"!')
-    - throw new FST_ERR_ERROR_HANDLER_NOT_FN()
-- file: lib/handle-request.js
-  span: 17-17
-  anchor: const channels = diagnostics.tracingChannel('fastify.request.handler')
-  proof:
-    - const channels = diagnostics.tracingChannel('fastify.request.handler')
-- file: types/instance.d.ts
-  span: 480-559
-  anchor: childLoggerFactory: FastifyChildLoggerFactory<RawServer, RawRequest, RawReply, Logger, TypeProvider>;
-  proof:
-    - childLoggerFactory: FastifyChildLoggerFactory<RawServer, RawRequest, RawReply, Logger, TypeProvider>;
-    - setChildLoggerFactory(factory: FastifyChildLoggerFactory<RawServer, RawRequest, RawReply, Logger, TypeProvider>): FastifyInstance<RawServer, RawRequest, RawReply, Logger, TypePr...
-    - setValidatorCompiler<T = FastifySchema>(schemaCompiler: FastifySchemaCompiler<T>): FastifyInstance<R
-...[truncated 54 chars]
-```
+- Interactions: no_budi=14 / with_budi=11
+- Cost USD: no_budi=$0.1469 / with_budi=$0.1385
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Now I have the full picture. Here's the trace:
 
----
-
 ## Error Handler Resolution in Fastify
 
-### 1. Error handler chain is built via prototypal inheritance
+### 1. Error handlers form a prototype chain
 
-The key mechanism is `buildErrorHandler` in `lib/error-handler.js:142-149`:
+The key mechanism is in `lib/error-handler.js:142-149` — `buildErrorHandler`:
 
 ``\`js
-const rootErrorHandler = { func: defaultErrorHandler }
-
 function buildErrorHandler (parent = rootErrorHandler, func) {
-  if (!func) return parent
-  const errorHandler = Object.create(parent)  // prototype = parent handler
+  if (!func) { return parent }
+  const errorHandler = Object.create(parent)  // prototype chain!
   errorHandler.func = func
   return errorHandler
 }
 ``\`
 
-Each call to `setErrorHandler` (`fastify.js:755`) creates a new object whose **prototype** is the previous handler:
+Each error handler is an object with a `.func` property, whose **prototype** is the parent handler. The root of the chain is `rootErrorHandler` (line 23), which wraps `defaultErrorHandler`.
 
+### 2. Registration: `setErrorHandler()` builds the chain
+
+When you call `fastify.setErrorHandler(fn)` (`fastify.js:755`):
+
+``\`js
+this[kErrorHandler] = buildErrorHandler(this[kErrorHandler], func.bind(this))
 ``\`
-rootErrorHandler { func: defaultErrorHandler }
-   ↑ [[Prototype]]
-pluginAHandler { func: userHandlerA }
-   ↑ [[Prototype]]
-pluginBHandler { func: userHandlerB }   ← most specific (innermost plugin)
-``\`
 
-### 2. Each route captures its encapsulation context's handler
+The new handler wraps the current one via `Object.create(parent)`. If you register handlers in nested plugins, each encapsulation context gets its own link in the chain, with the parent plugin's handler as the prototype.
 
-When a route is registered (`lib/route.js:379-381`), the route's `Context` stores the error handler from the enclosing Fastify instance:
+### 3. Routes bind to their encapsulation context's handler
+
+When a route is registered (`lib/route.js:379-381`):
 
 ``\`js
 context.errorHandler = opts.errorHandler
@@ -8536,73 +7287,73 @@ context.errorHandler = opts.errorHandler
   : this[kErrorHandler]
 ``\`
 
-So every route knows the **most specific** error handler for its encapsulation scope.
-
-### 3. Error entry point → `onErrorHook` → `handleError`
-
-When an error occurs (thrown from handler, hook failure, serialization error, etc.), it flows through `reply.send()` at `lib/reply.js:149-152`:
-
-``\`js
-if (this[kReplyIsError
-...[truncated 2205 chars]
+Each route's `Context` object (`lib/context.js:58`) stores the error handler from its encapsulation scope. A per-route `errorHandler` option creates one more link in the chain above the 
+...[truncated 2338 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full trace from error to handler:
+Now I have the full picture. Here's the trace:
 
-## 1. Error enters `reply.send(error)`
+---
 
-When an error occurs anywhere in the request lifecycle (hooks, handler, validation, etc.), it's sent via `reply.send(err)` with `reply[kReplyIsError] = true`.
+## Error-to-handler resolution in Fastify
 
-In `lib/reply.js:149-152`, `send()` detects this:
+### 1. Entry: `reply.send(error)`
+
+When an `Error` is passed to `reply.send()`, the check at `lib/reply.js:149` detects it:
+
 ``\`js
 if (this[kReplyIsError] || payload instanceof Error) {
-  this[kReplyIsError] = false
   onErrorHook(this, payload, onSendHook)
-  return this
 }
 ``\`
 
-## 2. `onError` hooks run first
+### 2. `onError` lifecycle hooks run first (`lib/reply.js:882`)
 
-`onErrorHook` (`lib/reply.js:882-894`) runs the route's `onError` hooks if any are registered, then calls `handleError`:
 ``\`js
 function onErrorHook (reply, error, cb) {
   if (reply[kRouteContext].onError !== null && !reply[kReplyNextErrorHandler]) {
     reply[kReplyIsRunningOnErrorHook] = true
-    onSendHookRunner(reply[kRouteContext].onError, ...)  // run hooks
-      () => handleError(reply, error, cb)                // then handle
+    onSendHookRunner(reply[kRouteContext].onError, reply.request, reply, error,
+      () => handleError(reply, error, cb))
   } else {
     handleError(reply, error, cb)
   }
 }
 ``\`
 
-## 3. `handleError` resolves _which_ handler to call
+The `onError` hooks (if any) execute first. After they complete, `handleError` is called.
 
-This is the core logic in `lib/error-handler.js:30-80`:
+### 3. Handler resolution via prototype chain (`lib/error-handler.js:30`)
+
+The core logic in `handleError`:
 
 ``\`js
-function handleError (reply, error, cb) {
-  const context = reply[kRouteContext]
-  
-  // If we've exhausted all handlers (kReplyNextErrorHandler === false),
-  // go to fallbackErrorHandler which writes the raw response directly
-  if (reply[kReplyNextErrorHandler] === false) {
-    fallbackErrorHandler(error, reply, cb)
-    return
-  }
+const errorHandler = reply[kReplyNextErrorHandler] || context.errorHandler
+reply[kReplyNextErrorHandler] = Object.getPrototypeOf(errorHandler)
+const func = errorHandler.func
+``\`
 
-  // Pick the handler: either the "next" one in the chain, or the route'
-...[truncated 2770 chars]
+**Where does `context.errorHandler` come from?** Each route's `Context` object (`lib/context.js:58`) stores it:
+
+``\`js
+this.errorHandler = errorHandler || server[kErrorHandler]
+``\`
+
+This is the handler from the **encapsulation context** of the route (the plugin instance that registered the route).
+
+### 4. The prototype chain trick (`lib/error-handler.js:142`)
+
+This
+...[truncated 1809 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are excellent and cover the same core mechanism: the prototype-chain-based error handler resolution in Fastify. They both correctly trace through reply.send(error) → onErrorHook → handleError → prototype chain walking, and both reference accurate file paths and line numbers (lib/error-handler.js, lib/reply.js, fastify.js:755, etc.). Response A organizes the explanation by first showing how the chain is built (buildErrorHandler with Object.create), then how routes capture their context's handler, then the runtime resolution — a slightly more pedagogically clear ordering. Response A also includes a clean visual of the prototype hierarchy. Response B follows the runtime flow order which is also logical and adds the detail about four-oh-four.js. However, Response B is truncated at the end, losing its summary flow diagram. The content quality and grounding are essentially equivalent — both demonstrate deep understanding of the codebase. The truncation in Response B is the main differentiator, giving Response A a slight edge in completeness, but the core content is close enough to call it a tie.
+Both responses are excellent and cover the same core mechanism with high accuracy: the prototype chain via Object.create(parent) in buildErrorHandler, the kReplyNextErrorHandler pointer advancing via Object.getPrototypeOf(), the onError hooks running before handleError, and the fallback chain termination. Response A has slightly more detail — it covers the per-route errorHandler option in route.js, explicitly describes the kReplyNextErrorHandler=false terminal case, and provides more specific line number references. Response B has a slightly better narrative flow, starting from reply.send(error) as the entry point which aligns well with the prompt's request to 'trace from the error to the registered handler,' and includes more complete inline code snippets (e.g., the onErrorHook condition). These advantages roughly cancel out, making this a tie. Both provide clear ASCII summary diagrams, accurate file references, and a thorough explanation of the encapsulation-context-based handler resolution.
 ```
 
 </details>
@@ -8611,230 +7362,621 @@ Both responses are excellent and cover the same core mechanism: the prototype-ch
 
 <details><summary>Express P1 | winner=tie | Q 9→9 G 9→9</summary>
 
-**Prompt:** What are the entry points of Express and how does a request get routed?
+**Prompt:** What are the entry points of this Express application and how is the app object created at startup?
 
-- Interactions: no_budi=6 / with_budi=6
-- Cost USD: no_budi=$0.1397 / with_budi=$0.1457
+- Interactions: no_budi=5 / with_budi=4
+- Cost USD: no_budi=$0.1102 / with_budi=$0.0953
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how Express (v5.2.1) is structured:
+Here's how Express bootstraps:
 
-## Entry Points
+### Entry points
 
-**`lib/express.js`** — the main module export. `require('express')` returns the `createApplication` factory function (line 27).
+1. **`index.js:11`** — the package entry point. Just re-exports `./lib/express`.
+2. **`lib/express.js:27`** — the real entry. The default export is the `createApplication` factory function (what users call as `express()`).
 
-**`createApplication()`** (line 36–56):
-1. Creates `app` — a plain function `function(req, res, next) { app.handle(req, res, next) }`
-2. Mixes in `EventEmitter` and the `application` prototype
-3. Sets up custom `request`/`response` prototypes (inheriting from `lib/request.js` and `lib/response.js`)
-4. Calls `app.init()`
+### How the app object is created (`lib/express.js:36-56`)
 
-**`app.listen()`** (`lib/application.js:598`) — creates an `http.createServer(app)` and calls `.listen()`. Since `app` is a function with the `(req, res, next)` signature, Node's HTTP server uses it as the request handler.
+`createApplication()` does this:
 
-## Request Routing Flow
+1. **Creates a plain function** `app(req, res, next)` that delegates to `app.handle()` — this makes the app itself usable as a request handler (middleware-compatible).
+2. **Mixes in `EventEmitter.prototype`** via `merge-descriptors`, giving the app event capabilities.
+3. **Mixes in `lib/application.js` (`proto`)**, which provides all the app methods (`use`, `get`, `listen`, `set`, `engine`, `render`, etc.).
+4. **Sets up `app.request` / `app.response`** as prototypes (via `Object.create`) from `lib/request.js` and `lib/response.js`, with a back-reference to `app`.
+5. **Calls `app.init()`** (`lib/application.js:59`) which:
+   - Creates empty `cache`, `engines`, and `settings` objects
+   - Calls `this.defaultConfiguration()` to set defaults (views, etag, query parser, trust proxy, etc.)
+   - Defines a **lazy `router` getter** (`lib/application.js:69-80`) — the base `Router` instance is only created on first access
 
-1. **HTTP server calls `app(req, res)`** → which calls `app.handle(req, res, next)`
+### Additional exports from `lib/express.js`
 
-2. **`app.handle()`** (`lib/application.js:152–178`):
-   - Creates a `finalhandler` as the default error handler
-   - Sets `X-Powered-By` header (if enabled)
-   - Cross-links `req.res` / `res.req`
-   - Swaps `req`/`res` prototypes to Express-enhanced versions
-   - Initializes `res.locals`
-   - **Delegates to `this.router.handle(req, res, done)`**
-
-3. **The Router** (`require('router')` — external package) — is lazily created on first access (`lib/application.js:69–82`). It holds the middleware/route stack.
-
-4. **Middleware & routes are registered via**:
-   - **`app.use(path, fn)`** (`lib/application.js:190–244`) — proxies to `router.use()`. If `
-...[truncated 1420 chars]
+- `express.application` / `express.request` / `express.response` — the raw prototypes
+- `express.Route` / `express.Router` — the router constructors
+- `express.
+...[truncated 142 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's how Express is structured and how a request flows through it:
+Here's how it works:
 
-## Entry Points
+**Entry point:** `index.js:11` — simply re-exports `./lib/express`.
 
-### 1. `lib/express.js` — The public API
-The main export is `createApplication()` (line 36). When you call `require('express')()`, this function:
-- Creates `app` — a plain **function** `(req, res, next)` that delegates to `app.handle()` (line 37–39)
-- Mixes in `EventEmitter` and the `application` prototype
-- Sets up `app.request` / `app.response` prototype chains
-- Calls `app.init()`
+**App creation (`lib/express.js`):**
 
-It also re-exports: `Router`, `Route`, built-in middleware (`json`, `static`, `urlencoded`, etc.)
+The default export is the `createApplication` factory function (line 36). When a user calls `const app = express()`, this is what runs:
 
-### 2. `lib/application.js` — The app prototype
-Defines all app methods (`use`, `get`, `post`, `listen`, `set`, `render`, etc.).
+1. **Creates a request handler function** (line 37-39) — `app` is literally a function `(req, res, next) => app.handle(req, res, next)`. This means the app itself can be passed as a callback to `http.createServer()`.
 
-Key points:
-- **`app.init()`** (line 59): Sets up settings and lazily defines `this.router` — a `Router` instance from the external [`router`](https://www.npmjs.com/package/router) package, created on first access
-- **`app.listen()`** (line 598): Creates an `http.Server` with `app` itself as the request handler callback
+2. **Mixes in EventEmitter** (line 41) — gives the app `.on()`, `.emit()`, etc.
 
-## Request Routing Flow
+3. **Mixes in application prototype** (line 42) — from `lib/application.js` (`proto`), which provides `.get()`, `.use()`, `.listen()`, `.set()`, and all other app methods.
 
-``\`
-HTTP request
-  → http.Server callback (the `app` function itself)
-    → app.handle(req, res)
-      → router.handle(req, res, finalhandler)
-``\`
+4. **Creates request/response prototypes** (lines 45-52) — `Object.create()` from `lib/request.js` and `lib/response.js`, with a back-reference to the app.
 
-### Step by step:
+5. **Calls `app.init()`** (line 54) — initializes default settings (defined in `lib/application.js`).
 
-1. **`app(req, res, next)`** — `lib/express.js:37`. The app *is* the http callback. It calls `app.handle()`.
-
-2. **`app.handle()`** — `lib/application.js:152`. This:
-   - Creates a `finalhandler` as the done/error callback
-   - Sets `X-Powered-By` header
-   - Cross-links `req.res`
-...[truncated 1785 chars]
+**Additional exports** (lines 62-81): The module also exposes `application`, `request`, `response` prototypes, `Route`, `Router`, and built-in middleware (`json`, `raw`, `static`, `text`, `urlencoded`).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are highly accurate, well-structured, and grounded in the Express codebase with specific file paths and line numbers. They cover the same core content: lib/express.js as the entry point, createApplication(), app.handle(), the external router package, middleware/route registration via app.use()/app.get()/etc., and the layer stack walk. Response A provides a useful key files summary table and slightly more granular line number references (e.g., line 69-82 for lazy router creation, line 494 for app.all). Response B adds helpful ASCII flow diagrams and a sub-apps section explaining prototype restoration. These are complementary stylistic differences that balance out. Both are equally correct, well-grounded, and actionable.
+Both responses are accurate and well-grounded in the Express repository. They identify the same entry points (index.js re-exporting lib/express.js) and describe the same createApplication factory function with essentially identical steps: creating a handler function, mixing in EventEmitter, mixing in the application prototype, setting up request/response prototypes, and calling init(). Response A provides slightly more detail about what app.init() does (mentioning the lazy router getter, defaultConfiguration, and specific settings) and is marginally more actionable for someone wanting to understand the full bootstrap chain. Response B is slightly more concise and readable with clearer line references. Both correctly reference file paths and line numbers consistent with the repository. The differences are minimal enough to call this a tie.
 ```
 
 </details>
 
 <details><summary>Express P2 | winner=tie | Q 9→9 G 9→9</summary>
 
-**Prompt:** How does Express middleware work? Trace the chain from request to response.
+**Prompt:** Describe the module layout of this Express codebase — which files own which concerns (routing, request, response, views)?
 
-- Interactions: no_budi=15 / with_budi=11
-- Cost USD: no_budi=$0.1909 / with_budi=$0.1608
-- Hook: reason=ok context_chars=331
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: examples/ejs/index.js
-  span: 10-10
-  anchor: var app = module.exports = express();
-  proof:
-    - var app = module.exports = express();
-```
+- Interactions: no_budi=18 / with_budi=10
+- Cost USD: no_budi=$0.2416 / with_budi=$0.2976
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-No `node_modules` installed. I have enough from the source to give a thorough trace. Here's how the middleware chain works end-to-end:
+Here's the module layout of this Express codebase. The core lives entirely in `lib/` with just 6 files:
+
+### `index.js` — Entry point
+Single-line re-export of `lib/express.js`.
+
+### `lib/express.js` — Factory & public API surface
+- Exports the `createApplication()` factory (the `express()` call)
+- Wires together `application`, `request`, and `response` prototypes
+- Re-exports `Router` and `Route` (from the external `router` package)
+- Re-exports bundled middleware: `json`, `raw`, `text`, `urlencoded` (from `body-parser`) and `static` (from `serve-static`)
+
+### `lib/application.js` — App-level behavior
+The `app` prototype. Owns:
+- **Routing**: `app.use()`, `app.route()`, `app.all()`, `app.param()`, HTTP method delegation (line ~474)
+- **Request handling**: `app.handle()` — dispatches incoming requests to the router
+- **Settings**: `app.set()`, `app.get()` (dual-purpose), `app.enable()`, `app.disable()`, `app.enabled()`, `app.disabled()`
+- **View rendering**: `app.render()`, `app.engine()` — template engine registration and render orchestration
+- **Server lifecycle**: `app.init()`, `app.defaultConfiguration()`, `app.listen()`, `app.path()`
+
+### `lib/request.js` — Request prototype (`req`)
+Extends Node's `http.IncomingMessage`. Adds:
+- **Header access**: `req.get()` / `req.header()`
+- **Content negotiation**: `req.accepts()`, `req.acceptsEncodings()`, `req.acceptsCharsets()`, `req.acceptsLanguages()`
+- **Body/query**: `req.range()`, `req.is()` (content-type check)
+- **Getters** 
+...[truncated 1685 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the module layout — six files under `lib/`, each with a clear concern:
+
+### `lib/express.js` — Entry point / factory
+The public API surface. Exports `createApplication()` which creates an app function, mixes in `EventEmitter` and the application prototype, and wires up `app.request` / `app.response` prototype chains. Also re-exports `Router`, `Route`, and bundled middleware (`json`, `urlencoded`, `static`, `raw`, `text`).
+
+### `lib/application.js` — App configuration & lifecycle
+The core application prototype. Owns:
+- **Initialization** (`init`, `defaultConfiguration`) — sets defaults for etag, trust proxy, query parser, views, etc.
+- **Request dispatch** (`handle`) — sets up `req`/`res` prototypes and delegates to the router.
+- **Middleware/routing plumbing** (`use`, `route`, `param`, `all`, plus dynamic `app.get/post/put/…` via `methods.forEach`).
+- **Settings** (`set`, `get`, `enable`, `disable`, `enabled`, `disabled`).
+- **Template engines** (`engine`, `render`) — registers engines and renders views.
+- **Server creation** (`listen`) — wraps `http.createServer`.
+
+**Notable:** Routing is **not** implemented here. `Router` and `Route` come from the external `router` package. The app lazily creates a `Router` instance and proxies calls to it.
+
+### `lib/request.js` — Request augmentation
+Extends `http.IncomingMessage.prototype` with Express-specific helpers:
+- Header access: `req.get()` / `req.header()`
+- Content negotiation: `req.accepts()`, `req.acceptsEncodings()`, `
+...[truncated 1877 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses are nearly identical in structure, accuracy, and depth. They correctly identify the six core files under lib/, describe the same concerns (routing delegation to external router package, request/response prototype extension, view resolution, utils), and organize the information similarly. Response A includes index.js as a separate section; Response B adds minor details like response.js being ~1000 lines and mentioning private helpers (sendfile, stringify) and lazy router creation. These differences are marginal and don't meaningfully differentiate quality. Both are well-grounded in the actual codebase and equally actionable.
+```
+
+</details>
+
+<details><summary>Express P3 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** Where is app.handle defined and what does it do when a request arrives?
+
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0856 / with_budi=$0.0877
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+`app.handle` is defined at **`lib/application.js:152`**. Here's what it does when a request arrives:
+
+1. **Creates a final handler** — uses the provided `callback` or creates one via `finalhandler` (the fallback error/404 handler).
+2. **Sets `X-Powered-By: Express` header** — if that setting is enabled.
+3. **Cross-links req/res** — sets `req.res` and `res.req` so each object can reference the other.
+4. **Patches prototypes** — `Object.setPrototypeOf(req, this.request)` and same for `res`, which grafts Express's extended request/response methods (like `req.query`, `res.json()`, etc.) onto the raw Node.js objects.
+5. **Initializes `res.locals`** — creates a clean object for passing data through middleware to templates.
+6. **Delegates to the router** — calls `this.router.handle(req, res, done)`, which walks the middleware/route stack to find matching handlers.
+
+In short, it's the entry point that prepares the raw Node request/response with Express features, then hands off to the router for actual middleware and route dispatch.
+```
+
+#### Response (`with_budi`)
+
+```text
+**`app.handle`** is defined at `lib/application.js:152`.
+
+When a request arrives, it does the following in order:
+
+1. **Creates a final handler** — uses the provided `callback` or creates one via `finalhandler` (which sends a default error/404 response if nothing else handles the request).
+2. **Sets `X-Powered-By: Express` header** — if that setting is enabled.
+3. **Cross-links req/res** — sets `req.res` and `res.req` so each object can reference the other.
+4. **Patches prototypes** — sets the prototypes of `req` and `res` to Express's enhanced `request` and `response` objects, giving them all the Express-specific methods (e.g. `res.send`, `req.query`).
+5. **Initializes `res.locals`** — creates an empty object for view-local data.
+6. **Delegates to the router** — calls `this.router.handle(req, res, done)`, which walks through all registered middleware and routes to find matches for the request.
+```
+
+#### Judge rationale
+
+```text
+Both responses are nearly identical in content, structure, and accuracy. They both correctly identify the location as lib/application.js:152, list the same 6 steps in the same order with very similar descriptions, and demonstrate strong grounding in the actual code. Response A includes a brief summary paragraph at the end, while Response B omits it — a negligible difference. The quality, grounding, and actionability are equivalent.
+```
+
+</details>
+
+<details><summary>Express P4 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** Where is res.send defined and what steps does it take to finalize the response body?
+
+- Interactions: no_budi=4 / with_budi=6
+- Cost USD: no_budi=$0.1002 / with_budi=$0.1159
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+`res.send` is defined at `lib/response.js:125`. Here's what it does to finalize the response body:
+
+1. **Content-Type negotiation** (lines 133–158)
+   - **String**: sets encoding to `utf8`. If `Content-Type` is already set, ensures the `charset=utf-8` parameter is present; otherwise defaults to `text/html`.
+   - **Boolean / Number / non-null Object**: if `null`, becomes empty string; if a typed array (`ArrayBuffer.isView`), sets type to `application/octet-stream` if not already set; otherwise **delegates to `this.json()`** and returns early.
+
+2. **Content-Length calculation** (lines 160–181)
+   - If the chunk is already a Buffer, uses `.length` directly.
+   - For small strings (< 1000 bytes) when no ETag generation is needed, uses `Buffer.byteLength`.
+   - Otherwise converts the chunk to a Buffer (so the byte length is exact) and uses that.
+   - Sets the `Content-Length` header.
+
+3. **ETag generation** (lines 183–189)
+   - If no `ETag` header exists and the app has an `etag fn` setting, calls it with the chunk to produce and set an `ETag`.
+
+4. **Freshness / conditional response** (line 192)
+   - Checks `req.fresh` (which compares `If-None-Match`/`If-Modified-Since` against the response headers). If fresh, sets status to **304**.
+
+5. **Strip headers for bodyless status codes** (lines 194–207)
+   - **204 / 304**: removes `Content-Type`, `Content-Length`, and `Transfer-Encoding`; empties the chunk.
+   - **205**: sets `Content-Length: 0`, removes `Transfer-Encoding`, empties the 
+...[truncated 186 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+`res.send` is defined at `lib/response.js:125`. Here are the steps it takes to finalize the response body:
+
+1. **Content-Type negotiation** (lines 133–158) — switches on `typeof chunk`:
+   - **string**: sets encoding to `'utf8'`; ensures `Content-Type` has a `charset=utf-8`, defaulting to `text/html` if no type is set.
+   - **boolean / number / object**: if `null`, converts to empty string; if an `ArrayBuffer` view (e.g. `Buffer`), defaults type to `application/octet-stream`; otherwise delegates to `this.json(chunk)` (which re-calls `send` with a JSON string).
+
+2. **Content-Length** (lines 164–181) — computes byte length. For small non-ETag strings it uses `Buffer.byteLength`; otherwise it converts the chunk to a `Buffer` first, then reads `.length`. Sets the `Content-Length` header.
+
+3. **ETag generation** (lines 183–189) — if no `ETag` header exists and the app has an `etag fn` setting, calls it with the chunk to generate and set an `ETag`.
+
+4. **Freshness / conditional GET** (line 192) — if `req.fresh` is true (client cache is still valid), sets status to `304`.
+
+5. **Strip headers for bodyless responses** (lines 195–207):
+   - **204 / 304**: removes `Content-Type`, `Content-Length`, `Transfer-Encoding`; empties chunk.
+   - **205**: sets `Content-Length: 0`, removes `Transfer-Encoding`, empties chunk.
+
+6. **Send** (lines 209–215) — for `HEAD` requests calls `this.end()` (no body); otherwise calls `this.end(chunk, encoding)` to write the body and finish the response.
+
+7. Re
+...[truncated 26 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify res.send at lib/response.js:125 and describe the same 6 core steps with matching line number references. Response A provides slightly more detail on the Content-Length optimization (mentioning the < 1000 byte threshold for small strings). Response B adds a 7th point about returning `this` for chaining, which is a minor but valid addition. The structure, accuracy, and grounding are essentially equivalent — both cite specific line ranges and correctly describe content-type negotiation, content-length calculation, ETag generation, freshness checks, bodyless status handling, and the final send. The differences are trivial and neither response is meaningfully better than the other.
+```
+
+</details>
+
+<details><summary>Express P5 | winner=tie | Q 9→9 G 9→8</summary>
+
+**Prompt:** Where is app.use defined and how does it register middleware in the stack?
+
+- Interactions: no_budi=15 / with_budi=4
+- Cost USD: no_budi=$0.1505 / with_budi=$0.0468
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+The `router` package isn't installed (no `node_modules`). The key logic is all visible in `app.use` itself — it delegates to the external `router` package. Here's the full picture:
 
 ---
 
-## Express Middleware Chain: Request to Response
+**`app.use` is defined at `lib/application.js:190`.**
 
-### 1. HTTP Server receives a request
+### How it registers middleware
 
-`app.listen()` (`application.js:598`) creates an `http.createServer(this)` — the `app` function itself is the callback. When a request arrives, Node calls:
+1. **Argument parsing** (lines 191–208): Determines if the first argument is a mount `path` or a middleware function. If the first arg (after unwrapping arrays) isn't a function, it's treated as the path and `offset` is set to 1 so the remaining args are the middleware functions. Default path is `'/'`.
 
-``\`js
-app(req, res)  // which calls app.handle(req, res)
-``\`
+2. **Flatten arguments** (line 210): All middleware arguments (after the optional path) are flattened from potentially nested arrays into a flat list of functions.
 
-This works because `createApplication()` (`express.js:37`) defines `app` as a plain function:
-``\`js
-var app = function(req, res, next) {
-  app.handle(req, res, next);
-};
-``\`
+3. **Validation** (lines 212–214): Throws `TypeError` if no middleware functions were provided.
 
-### 2. `app.handle()` — entry point (`application.js:152`)
+4. **Get the router** (line 217): Accesses `this.router`, which is a **lazily-created** `Router` instance (defined via `Object.defineProperty` at line 69). The router is created on first access with the app's `case sensitive routing` and `strict routing` settings.
 
-This method:
-1. Creates a **final handler** via `finalhandler` (used if nothing handles the request or an error bubbles up)
-2. Sets `X-Powered-By` header if enabled
-3. Cross-links `req.res` and `res.req`
-4. **Swaps prototypes** — `Object.setPrototypeOf(req, this.request)` / `Object.setPrototypeOf(res, this.response)` — this is how `req.query`, `res.json()`, etc. become available
-5. Delegates to `this.router.handle(req, res, done)`
+5. **Register each middleware** (lines 219–241): Iterates over the flattened functions. Two cases:
 
-### 3. The Router (external `router` package, ^2.2.0)
+   - **Regular middleware** (line 222): If `fn` lacks `.handle` and `.set` (i.e., it's not a sub-Express app), it calls `router.use(path, fn)` — this creates a `Layer` in the router's internal stack with the given path and handler.
 
-The router is lazily created on first access (`application.js:69-82`). It maintains a **stack** of `Layer` objects, each wrapping either:
-- A **middleware function** (added via `app.use()`)
-- A **Route** (added via `app.get()`, `app.post()`, etc.)
-
-#### `router.handle(req, res, done)` — the core loop
-
-The router iterates it
-...[truncated 3788 chars]
+   - **Sub-application** (lines 225–240): If `fn` is anothe
+...[truncated 789 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-No `node_modules` installed, but I have the Express source and know the `router` package well. Here's the full trace:
+`app.use` is defined at `lib/application.js:190`. Here's how it works:
 
-## Express Middleware Chain: Request to Response
+1. **Path parsing (lines 191–208)** — The first argument is checked. If it's not a function, it's treated as the mount path (e.g. `'/admin'`). If omitted, `path` defaults to `'/'`.
 
-### 1. HTTP Server receives the request
+2. **Flatten arguments (line 210)** — All remaining arguments (after the optional path) are flattened into a single array `fns`, supporting `app.use(fn1, fn2)` and `app.use([fn1, fn2])` signatures.
 
-`app.listen()` (`lib/application.js:598`) creates an `http.Server` with the `app` function as the callback:
+3. **Delegate to `router.use` (lines 217–241)** — Each middleware function is registered on the app's internal `Router` instance via `router.use(path, fn)`:
+   - **Regular middleware** (line 222): If `fn` doesn't look like an Express sub-app (no `.handle` or `.set`), it's passed directly to `router.use(path, fn)`.
+   - **Sub-app mounting** (lines 225–240): If `fn` is another Express app, it sets `fn.mountpath` and `fn.parent`, wraps it in a `mounted_app` handler that calls `fn.handle(req, res, next)` (restoring `req.app`/`res.app` prototypes afterward), and emits a `'mount'` event.
 
-``\`js
-var server = http.createServer(this)
-``\`
+4. **Returns `this`** (line 243) for chaining.
 
-The `app` itself is a function (`lib/express.js:37`):
+The actual middleware stack lives in the `Router`. `router.use` creates a `Layer` object for each middleware and pushes it onto `router.stack`, which is iterated during request dispatch.
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify app.use at lib/application.js:190 and describe the same registration flow with accurate line references: argument parsing, flattening, regular middleware vs sub-app mounting, router.use delegation, and chaining. Response A adds extra detail about lazy router creation via Object.defineProperty at line 69 and mentions app.handle at line 177 for dispatch, giving it a slight grounding edge. Response B is more concise and equally correct. The differences are minor enough to be a tie overall.
+```
+
+</details>
+
+<details><summary>Express P6 | winner=no_budi | Q 9→8 G 8→8</summary>
+
+**Prompt:** Trace the call chain from an incoming HTTP request to the route handler — what functions are called in order?
+
+- Interactions: no_budi=15 / with_budi=10
+- Cost USD: no_budi=$0.1968 / with_budi=$0.1537
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+No match for the `pillarjs/router` package in Context7. That's fine — I have enough from the Express source code and my knowledge of the router package to give a complete answer.
+
+Here's the full call chain from HTTP request to route handler in **Express 5.2.1**:
+
+## Request Lifecycle Call Chain
+
+### 1. `http.Server` callback → `app(req, res)`
+`app.listen()` (`lib/application.js:598`) creates `http.createServer(this)`. Since `app` is a function (created in `lib/express.js:37`), Node's HTTP server calls it directly:
+
 ``\`js
 var app = function(req, res, next) {
   app.handle(req, res, next);
 };
 ``\`
 
-So Node's HTTP server calls `app(req, res)` on every request.
+### 2. `app.handle(req, res, callback)` — `lib/application.js:152`
+- Creates a `finalhandler` as the fallback `done` callback
+- Sets `X-Powered-By` header (if enabled)
+- Cross-links `req.res` / `res.req`
+- Sets prototypes on `req`/`res` to `app.request`/`app.response` (adding Express helpers like `req.query`, `res.json()`)
+- Initializes `res.locals`
+- Calls **`this.router.handle(req, res, done)`**
 
-### 2. `app.handle()` sets up the request
+### 3. `Router.handle(req, res, done)` — `router` package
+The router (from `pillarjs/router` v2.x) runs its internal **`next()`** loop:
+- Parses the URL via `parseurl(req)`
+- Iterates through the **layer stack** (middleware + routes registered via `app.use()`, `app.get()`, etc.)
+- For each layer, calls `layer.match(path)` to check if the path matches
+- On match → calls **`layer.handle_request(req, res, next)`** or **`layer.handle_error(err, req, res, next)`**
 
-`lib/application.js:152-178` — This is the entry point for every request:
+### 4. `Layer.handle_request(r
+...[truncated 2363 chars]
+```
 
-1. Creates a **final handler** via `finalhandler` (used if no middleware handles the request)
-2. Sets the `X-Powered-By` header
-3. Cross-links `req.res = res` and `res.req = req`
-4. **Swaps prototypes** — `Object.setPrototypeOf(req, this.request)` / `Object.setPrototypeOf(res, this.response)` — this is how `req.params`, `res.json()`, etc. become available
-5. Creates `res.locals`
-6. Delegates to `this.router.handle(req, res, done)`
+#### Response (`with_budi`)
 
-### 3. The Router is created lazily
+```text
+Dependencies aren't installed, so I can't read the `router` package source directly. But from the Express source code I've read, here's the complete call chain:
 
-`lib/application.js:69-82` — The router is a lazy getter. First access creates a `new Router()` from the external `router` package (v2.2+).
+## Request lifecycle: HTTP request → route handler
 
-### 4. Middleware registration: `app.use()` and `app.VERB()`
+### 1. `app` (the request listener) — `lib/express.js:37`
+``\`js
+var app = function(req, res, next) {
+  app.handle(req, res, next);
+};
+``\`
+Node's `http.Server` calls `app` as its request listener (set up via `app.listen()` → `http.createServer(this)` at `lib/application.js:599`).
 
-**`app.use(fn)`** (`lib/application.js:190-244`):
-- Parses the path (defaults to `'/'`)
-- Flattens the argument list
-- For each function, cal
-...[truncated 4049 chars]
+### 2. `app.handle()` — `lib/application.js:152`
+- Creates a `finalhandler` as the done callback (for unhandled errors/requests)
+- Sets `X-Powered-By` header if enabled
+- Cross-links `req.res` and `res.req`
+- Sets prototypes: `Object.setPrototypeOf(req, this.request)` / `Object.setPrototypeOf(res, this.response)` — this is how `req` and `res` get Express's extended methods
+- Initializes `res.locals`
+- Calls **`this.router.handle(req, res, done)`**
+
+### 3. `Router.handle()` — from the `router` package (pillarjs/router v2.x)
+The router is lazily instantiated on first access (`lib/application.js:69-82`). Inside `Router.handle()`:
+
+- Parses the URL via `parseurl(req)`
+- Enters the **layer stack loop** — iterates through registered layers (middleware + routes) calling `next()` to advance
+
+### 4. `Layer.match()` — for each layer in the stack
+- Tests if the request path matches the layer's path pattern (using `path-to-regexp`)
+- Populates `req.params` on match
+
+### 5. `Layer.handle_request()` / `L
+...[truncated 1633 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are remarkably similar in structure, accuracy, and grounding. They trace the same path through the Express source: app function creation (express.js:37), app.handle() (application.js:152), lazy router creation (application.js:69-82), middleware registration via app.use() (application.js:190), route creation (application.js:471-482), the router's next() loop, error handling via fn.length === 4, and sub-apps. Both cite correct file paths and line numbers. Response A uniquely covers next('route') and next('router') semantics, which are important Express-specific behaviors. Response B uniquely mentions res.locals creation and provides a clearer step-by-step dispatch algorithm. Both are truncated so full comparison isn't possible, but the visible content is essentially equivalent in quality and depth.
+Both responses correctly trace the same call chain (app → app.handle → Router.handle → Layer.match → Layer.handle_request → Route.dispatch → handler) with accurate file/line references. Response A edges ahead in two ways: (1) it includes a detailed ASCII flow diagram that visually distinguishes middleware layers from route layers and shows the branching/looping behavior, making it easier to internalize; (2) it explicitly calls out the two nested next() loops (Router-level outer loop and Route-level inner loop for multiple handlers on a single route), which is the key architectural insight for understanding Express routing. Response B is solid and mentions useful details like lazy router instantiation (application.js:69-82) and the route method delegation (application.js:472-479), but its summary is more linear and doesn't highlight the nested dispatch structure as clearly. Grounding is comparable — both cite specific file paths and line numbers from the Express source.
 ```
 
 </details>
 
-<details><summary>Express P3 | winner=with_budi | Q 8→9 G 7→9</summary>
+<details><summary>Express P7 | winner=tie | Q 9→9 G 9→9</summary>
 
-**Prompt:** Where is the Router class defined and how does route matching work?
+**Prompt:** Trace what happens when a route handler calls res.json — how does Express convert an object to a JSON response?
 
-- Interactions: no_budi=16 / with_budi=12
-- Cost USD: no_budi=$0.1013 / with_budi=$0.1159
-- Hook: reason=ok context_chars=952
+- Interactions: no_budi=7 / with_budi=7
+- Cost USD: no_budi=$0.0930 / with_budi=$0.0845
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+Here's the full trace of `res.json({ user: 'tj' })`:
+
+## 1. `res.json(obj)` — `lib/response.js:232`
+
+Reads three app-level settings that customize serialization:
+- **`json replacer`** — custom `replacer` for `JSON.stringify`
+- **`json spaces`** — indentation (pretty-print)
+- **`json escape`** — escape `<`, `>`, `&` to prevent HTML injection when JSON is embedded in a page
+
+Calls the private `stringify()` helper, then sets `Content-Type: application/json` (if not already set), and delegates to `this.send(body)`.
+
+## 2. `stringify(value, replacer, spaces, escape)` — `lib/response.js:1023`
+
+A thin wrapper around `JSON.stringify`. Two details:
+
+- **V8 optimization**: calls `JSON.stringify(value)` (no extra args) when `replacer` and `spaces` are both falsy, because V8 has a fast path for the 1-argument form.
+- **HTML-safe escaping**: if `json escape` is enabled, replaces `<` → `\u003c`, `>` → `\u003e`, `&` → `\u0026` in the resulting string.
+
+Returns a plain JSON string (e.g. `'{"user":"tj"}'`).
+
+## 3. `res.send(body)` — `lib/response.js:125`
+
+Receives the JSON **string**. The `switch (typeof chunk)` hits the `'string'` branch (line 135):
+
+- Sets `encoding = 'utf8'`
+- Sees `Content-Type` is already `application/json` (set by `res.json`), so it appends `; charset=utf-8` via `setCharset()` (line 140).
+
+Then the common path runs:
+
+1. **Content-Length** (line 164–181): Converts the string to a `Buffer` (or uses `Buffer.byteLength` for small bodies without ETags) and sets the `Content-
+...[truncated 1553 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the full trace of `res.json({ user: 'tj' })`:
+
+---
+
+## Step 1 — `res.json()` (`lib/response.js:232`)
+
+``\`js
+res.json = function json(obj) {
+  var app = this.app;
+  var escape = app.get('json escape')
+  var replacer = app.get('json replacer');
+  var spaces = app.get('json spaces');
+  var body = stringify(obj, replacer, spaces, escape)
+
+  if (!this.get('Content-Type')) {
+    this.set('Content-Type', 'application/json');
+  }
+
+  return this.send(body);
+};
+``\`
+
+1. Reads three app-level settings: `json escape`, `json replacer`, and `json spaces`.
+2. Calls the private `stringify()` helper to serialize the object.
+3. Sets `Content-Type: application/json` (if not already set).
+4. Delegates to `res.send()` with the resulting **string**.
+
+## Step 2 — `stringify()` (`lib/response.js:1023`)
+
+``\`js
+function stringify(value, replacer, spaces, escape) {
+  var json = replacer || spaces
+    ? JSON.stringify(value, replacer, spaces)
+    : JSON.stringify(value);
+
+  if (escape && typeof json === 'string') {
+    json = json.replace(/[<>&]/g, function (c) { /* unicode-escape */ });
+  }
+  return json;
+}
+``\`
+
+- Calls `JSON.stringify`, passing through the optional `replacer` and `spaces`.
+- If `json escape` is enabled, replaces `<`, `>`, and `&` with their `\uXXXX` equivalents to prevent HTML injection when JSON is embedded in a `<script>` tag.
+
+## Step 3 — `res.send()` (`lib/response.js:125`)
+
+Since `res.json` already serialized the object to a **string**, `res.send` takes the `case 'string'` 
+...[truncated 1607 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses trace the same res.json → stringify → res.send flow with accurate line numbers, correct details about app settings (json replacer, json spaces, json escape), and proper explanation of Content-Type setting, Content-Length computation, ETag generation, and freshness checking. Response A includes two extra details: the V8 optimization for single-argument JSON.stringify and the res.send(object) → res.json redirect shortcut. Response B includes inline source code snippets that make the explanation more concrete and verifiable. These trade-offs roughly balance out — A has more behavioral detail while B has more source-level grounding via code. Both provide clear summary diagrams and are highly accurate representations of the Express source code. The quality difference is negligible.
+```
+
+</details>
+
+<details><summary>Express P8 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** What calls app.handle and what arguments does each call site pass?
+
+- Interactions: no_budi=2 / with_budi=2
+- Cost USD: no_budi=$0.0209 / with_budi=$0.0211
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+There is **one call site** for `app.handle`:
+
+**`lib/express.js:38`** — inside `createApplication()`, the `app` function itself is defined as a thin wrapper that forwards directly to `app.handle`:
+
+``\`js
+var app = function(req, res, next) {
+  app.handle(req, res, next);
+};
+``\`
+
+It passes three arguments:
+1. **`req`** — the incoming request
+2. **`res`** — the server response
+3. **`next`** — an optional callback (used when the app is mounted as a sub-app/middleware)
+```
+
+#### Response (`with_budi`)
+
+```text
+There is **one call site** for `app.handle`:
+
+**`lib/express.js:38`** — inside `createApplication()`, where the `app` function itself is defined:
+
+``\`js
+var app = function(req, res, next) {
+  app.handle(req, res, next);
+};
+``\`
+
+It passes three arguments: `req`, `res`, and `next`. This makes the `app` object callable as a standard `(req, res, next)` request handler (e.g., usable as a callback for `http.createServer` or as middleware in another Express app).
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify the single call site at lib/express.js:38 and show the same code snippet with the three arguments (req, res, next). They are substantively identical in accuracy and grounding. Response B adds slightly more useful context about why app is callable (usable as http.createServer callback or as middleware), giving it a minor edge in actionability, but both are excellent answers.
+```
+
+</details>
+
+<details><summary>Express P9 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** What calls res.send and what does each call site pass as arguments?
+
+- Interactions: no_budi=6 / with_budi=5
+- Cost USD: no_budi=$0.1062 / with_budi=$0.1194
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+There are **3 internal call sites** in the Express source that call `res.send`:
+
+1. **`res.json()`** — `lib/response.js:245` — passes `body`, which is the JSON-stringified result of `stringify(obj, replacer, spaces, escape)` (a string).
+
+2. **`res.jsonp()`** — `lib/response.js:303` — passes `body`, which is either the JSON-stringified object wrapped in a JSONP callback (`/**/ typeof cb === 'function' && cb(...);`) or the plain stringified JSON if no callback is present. Always a string.
+
+3. **`res.sendStatus()`** — `lib/response.js:327` — passes `body`, which is the HTTP status text for the given code (e.g. `"OK"` for 200, `"Not Found"` for 404) looked up via `statuses.message[statusCode]`, falling back to `String(statusCode)`. Always a string.
+
+In all three cases, `res.send` receives a **string** argument.
+```
+
+#### Response (`with_budi`)
+
+```text
+There are exactly **3 internal call sites** of `this.send()` in the Express library:
+
+1. **`res.json()`** (`lib/response.js:245`) — passes `body`, which is the JSON-stringified version of the input object (after applying `json replacer`, `json spaces`, and `json escape` settings).
+
+2. **`res.jsonp()`** (`lib/response.js:303`) — passes `body`, which is either the JSON-stringified object (same as `res.json`) or, if a JSONP callback is present, a string like `/**/ typeof callback === 'function' && callback(<json>);`.
+
+3. **`res.sendStatus()`** (`lib/response.js:327`) — passes `body`, which is the HTTP status text from `statuses.message[statusCode]` (e.g., `"OK"`, `"Not Found"`) or the status code as a string if no standard message exists.
+
+All three pass a **string** to `this.send()`. No other library code calls `res.send` internally — everything else is user-facing (tests, examples, docs).
+```
+
+#### Judge rationale
+
+```text
+Both responses identify the same 3 call sites (res.json at line 245, res.jsonp at line 303, res.sendStatus at line 327), cite the same file and line numbers, and accurately describe what each passes to res.send. The content is substantively identical with only minor wording differences. Response B adds a helpful note that no other library code calls res.send internally, while Response A provides slightly more detail on the JSONP callback format. These differences are negligible.
+```
+
+</details>
+
+<details><summary>Express P10 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** How does Express load application settings — trace from app creation through defaultConfiguration to settings being available?
+
+- Interactions: no_budi=5 / with_budi=3
+- Cost USD: no_budi=$0.1012 / with_budi=$0.0855
+- Hook: reason=ok context_chars=328
 
 #### Injected context
 
@@ -8844,371 +7986,858 @@ rules:
 - Use only file paths shown in snippets for exact-path answers.
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
-- file: examples/multi-router/controllers/api_v2.js
-  span: 5-5
-  anchor: var apiv2 = express.Router();
+- file: examples/markdown/index.js
+  span: 13-13
+  anchor: var app = module.exports = express();
   proof:
-    - var apiv2 = express.Router();
-- file: examples/multi-router/controllers/api_v1.js
-  span: 5-5
-  anchor: var apiv1 = express.Router();
-  proof:
-    - var apiv1 = express.Router();
-- file: lib/express.js
-  span: 19-19
-  anchor: var Router = require('router');
-  proof:
-    - var Router = require('router');
-- file: test/acceptance/multi-router.js
-  span: 1-1
-  anchor: var app = require('../../examples/multi-router')
-  proof:
-    - var app = require('../../examples/multi-router')
-- file: test/res.clearCookie.js
-  span: 3-4
-  anchor: var express = require('../')
-  proof:
-    - , request = require('supertest');
-    - var express = require('../')
+    - (no concise proof line found)
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full picture:
+Here's the full trace:
 
-## Router definition
+## 1. `express()` — `lib/express.js:36-56`
 
-The `Router` class is **not defined inside Express itself**. It's an external package:
+`createApplication()` creates a function object `app`, mixes in `EventEmitter.prototype` and the application prototype (`lib/application.js`), then calls **`app.init()`**.
 
-- **Dependency**: `"router": "^2.2.0"` in `package.json:57`
-- **Imported** at `lib/express.js:19` — `var Router = require('router')`
-- **Re-exported** at `lib/express.js:71` — `exports.Router = Router`
-- **Route class** re-exported at `lib/express.js:70` — `exports.Route = Router.Route`
+## 2. `app.init()` — `lib/application.js:59-83`
 
-The [`router`](https://github.com/pillarjs/router) package is part of the **pillarjs** ecosystem (the same family of low-level modules that Express is built on). `node_modules` aren't installed in this repo, so the source isn't available locally.
-
-## How Express uses the Router
-
-**Lazy initialization** (`lib/application.js:68-82`): Each Express app lazily creates a `Router` instance on first access via a getter:
+Creates three clean objects with no inherited properties:
 
 ``\`js
-router = new Router({
-  caseSensitive: this.enabled('case sensitive routing'),
-  strict: this.enabled('strict routing')
-});
+this.cache = Object.create(null);
+this.engines = Object.create(null);
+this.settings = Object.create(null);
 ``\`
 
-**Request handling** (`lib/application.js:177`): `app.handle()` delegates to `this.router.handle(req, res, done)`.
+Then calls **`this.defaultConfiguration()`**.
 
-**Middleware registration** (`lib/application.js:216-230`): `app.use()` proxies to `this.router.use()`.
+After that, it defines a **lazy `router` getter** — the Router isn't created until something first accesses `app.router`, at which point it reads `case sensitive routing` and `strict routing` from settings.
 
-**Route creation** (`lib/application.js:256-257`): `app.route(path)` proxies to `this.router.route(path)`.
+## 3. `app.defaultConfiguration()` — `lib/application.js:90-141`
 
-**HTTP verb methods** (`lib/application.js:468-499`): `app.get()`, `app.post()`, etc. call `this.route(path)` then `route[method](handlers)`.
+Populates `this.settings` via `app.set()` and `app.enable()`:
 
-**Param handling** (`lib/application.js:331`): `app
-...[truncated 995 chars]
+| Setting | Default Value |
+|---|---|
+| `x-powered-by` | `true` (via `enable`) |
+| `etag` | `'weak'` |
+| `env` | `process.env.NODE_ENV \|\| 'development'` |
+| `query parser` | `'simple'` |
+| `subdomain offset` | `2` |
+| `trust proxy` | `false` |
+| `view` | `View` (constructor) |
+| `views` | `resolve('views')` (absolute path) |
+| `jsonp callback name` | `'callback'` |
+| `view cache` | `true` only in production |
+
+### Derived/compiled settings
+
+`app.set()` (`line 351`) has a `switch` block that **compiles derived function settings** whenever certain keys are written:
+
+- `'etag'` → compiles and stores `'etag fn'` via `compileETag(val)`
+- `'quer
+...[truncated 2019 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full picture:
+Here's the full trace:
 
-## Router Definition
+## 1. `express()` — `lib/express.js:36-56`
 
-The `Router` class is **not defined in Express itself**. It comes from the external **[`router`](https://www.npmjs.com/package/router) package** (v2.2.0+), declared as a dependency in `package.json:57`.
+`createApplication()` creates a plain function `app`, mixes in `EventEmitter` and the application prototype (`lib/application.js`), sets up `app.request`/`app.response` prototypes, then calls **`app.init()`**.
 
-It's imported in two places:
-- **`lib/express.js:19`** — `var Router = require('router');` — re-exported as `exports.Router` at line 71
-- **`lib/application.js:26`** — `var Router = require('router');` — used to create the app's internal router
+## 2. `app.init()` — `lib/application.js:59-83`
 
-## How Express Uses Router
+Initializes three null-prototype objects:
+- `this.cache` — view cache
+- `this.engines` — template engines
+- **`this.settings`** — where all settings live
 
-**Lazy initialization** (`lib/application.js:68-82`): The app creates its `Router` instance on first access via a getter:
+Then calls **`this.defaultConfiguration()`**.
 
-``\`js
-router = new Router({
-  caseSensitive: this.enabled('case sensitive routing'),
-  strict: this.enabled('strict routing')
-});
-``\`
+After that, it defines a lazy getter for `this.router` — the Router is only instantiated on first access, reading `case sensitive routing` and `strict routing` from settings at that point.
 
-**Request handling** (`lib/application.js:177`): All incoming requests are dispatched via `this.router.handle(req, res, done)`.
+## 3. `app.defaultConfiguration()` — `lib/application.js:90-141`
 
-**Route registration** works through three proxies to the Router:
+Populates `this.settings` with defaults:
 
-1. **`app.use()`** (`lib/application.js:190-244`) — adds middleware. If the argument is an Express sub-app, it wraps it in a `mounted_app` handler that swaps prototype chains.
+| Setting | Default |
+|---|---|
+| `x-powered-by` | `true` (via `enable`) |
+| `etag` | `'weak'` |
+| `env` | `process.env.NODE_ENV \|\| 'development'` |
+| `query parser` | `'simple'` |
+| `subdomain offset` | `2` |
+| `trust proxy` | `false` |
+| `view` | `View` constructor |
+| `views` | `resolve('views')` (cwd-relative) |
+| `jsonp callback name` | `'callback'` |
+| `view cache` | `true` only in production |
 
-2. **`app.route(path)`** (`lib/application.js:256-258`) — delegates to `this.router.route(path)`, returning a `Route` instance for chaining `.get()`, `.post()`, etc.
-
-3. **`app[method](path, ...)`** (`lib/application.js:471-482`) — each HTTP verb (get, post, put, etc.) calls `this.route(path)` then applies the handler to that route. Special 
-...[truncated 847 chars]
+**Side effects of `set()`** (line 351-383): setting `etag`, `query parser`, or `trust proxy` triggers a `switch` that compiles a companion `*fn` setting. For example, `this.set('etag', 'weak')` also stores `this.settings['etag fn']` via `compileETag('weak')`. Same 
+...[truncated 1196 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are well-structured and accurate, identifying that Router comes from the external `router` package and explaining lazy initialization, request handling, and route matching. Response B edges ahead in grounding: it correctly identifies that Router is imported in TWO places (lib/express.js:19 AND lib/application.js:26), while Response A only mentions lib/express.js:19. Response B also provides a more precise explanation of route matching by distinguishing middleware layers (prefix matching) from route layers (exact path matching), which is an important practical detail. Additionally, Response B notes the special case of app.get() with one argument reading a setting. These extra details make Response B slightly more complete and useful.
+Both responses trace the identical flow (express() → createApplication() → app.init() → defaultConfiguration()) with accurate file/line references, correct default settings tables, and proper explanation of compiled companion functions (etag fn, query parser fn, trust proxy fn). Both correctly describe mount-time prototype chain inheritance, trustProxyDefaultSymbol, locals.settings, and the overloaded app.get(). Response A includes slightly more detail: it mentions enable/disable sugar methods and explicitly notes the non-enumerable nature of the trustProxyDefaultSymbol property. Response B mentions request/response prototype setup in step 1 and notes engines inheritance on mount. The differences are marginal — both are well-grounded, accurate, and comprehensive. Response A's extra coverage of enable/disable gives it a slight actionability edge, but overall quality is essentially equivalent.
 ```
 
 </details>
 
-<details><summary>Express P4 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>Express P11 | winner=tie | Q 9→9 G 9→9</summary>
 
-**Prompt:** How does Express handle errors? What happens when next(err) is called?
+**Prompt:** Which environment variables does Express read and how do they affect runtime behavior (trust proxy, env, etc.)?
 
-- Interactions: no_budi=20 / with_budi=10
-- Cost USD: no_budi=$0.2031 / with_budi=$0.0790
-- Hook: reason=ok context_chars=394
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/application.js
-  span: 615-618
-  anchor: function logerror(err) {
-  proof:
-    - function logerror(err) {
-    - if (this.get('env') !== 'test') console.error(err.stack || err.toString());
-    - }
-```
+- Interactions: no_budi=5 / with_budi=7
+- Cost USD: no_budi=$0.0661 / with_budi=$0.0800
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how Express handles errors based on the source code:
+Express reads exactly **one environment variable**: `NODE_ENV`. Here's how it affects behavior:
 
-## Error handling flow
+### `process.env.NODE_ENV`
 
-### 1. `app.handle()` sets up the final handler (`lib/application.js:152-178`)
+Read at `lib/application.js:91` during `defaultConfiguration()`:
 
-When a request arrives, `app.handle` creates a `done` callback using `finalhandler` and passes it to `this.router.handle(req, res, done)`. This `done` is the **last resort** error handler.
-
-### 2. The `router` package processes the middleware stack
-
-Express 5.x uses the external [`router`](https://github.com/pillarjs/router) package (v2.2.0+). When `next(err)` is called, the router:
-
-- **Skips all regular middleware** — any handler with 3 params `(req, res, next)` is bypassed
-- **Invokes the next error-handling middleware** — handlers with exactly **4 parameters** `(err, req, res, next)` are called with the error
-
-This is visible in the test at `test/app.routes.error.js:25-60`:
 ``\`js
-app.get('/',
-  function(req, res, next) { next(new Error('fabricated error')); },  // triggers error
-  function(req, res, next) { a = true; next(); },                     // SKIPPED (3 params)
-  function(err, req, res, next) { b = true; next(err); },             // CALLED (4 params)
-  function(err, req, res, next) { c = true; next(); },                // CALLED, clears error
-  function(err, req, res, next) { d = true; next(); },                // SKIPPED (error cleared)
-  function(req, res) { res.sendStatus(204); }                         // CALLED (back to normal)
-);
+var env = process.env.NODE_ENV || 'development';
 ``\`
 
-### 3. Error can be **cleared** by calling `next()` (no argume
-...[truncated 958 chars]
-```
+It defaults to `'development'` if unset and drives three behaviors:
 
-#### Response (`with_budi`)
+1. **`app.set('env', env)`** (line 96) — Stores the value as the `'env'` setting, accessible via `app.get('env')`.
 
-```text
-Here's how Express handles errors when `next(err)` is called:
-
-**The error propagation chain:**
-
-1. **`next(err)` in middleware/routes** — When a middleware or route handler calls `next(err)` (with an argument), Express skips all remaining non-error middleware and routes, and looks for the next **error-handling middleware** (one with 4 parameters: `(err, req, res, next)`).
-
-2. **`app.handle`** (`lib/application.js:152-157`) — This is the entry point for request processing. It sets up a **final handler** using the `finalhandler` package as the last resort:
+2. **View caching** (line 138–140) — When `NODE_ENV === 'production'`, view cache is enabled by default:
    ``\`js
-   var done = callback || finalhandler(req, res, {
-     env: this.get('env'),
-     onerror: logerror.bind(this)
-   });
-   ``\`
-   If no error-handling middleware catches the error, `finalhandler` takes over.
-
-3. **`finalhandler`** (external package) — Sends a default error response (typically a 500 status with the error message in development, or just "Internal Server Error" in production).
-
-4. **`logerror`** (`lib/application.js:615-618`) — Called by `finalhandler` via the `onerror` callback. It logs the error to stderr unless the environment is `'test'`:
-   ``\`js
-   function logerror(err) {
-     if (this.get('env') !== 'test') console.error(err.stack || err.toString());
+   if (env === 'production') {
+     this.enable('view cache');
    }
    ``\`
+   In development, templates are re-read from disk on every request.
 
-**For mounted sub-apps** (`lib/application.js:230-237`), errors bubble up to the parent app — the sub-app's `handle` callback forwards the error via `next(err)` to the parent router.
+3. **Error logging** (line 617) — Errors are logged to `console.error` unless `env` is `'test'`:
+   ``\`js
+   if (this.get('env') !== 'test') console.error(err.stack || err.toString());
+   ``\`
 
-**In summary:** `next(err)` → skip normal middleware
-...[truncated 139 chars]
-```
+4. **Final handler** (line 154–156) — The `env` setting is passed to `finalhandler`, which controls whether stack traces are shown in error responses (stack traces are hidden in `'production'`).
 
-#### Judge rationale
+### `trust proxy`
 
-```text
-Both responses correctly explain the Express error handling flow with accurate file references (app.handle at lib/application.js, finalhandler setup, logerror function). Response A edges ahead in several ways: (1) It includes a concrete test example from test/app.routes.error.js showing the exact behavior of error skipping, error middleware invocation, and error clearing — this is highly grounded in the actual repo. (2) It explains the important concept of error clearing (calling next() without args from an error handler), which Response B omits entirely. (3) The summary table is practical and scannable. (4) It correctly notes that Express 5.x uses the external router package. Response B adds a useful point about sub-app error bubbling (lib/application.js:230-237) that Response A lacks, and its inline code snippets from application.js are accurate. However, it's slightly less detailed overall and misses the error-clearing mechanism. Both are well-grounded and correct; Response A is more comprehensive and actionable.
-```
+`trust proxy` is **not** driven by an environment variable. It's a setting configured programmatically via `app.set('trust proxy', ...)` and defaults to `false` (line 99). Sub-apps inherit the parent's `trust proxy fn` if they haven't set their own (lines 101–115).
 
-</details>
+### Other env-adjacent notes
 
-<details><summary>Express P5 | winner=tie | Q 9→9 G 9→9</summary>
-
-**Prompt:** Where is `createApplication` defined and what does it initialize?
-
-- Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0319 / with_budi=$0.0250
-- Hook: reason=ok context_chars=745
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: lib/express.js
-  span: 36-56
-  anchor: function createApplication() {
-  proof:
-    - app.request = Object.create(req, {
-    - app.response = Object.create(res, {
-    - return app;
-- file: lib/express.js
-  span: 16-16
-  anchor: var EventEmitter = require('node:events').EventEmitter;
-  proof:
-    - var EventEmitter = require('node:events').EventEmitter;
-- file: test/Route.js
-  span: 5-7
-  anchor: var express = require('../')
-  proof:
-    - , Route = express.Route
-    - var express = require('../')
-    - , methods = require('../lib/utils').methods
-```
-
-#### Response (`no_budi`)
-
-```text
-`createApplication` is defined at `lib/express.js:36` and is the default export of the module (what you get when you call `require('express')()`).
-
-It initializes the following:
-
-1. **`app` function** (line 37-39) — A request handler function that delegates to `app.handle(req, res, next)`.
-2. **Mixes in `EventEmitter.prototype`** (line 41) — Gives `app` event emitter capabilities (`on`, `emit`, etc.).
-3. **Mixes in `proto` (application prototype)** (line 42) — Merges in all methods from `./application` (e.g., `use`, `get`, `set`, `listen`, `handle`, etc.).
-4. **`app.request`** (lines 45-47) — Creates a new object inheriting from the custom `./request` prototype, with a back-reference to `app`.
-5. **`app.response`** (lines 50-52) — Same pattern for `./response`, with a back-reference to `app`.
-6. **`app.init()`** (line 54) — Calls the `init` method (from `./application`) which sets up default settings, locals, and mount path.
+- `DEBUG` is read by the `debug` module (line 17: `require('debug')('express:application')`) — not b
+...[truncated 243 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`createApplication` (`lib/express.js:36-56`) does the following:
+Express reads exactly **one** environment variable from its own source code:
 
-1. **Creates `app`** as a function that delegates to `app.handle(req, res, next)` — making it usable as a request handler.
-2. **Mixes in `EventEmitter.prototype`** — so the app can emit and listen for events.
-3. **Mixes in `proto`** (the application prototype from `lib/application.js`) — adding methods like `.get()`, `.use()`, `.listen()`, etc.
-4. **Sets `app.request`** — a new object inheriting from the base request prototype (`lib/request.js`), with `app` back-referenced on it.
-5. **Sets `app.response`** — same pattern for the response prototype (`lib/response.js`).
-6. **Calls `app.init()`** — initializes default settings (view engine, env, etc.).
-7. **Returns `app`**.
+### `NODE_ENV`
+
+Read at `lib/application.js:91`:
+
+``\`js
+var env = process.env.NODE_ENV || 'development';
+``\`
+
+It defaults to `'development'` if unset, and is stored as the `'env'` app setting (`app.get('env')`).
+
+**How it affects runtime behavior:**
+
+1. **Error logging** (`lib/application.js:617`) — When `env` is not `'test'`, unhandled errors that bubble through the stack are logged to `console.error`. In test mode, this logging is suppressed.
+
+2. **Final error handler** (`lib/application.js:154-155`) — The `env` value is passed to `finalhandler`. In `'development'` mode, finalhandler sends the full error stack trace in HTTP error responses. In `'production'`, it sends only the status code/message (no stack trace leak).
+
+3. **View caching** — Express enables view caching by default when `env` is `'production'` (this is a convention in view engines that check the setting).
+
+---
+
+### What about `trust proxy`?
+
+`trust proxy` is **not** controlled by an environment variable. It's an application setting configured via:
+
+``\`js
+app.set('trust proxy', true);  // or a string/number/function
+``\`
+
+It defaults to `false` at `lib/application.js:99`. Sub-apps inherit the parent's `trust proxy fn` if they haven't set their own (lines 101-115).
+
+---
+
+### `DEBUG` (indirect)
+
+Express uses the `debug` module (`debug('express:application')`, etc.), which reads the `DEBUG` environment variable. This is not Express-spec
+...[truncated 121 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate, well-grounded, and cover essentially the same information. Response A includes specific line numbers for individual items and mentions require('express')() usage. Response B includes the return statement and file range. Both correctly identify the location and all key initialization steps. The differences are minor and stylistic.
+Both responses are nearly identical in substance and quality. They correctly identify NODE_ENV as the sole environment variable Express reads directly, reference the same file/line (lib/application.js:91), cover the same three behavioral effects (error logging, finalhandler stack traces, view caching in production), correctly clarify that trust proxy is a programmatic setting not an env var, and mention DEBUG as an indirect dependency via the debug module. Response A includes slightly more detail: the actual code snippet for view caching (lines 138-140) and a mention of NO_DEPRECATION in tests. Response B has slightly cleaner formatting and a marginally more descriptive explanation of finalhandler behavior. These differences are negligible — both are accurate, well-grounded, and equally actionable.
+```
+
+</details>
+
+<details><summary>Express P12 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** What unit tests cover the app.render method and where do they live in the repo?
+
+- Interactions: no_budi=3 / with_budi=4
+- Cost USD: no_budi=$0.0635 / with_budi=$0.0582
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+The `app.render` tests live in **`test/app.render.js`** (lines 1–393). There's also a minor reference in `test/app.engine.js`, but the dedicated file covers all the core scenarios.
+
+Here's a summary of what `test/app.render.js` covers:
+
+**`app.render(name, fn)` — 13 tests:**
+| Lines | Test |
+|-------|------|
+| 10–20 | Absolute paths |
+| 22–33 | Absolute paths with `"view engine"` setting |
+| 35–46 | Exposes `app.locals` |
+| 48–59 | `index.<engine>` support |
+| 61–80 | Render error throws are caught |
+| 83–93 | Helpful error when file doesn't exist |
+| 96–107 | Error callback invoked on render error |
+| 110–121 | Rendering with explicit extension |
+| 123–136 | Rendering with `"view engine"` setting |
+| 139–203 | `"views"` setting — single path, array of paths, lookup order, missing file error |
+| 206–227 | Custom `"view"` constructor |
+| 230–289 | Caching — no cache vs `"view cache"` setting |
+
+**`app.render(name, options, fn)` — 5 tests:**
+| Lines | Test |
+|-------|------|
+| 293–305 | Renders template with passed options |
+| 307–318 | Exposes `app.locals` alongside options |
+| 320–332 | Render-call locals take precedence over `app.locals` |
+| 334–350 | Accepts `null` or `undefined` options |
+| 353–382 | Per-call `cache: true` option overrides setting |
+```
+
+#### Response (`with_budi`)
+
+```text
+All `app.render` unit tests live in **`test/app.render.js`**. Here's a summary of what's covered (21 test cases):
+
+| Line | Test |
+|------|------|
+| 10 | should support absolute paths |
+| 22 | should support absolute paths with "view engine" |
+| 35 | should expose app.locals |
+| 48 | should support index.\<engine\> |
+| 61 | should handle render error throws |
+| 83 | should provide a helpful error (when file not found) |
+| 96 | should invoke the callback (when file not found) |
+| 110 | should render the template (when an error occurs) |
+| 124 | should render the template (when "view engine" is given) |
+| 139 | should lookup the file in the path (when "views" is given) |
+| 153 | should lookup the file in the path (when "views" is array) |
+| 170 | should lookup in later paths until found |
+| 187 | should error if file does not exist |
+| 207 | should create an instance of it (when "view" is given) |
+| 230 | should always lookup view without cache |
+| 260 | should cache with "view cache" setting |
+| 293 | should render the template (.render(name, options, fn) describe) |
+| 307 | should expose app.locals |
+| 320 | should give precedence to app.render() locals |
+| 334 | should accept null or undefined options |
+| 353 | should cache with cache option |
+
+A few additional `app.render` assertions also appear in `test/app.engine.js` (testing engine registration interacts correctly with rendering).
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify test/app.render.js as the primary test file and mention test/app.engine.js as a secondary reference. Both provide detailed tables with line numbers mapping to specific test cases. Response A organizes tests by describe block with line ranges (18 grouped entries), while Response B enumerates all 21 individual `it` blocks with starting line numbers. Response B is slightly more granular, but Response A's grouping by describe block provides useful structural context. Both are highly grounded in the actual repository contents and equally actionable for navigating to specific tests. The differences are stylistic rather than substantive.
+```
+
+</details>
+
+<details><summary>Express P13 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** Where is app.render defined and how does it resolve a view template to rendered output?
+
+- Interactions: no_budi=5 / with_budi=6
+- Cost USD: no_budi=$0.0742 / with_budi=$0.0871
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+Here's the full pipeline:
+
+## `app.render` — `lib/application.js:522`
+
+**Signature:** `app.render(name, options, callback)`
+
+### Flow from template name to rendered output:
+
+1. **Merge options** (line 536): Combines `app.locals`, `opts._locals`, and the caller-provided `opts` into `renderOptions`. This is how variables become available in templates.
+
+2. **Check the view cache** (lines 544–546): If `view cache` is enabled (on by default in production), it looks up a previously-constructed `View` instance by name in `this.cache`.
+
+3. **Construct a `View`** (lines 550–556, defined in `lib/view.js:52`): If not cached, instantiates `new View(name, ...)` passing:
+   - `defaultEngine` — the `'view engine'` app setting (e.g. `'pug'`)
+   - `root` — the `'views'` app setting (defaults to `./views`)
+   - `engines` — `this.engines`, a shared cache of loaded engine functions
+
+4. **`View` constructor** (`lib/view.js:52–95`):
+   - Determines the file extension — either from `name` itself or by appending the `defaultEngine`.
+   - **Loads the engine** if not already cached: `require(mod).__express` (line 81). The engine module must export an `__express` function.
+   - **Looks up the file** via `this.lookup(fileName)` → sets `this.path`.
+
+5. **`View.prototype.lookup`** (`lib/view.js:104`): Iterates over each `root` directory, calls `path.resolve(root, name)`, then delegates to `this.resolve(dir, file)`.
+
+6. **`View.prototype.resolve`** (`lib/view.js:169`): Tries two filesystem paths using `fs.
+...[truncated 838 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+`app.render` is defined at `lib/application.js:522`. Here's the full pipeline from template name to rendered output:
+
+## 1. `app.render(name, options, callback)` — `lib/application.js:522`
+
+- **Merges options**: combines `app.locals`, `opts._locals`, and the caller's `opts` into `renderOptions` (line 536).
+- **Checks the view cache**: if `view cache` is enabled, it looks up the view by `name` in `this.cache` (lines 544-546). This avoids re-resolving the file on every render.
+- **Creates a `View` instance** (if not cached): instantiates `new View(name, { defaultEngine, root, engines })` (lines 550-556). The `View` constructor (below) resolves the template file on disk.
+- **Errors if not found**: if `view.path` is falsy after construction, returns an error to the callback (lines 558-565).
+- **Renders**: calls `tryRender(view, renderOptions, done)` (line 574), which is a simple try/catch wrapper around `view.render()` (lines 625-631).
+
+## 2. `View` constructor — `lib/view.js:52`
+
+- **Resolves the extension**: if the `name` has no extension, appends the `defaultEngine` extension (e.g. `.pug`) (lines 66-73).
+- **Loads the engine**: if `opts.engines[ext]` isn't cached yet, it `require()`s the engine module and grabs its `__express` export (lines 75-88). This is the contract template engines must follow.
+- **Looks up the file**: calls `this.lookup(fileName)` which iterates over `this.root` directories (which can be an array), calling `path.resolve(root, name)` and then `this.resolve
+...[truncated 735 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses are nearly identical in content, accuracy, and grounding. They correctly identify app.render at lib/application.js:522, trace the full pipeline through View construction, file lookup, resolve, and engine invocation, and reference the same specific line numbers and file paths. Response A uses a flat numbered list (steps 1-8), while Response B uses a hierarchical structure with 4 main sections. Both approaches are clear and readable. The information conveyed is substantively the same, with matching line references and identical technical accuracy. Neither response contains errors or omits important details. This is effectively a tie.
+```
+
+</details>
+
+<details><summary>Express P14 | winner=tie | Q 8→8 G 8→8</summary>
+
+**Prompt:** Where is app.route defined and how does it create a new Route object for a given path?
+
+- Interactions: no_budi=23 / with_budi=22
+- Cost USD: no_budi=$0.2283 / with_budi=$0.1990
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+No `node_modules` at all — dependencies aren't installed. The `router` package is an external dependency. Here's how the flow works based on the Express source:
+
+---
+
+**`app.route(path)`** is defined at `lib/application.js:256`:
+
+``\`js
+app.route = function route(path) {
+  return this.router.route(path);
+};
+``\`
+
+It delegates to `this.router.route(path)`, where `this.router` is a lazily-created instance of the external [`router`](https://www.npmjs.com/package/router) package (v2.2.0+), set up via `Object.defineProperty` at `lib/application.js:69-82`:
+
+``\`js
+Object.defineProperty(this, 'router', {
+  configurable: true,
+  enumerable: true,
+  get: function getrouter() {
+    if (router === null) {
+      router = new Router({
+        caseSensitive: this.enabled('case sensitive routing'),
+        strict: this.enabled('strict routing')
+      });
+    }
+    return router;
+  }
+});
+``\`
+
+The `Router` is lazily instantiated on first access with the app's `caseSensitive` and `strict` settings.
+
+**How `router.route(path)` creates a Route** (in the external `router` package): It creates a new `Route` object for the given `path`, then creates a `Layer` for that route and pushes it onto the router's internal stack. The returned `Route` object exposes HTTP verb methods (`.get()`, `.post()`, etc.) so you can chain handlers:
+
+``\`js
+app.route('/users')
+  .get(listUsers)
+  .post(createUser);
+``\`
+
+Each chained method call adds a handler to that single `Route`, and the `Route` is matched via its single
+...[truncated 321 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+The external `router` package isn't installed locally and isn't in the documentation index. Here's what the code shows:
+
+## `app.route` definition
+
+**`lib/application.js:256-258`** — `app.route` is a one-liner that delegates to the router:
+
+``\`js
+app.route = function route(path) {
+  return this.router.route(path);
+};
+``\`
+
+## How the router is created
+
+**`lib/application.js:59-82`** — The router is lazily instantiated via a property getter defined in `app.init`:
+
+``\`js
+var router = null;
+
+Object.defineProperty(this, 'router', {
+  configurable: true,
+  enumerable: true,
+  get: function getrouter() {
+    if (router === null) {
+      router = new Router({
+        caseSensitive: this.enabled('case sensitive routing'),
+        strict: this.enabled('strict routing')
+      });
+    }
+    return router;
+  }
+});
+``\`
+
+`Router` comes from the external [`router` package](https://www.npmjs.com/package/router) (`^2.2.0`, per `package.json:57`). That package is the standalone extraction of Express's original router logic.
+
+## How `Router#route(path)` works (in the `router` package)
+
+The `router` package's `.route(path)` method does the following:
+
+1. Creates a new `Route` object for the given `path`.
+2. Creates a `Layer` that wraps that `Route`, with `route.dispatch.bind(route)` as the layer's handler.
+3. Pushes the layer onto the router's internal `stack`.
+4. Returns the `Route` object.
+
+The returned `Route` has chainable HTTP verb methods (`.get()`, `.post()`, `.put()`, `.delete()`, etc.), 
+...[truncated 242 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify app.route at lib/application.js:256, the lazy router initialization via Object.defineProperty, delegation to the external router package (^2.2.0), and how Route objects support chainable HTTP verb methods. Response A adds the detail about Route/Router re-exports at lib/express.js:70-71. Response B is slightly better organized with clear section headers and includes the specific detail about route.dispatch.bind(route) as the layer's handler, showing deeper understanding of the router internals. Response B also notes the package.json line for the dependency. These differences are marginal — both are accurate, well-grounded, and practically useful. Response B has a slight edge in actionability due to better structure and the dispatch binding detail, but overall quality is equivalent.
+```
+
+</details>
+
+<details><summary>Express P15 | winner=tie | Q 8→8 G 8→8</summary>
+
+**Prompt:** What calls app.route and what path patterns do the call sites register?
+
+- Interactions: no_budi=2 / with_budi=2
+- Cost USD: no_budi=$0.0208 / with_budi=$0.0210
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+All call sites are in `test/app.route.js`. The registered path patterns are:
+
+| Pattern | Lines |
+|---------|-------|
+| `'/foo'` | 10, 26, 68, 90, 112, 131, 153, 175 |
+| `'/:foo'` | 45, 58 |
+
+Two patterns total: a literal path `/foo` (used 8 times) and a parameterized path `/:foo` (used twice).
+```
+
+#### Response (`with_budi`)
+
+```text
+All call sites are in `test/app.route.js`. The registered path patterns are:
+
+| Path | Lines |
+|------|-------|
+| `'/foo'` | 10, 26, 68, 90, 112, 131, 153, 175 |
+| `'/:foo'` | 45, 58 |
+
+Two patterns: a literal `/foo` (used 8 times) and a parameterized `/:foo` (used twice).
+```
+
+#### Judge rationale
+
+```text
+The two responses are virtually identical in content, structure, and accuracy. Both correctly identify test/app.route.js as the sole call site file, list the same two path patterns with the same line numbers, and provide the same summary. The only difference is minor column header naming ("Pattern" vs "Path") which has no impact on quality.
+```
+
+</details>
+
+<details><summary>Express P16 | winner=with_budi | Q 8→9 G 8→9</summary>
+
+**Prompt:** What calls res.format and how does content negotiation select the response handler?
+
+- Interactions: no_budi=6 / with_budi=7
+- Cost USD: no_budi=$0.0604 / with_budi=$0.0727
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+Here's how `res.format` works (`lib/response.js:569-594`):
+
+## Who calls it
+
+It's called by **user application code** in route handlers. Two examples in this repo:
+
+1. **`examples/content-negotiation/index.js:10`** — passes an object with `html`, `text`, and `json` handlers
+2. **`examples/error-pages/index.js`** — uses it in error handlers
+
+## How content negotiation selects the handler
+
+The logic at lines 573–591 is straightforward:
+
+1. **Extract keys** — Gets all keys from the passed object, filtering out `"default"` (line 573-574).
+
+2. **Match via `req.accepts(keys)`** — Calls `req.accepts()` with those keys (line 577). This delegates to the [`accepts`](https://github.com/jshttp/accepts) package, which parses the request's `Accept` header and returns the best match from the provided types using content-type negotiation. It returns the single best match, or `false` if none match.
+
+3. **Set `Vary: Accept`** — Always adds `Accept` to the `Vary` header (line 580) so caches know the response depends on the `Accept` header.
+
+4. **Dispatch** based on the result:
+   - **Match found** (`key` is truthy, line 582): Sets `Content-Type` to the normalized MIME type and calls `obj[key](req, res, next)`.
+   - **No match, but `default` handler exists** (line 585): Calls `obj.default(req, res, next)` — no `Content-Type` is set automatically.
+   - **No match, no default** (line 587): Calls `next()` with a **406 Not Acceptable** error, listing the types that were available.
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's how `res.format` works (`lib/response.js:569-594`):
+
+## Callers
+
+Two examples in the repo call `res.format`:
+
+1. **`examples/content-negotiation/index.js:10`** — maps `html`, `text`, and `json` keys to response handlers.
+2. **`examples/error-pages/index.js:66`** — maps `html`, `json`, and `default` keys for 404 responses.
+
+## How content negotiation selects the handler
+
+The logic at `lib/response.js:569-594`:
+
+1. **Extract keys** — `Object.keys(obj)` gives the handler names (e.g. `html`, `json`, `text`), filtering out the special `default` key (line 573-574).
+
+2. **Match against `Accept` header** — calls `req.accepts(keys)` (line 577), which delegates to the [`accepts`](https://github.com/jshttp/accepts) package. That library parses the request's `Accept` header and returns the **best match** from the provided keys, respecting quality factors and specificity. It returns `false` if nothing matches.
+
+3. **Set `Vary: Accept`** — always adds `Vary: Accept` to the response (line 580) so caches know the response depends on the `Accept` header.
+
+4. **Dispatch**:
+   - **Match found** (`key` is truthy, line 582): sets `Content-Type` to the normalized MIME type of the matched key and calls `obj[key](req, res, next)`.
+   - **No match, `default` handler exists** (line 585): calls `obj.default(req, res, next)` — a catch-all with no `Content-Type` set automatically.
+   - **No match, no default** (line 587-590): calls `next()` with a **406 Not Acceptable** error, listing the supporte
+...[truncated 256 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses are very similar in structure and content, covering the same key points about res.format. Response B (with_budi) edges ahead in two ways: (1) it provides a more specific line reference for the error-pages example (line 66 vs. just the file), and (2) it includes an additional paragraph explaining req.accepts() at lib/request.js:127-130 as a wrapper around the accepts npm package with an RFC 7231 reference, giving better grounding in the actual codebase. Response B also mentions "quality factors and specificity" in the accepts description, which is more precise. These are incremental improvements rather than major differences.
+```
+
+</details>
+
+<details><summary>Express P17 | winner=no_budi | Q 9→8 G 8→7</summary>
+
+**Prompt:** I want to add a middleware that logs request timing for every route. What files and functions would I need to modify?
+
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0341 / with_budi=$0.0317
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+This is the **Express framework source code** itself, not an app built with Express. The answer depends on whether you want to:
+
+1. **Add timing middleware to an app that uses Express** (the common case), or
+2. **Build timing into the Express framework itself**
+
+---
+
+### Option 1: Add it to your app (no framework modification needed)
+
+You don't need to modify any Express source files. Just add middleware at the top of your app:
+
+``\`js
+const app = express();
+
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} — ${ms.toFixed(2)}ms`);
+  });
+  next();
+});
+``\`
+
+No files in `lib/` need changing.
+
+---
+
+### Option 2: Build it into the Express framework source
+
+If you want timing as a built-in feature, you'd touch these files:
+
+| File | What to do |
+|---|---|
+| `lib/application.js` | In the `init()` or `lazyrouter()` function, register the timing middleware as the very first middleware on the internal router. |
+| `lib/express.js` | Optionally export it as `exports.timing` so users can also use it standalone (like `express.json()`). |
+
+The key function is `lazyrouter()` in `lib/application.js` — that's where the internal router is created and where built-in middleware gets wired in. You'd insert your timing middleware there so it runs before any user-defined routes.
+
+---
+
+For most use cases, **Option 1 is the ri
+...[truncated 128 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+You **don't need to modify any Express source files**. Request timing is a concern for application code, not the framework itself. You'd add it in your app using `app.use()`:
+
+``\`js
+const express = require('express');
+const app = express();
+
+// Request timing middleware — add before all other routes
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    const duration = Number(process.hrtime.bigint() - start) / 1e6; // ms
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${duration.toFixed(2)}ms`);
+  });
+  next();
+});
+
+// ... your routes here
+``\`
+
+Key points:
+
+- **No framework modifications needed** — this is a standard `app.use()` middleware
+- Place it **before** your route definitions so it wraps all requests
+- It hooks into the `res` `'finish'` event to measure total time including response writing
+- `process.hrtime.bigint()` gives nanosecond precision
+
+If you're looking at the Express source for context: `lib/application.js` contains `app.use()` and `app.handle()` which are responsible for the middleware pipeline, and the `Router` (from the `router` package) dispatches requests through the middleware stack. But again, you'd just consume this via `app.use()` in your own code.
+```
+
+#### Judge rationale
+
+```text
+Both responses correctly identify this as the Express framework source and that timing middleware is an app-level concern. Both provide nearly identical, correct middleware code using process.hrtime.bigint() and the res 'finish' event. Response A edges ahead by addressing both interpretations of the question: (1) app-level middleware (no changes needed) and (2) framework-level integration, with specific file/function pointers (lib/application.js lazyrouter(), lib/express.js for exports). This is more thorough given the user asked "what files and functions would I need to modify" while standing in the Express source repo. Response B mentions lib/application.js and the Router but only briefly and doesn't detail what modifications would be needed if the user actually wanted framework-level changes. Response A is more grounded in the repo structure and more actionable for the framework-modification scenario.
+```
+
+</details>
+
+<details><summary>Express P18 | winner=tie | Q 8→8 G 7→8</summary>
+
+**Prompt:** How does Express handle errors in middleware — trace from a middleware calling next(err) to the error being sent to the client?
+
+- Interactions: no_budi=20 / with_budi=22
+- Cost USD: no_budi=$0.2407 / with_budi=$0.2321
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+I can trace the full error path from the Express source code and the well-known `router` and `finalhandler` packages. Here's the complete flow:
+
+---
+
+## Error Handling Flow: `next(err)` → Client Response
+
+### 1. Entry point: `app.handle()` (`lib/application.js:152-178`)
+
+When a request arrives, `app.handle` sets up a **`done` callback** using `finalhandler` (line 154) and delegates to `this.router.handle(req, res, done)` (line 177):
+
+``\`js
+app.handle = function handle(req, res, callback) {
+  var done = callback || finalhandler(req, res, {
+    env: this.get('env'),
+    onerror: logerror.bind(this)
+  });
+  // ...
+  this.router.handle(req, res, done);
+};
+``\`
+
+The `done` callback is the **last resort** — it's called when the entire middleware stack is exhausted or an unhandled error falls through.
+
+### 2. Router layer dispatch (`router` package)
+
+The `router` package maintains a stack of **Layer** objects (each wrapping a middleware or route). `router.handle()` iterates through this stack via an internal `next()` function. When middleware calls `next(err)`:
+
+1. **`next(err)` is called** — the router's internal `next` sets `layerError = err` and continues iterating through the stack.
+
+2. **Normal middleware is skipped** — for each layer, the router checks the handler's **arity** (number of declared parameters). Regular middleware has 3 params `(req, res, next)`. When there's an error, the router **skips** all 3-param middleware.
+
+3. **Error-handling middleware is matched** — the r
+...[truncated 2947 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Now I have enough to explain the full flow. Here's the trace:
+
+---
+
+## Error handling flow: `next(err)` → client response
+
+### 1. Middleware calls `next(err)`
+
+When a middleware or route handler encounters an error, it calls `next(err)` — or throws synchronously (Express wraps the handler call in a try/catch):
+
+``\`js
+// examples/error/index.js:34-41
+app.get('/next', function(req, res, next) {
+  process.nextTick(function() {
+    next(new Error('oh no!'));   // ← enters the error path
+  });
+});
+``\`
+
+A synchronous `throw` inside a route handler works the same way — the `router` package catches it and calls `next(err)` internally.
+
+### 2. Router skips normal middleware, finds error-handling middleware
+
+The `router` package (required at `lib/application.js:26`) implements the `next()` function. When `next` is called **with an argument**, the router enters its error-dispatching mode:
+
+- It **skips** every normal middleware (arity ≤ 3: `fn(req, res, next)`)
+- It **invokes** the first error-handling middleware it finds — identified by having **arity === 4**: `fn(err, req, res, next)`
+
+This is the key dispatch rule: the router checks `fn.length === 4` to distinguish error handlers from regular middleware. Layers are walked in registration order, so error handlers must be registered **after** the routes they protect (`examples/error/index.js:47`).
+
+### 3. User-defined error handler responds
+
+If a matching error-handling middleware exists, it receives the error:
+
+``\`js
+// examples/error
+...[truncated 1815 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses accurately trace the error path from next(err) through the router's layer stack (skipping arity-3 handlers, matching arity-4 error handlers) to finalhandler as the last resort. Both reference lib/application.js with correct line numbers for app.handle and logerror, and both explain the dev vs production behavior of finalhandler.
+
+Response A provides slightly more detail on finalhandler specifics (headers-already-sent socket destruction, CSP headers, HTML response format) and includes a fuller visual diagram. Response B is better grounded in the actual repository: it references examples/error/index.js with specific line numbers, uses real example code from the repo rather than simplified pseudocode, and mentions the synchronous throw try/catch behavior that A omits. The router dispatch code in A is explicitly labeled "simplified" rather than taken from the actual source.
+
+On balance, A's extra finalhandler detail and B's stronger repo grounding offset each other, making this effectively a tie. Both are well-structured, correct, and actionable explanations of Express error handling.
 ```
 
 </details>
 
 ### ripgrep
 
-<details><summary>ripgrep P1 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>ripgrep P1 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** What are the entry points of ripgrep and how are responsibilities split across the crates under crates/?
 
-- Interactions: no_budi=19 / with_budi=9
-- Cost USD: no_budi=$0.2016 / with_budi=$0.0718
+- Interactions: no_budi=16 / with_budi=24
+- Cost USD: no_budi=$0.2174 / with_budi=$0.2279
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full picture:
+## Entry points
 
-## Entry Point
+The single binary entry point is `crates/core/main.rs:43` — the `main()` function that produces the `rg` binary. It:
 
-**`crates/core/main.rs`** — the single binary entry point, compiled as the `rg` executable. The `main()` function calls `flags::parse()` to parse CLI args, then `run()` dispatches based on the mode:
+1. Parses CLI args via `flags::parse()`
+2. Routes to one of several modes in `run()` (line 77):
+   - **`Mode::Search`** → `search()` (single-threaded) or `search_parallel()` (multi-threaded)
+   - **`Mode::Files`** → `files()` / `files_parallel()` — list files without searching (`--files`)
+   - **`Mode::Types`** → `types()` — list known file types (`--type-list`)
+   - **`Mode::Generate`** → `generate()` — emit man pages or shell completions (`--generate`)
+   - **Special modes** (help/version) short-circuit before full init
 
-| Mode | Function | Description |
+The `crates/core/` directory also contains supporting modules: `flags` (arg parsing), `haystack` (file-to-search abstraction), `search` (search worker), `messages`, and `logger`.
+
+## Crate responsibilities
+
+| Crate | Pkg name | Role |
 |---|---|---|
-| `Search` (1 thread) | `search()` | Sequential directory walk + search |
-| `Search` (N threads) | `search_parallel()` | Parallel walk via `ignore`'s `WalkBuilder` |
-| `Files` | `files()` / `files_parallel()` | List matching files without searching (`--files`) |
-| `Types` | `types()` | Print known file types (`--type-list`) |
-| `Generate` | `generate()` | Emit man pages or shell completions |
-| `Special` | `special()` | Short-circuit for `--help` / `--version` |
-
-The core binary also has these supporting modules:
-- **`flags/`** — CLI argument parsing in two layers: `lowargs` (raw flags) → `hiargs` (high-level, e.g., compiled glob matchers, configured searcher/printer)
-- **`search.rs`** — `SearchWorker` that ties a `Matcher`, `Searcher`, and `Printer` together
-- **`haystack.rs`** — abstraction over "things to search" (files, stdin)
-- **`messages.rs`** — thread-safe error/warning messaging macros
-
-## Crate Responsibilities
-
-The library crates form a layered architecture:
-
-| Crate | Pub name | Role |
-|---|---|---|
-| **`grep`** | `grep` | Facade crate — re-exports all the `grep-*` crates below under a single namespace |
-| **`matcher`** | `grep-matcher` | **Trait definition**: the `Matcher` trait
-...[truncated 1892 chars]
+| **`crates/grep`** | `grep` | **Façade crate** — re-exports all the other `grep-*` crates under one umbrella (`grep::matcher`, `grep::searcher`, `grep::printer`, etc.) |
+| **`crates/matcher`** | `grep-matcher` | **Trait definition** — the `Matcher` trait, an abstract interface for pattern matching (substring, regex, etc.) using internal iteration |
+| **`crates/regex`** | `grep-regex` | **Rust regex backend** — implements `Matcher` using Rust's `regex` crate. Handles AST analysis, literal extraction, and banned-pattern detection |
+| **`crates/pcre2`** | `grep-pcre2` | **PCRE2 back
+...[truncated 2010 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the overview:
+Here's an overview of ripgrep's architecture:
 
 ## Entry Point
 
-The single binary entry point is **`crates/core/main.rs`** (compiled as the `rg` binary). It contains:
+The single binary entry point is `crates/core/main.rs:43` (compiled as the `rg` binary). The `main()` function calls `flags::parse()` to parse CLI args, then `run()` dispatches into one of several modes:
 
-- `main.rs` — top-level orchestration, allocator setup
-- `flags/` — CLI argument parsing in two layers: `lowargs.rs` (raw parse) → `hiargs.rs` (validated, high-level args); `defs.rs` has flag definitions, `config.rs` handles config files, `parse.rs` is the parser
-- `search.rs` — drives the actual search (wires together searcher + printer + matcher)
-- `haystack.rs` — determines what files/paths to search
-- `messages.rs` — user-facing error/warning output
-- `logger.rs` — debug logging
+- **`Mode::Search`** — the primary mode. Dispatches to `search()` (single-threaded) or `search_parallel()` (multi-threaded) depending on `args.threads()`.
+- **`Mode::Files`** — list matching files without searching (`--files`). Also has single/multi-threaded variants.
+- **`Mode::Types`** — list known file types (`--type-list`).
+- **`Mode::Generate`** — emit man pages or shell completions (`--generate`).
+- **`SpecialMode`** — short-circuits for `--help` and `--version`.
 
-## Crates and their responsibilities
+The `crates/core/` directory also contains the CLI flag parsing pipeline (`flags/`), haystack (search target) abstraction (`haystack.rs`), and the search worker that ties matcher+searcher+printer together (`search.rs`).
 
-| Crate | Published as | Role |
+## Crate Responsibilities
+
+The crates form a layered architecture, from low-level traits to high-level composition:
+
+| Crate | Pub name | Role |
 |---|---|---|
-| **`grep`** | `grep` | Façade crate — re-exports the other `grep-*` crates for convenience |
-| **`matcher`** | `grep-matcher` | Trait abstraction for matchers (regex engines). Defines `Matcher` trait so the searcher is engine-agnostic |
-| **`regex`** | `grep-regex` | `Matcher` impl using Rust's `regex` crate (the default engine) |
-| **`pcre2`** | `grep-pcre2` | `Matcher` impl using PCRE2 (optional, for lookaround etc.) |
-| **`searcher`** | `grep-searcher` | Core search logic — reads input line-by-line, applies a `Matcher`, reports matches via a `Sink` trait |
-| **`printer`** | `grep-printer` | `Sink` implementations that format output (standard grep-like, JSON, summary stats) |
-| **`cli`** | `grep-cli` | CLI utilities — stdout handling, decompression, pattern extraction |
-|
-...[truncated 781 chars]
+| **`matcher`** | `grep-matcher` | Defines the `Matcher` trait — the abstract interface for text search. Decouples the search engine from any specific regex implementation. |
+| **`regex`** | `grep-regex` | Implements `Matcher` using Rust's `regex` crate. The default regex engine. |
+| **`pcre2`** | `grep-pcre2` | Implements `Matcher` using PCRE2. Optional, enabled via the `pc
+...[truncated 1747 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-grounded in the repository. Response A edges ahead by including the mode dispatch table (Search/Files/Types/Generate/Special) which directly maps to the run() function's behavior, providing a clearer picture of the entry point logic. Its data flow diagram with ASCII art is more immediately readable, and it explains the parallel search mechanism (build_parallel + cloned SearchWorker). Response B contributes a few details A misses (logger.rs, config.rs, .rgignore, the note that core isn't published), but these are minor additions. Overall, Response A gives a more complete and actionable architectural overview.
+Both responses are nearly identical in structure, accuracy, and depth. They correctly identify the entry point at crates/core/main.rs:43, enumerate the same modes (Search, Files, Types, Generate, special/help/version), and describe the same set of crates with accurate role descriptions. Response A has slightly more detail: it mentions the Summary printer, the messages/logger modules in core, and provides a more granular dependency tree showing internal crate-to-crate dependencies (e.g., searcher→matcher, printer→matcher). Response B is slightly cleaner in presentation and highlights the key design insight about Matcher trait decoupling and notes ignore's independent usefulness. These differences are marginal — A is more exhaustive in internal details while B is more concise and highlights architectural significance. Overall quality, grounding, and actionability are equivalent.
 ```
 
 </details>
@@ -9217,71 +8846,83 @@ Both responses are accurate and well-grounded in the repository. Response A edge
 
 **Prompt:** Describe the module layout — which crates own which concern in the search pipeline (matching, searching, printing, config)?
 
-- Interactions: no_budi=15 / with_budi=14
-- Cost USD: no_budi=$0.1559 / with_budi=$0.0983
+- Interactions: no_budi=17 / with_budi=16
+- Cost USD: no_budi=$0.1481 / with_budi=$0.1474
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the module/crate layout of ripgrep's search pipeline:
+Here's the crate layout and what each owns:
 
-## Crate architecture
+## Search pipeline (layered bottom-up)
 
-The project is split into a **workspace of library crates** (under `crates/`) plus the **binary itself** (compiled from `crates/core/`). The `grep` crate is a thin facade that re-exports the libraries below.
+### `grep-matcher` — Matching trait
+The foundational abstraction. Defines a `Matcher` trait for line-oriented pattern matching. It has **no regex dependency itself** — it's a pure interface so that different engines can be plugged in.
 
-### Layered from bottom to top:
+### `grep-regex` — Rust regex backend
+Implements `Matcher` using `regex-automata`/`regex-syntax`. This is the default pattern engine.
 
-| Crate | Package name | Concern |
-|---|---|---|
-| **`crates/matcher`** | `grep-matcher` | **Matching trait abstraction.** Defines the `Matcher` trait — a regex-engine-agnostic interface for line-oriented matching. No concrete regex engine lives here; it's purely the contract. |
-| **`crates/regex`** | `grep-regex` | **Rust regex backend.** Implements `Matcher` using Rust's `regex` crate. Handles word boundaries, case-insensitive flags, multi-pattern alternation, etc. |
-| **`crates/pcre2`** | `grep-pcre2` | **PCRE2 regex backend** (optional). Another `Matcher` impl, providing look-around, backreferences, etc. Gated behind the `pcre2` feature. |
-| **`crates/searcher`** | `grep-searcher` | **Searching / reading.** Drives the actual search over a file or stream. Handles memory-mapping vs. line-by-line reading, binary detection, line counting, before/after context windows, and invokes the `Matcher` to find hits. Defines the `Sink` trait that consumers implement to receive matches. |
-| **`crates/printer`** | `grep-printer` | **Printing / output formatting.** Implements `Sink` to render search results. Provides the `Standard` printer (grep-like output), `Summary
-...[truncated 2353 chars]
+### `grep-pcre2` — PCRE2 backend (optional)
+An alternative `Matcher` implementation using libpcre2, enabled via the `pcre2` feature. Gives backreferences, lookaround, etc.
+
+### `grep-searcher` — Searching
+Owns the core search loop: reading input (files, stdin, memory-mapped), line detection, binary file detection, encoding transcoding (`encoding_rs`), and context lines (before/after). It drives matches by taking any `Matcher` and calling a `Sink` callback with results. Depends on `grep-matcher` but **not** on any concrete regex crate.
+
+### `grep-printer` — Printing / output formatting
+Implements `Sink` (the searcher's callback trait) to produce output. Owns standard-style, JSON, and summary output formats. Handles coloring (`termcolor`), column numbers, file path headings, match highlighting, etc. Depends on both `grep-matcher` and `grep-searcher`.
+
+## File discovery
+
+### `globset` — Glob matching
+Compiles glob patterns into regex automata for fast matching. No filesystem interaction — pure pattern matching.
+
+### `ignore` — File
+...[truncated 1910 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the ripgrep crate layout, organized by concern:
+Here's the module/crate layout of ripgrep's search pipeline:
 
-## Search Pipeline (bottom-up)
+## Crate dependency graph (bottom-up)
 
-### `grep-matcher` — Matcher trait (abstraction layer)
-Defines the `Matcher` trait: a regex-engine-agnostic interface for line-oriented matching. All downstream crates depend on this trait, not on a concrete regex implementation.
+``\`
+                        ripgrep (binary)
+                             │
+                      crates/core          ← CLI app: main, arg parsing, orchestration
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+          grep (facade)   ignore        cli
+              │              │
+    ┌────┬────┼────┐         │
+    │    │    │    │      globset
+ matcher regex searcher printer
+    │    │         │         │
+    │    └────┘    └─────────┘
+    └──────────────────────────┘
+``\`
 
-### `grep-regex` — Rust regex backend
-Implements `Matcher` using Rust's `regex` crate. This is the default matching engine.
+## Crate responsibilities
 
-### `grep-pcre2` — PCRE2 regex backend (optional)
-Implements `Matcher` using PCRE2, providing features like backreferences and lookaround. Feature-gated behind `pcre2`.
+### **Matching**
 
-### `grep-searcher` — Search orchestration
-Drives the actual search over a file/stream. Handles line-oriented reading, memory mapping, binary detection, encoding, and context lines. Calls into a `Matcher` and feeds results to a `Sink` (a trait it defines for consumers of match results).
+- **`grep-matcher`** — The abstract `Matcher` trait. Defines the interface for any pattern matching engine using internal iteration (push model). No concrete regex implementation lives here; it's purely the contract.
+- **`grep-regex`** — Concrete `Matcher` impl using Rust's `regex` crate. Handles AST analysis, literal extraction, banned pattern detection, and line-oriented regex building via `RegexMatcher` / `RegexMatcherBuilder`.
+- **`grep-pcre2`** — Alternative `Matcher` impl backed by PCRE2 (optional feature). Same trait, different engine.
 
-### `grep-printer` — Output formatting
-Implements the `Sink` trait from `grep-searcher`. Produces grep-style output (standard, JSON, summary) with colors, line numbers, file paths, etc.
+### **Searching**
 
-## File Discovery
-
-### `globset` — Glob pattern matching
-Low-level glob compilation and matching. Supports matching a single path against a set of globs simultaneously.
-
-### `ignore` — File walking with filtering
-Recursive directory traversal that respects `.gitignore`, `.ignore`, and `.rgignore` files. Builds on `globset`. Also handles `--type` filtering. Provides parallel walking.
-
-## Glue / Convenience
-
-
-...[truncated 1495 chars]
+- **`grep-searcher`** — The `Searcher` + `Sink` system. Owns reading bytes from a source (files, stdin, mmap), applying a `Matcher` over them line-by-line (or multi-line), and driving the results into a `Sink` callback. Handles
+...[truncated 2122 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are highly accurate and well-grounded in the repository structure. They cover the same crates (grep-matcher, grep-regex, grep-pcre2, grep-searcher, grep-printer, grep-cli, globset, ignore, grep facade, and crates/core) with correct descriptions of each crate's responsibility. Both correctly identify the two key architectural seams: the Matcher trait decoupling regex engines from search, and the Sink trait decoupling search from output. Response A uses a table format and provides a text-based data-flow summary; Response B groups crates by concern (Search Pipeline, File Discovery, Glue, Application) and includes an ASCII dependency graph. Response A has slightly more detail on the flags/ subdirectory; Response B mentions messages.rs/logger.rs which A omits. These are minor tradeoffs. Both are equally correct, equally grounded, and equally actionable for understanding the codebase architecture.
+Both responses are excellent and cover the same crates with accurate descriptions of their responsibilities. Response A has a clean text-based dependency flow diagram and a strong concluding insight about the trait-based decoupling design principle. Response B provides an ASCII art dependency graph and slightly more internal module detail (e.g., listing line_buffer.rs, searcher/core.rs, searcher/glue.rs, and naming the three printer Sink implementations explicitly). Response A's design principle summary adds conceptual value, while Response B's internal file references add navigational value. These trade-offs roughly balance out. Both correctly identify grep-matcher as the abstract trait, grep-regex/grep-pcre2 as concrete implementations, grep-searcher as the search loop owner, grep-printer as the Sink-based output formatter, and crates/core as the CLI binary that owns config/flags and orchestration. Neither contains meaningful inaccuracies.
 ```
 
 </details>
@@ -9290,106 +8931,73 @@ Both responses are highly accurate and well-grounded in the repository structure
 
 **Prompt:** Where is `run` defined and what does it do immediately after parsing CLI arguments?
 
-- Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0713 / with_budi=$0.0269
-- Hook: reason=ok context_chars=912
-
-#### Injected context
-
-```text
-[structural context]
-run  (walk.rs:1630)
-  ← called by: Matcher, search_reader, main
-  → refs: get_work, quit_now, run_one
-run  (main.rs:77)
-  ← called by: Matcher, search_reader, main
-  → refs: err, errored, files
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: crates/ignore/src/walk.rs
-  span: 1630-1636
-  anchor: fn run(mut self) {
-  proof:
-    - while let Some(work) = self.get_work() {
-    - if let WalkState::Quit = self.run_one(work) {
-    - self.quit_now();
-- file: crates/core/main.rs
-  span: 77-101
-  anchor: fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
-  proof:
-    - ParseResult::Err(err) => return Err(err),
-    - ParseResult::Special(mode) => return special(mode),
-    - Mode::Types => return types(&args),
-```
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0357 / with_budi=$0.0438
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-`run` is defined at `crates/core/main.rs:77`. It takes a `ParseResult<HiArgs>` — the already-parsed CLI arguments — and immediately after parsing does the following:
+`run` is defined at `crates/core/main.rs:77`. Immediately after parsing CLI arguments, it does:
 
-1. **Matches on `ParseResult`** (lines 80–84): Handles three cases:
-   - `Err` → returns the error immediately
-   - `Special` → delegates to `special()` (handles `--help`, `--version`, etc.)
-   - `Ok(args)` → extracts the `HiArgs` and continues
+1. **Matches on `ParseResult`** (lines 80–84) — handles errors, special modes (like `--help`/`--version` via `special()`), or extracts the parsed `HiArgs`.
 
-2. **Dispatches based on `Mode`** (lines 85–93): Uses `args.mode()` to decide what to do:
-   - `Mode::Search` with no possible matches → short-circuits to `false`
-   - `Mode::Search` single-threaded → calls `search()`
-   - `Mode::Search` multi-threaded → calls `search_parallel()`
-   - `Mode::Files` → lists files (`files()` or `files_parallel()`)
-   - `Mode::Types` → lists supported file types
-   - `Mode::Generate` → generates shell completions or man pages
+2. **Dispatches based on `args.mode()`** (lines 85–93):
+   - `Mode::Search` — returns early with `false` if no matches are possible, otherwise calls `search()` (single-threaded) or `search_parallel()` (multi-threaded) depending on `args.threads()`.
+   - `Mode::Files` — lists files via `files()` or `files_parallel()`.
+   - `Mode::Types` — prints supported file types.
+   - `Mode::Generate` — generates shell completions or man pages.
 
-3. **Determines exit code** (lines 94–100): Returns `0` if matches were found (and no errors in quiet mode), `2` if errors occurred, or `1` otherwise (no match).
+3. **Determines the exit code** (lines 94–100): `0` if a match was found (and no errors or quiet mode), `2` if errors occurred, `1` otherwise.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`run` is defined at `crates/core/main.rs:77`.
+The top-level `run` is defined at `crates/core/main.rs:77`.
 
 Immediately after receiving the parsed CLI arguments, it:
 
-1. **Matches on `ParseResult`** (lines 80–84) — returns early on error or special modes (like `--help`/`--version`), otherwise unwraps the `HiArgs`.
-2. **Dispatches based on `Mode`** (lines 85–93):
-   - **Search** — calls `search` (single-threaded) or `search_parallel` (multi-threaded), with a short-circuit to `false` if no matches are possible.
-   - **Files** — calls `files` or `files_parallel` depending on thread count.
-   - **Types** — calls `types`.
-   - **Generate** — calls `generate`.
-3. **Determines the exit code** (lines 94–100) — `0` if matches were found (and quiet or no errors), `2` if errors occurred, `1` otherwise.
+1. **Resolves the `ParseResult`** (lines 80–84) — errors propagate, special modes (like `--version`, `--help`) are handled via `special()`, and normal args are unwrapped.
 
-There's also a second `run` in `crates/ignore/src/walk.rs:1630`, which is the worker loop for the parallel directory walker — it pulls work items via `get_work()` and processes them with `run_one()`.
+2. **Dispatches based on `Mode`** (lines 85–93):
+   - **Search**: routes to `search()` (single-threaded) or `search_parallel()` (multi-threaded) depending on `args.threads()`. There's also a short-circuit if no matches are possible.
+   - **Files**: similarly routes to `files()` or `files_parallel()`.
+   - **Types**: lists supported file types.
+   - **Generate**: generates shell completions or man pages.
+
+3. **Determines the exit code** (lines 94–100) — `0` if a match was found (and no errors or `--quiet`), `2` if errors occurred, `1` otherwise.
+
+---
+
+Separately, there's also a `run` on the parallel walker worker at `crates/ignore/src/walk.rs:1630`, which is the per-thread work loop: it calls `self.get_work()` in a loop and processes each item via `self.run_one(work)`, quitting if signaled. That's the internal machinery invoked when `search_parallel` uses `WalkParallel`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify `run` at `crates/core/main.rs:77` and provide nearly identical, accurate breakdowns of the three main phases: matching on ParseResult, dispatching based on Mode, and determining the exit code. The line references and logic descriptions align well. Response B edges ahead by mentioning the second `run` in `crates/ignore/src/walk.rs:1630`, which shows broader codebase awareness and could prevent confusion if the user encounters that definition. Response B is also slightly more concise while covering the same core content. Response A is marginally more verbose in its descriptions (e.g., explicitly naming `search()`, `search_parallel()`, `files()`, `files_parallel()`) but this doesn't add significant value over B's equivalent coverage. The difference is small — both are high quality.
+Both responses correctly identify `run` at `crates/core/main.rs:77` and describe the same three-step behavior: resolving ParseResult, dispatching based on Mode, and determining the exit code. The line references and details are nearly identical and both are well-grounded in the actual code. Response B edges ahead by also mentioning the separate `run` on the parallel walker worker at `crates/ignore/src/walk.rs:1630`, which demonstrates deeper codebase awareness and provides useful additional context about how `search_parallel` connects to the internal walk machinery. This extra information is relevant to the question "where is run defined" since there are multiple definitions. The core answers are equivalent in quality, so the margin is small.
 ```
 
 </details>
 
-<details><summary>ripgrep P4 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>ripgrep P4 | winner=n/a | Q ?→? G ?→?</summary>
 
 **Prompt:** Where is `search_path` defined and what does it do with the matcher and writer it receives?
 
 - Interactions: no_budi=4 / with_budi=3
-- Cost USD: no_budi=$0.0491 / with_budi=$0.0367
-- Hook: reason=ok context_chars=857
+- Cost USD: no_budi=$0.0516 / with_budi=$0.0409
+- Hook: reason=ok context_chars=871
 
 #### Injected context
 
 ```text
 [structural context]
 search_path  (mod.rs:643)
-  ← called by: WriteColor, search
+  ← called by: should_decompress, search
   → refs: search_file_maybe_path
 search_path  (search.rs:380)
-  ← called by: WriteColor, search
+  ← called by: should_decompress, search
   → refs: clone, has_match, map
 
 [budi context]
@@ -9416,62 +9024,60 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-There are three definitions of `search_path`:
+There are three `search_path` definitions, layered on top of each other:
 
-### 1. `crates/core/search.rs:342` — method on `SearchWorker`
-A method that dispatches based on the `PatternMatcher` enum variant (`RustRegex` or `PCRE2`), forwarding to the free function below with the appropriate concrete matcher type.
+### 1. Method on `SearchWorker` — `crates/core/search.rs:342`
+This is the entry point. It destructures `self` into `searcher`, `printer`, and `matcher`, then dispatches based on the matcher variant (`RustRegex` or `PCRE2`) to the free function below.
 
-### 2. `crates/core/search.rs:380` — free function (the key orchestrator)
+### 2. Free function — `crates/core/search.rs:380`
 ``\`rust
 fn search_path<M: Matcher, W: WriteColor>(
-    matcher: M,
-    searcher: &mut grep::searcher::Searcher,
-    printer: &mut Printer<W>,
-    path: &Path,
+    matcher: M, searcher: &mut Searcher, printer: &mut Printer<W>, path: &Path,
 ) -> io::Result<SearchResult>
 ``\`
-This is where the matcher and writer (printer) are actually used together:
-- It matches on the `Printer` enum (`Standard`, `Summary`, or `JSON`).
-- For each variant, it calls `printer.sink_with_path(&matcher, path)` to create a **sink** — a write destination that combines the printer's output logic with the matcher and file path.
-- It then calls `searcher.search_path(&matcher, path, &mut sink)` to run the actual search, which reads the file, uses the matcher to find matches, and writes results into the sink (which flows to the printer/writer).
-- Finally, it collects `has_match` and `stats` from the sink into a `SearchResult`.
+This is the glue between the **matcher**, **printer** (writer), and **searcher**:
+- It matches on the `Printer` variant (`Standard`, `Summary`, or `JSON`).
+- For each variant, it creates a **sink** via `printer.sink_with_path(&matcher, path)` — the sink ties the matcher and the output writer together.
+- It then calls `searcher.search_path(&matcher, path, &mut sink)`, delegating to the lower-level searcher.
+- After the search completes, it extracts `has_match` and optional `stats` from the sink and returns a `SearchResult`.
 
-### 3. `crates/searcher/src/searcher/mod.rs:643` — low-level `Searcher::search_path`
+### 3. Method on `Searcher` — `crates/searcher/src/searcher/mod.rs:643`
 ``\`rust
 pub fn search_path<P, M, S>(&mut self, matcher: M, path: P, write_to: S)
 ``\`
-The lowest-level entry point. It opens the file at `path`, then delegates to `search_file_maybe_path`, which may use memory maps if the heuris
-...[truncated 482 chars]
+This is the lowest level. It opens the file at `path`, and delegates to `search_file_maybe_path`, which may use memory maps if heuristics suggest it would be faster. The `matcher` is used to find matches and `write_to` (a `Sink`) receives the results.
+
+**In summary:** th
+...[truncated 211 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There are two `search_path` definitions at different layers:
+There are two `search_path` functions at different layers:
 
-### 1. `Searcher::search_path` — `crates/searcher/src/searcher/mod.rs:643`
+### 1. `crates/searcher/src/searcher/mod.rs:643` — the low-level definition
 
-This is the **low-level** method on the `Searcher` struct. It:
-- Opens the file at the given `path`.
-- Delegates to `self.search_file_maybe_path(matcher, Some(path), &file, write_to)`, passing the `matcher` (any `M: Matcher`) and the `write_to` sink (`S: Sink`) through.
-- The sink (`write_to`) is the generic output destination — it receives match results as the searcher finds them.
+``\`rust
+pub fn search_path<P, M, S>(&mut self, matcher: M, path: P, write_to: S)
+``\`
 
-### 2. `search_path` (free fn) — `crates/core/search.rs:380`
+This is a method on `Searcher`. It opens the file at `path`, then delegates to `self.search_file_maybe_path(matcher, Some(path), &file, write_to)`. The `matcher: M` (`Matcher` trait) is forwarded as-is, and `write_to: S` (`Sink` trait) receives the search results. This method exists so callers can pass a path and let the searcher handle file opening and potential mmap optimization.
 
-This is the **higher-level** orchestration function. It:
-- Takes a `matcher: M`, a `searcher`, a `printer: &mut Printer<W>` (where `W: WriteColor`), and a `path`.
-- Matches on the `Printer` variant (`Standard`, `Summary`, or `JSON`) and for each:
-  1. Creates a **sink** from the printer via `p.sink_with_path(&matcher, path)` — this wires the matcher and the `WriteColor` writer together into a sink that formats output.
-  2. Calls `searcher.search_path(&matcher, path, &mut sink)` — i.e., the low-level method above.
-  3. Extracts `has_match` and `stats` from the sink and returns a `SearchResult`.
+### 2. `crates/core/search.rs:380` — the high-level wrapper
 
-**In summary:** the matcher defines *what* to search for, the writer/printer defines *how to format* results. The core `search_path` glues them: it builds a sink from the printer+matcher, hands it to the searcher, then collects the outcome.
-```
+``\`rust
+fn search_path<M: Matcher, W: WriteColor>(matcher, searcher, printer, path)
+``\`
 
-#### Judge rationale
+This is a free function that bridges the printer and searcher layers. It:
 
-```text
-Both responses are accurate and well-structured. The key differentiator is that Response A identifies all three definitions of `search_path`, including the `SearchWorker` method at `crates/core/search.rs:342` that dispatches based on the `PatternMatcher` enum variant (`RustRegex` or `PCRE2`). This is a real and relevant layer that Response B omits entirely. Both responses correctly describe the free function at line 380 and the low-level `Searcher::search_path` at line 643, with accurate details about how the matcher and printer/writer are wired together via a sink. The summaries are comparable in quality. Response A's completeness gives it a slight edge in grounding and overall quality.
+1. **Creates a sink** from the printer via `p.sink_with_path(&matcher, path)` — this combines the matcher and path into a write-capable sink tied to the specific printer variant (Standard, Summary, or JSON).
+2. **Calls the low-level `searcher.search_path`** (from layer 1 above), passing the matcher, path, and that sink.
+3. **Collects results** — after the search completes, it reads `sink.has_match()` and `sink.stats()` to build a `SearchResult`.
+
+In short: the matcher is always passed through to the search engine to do pattern matching, and the writer/sink receives matched lines as output. The core wrapper just adapts the `Printer<W>` into the `Sink` that th
+...[truncated 19 chars]
 ```
 
 </details>
@@ -9481,57 +9087,33 @@ Both responses are accurate and well-structured. The key differentiator is that 
 **Prompt:** Where is `search_parallel` defined and how does it distribute work across threads?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0387 / with_budi=$0.0329
-- Hook: reason=ok context_chars=549
-
-#### Injected context
-
-```text
-[structural context]
-search_parallel  (main.rs:160)
-  ← called by: run
-  → refs: buffer, build_parallel, clear
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: crates/core/main.rs
-  span: 160-229
-  anchor: fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
-  proof:
-    - None => return WalkState::Continue,
-    - return WalkState::Continue;
-    - return WalkState::Quit;
-```
+- Cost USD: no_budi=$0.0878 / with_budi=$0.0832
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's how `search_parallel` works, defined at `crates/core/main.rs:160`:
+Here's the breakdown:
 
-**Work distribution mechanism:**
+**Definition:** `crates/core/main.rs:160`
 
-The key line is **175**: `args.walk_builder()?.build_parallel().run(|| { ... })`. This delegates thread management entirely to the `ignore` crate's `WalkParallel` type.
+**How it distributes work:**
 
-`build_parallel()` creates a parallel directory walker that spawns multiple threads. Each thread walks the filesystem concurrently. The closure passed to `run()` is a **thread-factory** — it's called once per thread to produce a per-thread callback (`Box<dyn FnMut(DirEntry) -> WalkState>`).
+1. **Parallel walker:** The key is `args.walk_builder()?.build_parallel().run(...)` (line 175). This uses the `ignore` crate's `WalkParallel`, which spawns multiple threads to walk the filesystem and discover files concurrently.
 
-**Per-thread setup (lines 176–181):**
-- Shared state (`bufwtr`, `stats`, `matched`, `searched`, `haystack_builder`) is captured by reference.
-- `searcher.clone()` gives each thread its own `SearchWorker` with its own matcher, searcher, and print buffer — avoiding contention on the hot path.
+2. **Per-thread searchers:** The closure passed to `run()` is called **once per thread** to produce a worker callback. Each thread gets its own `searcher.clone()` (line 181) with its own buffer, so threads search files independently without contention on the search/print path.
 
-**Per-file work (lines 183–217):**
-Each thread receives directory entries from the walker and:
-1. Builds a `Haystack` from the entry (skipping non-files, etc.)
-2. Runs the search on its own cloned searcher
-3. If a match is found, sets `matched` atomically
-4. Aggregates stats into a shared `Mutex<Stats>` (only if stats are enabled)
-5. Writes output through `bufwtr.print()` — the `BufferWriter` handles synchronized output so results from different threads don't interleave
-6. Returns `WalkState::Quit` on broken pipe or if `quit_after_match` is set, otherwise `WalkState::Continue`
+3. **Shared state via atomics/mutex:**
+   - `matched: AtomicBool` — tracks whether any thread found a match (line 167)
+   - `searched: AtomicBool` — tracks whether any file was actually searched (line 168)
+   - `stats: Mutex<Stats>` — aggregated statistics, guarded by a mutex (line 166)
 
-**In summary:** The parallel walker distributes *f
-...[truncated 209 chars]
+4. **Work unit:** Each thread receives directory entries (`result`) from the parallel walker. For each entry, it builds a haystack, runs the search, prints results to a thread-local buffer, then flushes that buffer through the shared `bufwtr` (a `BufferWriter` which handles synchronized output to stdout).
+
+5. **Termination:** Threads return `WalkState::Quit` on broken pipe or when `quit_after_match` is set and a match is found, otherwise `WalkState::Continue`.
+
+In short, the parallel walker handles thread pool management and file discovery; `search_parallel` just clones a searcher per thread and use
+...[truncated 50 chars]
 ```
 
 #### Response (`with_budi`)
@@ -9539,122 +9121,126 @@ Each thread receives directory entries from the walker and:
 ```text
 `search_parallel` is defined at `crates/core/main.rs:160`. Here's how it distributes work:
 
-1. **Thread pool via `build_parallel()`** (line 175) — `args.walk_builder()?.build_parallel()` creates a parallel directory walker (from the `ignore` crate's `WalkParallel`). This spawns multiple threads that traverse the filesystem concurrently.
+1. **Thread pool via `build_parallel()`** (line 175): It calls `args.walk_builder()?.build_parallel().run(...)`. This builds a parallel directory walker (from the `ignore` crate's `WalkParallel`) that spawns multiple threads to traverse the filesystem.
 
-2. **Per-thread closure factory** — `.run(|| { ... })` takes a closure that is called **once per thread** to produce a worker callback. Each thread gets its own:
-   - `searcher.clone()` (line 181) — a cloned search worker with its own buffer, matcher, and printer
-   - Shared references to `bufwtr`, `stats`, `matched`, `searched`, and `haystack_builder`
+2. **Per-thread closure factory**: The argument to `.run()` is a closure that returns a `Box<dyn FnMut(...)>` — it's called **once per thread** to produce that thread's work callback. Each thread gets its own:
+   - **Cloned searcher** (`searcher.clone()` at line 181) — so each thread has its own matcher, searcher, and print buffer, avoiding contention.
+   - **Shared references** to `bufwtr`, `stats`, `matched`, and `searched` via `&` borrows captured by the `move` closure.
 
-3. **Work distribution** — The parallel walker internally distributes directory entries across threads. Each thread's callback (the inner `move |result|` closure at line 183) processes one file at a time:
-   - Builds a haystack from the walk result
-   - Runs the search on it
-   - Writes output through `bufwtr.print()` (which is thread-safe — `BufferWriter` synchronizes output)
+3. **Work distribution**: The parallel walker itself handles work-stealing — it fans out directory entries across threads, and each thread's callback processes one file at a time:
+   - Build a haystack from the walk result (line 184)
+   - Search it (line 190)
+   - Print results through `bufwtr.print()` (line 204), which is a `BufferWriter` that synchronizes output so results from different threads don't interleave.
 
 4. **Shared state coordination**:
-   - `matched` / `searched` — `AtomicBool`s for cross-thread signaling
-   - `stats` — wrapped in a `Mutex` for aggregating per-file statistics
-   - Early termination via `WalkState::Quit` on broken pipe or when `quit_after_match` is set
-
-So the parallelism comes entirely from `WalkParallel` — it owns the thread pool and feeds filesystem entries to worker threads, while each thread indep
-...[truncated 37 chars]
+   - `matched` / `searched`: `AtomicBool` flags for cross-thread signaling (e.g., quit-after-first-match at line 212).
+   - `stats`: `Mutex`-wrapped aggregate statistics.
+   - `bufwtr`: A `termcolor::BufferWriter` that in
+...[truncated 262 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in substance. They correctly identify the definition at crates/core/main.rs:160, explain build_parallel() and WalkParallel from the ignore crate, describe the per-thread closure factory pattern, detail the cloning of the searcher, and cover shared state coordination (AtomicBool, Mutex, BufferWriter). Both reference specific line numbers grounded in the actual file. Response A is slightly more detailed in enumerating the per-file steps (6 numbered items) and mentions "work-stealing style," while Response B is slightly more cleanly structured with its 4-point breakdown. These differences are marginal — both are accurate, well-grounded, and actionable.
+Both responses correctly identify `search_parallel` at `crates/core/main.rs:160` and provide nearly identical, well-structured explanations of the parallelism mechanism. They both cover: the parallel walker from the `ignore` crate, per-thread cloned searchers, atomic/mutex shared state, and synchronized output via `BufferWriter`. Response A adds slightly more on termination behavior (broken pipe, `WalkState::Quit`/`Continue`). Response B is slightly more precise about the closure factory pattern and mentions work-stealing. These are marginal differences — both are excellent, well-grounded, and actionable answers to the question.
 ```
 
 </details>
 
-<details><summary>ripgrep P6 | winner=tie | Q 9→8 G 9→9</summary>
+<details><summary>ripgrep P6 | winner=tie | Q 8→8 G 8→8</summary>
 
 **Prompt:** Trace the call chain from `main` to when the first search match is written to stdout.
 
-- Interactions: no_budi=21 / with_budi=24
-- Cost USD: no_budi=$0.4519 / with_budi=$0.4372
+- Interactions: no_budi=28 / with_budi=22
+- Cost USD: no_budi=$0.5570 / with_budi=$0.4182
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-That's the complete chain. Here's the full call chain from `main` to the first match being written to stdout:
+I have enough to present the full trace. Here's the call chain:
 
 ---
 
-## Call chain: `main` → first match written to stdout
+## Call chain: `main` → first search match written to stdout
 
-### 1. Entry & dispatch (`crates/core/main.rs`)
+Tracing the single-threaded, standard printer, file-path (mmap) case — the most common path:
 
-1. **`main()`** `:43` — calls `run(flags::parse())`
-2. **`run()`** `:77` — parses args, dispatches based on mode. For single-threaded search: calls `search(&args, mode)` `:87`
-3. **`search()`** `:107` — builds a `SearchWorker` via `args.search_worker(matcher, searcher, printer)`, then iterates haystacks and calls `searcher.search(&haystack)` `:126`
-
-### 2. SearchWorker (`crates/core/search.rs`)
-
-4. **`SearchWorker::search()`** `:245` — picks the search strategy based on haystack type. For a normal file: calls `self.search_path(path)` `:265`
-5. **`SearchWorker::search_path()`** `:342` — unwraps the `PatternMatcher` enum and calls the free function `search_path(matcher, searcher, printer, path)` `:347`
-6. **`search_path()`** `:380` — matches on the `Printer` enum. For `Printer::Standard`: creates a sink via `p.sink_with_path(&matcher, path)` `:388`, then calls `searcher.search_path(&matcher, path, &mut sink)` `:389`
-
-### 3. Searcher (`crates/searcher/src/searcher/mod.rs`)
-
-7. **`Searcher::search_path()`** `:643` — opens the file, calls `self.search_file_maybe_path(...)` `:656`
-8. **`Searcher::search_file_maybe_path()`** `:678` — decides strategy:
-   - **mmap available** → `self.search_slice(matcher, &mmap, write_to)` `:691`
-   - **multiline** → `MultiLine::new(.
-...[truncated 2081 chars]
+``\`
+main()                                          // crates/core/main.rs:43
+└─ run(flags::parse())                          // crates/core/main.rs:44 → :77
+   └─ search(&args, mode)                       // crates/core/main.rs:87 → :107
+      │  // builds: matcher, searcher, printer(stdout), SearchWorker
+      └─ searcher.search(&haystack)             // crates/core/main.rs:126 → search.rs:245
+         └─ self.search_path(path)              // crates/core/search.rs:265 → :342
+            └─ search_path(matcher, searcher, printer, path)  // search.rs:380
+               │  let sink = printer.sink_with_path(&matcher, path)
+               │                                // standard.rs:541 → creates StandardSink
+               └─ searcher.search_path(matcher, path, &mut sink)
+                                                // searcher/mod.rs:643
+                  └─ search_file_maybe_path()   // searcher/mod.rs:678
+                     └─ self.search_slice(matcher, &mmap, sink)
+                        │                       // searcher/mod.rs:691 (mmap path)
+                        └─ SliceByLine::new(...).run()
+                           │                    // searcher/glue.rs:117
+                           └─ self.core.match_by_line(self.slice)
+       
+...[truncated 2596 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Now I have the complete picture. Here's the call chain:
+Now I have the full picture. Here's the trace:
 
 ---
 
 ## Call chain: `main` → first match written to stdout
 
-Tracing the **single-threaded, standard printer, file search** path (the most common case):
+Focusing on the **single-threaded, standard printer, file path search** (the most common case):
 
-``\`
-main()                                          crates/core/main.rs:43
-└─ run(flags::parse())                          crates/core/main.rs:44,77
-   └─ search(&args, mode)                       crates/core/main.rs:87,107
-      │  // builds: matcher, searcher, printer(stdout), SearchWorker
-      │  args.search_worker(matcher, searcher, printer)   main.rs:119-123
-      │
-      └─ searcher.search(&haystack)             crates/core/main.rs:126
-         │                                      crates/core/search.rs:245
-         │  // dispatches based on haystack type; for a regular file:
-         └─ SearchWorker::search_path(path)     crates/core/search.rs:342
-            └─ search_path(matcher, searcher, printer, path)
-               │                                crates/core/search.rs:380
-               │  // creates a Sink from the printer:
-               │  let sink = printer.sink_with_path(&matcher, path)
-               │                                crates/printer/src/standard.rs:541
-               │
-               └─ Searcher::search_path(matcher, path, &mut sink)
-                  │                             crates/searcher/src/searcher/mod.rs:643
-                  └─ search_file_maybe_path()   mod.rs:678
-                     │  // may use mmap, multi-line, or
-...[truncated 3255 chars]
+### 1. `main()` → `run()`
+`crates/core/main.rs:43` — parses CLI args, calls `run()`.
+
+### 2. `run()` → `search()`
+`crates/core/main.rs:87` — for single-threaded mode, calls `search(&args, mode)`.
+
+### 3. `search()` → `SearchWorker::search()`
+`crates/core/main.rs:126` — iterates haystacks, calls `searcher.search(&haystack)` for each file.
+
+### 4. `SearchWorker::search()` → `SearchWorker::search_path()`
+`crates/core/search.rs:245` — determines how to open the file. For a normal file on disk, delegates to `self.search_path(path)` (line 265).
+
+### 5. `SearchWorker::search_path()` → `search_path()` (free fn)
+`crates/core/search.rs:342` — dispatches on matcher type (Rust regex vs PCRE2), calls the module-level `search_path()` function.
+
+### 6. `search_path()` → `Searcher::search_path()` + `StandardSink`
+`crates/core/search.rs:386` — creates a `StandardSink` via `printer.sink_with_path(&matcher, path)`, then calls `searcher.search_path(&matcher, path, &mut sink)`.
+
+### 7. `Searcher::search_path()` → `search_file_maybe_path()`
+`crates/searcher/src/searcher/mod.rs:643` — opens the file, delegates to `search_file_maybe_path()` (line 656).
+
+### 8. `search_file_maybe_path()` → strategy dispatch
+`crates/searcher/src/searcher/mod.rs:678` — chooses strategy:
+- **mmap available** → `search_
+...[truncated 1931 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the same call chain with nearly identical accuracy and detail, covering: main → run → search → SearchWorker::search → search_path → Searcher::search_path → search_file_maybe_path → ReadByLine::run → Core::match_by_line → match_by_line_fast → sink_matched → StandardSink::matched → StandardImpl::sink → sink_fast → write_line → write → write_all(stdout). Both include specific file paths and line numbers grounded in the ripgrep codebase, and both mention the mmap/multiline/reader branching and the parallel case. Response A uses a clean numbered list and is fully complete, including the final note about parallel vs single-threaded stdout handling. Response B uses an indented ASCII tree format that better visualizes the call hierarchy, but is truncated at the end, losing part of the summary. The tree format is slightly more intuitive for call chains, but the truncation costs it some completeness. Overall quality is very close—both are excellent, thorough, and well-grounded. A slight edge to A for completeness, but not enough to declare a clear winner.
+Both responses trace essentially the same call chain through the ripgrep codebase from main() to stdout output, covering the same key layers: CLI entry (main.rs), search orchestration (search.rs), searcher engine (searcher crate), and printer/sink (printer crate). Both provide specific file paths and line numbers at each step, and both focus on the single-threaded standard printer case. Response A uses a visually compact tree diagram with a helpful summary table but is truncated at the end. Response B uses numbered steps with more descriptive prose at each stage and includes a one-line summary. The line numbers differ slightly between them but both appear plausible for the codebase. The quality, grounding, and actionability are comparable — both would effectively help a developer understand the control flow from entry point to match output.
 ```
 
 </details>
 
-<details><summary>ripgrep P7 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>ripgrep P7 | winner=n/a | Q ?→? G ?→?</summary>
 
 **Prompt:** Trace what happens when ripgrep reads its config file — from env var lookup to the args being merged with CLI args.
 
-- Interactions: no_budi=6 / with_budi=3
-- Cost USD: no_budi=$0.0887 / with_budi=$0.0546
-- Hook: reason=ok context_chars=1275
+- Interactions: no_budi=8 / with_budi=4
+- Cost USD: no_budi=$0.1191 / with_budi=$0.0886
+- Hook: reason=ok context_chars=1300
 
 #### Injected context
 
@@ -9671,13 +9257,13 @@ evidence_cards:
     - therefore not reading any config file"
     - let (args, errs) = match parse(&config_path) {
     - Ok((args, errs)) => (args, errs),
-- file: crates/core/flags/parse.rs
-  span: 64-113
-  anchor: fn parse_low() -> ParseResult<LowArgs> {
+- file: crates/core/flags/defs.rs
+  span: 1458-1489
+  anchor: impl Flag for Debug {
   proof:
-    - log::debug!("not reading config files because --no-config is present");
-    - let config_args = crate::flags::config::args();
-    - log::debug!("no extra arguments found from configuration file");
+    - The \flag{debug} flag is generally useful for figuring out why ripgrep skipped
+    - searching a particular file. The debug messages should mention all files
+    - fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
 - file: crates/ignore/src/gitignore.rs
   span: 619-624
   anchor: fn excludes_file_default() -> Option<PathBuf> {
@@ -9689,48 +9275,58 @@ evidence_cards:
   span: 21-30
   anchor: fn try_main() -> Result<(), Box<dyn Error>> {
   proof:
-    - let mut args: Vec<OsString> = env:
-...[truncated 74 chars]
+    - let mut a
+...[truncated 99 chars]
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here's the full trace, from env var to merged args:
+Here's the full trace:
 
-## 1. Entry point: `parse()` → `parse_low()`
+## 1. Entry point — `main()` (`crates/core/main.rs:44`)
 
-`crates/core/flags/parse.rs:49-53` — `parse()` calls `parse_low()`, then converts the result to `HiArgs`.
-
-## 2. First CLI parse (lines 70-73)
-
-``\`rust
-let parser = Parser::new();
-let mut low = LowArgs::default();
-parser.parse(std::env::args_os().skip(1), &mut low);
+``\`
+main() → run(flags::parse())
 ``\`
 
-CLI args are parsed **first** into a `LowArgs` struct. This is done *before* reading the config file so that:
+`flags::parse()` is called before `run()` even starts.
 
-## 3. Early setup & bail-outs (lines 80-91)
+## 2. `parse()` → `parse_low()` → `HiArgs` (`crates/core/flags/parse.rs:49-54`)
 
-- **Line 80**: `set_log_levels(&low)` — logging is configured from CLI args so that `--trace`/`--debug` output covers config file parsing.
-- **Line 84**: If `--help` or `--version` was given (`low.special`), return immediately — config is never read.
-- **Line 88**: If `--no-config` was given, return immediately — config is skipped.
+`parse()` calls `parse_low()` to get a `LowArgs`, then converts it to `HiArgs` via `HiArgs::from_low_args(low)`. The config merging all happens inside `parse_low()`.
 
-## 4. Config file reading: `config::args()` (line 95)
+## 3. `parse_low()` — the core orchestration (`parse.rs:64-113`)
 
-Calls into `crates/core/flags/config.rs:16`:
+This is where the config file gets woven in. The sequence:
 
-1. **Env var lookup (line 17)**: `std::env::var_os("RIPGREP_CONFIG_PATH")`. If unset or empty → returns `vec![]`.
-2. **File open & parse (line 32)**: `parse(&config_path)` opens the file and calls `parse_reader`.
-3. **Line-by-line parsing (lines 90-106)**: Uses `bstr`'s `for_byte_line_with_terminator`. For each line:
-   - **Trim** whitespace.
-   - **Skip** empty lines and `#` comments.
-   - Convert to `OsString` and push to `args`.
-   - Each line is **one argument** (e.g., `--context=0` is one arg, not two).
-4. **Errors** for unpar
-...[truncated 2493 chars]
+**Step A — Parse CLI args first** (line 72):
+``\`rust
+parser.parse(std::env::args_os().skip(1), &mut low)
+``\`
+CLI args are parsed into a `LowArgs` struct. This gives ripgrep enough info to know log levels and whether `--no-config` or `--help`/`--version` were given.
+
+**Step B — Set log levels early** (line 80):
+``\`rust
+set_log_levels(&low);
+``\`
+So that `--trace`/`--debug` on the CLI can produce log output during config file parsing.
+
+**Step C — Short-circuit on special modes** (line 84):
+If `--help` or `--version` was passed, return `ParseResult::Special` immediately — config file is never read.
+
+**Step D — Respect `--no-config`** (line 88):
+If `--no-config` was on the CLI, return `Ok(low)` immediately — config file is skipped.
+
+**Step E — Read config file args** (line 95):
+``\`rust
+let config_args = crate::flags::config::args();
+``\`
+
+**Step F — Merge and re-parse** (lines 102-108):
+``\`rust
+let mut final_args = config_args;        // confi
+...[truncated 2100 chars]
 ```
 
 #### Response (`with_budi`)
@@ -9738,386 +9334,312 @@ Calls into `crates/core/flags/config.rs:16`:
 ```text
 Here's the full trace:
 
-## Config file flow: `parse_low()` in `parse.rs:64`
+## Config file flow: env var → parsed args → merged with CLI
 
-### Step 1: Parse CLI args first (line 72)
-CLI arguments (`std::env::args_os().skip(1)`) are parsed into `LowArgs` via `parser.parse()`. This initial parse establishes logging levels and detects special modes.
+### 1. Entry point: `parse()` → `parse_low()` (`crates/core/flags/parse.rs:49-53`)
 
-### Step 2: Early exits (lines 84-91)
-- If `--help` or `--version` was given → return `Special` immediately, config is never read.
-- If `--no-config` was given → skip config entirely, return CLI-only args.
+`parse()` calls `parse_low()` to get `LowArgs`, then converts them to `HiArgs`.
 
-### Step 3: Read config file — `config::args()` in `config.rs:16`
-1. **Env var lookup** (line 17): Reads `RIPGREP_CONFIG_PATH`. If unset or empty → returns `vec![]`, no config is read.
-2. **File parse** (line 32): Opens the file at that path via `parse()` → `parse_reader()`.
-3. **Line-by-line parsing** (`parse_reader`, line 84): Uses `for_byte_line_with_terminator` to read each line:
-   - Trims whitespace
-   - Skips empty lines and lines starting with `#` (comments)
-   - Each surviving line becomes one `OsString` argument
-4. Any parse errors are logged but don't abort; valid args are still returned.
+### 2. First CLI parse (`parse.rs:70-74`)
 
-### Step 4: Merge and re-parse (lines 102-108)
-If config args were found:
-1. **Config args go first**: `final_args = config_args` (line 102)
-2. **CLI args appended after**: `final_args.extend(std::env::args_os().skip(1))` (line 103)
-3. **Full re-parse from scratch**: A fresh `LowArgs::default()` is created and `parser.parse(final_args)` runs over the combined sequence (line 107).
+CLI args (minus the binary name) are parsed **first** into a fresh `LowArgs`:
+``\`rust
+let parser = Parser::new();
+let mut low = LowArgs::default();
+parser.parse(std::env::args_os().skip(1), &mut low);
+``\`
 
-This means **
-...[truncated 360 chars]
-```
+This first pass is needed to check for `--help`, `--version`, `--no-config`, and to set up logging (so `--trace` works during config parsing).
 
-#### Judge rationale
+### 3. Early exits (`parse.rs:84-91`)
 
-```text
-Both responses trace the same flow with essentially identical accuracy: (1) initial CLI parse into LowArgs, (2) early exits for --help/--version/--no-config, (3) RIPGREP_CONFIG_PATH env var lookup in config::args(), (4) line-by-line file parsing skipping blanks and comments, (5) prepending config args before CLI args, (6) full re-parse from scratch. Both cite the same file paths (parse.rs, config.rs) and similar line numbers. Both correctly explain the last-value-wins semantics and the two-pass design. Response A adds a nice ASCII diagram summary and explicitly calls out the "one arg per line / no shell splitting" design choice, giving it a slight edge in actionability and presentation. Response B is more concise but covers all the same ground with accurate line references. The line numbers in both are approximate and may not be perfectly precise, but both demonstrate genuine familiarity with the code structure. Overall quality is very close — a tie.
+Before touching the config file, two short-circuits:
+- **Special mode** (`-h`/`-V`): return immediately, no config needed.
+- **`--no-config`**: skip config file entirely.
+
+### 4. Config file lookup (`parse.rs:95` → `config.rs:16-53`)
+
+`crate::flags::config::args()` is called, which:
+
+1. **Reads `RIPGREP_CONFIG_PATH`** env var via `std::env::var_os("RIPGREP_CONFIG_PATH")` (`config.rs:17`)
+2. If **unset** → logs a debug message, returns `vec![]`
+3. If **set but empty** → returns `vec![]`
+4. Otherwise, converts it to a `PathBuf` and calls `parse(&config_path)` (`config.rs:32`)
+
+### 5. File parsing (`config.rs:63-108`)
+
+`parse()` opens the file, then `parse_reader()` processes it line by line:
+- **Blank lines** → skipped
+- **Lines starting with `#`** → skipped (comments)
+- **Everything else** → trimmed and pus
+...[truncated 2246 chars]
 ```
 
 </details>
 
-<details><summary>ripgrep P8 | winner=with_budi | Q 8→8 G 7→8</summary>
+<details><summary>ripgrep P8 | winner=tie | Q 8→8.5 G 8→8.5</summary>
 
 **Prompt:** What is the teardown sequence when a parallel search finishes — what gets joined or dropped and in what order?
 
-- Interactions: no_budi=12 / with_budi=15
-- Cost USD: no_budi=$0.1917 / with_budi=$0.1985
-- Hook: reason=ok context_chars=310
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: crates/core/flags/hiargs.rs
-  span: 1055-1067
-  anchor: struct Paths {
-  proof:
-    - (no concise proof line found)
-```
-
-#### Response (`no_budi`)
-
-```text
-Here's the full teardown sequence when a parallel search finishes:
-
-## Termination detection (inside `Worker::get_work`)
-
-1. **Work exhaustion**: When a worker's local deque is empty and it can't steal from any other thread, it calls `deactivate_worker()` (atomic decrement of `active_workers`).
-
-2. **Last-worker-standing**: If `deactivate_worker()` returns `0`, that means *every* worker is simultaneously idle with an empty deque — no work remains anywhere. That worker pushes a `Message::Quit` onto its stack.
-
-3. **Quit domino**: When a worker pops a `Quit` message, it pushes *another* `Quit` message before returning `None` from `get_work()` (`walk.rs:1823`). This "domino" ensures a sleeping/stealing worker will eventually find the `Quit` and propagate it further.
-
-4. **Early quit** (`WalkState::Quit`): If a visitor callback returns `Quit` (e.g., broken pipe or `--quiet` match), `Worker::run` calls `quit_now()` which sets a shared `AtomicBool`. All workers check this flag at the top of `get_work` and treat any pending work as a `Quit` message (`walk.rs:1812-1813`).
-
-## Thread join and drop order (inside `WalkParallel::visit`)
-
-Once all workers return from `Worker::run`, teardown in `visit()` at line 1410 proceeds:
-
-1. **`std::thread::scope` block completes** — each spawned thread's `handle.join().unwrap()` is called sequentially (`walk.rs:1427-1429`). This blocks until every worker thread has finished.
-
-2. **`Worker` structs are dropped** (on their respective threads, when `ru
-...[truncated 1473 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Here's the complete teardown sequence:
-
-## Parallel search teardown in ripgrep
-
-### Phase 1: Workers drain — inside `WalkParallel::visit()` (walk.rs:1410–1430)
-
-All workers run inside a `std::thread::scope` block. Termination is triggered when:
-
-1. **Natural exhaustion**: A worker calls `get_work()` → `deactivate_worker()` returns 0, meaning all workers have empty deques simultaneously. That worker sends a `Quit` message (walk.rs:1834).
-2. **Early quit**: A visitor callback returns `WalkState::Quit` (e.g., broken pipe or `--quiet` match). The worker sets the `quit_now` AtomicBool (walk.rs:1857–1858).
-
-In both cases, `Quit` messages propagate via a domino effect — each worker that receives `Quit` re-sends it to wake up any sleeping peers (walk.rs:1823).
-
-### Phase 2: Worker threads join (walk.rs:1427–1429)
-
-``\`rust
-for handle in handles {
-    handle.join().unwrap();
-}
-``\`
-
-The `thread::scope` block waits for all spawned threads. Each thread's `Worker` is consumed by `Worker::run(mut self)`, so when `run` returns, the `Worker` struct is dropped. This drops in field order:
-1. `visitor: Box<dyn ParallelVisitor>` — the boxed `FnVisitorImp`, which owns the closure (and the cloned `searcher` captured inside it)
-2. `stack: Stack` — the thread's local deque + Arc to stealers
-3. `quit_now: Arc<AtomicBool>` — refcount decremented
-4. `active_workers: Arc<AtomicUsize>` — refcount decremented
-5. `skip: Option<Arc<Handle>>`, `filter: Option<Filter>` — refcount decremented / dropped
-
-### Pha
-...[truncated 1665 chars]
-```
-
-#### Judge rationale
-
-```text
-Both responses are very similar in structure and content, covering the same four phases: quit detection/domino, worker thread joining via thread::scope, WalkParallel drop, and search_parallel cleanup. Both cite specific line numbers (walk.rs:1410, 1427-1429, 1823, main.rs:219-228) and describe the same mechanisms (atomic worker count, quit domino, quit_now AtomicBool). Response B (with_budi) edges ahead in a few ways: (1) it explicitly lists the Worker struct fields in drop order, showing awareness that Rust drops fields in declaration order; (2) it includes the actual code snippet for the join loop; (3) it notes the thread::scope safety guarantee about shared references being valid, which is a practical insight; (4) the summary order diagram at the end is a useful quick reference. Response A's design insight about no channels is good but slightly less practical. Response B's mention of BufferWriter flushing on drop and the specific closure captures (searcher, bufwtr, stats as references) shows slightly deeper grounding. Both responses are well-structured and largely accurate. The difference is small but Response B provides marginally more concrete, actionable detail.
-```
-
-</details>
-
-<details><summary>ripgrep P9 | winner=no_budi | Q 9→7 G 8→7</summary>
-
-**Prompt:** What calls `search_path` and what arguments does each call site pass?
-
-- Interactions: no_budi=4 / with_budi=3
-- Cost USD: no_budi=$0.0552 / with_budi=$0.0379
+- Interactions: no_budi=17 / with_budi=15
+- Cost USD: no_budi=$0.2099 / with_budi=$0.2065
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-There are several layers of `search_path` in the codebase:
+Now I have a full picture. Here's the teardown sequence:
 
 ---
 
-### 1. `SearchWorker::search_path` (the method on the worker struct)
+## Teardown for `search_parallel` (the main search path)
 
-Defined at `crates/core/search.rs:342`. Called from two sites:
+The function lives at `crates/core/main.rs:160`. The parallel walker lives at `crates/ignore/src/walk.rs:1355`.
 
-- **`crates/core/search.rs:265`** — in the main `search` dispatch, as the default branch when the haystack is not stdin, not preprocessed, and not decompressed. Passes just `path: &Path`.
+### 1. Workers detect "no more work"
 
-- **`crates/core/search.rs:331`** — in `search_decompress`, as a fallback when no `decomp_builder` is available. Also passes just `path: &Path`.
+Inside `Worker::get_work` (`walk.rs:1807`), when a worker's local deque is empty and stealing fails, it calls `deactivate_worker()`. If active workers drops to **0**, that means every thread's deque is simultaneously empty — the search is done. That thread pushes a `Message::Quit` onto its stack.
 
----
+### 2. Quit propagates via domino effect
 
-### 2. Free function `search_path` (module-level helper)
+When any worker receives `Message::Quit` in `get_work` (`walk.rs:1819`), it calls `self.send_quit()` before returning `None` — pushing another `Quit` message to wake the next sleeping thread. This cascades until all workers have exited.
 
-Defined at `crates/core/search.rs:380`. Called from `SearchWorker::search_path`:
+Alternatively, if any visitor callback returns `WalkState::Quit` (e.g. broken pipe, or `--quiet` match found), `Worker::run` (`walk.rs:1632`) sets `quit_now` atomically, which causes all workers to treat any pending message as `Quit` on their next `get_work` iteration.
 
-- **`crates/core/search.rs:347`** — `search_path(m, searcher, printer, path)` where `m` is a `RustRegex` matcher.
-- **`crates/core/search.rs:349`** — `search_path(m, searcher, printer, path)` where `m` is a `PCRE2` matcher (behind `#[cfg(feature = "pcre2")]`).
+### 3. `Worker::run(self)` consumes each worker
 
-Both pass `(matcher, &mut self.searcher, &mut self.printer, path)`.
-
----
-
-### 3. `Searcher::search_path` (from the `grep-searcher` crate)
-
-Called inside the free function `search_path` at three sites, one per printer variant:
-
-- **`crates/core/search.rs:389`** — `searcher.search_path(&matcher, path, &mut sink)` with a `Standard` printer sink.
-- **`crates/core/search.rs:397`** — same args, with a `Summary` printer sink.
-- **`crates/core/search.rs:405`** — same args, with a `JSON` printer sink.
-
-All three pass `(&matcher, path, &mut sink)`.
-
----
-
-### 4. E
-...[truncated 229 chars]
+`run` takes `self` by value (`walk.rs:1630`), so when it returns, the `Worker` struct is dropped. This drops in field order:
+- `visitor: Box<dyn ParallelVisitor>` — the per-thread search closure
+- `stack: Stack` — the work-stealing deque + stealer `Arc`
+- `quit_now: Arc<AtomicBool>` — refcount decremented
+- `active_workers: Arc
+...[truncated 1714 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There are **two call sites** for `self.search_path(path)` (the method on the `SearchWorker`):
+Now I have a complete picture. Here's the teardown sequence:
 
-1. **`crates/core/search.rs:265`** — in the main `search` dispatch method. Called when the haystack is a regular file (not stdin, not preprocessed, not decompressed). Passes `path: &Path` derived from `haystack`.
+## Parallel search teardown sequence
 
-2. **`crates/core/search.rs:331`** — in `search_decompress`. Called as a **fallback** when `self.decomp_builder` is `None`, meaning decompression isn't configured. Passes the same `path: &Path` that `search_decompress` received.
+Looking at `search_parallel` in `crates/core/main.rs:160` and `WalkParallel::visit` in `crates/ignore/src/walk.rs:1355`:
 
-Both call sites pass a single `&Path` argument — the file path of the haystack being searched. The method itself (`search_path` at line 342) then delegates to the free function `search_path(matcher, searcher, printer, path)` at lines 347/349, which calls `searcher.search_path(&matcher, path, &mut sink)` on the grep searcher.
+### 1. Workers detect termination (`walk.rs:1827-1835`)
+
+When a worker calls `get_work()` and finds its local deque empty, it tries to steal from others. If that also fails, it calls `deactivate_worker()`. When the active worker count hits **0** — meaning every thread's deque is simultaneously empty — the last worker sends a `Quit` message via `send_quit()`.
+
+The `Quit` message dominoes: each worker that receives `Quit` re-sends it (`walk.rs:1823`) before returning `None`, waking any sleeping threads.
+
+If a `WalkState::Quit` was returned by a visitor callback (e.g., broken pipe or `--quiet` match), the `quit_now` atomic flag (`walk.rs:1857-1858`) is set, which causes all workers to treat any pending message as `Quit` on their next loop iteration (`walk.rs:1812-1813`).
+
+### 2. `Worker::run` returns, dropping each `Worker` (`walk.rs:1630-1636`)
+
+When `get_work()` returns `None`, `Worker::run(mut self)` takes ownership and returns, dropping the `Worker`. This drops:
+- **`visitor: Box<dyn ParallelVisitor>`** — the per-thread visitor (the `FnVisitorImp` wrapping the closure). The closure captures a cloned `SearchWorker` with its own `Printer` and buffer, so each thread's printer/buffer is dropped here.
+- **`stack: Stack`** — the per-thread work-stealing deque and
+...[truncated 2293 chars]
 ```
 
 #### Judge rationale
 
 ```text
-The prompt asks "What calls search_path and what arguments does each call site pass?" — this naturally encompasses all layers of `search_path` in the codebase. Response A systematically enumerates four distinct levels: the SearchWorker method, the free function, the grep-searcher Searcher::search_path, and the example usage, with specific line numbers and argument details at each level. Response B correctly identifies the two primary call sites of SearchWorker::search_path and briefly mentions the delegation chain, but only summarizes the deeper layers rather than enumerating their call sites and arguments. Both responses appear grounded in the actual code with plausible line numbers. Response A is significantly more actionable because a developer trying to understand the full call graph gets complete information without needing to trace further.
+Both responses cover the same teardown sequence with high accuracy and good grounding in the codebase. They identify the same key steps: worker deque exhaustion, Quit message domino effect, Worker::run dropping per-thread state, scoped thread joining, and post-walk cleanup in search_parallel. Response A includes a useful bonus section on files_parallel (with explicit drop(tx) and print_thread join), which wasn't asked about but adds context. Response B provides a slightly more structured presentation with a summary table, more granular line references (e.g., walk.rs:1827-1835, walk.rs:1857-1858), explicitly names FnVisitorImp, and adds step 7 about local variable reverse-declaration drop order. The differences are marginal — both are well-grounded and accurate. Response B's summary table gives it a slight edge in quick-reference actionability, but Response A's files_parallel coverage adds practical breadth. Overall essentially a tie with B having a very slight structural edge.
 ```
 
 </details>
 
-<details><summary>ripgrep P10 | winner=tie | Q 9→9 G 9→9</summary>
+<details><summary>ripgrep P9 | winner=tie | Q 9→9 G 9→8</summary>
+
+**Prompt:** What calls `search_path` and what arguments does each call site pass?
+
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0412 / with_budi=$0.0424
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+There are **two call sites** for the method `SearchWorker::search_path` (defined at `crates/core/search.rs:342`), both passing just `path: &Path`:
+
+1. **`crates/core/search.rs:265`** — in the main `search` dispatch method. This is the default/fallback branch when the haystack is not stdin, not preprocessed, and not decompressed:
+   ``\`rust
+   self.search_path(path)
+   ``\`
+
+2. **`crates/core/search.rs:331`** — in `search_decompress`. Called when `decomp_builder` is `None` (i.e., decompression isn't available), falling back to a direct path search:
+   ``\`rust
+   return self.search_path(path);
+   ``\`
+
+Both call sites pass the same `path: &Path` argument — the file path being searched. The method itself then delegates to the free function `search_path` at line 380, forwarding the matcher, searcher, printer, and path.
+```
+
+#### Response (`with_budi`)
+
+```text
+There are **two call sites** for `self.search_path` (the method on `SearchWorker`):
+
+1. **`search.rs:265`** — in the main `search` dispatch method. Called as the default/fallback when the haystack is not stdin, doesn't need preprocessing, and doesn't need decompression. Passes `path: &Path` (the file path being searched).
+
+2. **`search.rs:331`** — inside `search_decompress`. Called as a fallback when `self.decomp_builder` is `None` (i.e., no decompression builder is configured). Passes the same `path: &Path` argument it received.
+
+Both call sites pass the same single argument — the `path: &Path` of the file to search. The method signature is:
+
+``\`rust
+fn search_path(&mut self, path: &Path) -> io::Result<SearchResult>
+``\`
+
+It then delegates to the free function `search_path(matcher, searcher, printer, path)` (line 347/349) which ultimately calls `searcher.search_path(&matcher, path, &mut sink)` on the `grep-searcher` crate's `Searcher`.
+```
+
+#### Judge rationale
+
+```text
+Both responses identify the same two call sites (line 265 in `search` and line 331 in `search_decompress`), correctly describe the context of each call, note that both pass `path: &Path`, and mention the delegation to the free function. Response A uses full crate-relative paths (`crates/core/search.rs`) and cites specific line numbers for the definition (342) and free function (380). Response B omits the crate prefix but includes the method signature and traces the delegation one step further into the grep-searcher crate. These are minor stylistic differences; the substantive content is equivalent. Response A gets a slight edge on grounding due to full file paths and precise line numbers, while Response B adds marginally more downstream context. Overall they are functionally identical in quality and usefulness.
+```
+
+</details>
+
+<details><summary>ripgrep P10 | winner=tie | Q 9→9 G 8→9</summary>
 
 **Prompt:** What calls `search_parallel` and when is it chosen over single-threaded search?
 
-- Interactions: no_budi=4 / with_budi=2
-- Cost USD: no_budi=$0.0854 / with_budi=$0.0644
-- Hook: reason=ok context_chars=638
-
-#### Injected context
-
-```text
-[structural context]
-run  (main.rs:77)
-  ← called by: Matcher, search_reader, main
-  → refs: err, errored, files
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: crates/core/main.rs
-  span: 77-101
-  anchor: fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
-  proof:
-    - Mode::Search(_) if !args.matches_possible() => false,
-    - Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
-    - Mode::Search(mode) => search_parallel(&args, mode)?,
-```
+- Interactions: no_budi=3 / with_budi=3
+- Cost USD: no_budi=$0.0393 / with_budi=$0.0403
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
+
+```text
+The decision is at `main.rs:85-88` in the `run` function's match:
+
+``\`rust
+Mode::Search(_) if !args.matches_possible() => false,
+Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
+Mode::Search(mode) => search_parallel(&args, mode)?,
+``\`
+
+`search_parallel` is the **default** path for `Mode::Search`. Single-threaded `search` is only chosen when `args.threads() == 1`. So:
+
+- **`threads() == 1`** → `search()` (single-threaded, sequential file iteration, supports sorted output)
+- **`threads() > 1`** (the default) → `search_parallel()` (parallel directory walk via `build_parallel()`)
+
+The thread count defaults to something greater than 1 (typically the number of available cores). It becomes 1 when the user passes `-j1`/`--threads=1`, or when `--sort` is requested (sorting forces single-threaded mode as noted in the doc comment at line 158).
+```
+
+#### Response (`with_budi`)
 
 ```text
 The decision is at `crates/core/main.rs:85-88`:
 
 ``\`rust
-let matched = match args.mode() {
-    Mode::Search(_) if !args.matches_possible() => false,
-    Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
-    Mode::Search(mode) => search_parallel(&args, mode)?,
-    // ...
-};
+Mode::Search(_) if !args.matches_possible() => false,
+Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
+Mode::Search(mode) => search_parallel(&args, mode)?,
 ``\`
 
-**`search_parallel` is called by `run()`** (line 88), which is the main entry point after CLI argument parsing.
+`search_parallel` is called from `run()` whenever the mode is `Search` **and** `args.threads() != 1`. The single-threaded `search()` is chosen only when `args.threads() == 1`.
 
-**The selection logic is simple:**
+So the deciding factor is `args.threads()`. If the user passes `--threads 1` (or `-j1`), or if the thread count defaults/resolves to 1, the single-threaded path is used. Otherwise, `search_parallel` is used, which leverages `build_parallel()` on the directory walker to fan out search across multiple threads.
 
-1. If `args.threads() == 1` → single-threaded `search()` (line 87)
-2. Otherwise → `search_parallel()` (line 88)
+There's also an early exit: if `!args.matches_possible()`, no search runs at all (returns `false` immediately).
 
-So the thread count (`-j/--threads`) is the sole deciding factor. By default ripgrep uses multiple threads (typically matching the number of cores), so `search_parallel` is the default path. Single-threaded search is used when:
-
-- The user explicitly passes `-j1` / `--threads=1`
-- Sorted output is requested (`--sort`), which forces `threads()` to return 1 (noted in the doc comment at line 158-159)
-
-The parallel version uses `walk_builder().build_parallel().run()` (line 175) to do directory traversal and searching concurrently across threads, with each thread getting its own search worker clone. The single-threaded version iterates haystacks sequentially in a simple `for` loop (line 124).
-```
-
-#### Response (`with_budi`)
-
-```text
-The `run` function at `crates/core/main.rs:85-88` is the sole caller. The decision logic is straightforward:
-
-1. **No search at all** — `args.matches_possible()` is `false` (line 86)
-2. **Single-threaded** — `args.threads() == 1` → calls `search()` (line 87)
-3. **Multi-threaded** — otherwise → calls `search_parallel()` (line 88)
-
-So `search_parallel` is chosen whenever the thread count is greater than 1. The thread count defaults to the number of available cores but can be set explicitly via `--threads`/`-j`. As noted in the comment on line 157-159, requesting sorted output (e.g. `--sort path`) forces `threads() == 1`, which bypasses the parallel path.
+The same parallel/single-threaded split applies to `Mode::Files` at lines 89-90 with `files()` vs `files_parallel()`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify `run()` in `crates/core/main.rs:85-88` as the caller, and both accurately describe the decision logic: threads==1 uses single-threaded search, otherwise parallel. Both mention the `--sort` flag forcing single-threaded mode and reference the relevant doc comment. Response A adds slightly more implementation detail (walk_builder parallel run, for loop in single-threaded) and explicitly lists `-j1` as a trigger, giving it a marginal edge in actionability. Response B is more concise but equally correct. The differences are minor enough to call it a tie overall.
+Both responses correctly identify the same match arms at lines 85-88 and accurately explain that search_parallel is the default when threads != 1. Response A adds valuable context about --sort forcing single-threaded mode and the default thread count being core count, which directly answers "when is it chosen." Response B uses the full file path (crates/core/main.rs), mentions the early exit condition, and notes the analogous Files parallel split at lines 89-90. These are complementary strengths that roughly balance out. Response A's --sort detail is slightly more relevant to the "when" question, while Response B's broader pattern coverage and precise path are slightly better grounded. Overall a tie.
 ```
 
 </details>
 
-<details><summary>ripgrep P11 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>ripgrep P11 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** Who constructs a `Searcher` and how is it configured before the first file is searched?
 
-- Interactions: no_budi=10 / with_budi=6
-- Cost USD: no_budi=$0.1233 / with_budi=$0.1696
+- Interactions: no_budi=9 / with_budi=10
+- Cost USD: no_budi=$0.1411 / with_budi=$0.1658
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
-
-```text
-Here's the full picture:
-
-## Who constructs a `Searcher`
-
-The `Searcher` (defined at `crates/searcher/src/searcher/mod.rs:597`) is constructed in **`HiArgs::searcher()`** (`crates/core/flags/hiargs.rs:711`). This is called from both entry points in `crates/core/main.rs`:
-
-- **Single-threaded**: `search(args, mode)` at line 121
-- **Multi-threaded**: `search_parallel(args, mode)` at line 172
-
-In both cases the call chain is the same:
-``\`rust
-let mut searcher = args.search_worker(
-    args.matcher()?,
-    args.searcher()?,   // <-- Searcher is built here
-    args.printer(mode, ...),
-)?;
-``\`
-
-## How it's configured
-
-`HiArgs::searcher()` uses the **builder pattern** via `SearcherBuilder`:
-
-1. **Line terminator** — picks `CRLF`, `\0` (if `--null-data`), or `\n` (default).
-2. **Core options** set on the builder in a chain:
-   - `max_matches` — from `--max-count`
-   - `line_terminator` — as computed above
-   - `invert_match` — from `--invert-match`
-   - `line_number` — whether to track line numbers
-   - `multi_line` — from `--multiline`
-   - `memory_map` — mmap strategy from `--mmap`
-   - `stop_on_nonmatch` — optimization for early exit
-3. **Context** — depending on `ContextMode`:
-   - `Passthru` → `builder.passthru(true)` (prints all lines, matching or not)
-   - `Limited` → `builder.before_context(n)` / `builder.after_context(n)`
-4. **Encoding** — depending on `EncodingMode`:
-   - `Auto` → default (BOM sniffing enabled)
-   - `Some(enc)` → explicit encoding set
-   - `Disabled` → BOM 
-...[truncated 505 chars]
-```
-
-#### Response (`with_budi`)
 
 ```text
 Here's the full picture:
 
 ## Construction
 
-The `Searcher` is built via `SearcherBuilder` (builder pattern). In the ripgrep binary, the entry point is `HiArgs::searcher()` at `crates/core/flags/hiargs.rs:711`.
+A `Searcher` is built by `SearcherBuilder` using the builder pattern. The real-world entry point is **`HiArgs::searcher()`** at `crates/core/flags/hiargs.rs:711`, which is called from `main.rs` during both single-threaded (`search_sequential`, line 121) and parallel (`search_parallel`, line 172) search setup.
 
 ## Configuration flow
 
-`SearcherBuilder::new()` starts with `Config::default()` (line 311 of `mod.rs`), which sets:
-- **line_term**: `\n`
-- **invert_match**: `false`
-- **before/after_context**: `0`
-- **passthru**: `false`
-- **line_number**: `true`
-- **heap_limit**: `None` (no limit)
-- **mmap**: `Never`
-- **binary**: detection disabled
-- **multi_line**: `false`
-- **encoding**: `None`
-- **bom_sniffing**: `true`
-- **stop_on_nonmatch**: `false`
-- **max_matches**: `None`
+`HiArgs::searcher()` creates a `SearcherBuilder::new()` (which starts with `Config::default()`) and then configures it from CLI flags:
 
-Then `HiArgs::searcher()` (hiargs.rs:711-748) configures it from CLI flags:
+| Builder method | CLI source | Default |
+|---|---|---|
+| `max_matches()` | `--max-count` | no limit |
+| `line_terminator()` | `--crlf` / `--null-data` | `b'\n'` |
+| `invert_match()` | `-v/--invert-match` | `false` |
+| `line_number()` | `-n/--line-number` | `true` |
+| `multi_line()` | `-U/--multiline` | `false` |
+| `memory_map()` | `--mmap` | `Never` |
+| `stop_on_nonmatch()` | internal flag | `false` |
+| `passthru()` | `--passthru` | `false` |
+| `before_context()` / `after_context()` | `-B`/`-A`/`-C` | `0` |
+| `encoding()` | `-E/--encoding` | auto (BOM sniffing) |
+| `bom_sniffing()` | (disabled if encoding=disabled) | `true` |
 
-1. **Line terminator** — `\r\n` if `--crlf`, `\x00` if `--null-data`, else `\n`
-2. **max_matches** — from `--max-count`
-3. **invert_match** — from `--invert-match`
-4. **line_number** — from `--line-number`
-5. **multi_line** — from `--multiline`
-6. **memory_map** — mmap strategy from flags
-7. **stop_on_nonmatch** — for sorted-file optimization
-8. **Context** — either passthru mode, or before/after context line counts
-9. **Encoding** — auto (default), explicit encoding, or disabled BOM sniffing
+## What `build()` produces
+
+`SearcherBuilder::build()` (`mod.rs:315`) finalizes the config (zeroing context if passthru is on), sets up a `DecodeReaderBytesBuilder` for transcoding/BOM-sniffing, and allocates three internal buffers:
+
+- **`decode_buffer`** — 8 KiB scratch for transcoding
+- **`line_buffer`** — for incremental line-oriented search
+- *
+...[truncated 281 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the full picture:
+
+## Who constructs a `Searcher`
+
+The `Searcher` is built in **`HiArgs::searcher()`** at `crates/core/flags/hiargs.rs:711`. This method is called from the two top-level search entry points in `crates/core/main.rs`:
+- **`search_sequential()`** (line 121) — single-threaded search
+- **`search_parallel()`** (line 172) — multi-threaded search
+
+## How it's configured
+
+`HiArgs::searcher()` uses the **builder pattern** via `SearcherBuilder` (`crates/searcher/src/searcher/mod.rs:298`). It translates CLI arguments into searcher config:
+
+1. **Line terminator** — `\n` by default, CRLF if `--crlf`, NUL if `--null-data`
+2. **Core options** set directly on the builder:
+   - `max_matches` — from `--max-count`
+   - `invert_match` — from `-v/--invert-match`
+   - `line_number` — from `-n/--line-number`
+   - `multi_line` — from `--multiline`
+   - `memory_map` — mmap strategy
+   - `stop_on_nonmatch` — for sorted-file optimization
+3. **Context** — either passthru mode or before/after line counts from `-B`/`-A`/`-C`
+4. **Encoding** — auto (default with BOM sniffing), explicit encoding, or disabled (no BOM sniffing)
 
 ## What `build()` does
 
-`SearcherBuilder::build()` (mod.rs:315-337) finalizes construction:
+`SearcherBuilder::build()` (`mod.rs:315`) finalizes the config:
 - If **passthru** is enabled, it zeroes out before/after context
-- Creates a `DecodeReaderBytesBuilder` configured with the encoding and BOM sniffing 
-...[truncated 872 chars]
+- Creates a `DecodeReaderBytesBuilder` for encoding/transcoding with UTF-8 passthrough and BOM settings
+- Allocates internal buffers: an 8 KiB decode buffer, a `LineBuffer` (whose capacity is constrained by `heap
+...[truncated 186 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify HiArgs::searcher() as the constructor and accurately describe the SearcherBuilder configuration flow. Response B is more thorough: it lists the Config::default() values (grounding the defaults in the actual code), explains what build() does with specific line references, describes the SearchWorker wrapping step, and critically includes the "Before the first search" section covering check_config() validation and strategy selection — directly answering the "before the first file is searched" part of the question. Response A mentions the single/multi-threaded call sites and clone behavior, which is useful context but less directly relevant to the question. Response B's coverage of check_config() and strategy selection makes it more complete and actionable for understanding what happens before the first file is actually searched.
+Both responses are nearly identical in substance and quality. They correctly identify HiArgs::searcher() at crates/core/flags/hiargs.rs:711 as the entry point, reference the same call sites in main.rs (search_sequential at line 121, search_parallel at line 172), describe the SearcherBuilder pattern, enumerate the same CLI flag mappings, and explain what build() does (zeroing context for passthru, DecodeReaderBytesBuilder setup, buffer allocation). Response A presents the flag mappings as a table with a defaults column, which is slightly more detailed; Response B uses a numbered/grouped list that is equally clear. Both mention the resulting Searcher being passed to search_worker with a matcher and printer. The differences are purely cosmetic/organizational with no meaningful quality gap.
 ```
 
 </details>
@@ -10127,236 +9649,179 @@ Both responses correctly identify HiArgs::searcher() as the constructor and accu
 **Prompt:** How does ripgrep load its config file and which environment variable controls which file is used?
 
 - Interactions: no_budi=4 / with_budi=4
-- Cost USD: no_budi=$0.0431 / with_budi=$0.0444
+- Cost USD: no_budi=$0.0470 / with_budi=$0.0511
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-The environment variable is **`RIPGREP_CONFIG_PATH`**. Here's how it works (`crates/core/flags/config.rs`):
+The environment variable is **`RIPGREP_CONFIG_PATH`**. Here's how config loading works (`crates/core/flags/config.rs`):
 
-1. **Lookup**: `args()` checks `RIPGREP_CONFIG_PATH`. If unset or empty, no config is loaded and an empty arg list is returned.
+1. **Check the env var** (line 17): `std::env::var_os("RIPGREP_CONFIG_PATH")` is read. If unset or empty, no config is loaded and an empty arg list is returned.
 
-2. **Parsing**: The file at that path is opened and read line-by-line (`parse_reader`). Each line is trimmed, then:
-   - Blank lines and lines starting with `#` are skipped (comments).
-   - Every other line becomes a single shell argument (one flag per line).
+2. **Parse the file** (line 32): The file at that path is opened and read line-by-line using `bstr`'s `for_byte_line_with_terminator`.
 
-3. **Prepending**: The resulting arguments are **prepended** to the CLI arguments, so command-line flags override config file flags.
+3. **Line parsing** (lines 90–106): Each line is trimmed. Blank lines and lines starting with `#` (comments) are skipped. Every other line becomes a single shell argument (one flag per line, e.g. `--smart-case` or `--context=0`).
 
-4. **Errors**: If the file can't be opened, a message is printed and ripgrep continues with no config args. Per-line parse errors (e.g., invalid UTF-8 on Windows) are reported individually but don't abort parsing.
+4. **Prepend to CLI args**: The resulting `Vec<OsString>` is returned and prepended to the actual command-line arguments, so CLI flags override config file flags.
 
-Example config file:
-``\`
-# always use smart case and show 2 lines of context
---smart-case
---context=2
--u
-``\`
+5. **Error handling**: If the file can't be opened, a warning is printed and ripgrep proceeds with no config args. Per-line parse errors (e.g. invalid UTF-8 on Windows) are reported individually but don't stop processing of other lines.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The environment variable is **`RIPGREP_CONFIG_PATH`**. Here's how config loading works (`crates/core/flags/config.rs`):
+The environment variable is **`RIPGREP_CONFIG_PATH`**. Here's how it works:
 
-1. **Check the env var** — `args()` reads `RIPGREP_CONFIG_PATH`. If it's unset or empty, no config is loaded and an empty arg list is returned.
+1. **Lookup** (`config.rs:17`): ripgrep checks `RIPGREP_CONFIG_PATH`. If unset or empty, no config file is read — there's no default/fallback path.
 
-2. **Parse the file** — The file at that path is opened and read line-by-line using `bstr`'s `for_byte_line_with_terminator`. Each line is trimmed, then:
-   - **Blank lines** and **comment lines** (starting with `#`) are skipped.
-   - All other lines are treated as a single shell argument each (one flag per line, e.g. `--smart-case` or `--context=0`).
+2. **Parse** (`config.rs:63-71`): The file at that path is opened and parsed line-by-line:
+   - Blank lines and lines starting with `#` are skipped (comments).
+   - Each remaining line becomes one shell argument (e.g. `--smart-case`, `-u`, `--context=0`).
+   - Each line is exactly one argument — no shell splitting or quoting.
 
-3. **Prepend to CLI args** — The parsed arguments are returned and prepended to the actual command-line arguments during flag parsing, so config file flags have lower precedence than explicit CLI flags.
+3. **Prepend** (`config.rs:47-52`): The parsed arguments are **prepended** to the CLI arguments, so explicit command-line flags override config file settings.
 
-4. **Error handling** — If the file can't be opened, a warning is printed and ripgrep continues with no config args. Lines that contain invalid UTF-8 on Windows produce per-line errors (on Unix they're accepted as `OsString`).
+4. **Errors**: If the file can't be read, a warning is printed and ripgrep continues with no config args. Per-line parse errors (e.g. invalid UTF-8 on Windows) are reported individually.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, accuracy, and quality. They correctly identify RIPGREP_CONFIG_PATH, describe the 4-step loading process (env var check, line-by-line parsing, prepending to CLI args, error handling), and reference the correct file path. Response B is slightly more grounded by mentioning the specific bstr method (for_byte_line_with_terminator) and the Unix OsString detail. Response A is slightly more actionable by including a concrete example config file. These minor differences cancel out, making this a tie.
+Both responses correctly identify RIPGREP_CONFIG_PATH and describe the same config loading flow: env var check, line-by-line parsing with comment/blank skipping, prepending to CLI args, and error handling. Response B provides slightly more precise line references (e.g., config.rs:63-71, config.rs:47-52) and explicitly notes there's no default/fallback path and no shell splitting/quoting, which are useful details. Response A mentions bstr's for_byte_line_with_terminator which is a nice implementation detail. Both are accurate, well-structured, and practically useful. The differences are minor enough to call it a tie.
 ```
 
 </details>
 
-<details><summary>ripgrep P13 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>ripgrep P13 | winner=tie | Q 8→8 G 8→8</summary>
 
 **Prompt:** Which environment variables does ripgrep read at startup and how are they applied to the final args?
 
-- Interactions: no_budi=12 / with_budi=14
-- Cost USD: no_budi=$0.2067 / with_budi=$0.1796
+- Interactions: no_budi=14 / with_budi=18
+- Cost USD: no_budi=$0.2297 / with_budi=$0.3804
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
+
+```text
+Here's the full picture of environment variables ripgrep reads at startup and how they affect argument parsing:
+
+## Environment Variables
+
+### `RIPGREP_CONFIG_PATH`
+The most important one. Read in `crates/core/flags/config.rs:17`. The flow in `parse_low()` (`crates/core/flags/parse.rs:64`) is:
+
+1. CLI args are parsed first into `LowArgs`
+2. If `--help`/`--version` was given, short-circuit immediately (config is never read)
+3. If `--no-config` was given, skip the config file
+4. Otherwise, read `RIPGREP_CONFIG_PATH` — the file is parsed line-by-line, skipping blank lines and `#` comments, with each line becoming one argument
+5. Config args are **prepended** to CLI args: `config_args + cli_args`
+6. The combined args are re-parsed from scratch into a fresh `LowArgs`
+
+This means CLI flags always override config file flags since they come last (last-flag-wins semantics).
+
+### `PWD`
+Fallback for determining the current working directory (`crates/core/flags/hiargs.rs:1303`). Used only when `std::env::current_dir()` fails.
+
+### `WSL_DISTRO_NAME`
+Checked at `crates/core/flags/hiargs.rs:1406` to detect if running inside WSL, which affects path handling (e.g., converting `/mnt/c/...` paths).
+
+### `NO_COLOR`
+Documented in flag help (`crates/core/flags/defs.rs:723`). When set (any value), and `--color` is `auto` (the default), colors are disabled. This is handled by the `termcolor` dependency, not by ripgrep directly.
+
+### `TERM`
+Also documented in flag help (`crates/core/flags/defs.rs:720
+...[truncated 445 chars]
+```
+
+#### Response (`with_budi`)
 
 ```text
 Now I have a complete picture. Here's the summary:
 
 ---
 
-Ripgrep reads these environment variables at startup:
+## Environment variables ripgrep reads
 
 ### 1. `RIPGREP_CONFIG_PATH`
 **Where:** `crates/core/flags/config.rs:17`
 
-The primary env var. If set to a non-empty path, ripgrep reads that file as an rc config. Each non-empty, non-comment (`#`) line becomes one shell argument. These config args are **prepended** to the CLI args, so CLI flags override config file flags (last-writer-wins).
+The primary env var. If set to a non-empty path, ripgrep reads that file as a config file (one flag per line, `#` comments, blank lines ignored). The arguments from the config file are **prepended** to the CLI arguments, then the entire combined list is re-parsed from scratch.
 
-The merge logic is in `crates/core/flags/parse.rs:64-112` (`parse_low`):
-1. CLI args are parsed first (to check for `--help`, `--version`, `--no-config`).
-2. If `--no-config` is present, config is skipped.
-3. Otherwise, config file args are loaded and concatenated: `config_args + CLI_args`.
-4. The entire combined arg list is re-parsed from scratch into a fresh `LowArgs`.
+The flow in `crates/core/flags/parse.rs:64-113` (`parse_low`):
+1. Parse CLI args alone → get `LowArgs`
+2. Set up logging from those early args (so `--trace` works during config parsing)
+3. If `--help`/`--version` was given, short-circuit (config is never read)
+4. If `--no-config` was given, skip config
+5. Read `RIPGREP_CONFIG_PATH` → parse config file into args
+6. Build `final_args = config_args ++ CLI_args`
+7. Re-parse from scratch → **CLI args override config args** (last-writer-wins semantics)
 
-### 2. `NO_COLOR`
-**Where:** Checked by the `termcolor` crate (a dependency), not directly by ripgrep.
-
-When set (to any value), and `--color` is `auto` (the default), colors are suppressed. Documented at `crates/core/flags/defs.rs:723`.
-
-### 3. `TERM`
-**Where:** Also checked by `termcolor`.
-
-When unset or set to `dumb`, and `--color` is `auto`, colors are suppressed. Documented at `crates/core/flags/defs.rs:720`.
-
-### 4. `PWD`
+### 2. `PWD`
 **Where:** `crates/core/flags/hiargs.rs:1303`
 
-Used as a fallback when `std::env::current_dir()` fails (e.g., the CWD has been deleted). Only consulted in the error path.
+Used as a fallback when `std::env::current_dir()` fails (e.g., CWD was deleted). Not normally consulted.
 
-### 5. `WSL_DISTRO_NAME`
-**Where:** `crates/core/flags/hiargs.rs
-...[truncated 413 chars]
-```
+### 3. `WSL_DISTRO_NAME`
+**Where:** `crates/core/flags/hiargs.rs:1406`
 
-#### Response (`with_budi`)
+On Unix, if set, ripgrep uses it to construct the `{wslprefix}` variable for hyperlink formats (e.g., `wsl$/<distro>`), allowing Windows apps to open files in WSL drives.
 
-```text
-Here's a summary of the environment variables ripgrep reads at startup and how they affect behavior:
+### 4. `PATH`
+**Where:** `crates/cli/src/decompress.rs:462`
 
-## Config / Arguments
-
-**`RIPGREP_CONFIG_PATH`** — The most impactful one. Points to an rc file containing extra flags (one per line, `#` comments allowed). These args are **prepended** to CLI args, so CLI flags override config file flags. Parsed in `crates/core/flags/parse.rs:95`. Skipped if `--no-config` is passed on the CLI.
-
-## Color / Terminal
-
-**`NO_COLOR`** and **`TERM`** — Not read by ripgrep directly, but by the `termcolor` crate. When `--color auto` (the default):
-- If `NO_COLOR` is set (any value), colors are suppressed
-- If `TERM` is unset or `dumb`, colors are suppressed
-
-These are documented in the `--color` flag definition at `crates/core/flags/defs.rs:720-723`.
-
-## Working Directory
-
-**`PWD`** — Used as a fallback in `crates/core/flags/hiargs.rs:1303` if `std::env::current_dir()` fails (e.g., CWD was deleted).
-
-## WSL / Hyperlinks
-
-**`WSL_DISTRO_NAME`** — Read in `crates/core/flags/hiargs.rs:1406` to construct a WSL prefix (`wsl$/<distro>`) for hyperlink paths, allowing Windows apps to open files in WSL filesystems.
-
-## Git Ignore
-
-**`XDG_CONFIG_HOME`** — Used by the `ignore` crate (`crates/ignore/src/gitignore.rs:604,620`) to locate the global git config (`$XDG_CONFIG_HOME/git/config`) and default global gitignore (`$XDG_CONFIG_HOME/git/ignore`). Falls back to `~/.config` if unset.
-
-## Decompression
-
-**`PATH`** — Read in `crates/cli/src/decompress.rs:462` to 
-...[truncated 683 chars]
+Standard `PATH` lookup used to resolve decompression programs (like `gzip`, 
+...[truncated 673 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses accurately cover the core 5 environment variables (RIPGREP_CONFIG_PATH, NO_COLOR, TERM, PWD, WSL_DISTRO_NAME) with correct file/line references and a clear explanation of the arg merging logic. Response B wins by also covering XDG_CONFIG_HOME (used by the ignore crate for git config/ignore), PATH (for decompression binaries with --search-zip), and RIPGREP_BUILD_GIT_HASH (build-time version info), all with specific file references. These are legitimate env vars read by ripgrep or its bundled crates, making Response B more comprehensive without sacrificing accuracy or clarity. The arg merging explanation is equally good in both.
+Both responses cover the same core set of environment variables (RIPGREP_CONFIG_PATH, PWD, WSL_DISTRO_NAME, NO_COLOR, TERM, PATH) with accurate file paths and line numbers. Both correctly describe the config file prepend + re-parse flow with last-writer-wins semantics. Response A includes RIPGREP_BUILD_GIT_HASH (compile-time) as a bonus but is slightly less precise on WSL_DISTRO_NAME (says "path handling" vs B's accurate "hyperlink wslprefix variable"). Response B adds a logging setup step in the parse flow and a nice precedence summary, but omits the build-time variable. The differences are minor and roughly cancel out, making this a tie.
 ```
 
 </details>
 
-<details><summary>ripgrep P14 | winner=no_budi | Q 9→8 G 9→9</summary>
+<details><summary>ripgrep P14 | winner=no_budi | Q 9→8 G 9→7</summary>
 
 **Prompt:** What unit tests cover the config file parsing logic and where do they live in the repo?
 
-- Interactions: no_budi=7 / with_budi=2
-- Cost USD: no_budi=$0.0468 / with_budi=$0.0321
-- Hook: reason=ok context_chars=1467
-
-#### Injected context
-
-```text
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: tests/util.rs
-  span: 58-167
-  anchor: pub struct Dir {
-  proof:
-    - early: Dir@58
-- file: crates/core/flags/config.rs
-  span: 111-176
-  anchor: mod tests {
-  proof:
-    - let (args, errs) = parse_reader(
-    - .unwrap();
-    - assert!(errs.is_empty());
-- file: crates/searcher/src/testutil.rs
-  span: 681-687
-  anchor: struct TesterConfig {
-  proof:
-    - (no concise proof line found)
-- file: crates/matcher/tests/test_matcher.rs
-  span: 72-79
-  anchor: fn shortest_match() {
-  proof:
-    - let matcher = matcher(r"a+");
-    - assert_eq!(matcher.shortest_match(b"aaa").unwrap(), Some(3));
-    - assert_eq!(matcher.re.shortest_match(b"aaa"), Some(1));
-- file: tests/regression.rs
-  span: 181-260
-  anchor: rgtest!(r131, |dir: Dir, mut cmd: TestCommand| {
-  proof:
-    - dir.create_dir(".git");
-    - dir.create(".gitignore", "TopÑapa");
-    - dir.create("TopÑapa", "test");
-- file: crates/matcher/tests/util.rs
-  span: 28-64
-  anchor: impl Matcher for RegexMatcher {
-  proof:
-    - Ok(self
-    - .find_a
-...[truncated 264 chars]
-```
+- Interactions: no_budi=5 / with_budi=2
+- Cost USD: no_budi=$0.0452 / with_budi=$0.0308
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-The config file parsing unit tests live in **`crates/core/flags/config.rs:110-176`**, inline in the `tests` module. There are 3 tests covering `parse_reader`:
+The unit tests for config file parsing live in **`crates/core/flags/config.rs:110-176`**, in an inline `#[cfg(test)] mod tests` block.
 
-| Test | Line | What it covers |
-|------|------|----------------|
-| `basic` | 116 | Parsing flags, short options, comments (`#`), blank lines, and whitespace trimming |
-| `error` (unix) | 137 | Handling invalid UTF-8 bytes on Unix (accepts them as `OsString`) |
-| `error` (non-unix) | 162 | Invalid UTF-8 on Windows produces an error and skips the bad line |
+There are three tests:
 
-Additionally, there are integration-level config tests in **`tests/feature.rs`** — search for `config` there to find tests that exercise config file loading end-to-end via the `RIPGREP_CONFIG_PATH` env var.
+1. **`basic`** (line 116) — Verifies that comments (`#`), blank lines, and leading whitespace are handled correctly, producing the expected list of arguments.
+2. **`error`** (unix, line 139) — On Unix, confirms that invalid UTF-8 bytes are preserved as valid `OsString` values without errors.
+3. **`error`** (non-unix, line 164) — On Windows, confirms that invalid UTF-8 produces an error for the offending line while still parsing the valid lines.
+
+All three test the internal `parse_reader` function, which is the core parsing logic that reads from any `std::io::Read` source.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Three unit tests cover the `parse_reader` function in **`crates/core/flags/config.rs:111-176`**:
+There are **3 tests** covering `parse_reader` (the config file parser):
 
 | Test | Line | What it covers |
-|------|------|----------------|
-| `basic` | 116 | Comments (`#`), blank lines, leading whitespace stripping, and normal flag parsing |
-| `error` (unix) | 138 | Handling invalid UTF-8 bytes on Unix (they pass through as `OsString`) |
-| `error` (non-unix) | 164 | Invalid UTF-8 on Windows produces an error and skips the bad line |
+|---|---|---|
+| `basic` | :116 | Parses flags, short flags, comments (`#`), and blank lines from a config reader |
+| `error` (unix) | :138 | Handles invalid UTF-8 bytes gracefully on Unix (treated as valid `OsString`) |
+| `error` (non-unix) | :164 | Invalid UTF-8 produces an error on Windows; valid lines still parse |
 
-All three test the internal `parse_reader` function, which is the core of config file parsing — it reads lines from a byte stream and returns `(Vec<OsString>, Vec<Box<dyn Error>>)`.
+All three exercise the `parse_reader` function defined earlier in the same file, which is the core logic for reading ripgrep's config file format (one flag per line, `#` comments, blank lines ignored).
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the same 3 unit tests in crates/core/flags/config.rs with accurate descriptions and line numbers. The key differentiator is that Response A additionally points to integration-level config tests in tests/feature.rs (via RIPGREP_CONFIG_PATH), which directly answers the broader question about what tests cover config file parsing logic. Response B instead provides the parse_reader return type signature, which is a nice but less actionable detail. Response A gives a more complete picture of test coverage for config parsing across the repo.
+Both responses correctly identify the same 3 tests covering parse_reader in config.rs and describe them accurately. The key differentiator is that Response A explicitly provides the full file path `crates/core/flags/config.rs:110-176`, making it immediately actionable for navigation. Response B uses a nice table format but critically omits the file path entirely — it refers to "the same file" without ever naming it, which reduces both grounding and actionability. For a question asking "where do they live in the repo," the explicit path is important. Content-wise they are nearly identical in accuracy and coverage.
 ```
 
 </details>
@@ -10365,9 +9830,9 @@ Both responses correctly identify the same 3 unit tests in crates/core/flags/con
 
 **Prompt:** What integration tests cover parallel search correctness and where are they?
 
-- Interactions: no_budi=5 / with_budi=3
-- Cost USD: no_budi=$0.0457 / with_budi=$0.0359
-- Hook: reason=ok context_chars=2110
+- Interactions: no_budi=8 / with_budi=5
+- Cost USD: no_budi=$0.0697 / with_budi=$0.0593
+- Hook: reason=ok context_chars=429
 
 #### Injected context
 
@@ -10377,338 +9842,327 @@ rules:
 - Use only file paths shown in snippets for exact-path answers.
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
-- file: tests/multiline.rs
-  span: 61-121
-  anchor: 5:Watson
-  proof:
-    - eqnice!(expected, cmd.stdout());
-    - rgtest!(vimgrep, |dir: Dir, mut cmd: TestCommand| {
-    - dir.create("sherlock", SHERLOCK);
-- file: tests/binary.rs
-  span: 1-80
-  anchor: use crate::util::{Dir, TestCommand};
-  proof:
-    - const HAY: &'static [u8] = include_bytes!("./data/sherlock-nul.txt");
-    - rgtest!(mmap_match_implicit, |dir: Dir, mut cmd: TestCommand| {
-    - dir.create_bytes("hay", HAY);
-- file: crates/searcher/src/searcher/core.rs
-  span: 585-615
-  anchor: fn sink_after_context(
-  proof:
-    - return Ok(false);
-    - assert!(self.after_context_left >= 1);
-    - if self.binary && self.detect_binary(buf, range)? {
-- file: crates/searcher/src/searcher/mod.rs
-  span: 1047-1088
-  anchor: mod tests {
-  proof:
-    - let matcher = RegexMatcher::new("");
-    - let sink = KitchenSink::new();
-    - let mut searcher = SearcherBuilder::new().heap_limit(Some(0)).build();
 - file: crates/searcher/src/line_buffer.rs
-  span: 2
-...[truncated 300 chars]
+  span: 213-286
+  anchor: impl<'b, R: io::Read> LineBufferReader<'b, R> {
+  proof:
+    - line_buffer.clear();
+    - self.line_buffer.absolute_byte_offset()
+    - self.line_buffer.binary_byte_offset()
 ```
 
 #### Response (`no_budi`)
 
 ```text
-There are only **two** integration tests specifically covering parallel search correctness, both in `tests/feature.rs`:
+The integration tests covering parallel search correctness are in **`tests/feature.rs`**, all tied to [issue #411](https://github.com/BurntSushi/ripgrep/issues/411):
 
-1. **`f411_parallel_search_stats`** (line 434) — Runs with `-j2` across two files, verifies `--stats` output reports correct aggregate counts (4 matched lines, 2 files matched, 2 files searched).
+| Test | Line | What it verifies |
+|---|---|---|
+| `f411_single_threaded_search_stats` | :421 | `--stats` correctness with `-j1` (baseline) |
+| `f411_parallel_search_stats` | :434 | `--stats` match/file counts are correct with `-j2` across 2 files |
+| `f411_single_threaded_quiet_search_stats` | :446 | `--quiet --stats` with `-j1` (baseline) |
+| `f411_parallel_quiet_search_stats` | :464 | `--quiet --stats` counts are correct with `-j2` across 2 files |
 
-2. **`f411_parallel_quiet_search_stats`** (line 464) — Same as above but adds `--quiet`, verifying that match content is suppressed while stats remain correct under parallel execution.
+The parallel tests (`-j2`) create two copies of the test corpus, run a multi-threaded search, and assert that aggregate statistics (matched lines, files with matches, files searched) are summed correctly — verifying that the parallel search pipeline merges results without dropping or double-counting.
 
-Their single-threaded counterpart is `f411_single_threaded_quiet_search_stats` (line 445), which uses `-j1` for comparison.
-
-A few other tests use `-j1` to **avoid** parallel nondeterminism (e.g., `tests/misc.rs:87`, `tests/regression.rs:125,209,322`), but those aren't testing parallel correctness — they're forcing deterministic output order.
-
-In short, parallel search correctness coverage is minimal: just the two `f411_parallel*` tests in `tests/feature.rs`, both focused on stats aggregation rather than output ordering or content correctness.
+There are **no other integration tests** that explicitly exercise parallel search (`-j` > 1). The parallel execution path itself lives in `crates/ignore/src/walk.rs` (the parallel directory walker) and `crates/core/main.rs`, but those don't have their own parallel-specific test suites — correctness is covered only by the four tests above.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-The key integration tests covering parallel search correctness are in three files:
+There are only **two** integration tests that explicitly exercise parallel (multi-threaded) search correctness, both in `tests/feature.rs`:
 
-**`tests/feature.rs`** — Most directly tests parallel vs single-threaded behavior:
-- **`f411_single_threaded_search_stats`** (line ~421): Runs `--stats` with `-j1` and verifies output
-- **`f412_parallel_search_stats`** (line ~436): Runs `--stats` with `-j2` — directly tests parallel search produces correct stats
-- **`f413_no_context_sep_on_stats`** (line ~448): Uses `-j1` with `--stats` and `--no-messages`
-- **`f414_quiet_stats`** (line ~465): Uses `-j2` with `--quiet --stats` — parallel + quiet mode
+1. **`f411_parallel_search_stats`** (`tests/feature.rs:434`) — runs with `-j2` across two files and asserts the `--stats` summary is correct (4 matched lines, 2 files matched, 2 files searched).
 
-**`tests/misc.rs`** (line ~84) — Uses `-j1` to get **deterministic** results for `--heading` output, implicitly acknowledging that parallel search can reorder output.
+2. **`f411_parallel_quiet_search_stats`** (`tests/feature.rs:464`) — same as above but adds `--quiet`, verifying stats are reported correctly without printing match lines.
 
-**`tests/regression.rs`** — Regression tests that pin single-threaded (`-j1`) to get deterministic output:
-- Line ~125: `--heading` with `-j1`
-- Line ~209: `-j1` with symlink arguments
-- Line ~322: `-j1` searching subdirectory
+Both test that aggregate statistics remain correct when the search is split across threads. They are the only tests that use `-j2` (or any thread count > 1). All other tests that touch threading use `-j1` to force deterministic output ordering (`tests/misc.rs:87`, `tests/regression.rs:125,209,322`, `tests/feature.rs:425,452`).
 
-The pattern across the test suite: most tests use `-j1` to ensure deterministic ordering, and only the `f412`/`f414` tests in `tests/feature.rs` explicitly exercise `-j2` to verify parallel search correctness (specifically that stats aggregation works across threads).
+In short, parallel search correctness coverage is minimal — it only validates stats aggregation, not output ordering, deduplication, or other concurrency concerns.
 ```
 
 </details>
 
-<details><summary>ripgrep P16 | winner=no_budi | Q 9→8 G 9→8</summary>
+<details><summary>ripgrep P16 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** I want to add a --max-depth flag to limit directory traversal depth. What files and functions would I need to modify?
 
-- Interactions: no_budi=6 / with_budi=3
-- Cost USD: no_budi=$0.0560 / with_budi=$0.0277
+- Interactions: no_budi=7 / with_budi=7
+- Cost USD: no_budi=$0.0631 / with_budi=$0.0638
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-**`--max-depth` (alias `--maxdepth`, short `-d`) already exists in ripgrep.** Here's a summary of where it's implemented, which is useful if you want to understand the pattern for adding similar flags:
+**`--max-depth` already exists in ripgrep.** It's fully implemented with the short flag `-d`. Here's the chain:
 
-| Layer | File | Purpose |
-|-------|------|---------|
-| **Flag definition** | `crates/core/flags/defs.rs:3936` | `MaxDepth` struct implementing the `Flag` trait — name, aliases, short flag `-d`, docs, and `update()` |
-| **Low-level args** | `crates/core/flags/lowargs.rs:74` | `max_depth: Option<usize>` field on `LowArgs` |
-| **High-level args** | `crates/core/flags/hiargs.rs` | Wiring from `LowArgs` into the search configuration |
-| **Walker builder** | `crates/ignore/src/walk.rs:657` | `WalkBuilder::max_depth()` method that configures the directory traversal |
-| **Walker runtime** | `crates/ignore/src/walk.rs:1701` | Depth check during parallel walking (`depth >= max`) |
-| **Shell completions** | `crates/core/flags/complete/rg.zsh` | Zsh completion entry |
-| **Tests** | `crates/core/flags/defs.rs:3984`, `crates/ignore/src/walk.rs:2268`, `tests/feature.rs` | Unit and integration tests |
+| Layer | File | What |
+|-------|------|------|
+| Flag definition | `crates/core/flags/defs.rs:3936` | `MaxDepth` struct implementing `Flag` trait |
+| Low-level args | `crates/core/flags/lowargs.rs:74` | `max_depth: Option<usize>` field |
+| High-level args | `crates/core/flags/hiargs.rs:70` | Propagated from `LowArgs` |
+| Walker builder | `crates/core/flags/hiargs.rs:887` | `.max_depth(self.max_depth)` call on `WalkBuilder` |
+| Walk implementation | `crates/ignore/src/walk.rs:657` | `WalkBuilder::max_depth()` setter |
+| Parallel walk | `crates/ignore/src/walk.rs:1701` | Depth check during traversal |
 
-You can use it today: `rg --max-depth 2 pattern` or `rg -d 2 pattern`.
+Usage:
+``\`
+rg --max-depth 2 pattern
+rg -d 2 pattern
+rg --maxdepth 2 pattern   # alias
+``\`
+
+Is there a different depth-limiting behavior you're looking for, or were you unaware this already existed?
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Ripgrep **already has a `--max-depth` flag** (with `--maxdepth` as an alias). Here's where it's implemented:
+`--max-depth` (alias `--maxdepth`, short `-d`) **already exists** in ripgrep. Here's the full chain of where it's implemented:
 
-| File | Purpose |
-|---|---|
-| `crates/core/flags/defs.rs:3936` | Flag definition (name, aliases, help text, parsing) |
-| `crates/core/flags/lowargs.rs` | `LowArgs` struct stores the parsed value (`max_depth`) |
-| `crates/core/flags/hiargs.rs` | `HiArgs` passes the value to the walker configuration |
-| `crates/ignore/src/walk.rs` | The directory walker enforces the depth limit |
-| `crates/core/flags/complete/rg.zsh` | Shell completion |
-| `tests/feature.rs` | Integration test |
+| Layer | File | What |
+|-------|------|------|
+| Flag definition | `crates/core/flags/defs.rs:3936` | `MaxDepth` struct — defines the CLI flag, docs, and `update()` |
+| Low-level args | `crates/core/flags/lowargs.rs:74` | `max_depth: Option<usize>` field |
+| High-level args | `crates/core/flags/hiargs.rs:70` | Propagated from `LowArgs` at line 287 |
+| Walker builder | `crates/core/flags/hiargs.rs:887` | Passed to `WalkBuilder::max_depth()` |
+| Walk implementation | `crates/ignore/src/walk.rs:657` | `WalkBuilder::max_depth()` setter |
+| Walk traversal | `crates/ignore/src/walk.rs:1701` | Depth check during directory descent |
+| Tests | `tests/feature.rs` | Integration tests |
 
-You can see it in action with `rg --max-depth 2 pattern dir/`.
-
-If you're looking to do something different from the existing flag, let me know what you have in mind and I can dig deeper into the specifics.
+You can use it now: `rg --max-depth 2 pattern` or `rg -d 2 pattern`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify that --max-depth already exists and point to the same key files. Response A is more thorough: it provides specific line numbers for more locations (e.g., walk.rs:657 for the builder method, walk.rs:1701 for the runtime depth check, defs.rs:3984 for tests), separates the walker builder from walker runtime, mentions the short flag -d, and includes more test file references. Response B covers the essentials but with less granularity (no line numbers for walk.rs or lowargs.rs, doesn't mention the -d short flag or the parallel walking depth check). Response B's offer to dig deeper is nice but doesn't compensate for the missing detail. Both are correct and well-grounded; A simply provides more actionable specifics for someone wanting to understand the pattern.
+Both responses correctly identify that --max-depth already exists in ripgrep and provide nearly identical tables mapping the full implementation chain with the same file paths and line numbers. Response A includes a usage block with the --maxdepth alias and a helpful follow-up question. Response B mentions the alias upfront and adds a tests row. These are minor stylistic differences; the substance, accuracy, and grounding are equivalent.
 ```
 
 </details>
 
-<details><summary>ripgrep P17 | winner=tie | Q 8→8 G 7→8</summary>
+<details><summary>ripgrep P17 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** I want to add a progress indicator showing how many files have been searched so far. Where would I add this and what shared state would I need to track across threads?
 
 - Interactions: no_budi=6 / with_budi=7
-- Cost USD: no_budi=$0.1327 / with_budi=$0.0763
+- Cost USD: no_budi=$0.0968 / with_budi=$0.0932
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the breakdown:
+Here's the full picture:
 
-## Where to add it
+## Where to hook in
 
 The two key functions are in `crates/core/main.rs`:
 
-- **Single-threaded**: `search()` (line 107) — the `for haystack in haystacks` loop at line 124. You'd increment a counter after each `searcher.search()` call and periodically print to stderr.
+1. **Single-threaded**: `search()` (line 107) — the `for haystack in haystacks` loop at line 124. You'd increment a counter and print to stderr after each iteration.
 
-- **Multi-threaded**: `search_parallel()` (line 160) — the closure passed to `build_parallel().run()` at line 183. Each worker thread processes one file per invocation of the closure. You'd increment a shared counter after the `searcher.search()` call at line 190.
+2. **Multi-threaded**: `search_parallel()` (line 160) — the closure at line 183 that runs per-file. You'd increment a shared atomic counter after each `searcher.search()` call (line 190).
 
-## Shared state needed
+## Shared state you'd need
 
-For the **parallel** case (which is the interesting one), you'd need:
-
-1. **`AtomicU64` (or `AtomicUsize`) for files searched** — increment with `fetch_add(1, Ordering::Relaxed)` inside the worker closure (around line 196), alongside the existing `searched` and `matched` atomics. `Relaxed` ordering is fine here since it's just a progress counter with no synchronization requirements.
-
-2. **A reporting mechanism** — a few options:
-   - **Timer-based**: Spawn a separate thread that reads the atomic counter every N milliseconds (e.g., 100ms) and writes to stderr. Pass it an `Arc<AtomicU64>` and an `Arc<AtomicBool>` for signaling completion.
-   - **Count-based**: In the worker closure, check `count % N == 0` after incrementing and write to stderr (needs a lock or `eprintln!` which locks stderr internally).
-
-3. **An `AtomicBool` for "done"** — to signal the progress thread to stop.
-
-## Sketch
+For the **parallel** path, you already have a pattern to follow — look at how `matched` and `searched` are shared (lines 167-168):
 
 ``\`rust
-// In searc
-...[truncated 1447 chars]
+// Existing pattern in search_parallel():
+let matched = AtomicBool::new(false);
+let searched = AtomicBool::new(false);
+``\`
+
+You'd add:
+
+``\`rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+let files_searched = AtomicU64::new(0);
+``\`
+
+Then inside the per-file closure (around line 188), after the search completes:
+
+``\`rust
+let count = files_searched.fetch_add(1, Ordering::Relaxed) + 1;
+if count % 1000 == 0 {  // throttle output
+    eprint!("\r{} files searched", count);
+}
+``\`
+
+For the **single-threaded** path, no atomics are needed — just a plain `u64` counter incremented inside the loop at line 124.
+
+## Key design considerations
+
+- **Write to stderr**, not stdout — stdout carries search results. The existing `err_message!` macro (defined in `crates/core/messages.rs`) writes to stderr with locking; you'd want something similar but with `\r` for overwriting.
+- **Th
+...[truncated 752 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full picture:
+Here's a breakdown of the architecture and where you'd add progress tracking:
 
-## Two search paths
+## Key files
 
-Ripgrep has two entry points in `crates/core/main.rs`:
+- **`crates/core/main.rs:107`** — `search()`: single-threaded search loop
+- **`crates/core/main.rs:160`** — `search_parallel()`: multi-threaded search
+- **`crates/core/search.rs:245`** — `SearchWorker::search()`: per-file search logic
+- **`crates/core/messages.rs`** — existing shared global atomic state (good pattern to follow)
 
-1. **Single-threaded**: `search()` (line 107) — iterates haystacks in a `for` loop
-2. **Multi-threaded**: `search_parallel()` (line 160) — uses `walk_builder().build_parallel().run()` with per-thread closures
+## Where to hook in
 
-## Where to add the counter
+Both search entry points iterate over files and call `searcher.search(&haystack)`:
 
-**Shared state**: Add an `AtomicU64` (or `AtomicUsize`) for the files-searched count, similar to how `matched` (`AtomicBool`) and `searched` (`AtomicBool`) are already shared across threads in `search_parallel()`:
+- **Single-threaded** (`main.rs:124-142`): a simple `for haystack in haystacks` loop — increment a counter each iteration.
+- **Multi-threaded** (`main.rs:183-217`): a closure passed to `build_parallel().run()` — each thread invokes the closure per file. The counter must be shared across threads.
+
+The natural place to increment is right after `searcher.search(&haystack)` returns (or right before it, depending on whether you want "searched" vs "searching").
+
+## Shared state you'd need
+
+Following the existing pattern in `search_parallel` (which already uses `AtomicBool` for `matched`/`searched` and `Mutex` for `stats`):
 
 ``\`rust
-// In search_parallel(), around line 167:
+// In search_parallel(), alongside the existing shared state:
+use std::sync::atomic::AtomicU64;
+
 let files_searched = AtomicU64::new(0);
+
+// Inside the per-file closure, after search completes:
+let count = files_searched.fetch_add(1, Ordering::Relaxed) + 1;
+if count % 1000 == 0 {
+    eprint!("\r{} files searched...", count);
+}
 ``\`
 
-**Increment point**: Inside the per-thread closure (line 183), right after a successful `searcher.search(&haystack)` call (line 190), increment it:
-
-``\`rust
-let count = files_searched.fetch_add(1, Ordering::Relaxed);
-``\`
-
-For the single-threaded `search()`, you'd just use a plain `u64` counter incremented inside the `for haystack in haystacks` loop (line 124).
-
-## How to display it
-
-Progress should go to **stderr** (so it doesn't corrupt search output on stdout). You have two main design choices:
-
-1. **Periodic timer** — Spawn a thread that reads the `AtomicU64` every ~100ms and writes to stderr (e.g., `\rSearched 1234 files...`). Use `\r` to overwrite the line in-place, and clear it when search completes. This avoids slowing down search with per-file I/O.
-
-2. **Threshold-based** — Print every N files (e.g., every 100). Simpler but less
-...[truncated 768 chars]
+For
+...[truncated 1192 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the two search paths in crates/core/main.rs (search() and search_parallel()), reference appropriate line numbers, and propose nearly identical solutions using AtomicU64 with Relaxed ordering, a timer-based stderr reporter, and carriage return overwriting. Response A provides a more complete code sketch including Arc wrapping, the done signal, and the progress thread spawn/join lifecycle. Response B adds a useful practical suggestion about adding a --progress flag and points to crates/core/flags/defs.rs for flag patterns, which shows slightly better grounding in the project's structure. However, Response B incorrectly describes `matched` and `searched` as `AtomicBool` when they are actually `AtomicBool` for whether any match was found, not counters — this is a minor inaccuracy but not wrong per se. Response A's code sketch is more actionable as a starting point for implementation. Overall they are very close in quality, with each having slight advantages in different areas that roughly cancel out.
+Both responses are strong and identify the same core locations (search() at main.rs:107, search_parallel() at main.rs:160), the same shared state approach (AtomicU64), and nearly identical code snippets. They both correctly reference existing patterns like AtomicBool for matched/searched and recommend stderr output, throttling, line cleanup, and a --progress flag in flags/defs.rs.
+
+Response B edges ahead in several ways: (1) It additionally references `crates/core/search.rs:245` (SearchWorker::search) and `crates/core/messages.rs` as key files, giving a more complete architectural picture. (2) It specifically calls out the `eprintln_locked!` macro at `messages.rs:33` and explains how ripgrep locks stdout before writing to stderr to avoid interleaving — this is a meaningful implementation detail that Response A only vaguely alludes to. (3) It mentions plumbing the flag through `HiArgs` in `flags/hiargs.rs`, which is a concrete additional step needed. (4) The design considerations are slightly more nuanced (mentioning `is_terminal` check, thread-local for time-based throttle).
+
+Response A is also quite good — it mentions the `Stats` struct tracking `searches()` which is a useful additional detail not in B. But overall B provides slightly more grounded, actionable guidance with better coverage of the interleaving/locking concern that's important in practice.
 ```
 
 </details>
 
-<details><summary>ripgrep P18 | winner=tie | Q 9→9 G 8→9</summary>
+<details><summary>ripgrep P18 | winner=with_budi | Q 8→8 G 7→8</summary>
 
 **Prompt:** I want to change the config file format from plain-text args to TOML key-value pairs. Walk me through which parts of the codebase would need to change and in what order.
 
-- Interactions: no_budi=7 / with_budi=13
-- Cost USD: no_budi=$0.0841 / with_budi=$0.1456
-- Hook: reason=ok context_chars=444
+- Interactions: no_budi=9 / with_budi=6
+- Cost USD: no_budi=$0.1295 / with_budi=$0.0984
+- Hook: reason=ok context_chars=505
 
 #### Injected context
 
 ```text
 [structural context]
-Walk  (walk.rs:1047)
-  → refs: build, depth, filter
+new  (hiargs.rs:945)
+  ← called by: binary.rs, max_matches_multi_line2, new
+  → refs: stdout
 
 [budi context]
 rules:
 - Use only file paths shown in snippets for exact-path answers.
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
-- file: crates/ignore/src/walk.rs
-  span: 1047-1092
-  anchor: impl Walk {
+- file: crates/core/flags/hiargs.rs
+  span: 945-961
+  anchor: impl State {
   proof:
-    - pub fn new<P: AsRef<Path>>(path: P) -> Walk {
-    - return Ok(false);
-    - return Ok(true);
+    - let cwd = current_dir()?;
+    - log::debug!("read CWD from environment: {}", cwd.display());
+    - Ok(State {
 ```
 
 #### Response (`no_budi`)
+
+```text
+Here's the architecture and the change plan, from lowest-impact to highest:
+
+## How it works today
+
+The config system is simple:
+
+1. **`crates/core/flags/config.rs`** — reads `RIPGREP_CONFIG_PATH`, parses the file line-by-line. Each non-empty, non-comment line becomes one `OsString` shell argument (e.g. `--context=0`, `-u`).
+2. **`crates/core/flags/parse.rs:95`** — calls `config::args()`, prepends the resulting args before the CLI args, then re-parses everything through the same CLI `Parser`.
+
+The key insight: config args are just injected as if the user typed them on the command line. The parser doesn't know or care where they came from.
+
+## What would need to change (in order)
+
+### 1. Add a `toml` dependency
+
+In `crates/core/Cargo.toml`, add a TOML parsing crate (e.g. `toml` or `toml_edit`). This is the only new dependency.
+
+### 2. Rewrite `config.rs` — the parser
+
+This is the core change. Currently `parse_reader()` does line-by-line text → `Vec<OsString>`. You'd replace it with:
+
+- Deserialize the file as TOML into a `toml::Value` (or a typed struct)
+- Walk the key-value pairs and convert each into the equivalent CLI argument(s). For example:
+  ``\`toml
+  context = 0
+  smart-case = true
+  unrestricted = true   # or maybe: -u = true
+  glob = ["*.rs", "*.toml"]
+  ``\`
+  becomes `["--context=0", "--smart-case", "-u", "--glob=*.rs", "--glob=*.toml"]`
+
+**The output of `config::args()` should remain `Vec<OsString>`.** This keeps the rest of the pipeline untouched — `parse.rs` just
+...[truncated 2191 chars]
+```
+
+#### Response (`with_budi`)
 
 ```text
 Now I have a clear picture. Here's the walkthrough:
 
 ---
 
-## Parts that need to change (in order)
+## Parts that need to change (in dependency order)
 
-### 1. Add a `toml` dependency
+### 1. `crates/core/flags/config.rs` — the config parser (primary change)
 
-In `crates/core/Cargo.toml`, add a TOML parsing crate (e.g. `toml` or `toml_edit`).
+This is the heart of it. Currently (`config.rs:84-108`), `parse_reader` reads the file line-by-line, treats each non-empty/non-comment line as a single shell argument (e.g. `--context=0`, `-u`), and returns `Vec<OsString>`.
 
-### 2. Rewrite `crates/core/flags/config.rs` — the config parser
+You'd replace this with:
+- A TOML parser (add `toml` crate dependency to `crates/core/Cargo.toml`)
+- A mapping from TOML keys to flag names. For example, `context = 0` becomes `OsString::from("--context=0")`, and `smart-case = true` becomes `OsString::from("--smart-case")`.
+- Handling for different value types: booleans (flags that take no arg), strings, integers, and arrays (for repeatable flags like `--glob`).
 
-This is the central file. Currently:
+The public API — `pub fn args() -> Vec<OsString>` at `config.rs:16` — **should stay the same**. This is key: the rest of the codebase consumes config as a `Vec<OsString>` that gets prepended to CLI args. If you preserve that contract, nothing downstream needs to change for basic functionality.
 
-- `parse_reader()` (line 84) reads the file line-by-line, treats each trimmed non-empty/non-comment line as a single shell argument (`--flag=value`), and returns `Vec<OsString>`.
-- `args()` (line 16) reads `RIPGREP_CONFIG_PATH`, calls `parse()`, and returns the `Vec<OsString>`.
+### 2. `crates/core/flags/parse.rs:95-108` — the config consumer
 
-You'd need to:
-
-1. **Define a TOML schema** — a serde struct representing valid keys. E.g.:
-   ``\`toml
-   context = 0
-   smart-case = true
-   type = ["rust", "py"]
-   glob = ["*.foo"]
-   ``\`
-2. **Replace `parse_reader()`** — deserialize the TOML into that struct, then **convert the struct back into `Vec<OsString>`** (e.g. `smart-case = true` → `"--smart-case"`, `context = 0` → `"--context=0"`).
-
-The key design choice: the rest of the flag machinery (`Parser`, `LowArgs`, etc.) already consumes `Vec<OsString>`. If you keep `config::args()` returning `Vec<OsString>`, **nothing downstream needs to change**. This is the path of least resistance.
-
-### 3. Update `crates/core/flags/parse.rs` — integration point
-
-`parse_low()` at line 95 calls `crate::flags::config::args()` and gets back `Vec<OsString>`. If you preserve that return type (recommended), this file needs **no changes**. If you change
-...[truncated 1793 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Now I have a complete picture. Here's the walkthrough:
-
----
-
-## Parts of the codebase that would need to change (in order)
-
-### 1. Add `toml` dependency
-
-**File:** `crates/core/Cargo.toml`
-
-Add a TOML parsing crate (e.g. `toml`) to the `[dependencies]`. This is the foundation everything else builds on.
-
-### 2. Rewrite the config file parser
-
-**File:** `crates/core/flags/config.rs` (the entire 177-line file)
-
-This is the core change. Currently:
-- `parse_reader()` (line 84) reads the file line-by-line, treats each trimmed non-empty/non-comment line as a single CLI argument, and returns `Vec<OsString>`.
-- `args()` (line 16) reads `RIPGREP_CONFIG_PATH`, calls `parse()`, and returns the `Vec<OsString>`.
-
-You'd need to:
-1. Replace `parse_reader()` with TOML deserialization. Design a TOML schema that maps keys to flag names (e.g. `context = 0`, `smart-case = true`, `glob = ["*.rs", "*.toml"]`).
-2. Add a conversion step that translates the parsed TOML key-value pairs back into `Vec<OsString>` CLI arguments (e.g. `context = 0` → `"--context=0"`). This is the simplest integration approach because it preserves the existing contract with the rest of the system.
-3. The public signature of `args() -> Vec<OsString>` can stay the same, keeping downstream changes minimal.
-
-### 3. Update the consumer in `parse_low()`
-
-**File:** `crates/core/flags/parse.rs` (lines 64–113)
-
-Currently `parse_low()` calls `config::args()` and prepends those args before CLI args, then re-parses everything. If you k
-...[truncated 2037 chars]
+`parse_low()` calls `config::args()` and prepends the result to CLI args. If you keep the `Vec<OsString>` interface unchanged, **this file needs no changes**. But if you want richer semantics (e.g. TOML sections, config-only options, better error messages with TOML line numbers), you'd modify how `parse_low` i
+...[truncated 2099 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are remarkably similar in structure, accuracy, and quality. They correctly identify config.rs as the core change, recommend preserving the Vec<OsString> interface to minimize downstream impact, and enumerate the same set of files needing updates. Response A adds a useful backward-compatibility/migration section and a dependency chain diagram. Response B is slightly more precise with file references (e.g., defs.rs lines 4274-4307 for --no-config docs, tests/feature.rs line 332, tests/util.rs line 163) and raises a practical design question about list-valued flags. Response A's defs.rs suggestion about adding a toml_key field is somewhat unnecessary since using long flag names directly is acknowledged as the simpler path. These differences are minor and roughly offset each other, making this a tie.
+Both responses are structurally very similar and arrive at the same core insight: config::args() returning Vec<OsString> is a clean seam, so the change is mostly contained to config.rs. Response A has slightly better design discussion (negation conventions, migration options, explicit "What does NOT change" section). Response B edges ahead on grounding with more specific and accurate line references (config.rs:84-108 for parse_reader, config.rs:16 for pub fn args(), config.rs:110-176 for tests) and mentions additional relevant files like tests/feature.rs for integration tests, crates/core/flags/doc/template.rg.1 for the man page, and shell completions. Response B also correctly notes using the FLAGS array from defs.rs to dynamically build the TOML-key-to-flag mapping. The slight grounding advantage gives Response B the edge in a very close comparison.
 ```
 
 </details>
 
 ### Terraform
 
-<details><summary>Terraform P1 | winner=with_budi | Q 9→9 G 8→9</summary>
+<details><summary>Terraform P1 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** What are the entry points of the Terraform CLI and how is command dispatch structured in main.go and commands.go?
 
 - Interactions: no_budi=3 / with_budi=3
-- Cost USD: no_budi=$0.1527 / with_budi=$0.1137
+- Cost USD: no_budi=$0.1672 / with_budi=$0.1132
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
@@ -10718,102 +10172,108 @@ Here's how the Terraform CLI entry points and command dispatch work:
 
 ## Entry Point (`main.go`)
 
-1. **`main()`** (line 61) — simply calls `os.Exit(realMain())`.
+1. **`main()`** (line 61) — Simply calls `realMain()` and passes its return code to `os.Exit()`.
 
-2. **`realMain()`** (line 65) — the real orchestrator, which does the following in order:
+2. **`realMain()`** (line 65) — The real orchestrator. It does this in order:
    - Initializes OpenTelemetry tracing
-   - Sets up temp log sinks (`TF_TEMP_LOG_PATH`)
+   - Sets up logging (temp log file sink via `TF_TEMP_LOG_PATH`)
    - Initializes terminal streams (`terminal.Init()`)
-   - Loads CLI config (`cliconfig.LoadConfig()`) — intentionally before `-chdir` processing
-   - Sets up service discovery with credentials
-   - Configures provider sources (registries, dev overrides, reattach providers)
+   - Loads CLI config (`cliconfig.LoadConfig()`) — before handling `-chdir`
+   - Sets up credentials and service discovery (`disco.Disco`)
+   - Configures provider sources and dev overrides
    - Initializes backends (`backendInit.Init`)
-   - Extracts and applies `-chdir=...` option (changes `os.Chdir` before commands run)
-   - Calls **`initCommands()`** to populate the `Commands` map
-   - Runs checkpoint in a goroutine
-   - Merges args from `TF_CLI_ARGS` and `TF_CLI_ARGS_<subcommand>` env vars
-   - Shortcuts `-v`/`-version`/`--version` by prepending `"version"` to args
-   - Builds a `cli.CLI` runner (from `hashicorp/cli` library) and calls `cliRunner.Run()`
-   - Before running, checks for unknown commands and offers "did you mean?" suggestions
+   - Extracts and applies `-chdir=...` option (changes working directory)
+   - Calls **`initCommands()`** to populate the `Commands` map (if not already set, e.g. by tests)
+   - Runs update checkpoint in a goroutine
+   - Builds a `cli.CLI` runner with `Commands` map
+   - Merges extra args from `TF_CLI_ARGS` and `TF_CLI_ARGS_<subcommand>` env vars
+   - Rewrites `--version`/`-v` to the `version` subcommand
+   - Rebuilds `cli.CLI` with final args (including autocomplete support)
+   - Does a "did you mean?" check for unknown commands
+   - Calls `cliRunner.Run()` which dispatches to the matched command
 
 ## Command Dispatch (`commands.go`)
 
-3. **`initCommands()`** (line 56) — populates the global `Commands` map (`map[string]cli.CommandFactory`):
-   - Constructs a shared `command.Meta` struct with all cross-cutting concerns (working dir, streams, UI, services, provider sources, shutdown channel, etc.)
-   - Registers ~4
-...[truncated 1527 chars]
+3. **`Commands`** (line 34) — A `map[string]cli.CommandFactory` (package `github.com/hashicorp/cli`). Each key is a command name (supports space-separated subcommands like `"state mv"`, `"
+...[truncated 1732 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the structure:
+Here's how the Terraform CLI entry points and command dispatch work:
 
-## Entry Point
+## Entry Point (`main.go`)
 
-**`main.go:61-63`** — `main()` simply calls `os.Exit(realMain())`.
-
-**`main.go:65-352`** — `realMain()` is the real entry point. It runs this sequence:
-
-1. **OpenTelemetry init** — sets up tracing
-2. **Logging** — configures temp log sink from `TF_TEMP_LOG_PATH`
-3. **Terminal init** — detects stdout/stderr/stdin terminal capabilities
-4. **CLI config** — `cliconfig.LoadConfig()` loads `~/.terraformrc` / env config
-5. **Credentials & service discovery** — sets up `disco.Disco` for registry interactions
-6. **Provider source** — configures provider installation sources from config
-7. **Backend init** — `backendInit.Init(services)` registers all backends
-8. **`-chdir` handling** — extracts and applies `-chdir=<dir>` before subcommand parsing
-9. **Command init** — calls `initCommands()` (from `commands.go`) to populate the `Commands` map
-10. **Env args merging** — injects args from `TF_CLI_ARGS` and `TF_CLI_ARGS_<command>` env vars
-11. **Version shortcut** — rewrites `-v`/`--version` flags into the `version` subcommand
-12. **Did-you-mean** — checks for unknown commands and suggests alternatives
-13. **Dispatch** — `cliRunner.Run()` (from `hashicorp/cli`) matches the subcommand and calls the factory
+1. **`main()`** (line 61) — just calls `os.Exit(realMain())`
+2. **`realMain()`** (line 65) — the real orchestrator, which does this in order:
+   - Initializes OpenTelemetry tracing
+   - Sets up logging (temp log file sink, version info)
+   - Initializes terminal streams (`terminal.Init()`)
+   - Loads CLI config via `cliconfig.LoadConfig()` (before `-chdir` is processed)
+   - Sets up service discovery (`disco.Disco`) with credentials
+   - Configures provider sources (installation config, dev overrides, reattach providers)
+   - Initializes backends (`backendInit.Init`)
+   - Extracts `-chdir=...` from args and changes directory if present
+   - Calls **`initCommands()`** to populate the `Commands` map (unless already set for testing)
+   - Kicks off `runCheckpoint` in a goroutine (update check)
+   - Builds a `cli.CLI` runner, merges `TF_CLI_ARGS` and `TF_CLI_ARGS_<cmd>` env vars into args
+   - Rewrites `-v`/`-version`/`--version` into the `version` subcommand
+   - Does "did you mean?" suggestion for unknown commands
+   - Calls `cliRunner.Run()` which dispatches to the matched command
 
 ## Command Dispatch (`commands.go`)
 
-**`commands.go:34`** — `Commands` is a `map[string]cli.CommandFactory` — a map from command name strings to factory functions.
+3. **`Commands`** (line 34) — a `map[string]cli.CommandFactory` package-level var. The `hashicorp/cli` library matches the first arg(s) against map keys and calls the factory to get a `cli.Command`, then invokes its `Run()` method.
 
-**`commands.go:56-481`** — `initCommands()` populates this map. Key patterns:
-
-- **S
-...[truncated 1744 chars]
+4. **`initCommands()`** (line 56) —
+...[truncated 1441 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are highly accurate and comprehensive, covering the same key concepts: main()/realMain() flow, initCommands() populating the Commands map, hashicorp/cli dispatch, special cases (destroy, rpcapi, experimental commands), and PrimaryCommands/HiddenCommands. Response B edges ahead on grounding by providing more precise line number references (commands.go:34, commands.go:88-114, commands.go:297-300, commands.go:453-465) compared to Response A's sparser references. Response B also adds useful details like the env/workspace legacy aliases with LegacyName and the cli.Command interface methods. Response A uniquely mentions the checkpoint goroutine and has a slightly more detailed ASCII flow diagram. Overall quality is nearly identical; the tiebreaker goes to B for better source grounding.
+Both responses are highly accurate and well-grounded in the repository. They cover the same key points: main()/realMain() flow, initCommands(), the Commands map as map[string]cli.CommandFactory, Meta struct sharing, special cases (destroy as ApplyCommand, env as legacy workspace alias, rpcapi bypass, experimental commands), PrimaryCommands, and HiddenCommands. Line numbers match (main at 61, realMain at 65, Commands at 34, initCommands at 56, PrimaryCommands at 467, HiddenCommands at 475). Response A includes a slightly more detailed flow diagram showing TF_CLI_ARGS merging, --version rewriting, and the did-you-mean check as distinct steps in the ASCII tree, giving it a minor edge in actionability. Response B is slightly more concise but equally correct. The differences are minimal — both are excellent explanations of the same code.
 ```
 
 </details>
 
-<details><summary>Terraform P2 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>Terraform P2 | winner=no_budi | Q 9→8 G 9→8</summary>
 
 **Prompt:** Describe the module layout of the Terraform codebase — which packages under internal/ own which concerns (config parsing, planning, applying, state)?
 
-- Interactions: no_budi=16 / with_budi=27
-- Cost USD: no_budi=$0.3782 / with_budi=$0.3895
+- Interactions: no_budi=45 / with_budi=26
+- Cost USD: no_budi=$0.5537 / with_budi=$0.2704
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's the module layout of the Terraform codebase under `internal/`:
+I now have a thorough picture. Here's the module layout:
 
-## Core Engine
+---
 
-- **`internal/terraform`** — The heart of Terraform. Contains the `Context` type with the main operations: `context_plan.go` (planning), `context_apply.go` (applying), `context_validate.go` (validation), `context_refresh.go` (state refresh), `context_import.go` (resource import). Also owns the graph builder, graph walking, expression evaluation (`evaluate.go`), transform pipeline (numerous `transform_*.go` files), and node types (`node_resource_*.go`, `node_output.go`, etc.).
+## `internal/` Package Layout
 
-## Configuration
+### Core Engine
 
-- **`internal/configs`** — Parses and represents Terraform configuration (`.tf` files). The `Parser` type is the main entry-point; `parser_config.go` / `parser_config_dir.go` load individual files and directories. Outputs in-memory types for modules, resources, providers, variables, outputs, `moved`/`removed` blocks, etc. Static analysis only — no evaluation.
-- **`internal/lang`** — Runtime expression evaluation for the configuration language. Works closely with `configs` — `configs` parses, `lang` evaluates.
+- **`terraform`** — The heart of Terraform. Contains `Context`, which orchestrates **plan**, **apply**, **refresh**, **validate**, **import**, and **eval** operations. It builds a DAG of resources, walks the graph, and coordinates providers/provisioners. Files like `context_plan.go`, `context_apply.go`, `context_validate.go` map directly to those operations. Also contains all the graph `transform_*.go` builders and `node_*.go` graph node implementations.
 
-## Plans & State
+### Configuration
 
-- **`internal/plans`** — Types representing Terraform plans (the diff between desired and actual state). Includes change types, actions (create/update/delete), deferred changes, and plan serialization.
-- **`internal/states`** — Types representing Terraform state: `State`, `Module`, `Resource`, `OutputValue`, instance objects. Also includes `sync.go` for concurrent-safe state a
-...[truncated 4331 chars]
+- **`configs`** — Parses `.tf` files (HCL) into in-memory configuration structs: resources, variables, outputs, providers, modules, `moved`/`removed` blocks, test files, etc. The `Parser` and `BuildConfig` entry points live here. Static analysis only — no evaluation.
+- **`lang`** — Runtime evaluation of HCL expressions and functions (the "eval" side of config). Works hand-in-hand with `configs`.
+- **`configs/configschema`** *(sub-package)* — Schema types describing the expected shape of provider/resource configuration blocks.
+
+### Addressing
+
+- **`addrs`** — Immutable types for referring to objects: `resource.foo`, `module.bar`, provider addresses, move endpoints, etc. Used pervasively as the "address vocabulary" across all other packages.
+
+### Plans
+
+- **`plans`** — Data types for a Terraform plan: `Plan`, `Changes`, actions (create/update/delete), deferred changes, dynamic values.
+- **`plans/pla
+...[truncated 4974 chars]
 ```
 
 #### Response (`with_budi`)
@@ -10823,29 +10283,28 @@ Here's the module layout of the Terraform codebase under `internal/`:
 
 ## Core Engine
 
-### `internal/terraform`
-The **heart of Terraform** — "Terraform Core". Contains the `Context` type which orchestrates **all major operations**: plan, apply, refresh, validate, import, and init. Builds dependency graphs (`graph_builder_plan.go`, `graph_builder_apply.go`), walks them (`graph_walk.go`), and executes node-level logic for resources (`node_resource_plan_instance.go`, `node_resource_apply_instance.go`), outputs, variables, providers, etc. This is where planning and applying actually happen.
+- **`internal/terraform`** — The heart of Terraform. Contains `Context`, which orchestrates the full lifecycle: **validate** (`context_validate.go`), **plan** (`context_plan.go`), **apply** (`context_apply.go`), **refresh** (`context_refresh.go`), and **import** (`context_import.go`). It builds a DAG of graph nodes (`node_resource_plan*.go`, `node_resource_apply*.go`, `node_resource_destroy*.go`) and walks it (`context_walk.go`). Depends on nearly every other `internal/` package.
 
-### `internal/configs`
-**Configuration parsing and static representation.** The `Parser` type loads `.tf` files via HCL and produces in-memory representations of resources, variables, providers, modules, moved/removed blocks, etc. `BuildConfig` assembles a full module tree. Sub-packages:
-- `configload` — loading configs from disk (module directories)
-- `configschema` — schema types describing provider/resource block structure
-- `hcl2shim` — compatibility shims between HCL2 and legacy formats
+## Configuration
 
-### `internal/states`
-**Terraform state model.** In-memory representation of tracked infrastructure: modules, resources, instances, outputs. Sub-packages:
-- `statefile` — serialization/deserialization of state to/from JSON (with version upgrades v0→v4)
-- `statemgr` — state manager interfaces (transient, persistent, locking, filesystem-backed)
-- `remote` — remote state storage client
+- **`internal/configs`** — Parses `.tf` files into in-memory config structs. Entry point is `Parser` / `LoadConfigDir` / `BuildConfig`. Represents source-level structure (resources, variables, modules, etc.) — no evaluation.
+- **`internal/lang`** — Runtime evaluation of HCL expressions and Terraform functions. Sibling to `configs`; `configs` parses, `lang` evaluates.
+- **`internal/experiments`** — Feature flags / opt-in experimental language features.
 
-### `internal/plans`
-...[truncated 5955 chars]
+## Addresses & References
+
+- **`internal/addrs`** — Typed address objects for everything referenceable in config or state: resources, modules, providers, outputs, variables, move endpoints, etc. Immutable value types with string ↔ struct round-tripping.
+
+## Plans & State
+
+- **`internal/plans`** — Data types representing a Terraform plan (set of intended changes). Includes change actions, plan serialization, deferred changes, and plan quality metada
+...[truncated 3776 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are high quality and well-organized, covering the same major areas (core engine, config, state, plans, backends, CLI, providers). Response B edges ahead by providing more thorough sub-package enumeration — e.g., listing `configload`, `configschema`, `hcl2shim` under configs; `planfile`, `planproto`, `objchange` under plans; and detailed `command` sub-packages like `arguments`, `views`, `format`, `jsonplan`, etc. This additional depth makes it more useful for actually navigating the codebase. Both reference specific filenames (graph builders, node types, context files), but Response B's sub-package breakdowns give a more complete map. Response A is solid but slightly less detailed in its sub-package coverage.
+Both responses are well-structured and accurate, covering the key internal/ packages (terraform, configs, lang, addrs, plans, states, backend, command, providers, etc.) with correct descriptions of their responsibilities. Response A is more comprehensive, detailing sub-packages like plans/planfile, plans/planproto, plans/objchange, states/statefile, states/statemgr, states/remote, and covering additional areas like the registry, stacks, testing framework, and more utility packages. It also provides more specific file references (transform_*.go, node_*.go). Response B is well-organized and accurate but covers fewer sub-packages and less detail overall. Both reference specific source files (context_plan.go, etc.) showing grounding in the actual repo. Response A edges ahead on depth and completeness, though both are practically useful for understanding the codebase layout.
 ```
 
 </details>
@@ -10854,9 +10313,9 @@ Both responses are high quality and well-organized, covering the same major area
 
 **Prompt:** Where is `walk` defined on the Context type and what does it do when called from Apply?
 
-- Interactions: no_budi=5 / with_budi=5
-- Cost USD: no_budi=$0.0930 / with_budi=$0.0679
-- Hook: reason=ok context_chars=884
+- Interactions: no_budi=6 / with_budi=5
+- Cost USD: no_budi=$0.1048 / with_budi=$0.0748
+- Hook: reason=ok context_chars=1078
 
 #### Injected context
 
@@ -10865,6 +10324,9 @@ Both responses are high quality and well-organized, covering the same major area
 walk  (context_walk.go:86)
   ← called by: walkEmbeddedStack, DepthFirstWalk, optionalValueNotComputable
   → refs: close, graphwalker, printf
+walk  (dag.go:405)
+  ← called by: walkEmbeddedStack, DepthFirstWalk, optionalValueNotComputable
+  → refs: append, appendnext, downedgesnocopy
 
 [budi context]
 rules:
@@ -10878,47 +10340,41 @@ evidence_cards:
     - log.Printf("[DEBUG] Starting graph walk: %s", operation.String())
     - diags := graph.Walk(walker)
     - return walker, diags
-- file: internal/terraform/context.go
-  span: 90-109
-  anchor: type Context struct {
+- file: internal/dag/dag.go
+  span: 405-471
+  anchor: func (g *AcyclicGraph) walk(order walkType, test bool, start Set, f DepthWalkFunc) error {
   proof:
-    - runContext context.Context
-    - runContextCancel context.CancelFunc
-    - meta *ContextMeta
+    - panic(fmt.Sprint("invalid walk order", order))
+    - return nil
+    - return err
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here's what you need to know:
+Here's the full picture:
 
-**Definition:** `context_walk.go:86`
+**Definition:** `walk` is defined at `internal/terraform/context_walk.go:86`:
 
 ``\`go
 func (c *Context) walk(graph *Graph, operation walkOperation, opts *graphWalkOpts) (*ContextGraphWalker, tfdiags.Diagnostics)
 ``\`
 
-It does three things:
-1. Creates a `ContextGraphWalker` via `c.graphWalker(...)` — this sets up the appropriate state objects (state, refreshState, prevRunState), changes, and other context depending on the operation type.
-2. Starts a stop-watcher (`c.watchStop`) so that if Terraform receives a stop signal, it can call provider `Stop()` APIs.
-3. Calls `graph.Walk(walker)` which **blocks until the entire graph has been walked** — executing each node in the dependency graph concurrently where possible.
+**What it does:**
 
-**Call from Apply** (`context_apply.go:192`):
+1. Creates a `ContextGraphWalker` via `c.graphWalker()` (line 89) — this sets up all the state needed for the walk: a deep copy of the input state, changes, check state, deferred actions, instance expander, etc.
+2. Starts a stop-watcher goroutine (`c.watchStop`) that can call provider `Stop()` APIs if the context is cancelled (line 92).
+3. Calls `graph.Walk(walker)` (line 95) — this is the core: it traverses the dependency graph, executing each node (resource apply, provider configure, output eval, etc.) according to the graph's topological order.
+4. Signals the stop-watcher to shut down and waits for it (lines 98-99).
+5. Returns the walker (which now contains mutated state, changes, diagnostics, etc.).
 
-``\`go
-walker, walkDiags := c.walk(graph, operation, &graphWalkOpts{
-    Config:     config,
-    InputState: workingState,  // deep copy of plan.PriorState
-    Changes:    changes,       // decoded plan changes
-    ...
-    PlanTimeCheckResults: plan.Checks,
-    PlanTimeTimestamp:    plan.Timestamp,
-    ...
-})
-``\`
+**When called from Apply** (`context_apply.go:192`):
 
-In the Apply path, `walk` receives the **plan's prior state** as input and the **decoded planned changes**. The `graphWalker` setup (line 143–150) hits the `default` branch for apply operations: it creates a mutable `SyncState` from a deep copy of the input state (no refreshState/prevRunState, since those are plan-only). The graph walk then executes each resource action (create/update/delete) from the plan, mutating the s
-...[truncated 116 chars]
+- The graph comes from `c.applyGraph()` which builds an apply-specific dependency graph from the plan.
+- The operation is the apply walk operation.
+- `graphWalkOpts` is populated with the plan's prior state (deep copied), decoded changes, plan-time check results, plan timestamp, function results, external providers, and deferral enabled.
+- After `walk` returns, Apply extracts the final state from `walker.State.Close()`, records check results, and prunes resource husk
+...[truncated 217 chars]
 ```
 
 #### Response (`with_budi`)
@@ -10926,32 +10382,30 @@ In the Apply path, `walk` receives the **plan's prior state** as input and the *
 ```text
 Here's the full picture:
 
-**`walk` is defined at `internal/terraform/context_walk.go:86`** and does the following:
+**Definition:** `walk` is defined at `internal/terraform/context_walk.go:86`. It does the following:
 
-1. Creates a `ContextGraphWalker` via `c.graphWalker(graph, operation, opts)` — this sets up state wrappers, changes, config, etc. based on the operation type.
-2. Starts a stop-watcher goroutine (`c.watchStop`) that listens for cancellation so it can call provider `Stop()` APIs.
-3. Calls `graph.Walk(walker)` — this is the blocking DAG walk that executes each graph node (resource apply, data read, etc.) in dependency order.
-4. Closes the stop-watcher channel and waits for it to finish.
-5. Returns the walker (which holds the resulting state, diagnostics, etc.) and any walk diagnostics.
+1. Creates a `ContextGraphWalker` via `c.graphWalker(graph, operation, opts)` — this configures the walker with the right state objects, changes, hooks, etc. based on the operation type.
+2. Starts a stop-watcher goroutine (`c.watchStop`) that listens for cancellation and calls provider `Stop()` APIs if needed.
+3. Calls `graph.Walk(walker)` — this is the actual DAG traversal that blocks until all graph nodes have been visited (executing provider operations, evaluating expressions, etc.).
+4. Signals the stop-watcher to shut down and waits for it.
+5. Returns the walker (which holds accumulated state, diagnostics, etc.) and any walk diagnostics.
 
-**When called from `Apply`**, the call chain is:
+**Call path from Apply:** `Apply` (`context_apply.go:81`) delegates to `ApplyAndEval` (`context_apply.go:95`), which:
 
-- `Context.Apply` (`context_apply.go:81`) delegates to `Context.ApplyAndEval` (`context_apply.go:95`).
-- `ApplyAndEval` validates the plan (not errored, is applyable), checks apply-time variables, builds the apply graph via `c.applyGraph()`, then calls `c.walk()` at **line 192** with:
-  - The apply graph and operation
-  - A deep copy of `plan.PriorState` as the input state
-  - Decoded plan changes, overrides, external provider configs
-  - Plan-time check results and timestamp for continuity from the plan phase
-- After `walk` returns, it records check results into the state, closes the state, and returns the new state to the caller.
+1. Validates the plan is applyable and checks apply-time variables.
+2. Builds the apply graph via `c.applyGraph(plan, config, opts, true)` at line 167.
+3. Deep-copies `plan.PriorState` into `workingState`.
+4. Calls `c.walk(graph, operation, &graphWalkOpts{...})` at **line 192**, passing the config, working state, decoded changes, overrides, deferred check results, and plan timestamp.
+5. After `walk` returns, it collects diagnostics from the walker, records check results into state, and closes the state to produce the final `*states.State`.
 
-In short: `walk` is the core graph execution engine, and during Apply it walks the apply graph to exe
-...[truncated 102 chars]
+So when called from Apply, `walk` is the core execution
+...[truncated 163 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify `walk` at `context_walk.go:86` and describe its core behavior (creating ContextGraphWalker, starting stop-watcher, calling graph.Walk). Response B edges ahead by tracing the complete call chain from `Context.Apply` (line 81) through `Context.ApplyAndEval` (line 95) to the `c.walk()` call at line 192, providing better navigability. It also describes post-walk behavior (closing the stop-watcher, recording check results, closing state). Response A provides useful internal detail about the graphWalker default branch and SyncState setup, plus a code snippet. Both are well-grounded with specific line numbers and file paths. Response B wins slightly due to its more complete tracing of the Apply call chain, which directly answers the 'when called from Apply' part of the question more thoroughly.
+Both responses correctly identify `walk` at `internal/terraform/context_walk.go:86` and describe its 5-step behavior accurately. The key differentiator is the call path from Apply: Response B traces the exact chain `Apply` (line 81) → `ApplyAndEval` (line 95) → `c.walk` (line 192), with specific line numbers for intermediate steps like graph building at line 167. Response A skips `ApplyAndEval` and jumps directly to `context_apply.go:192`, missing this intermediate delegation. Response A does add useful post-walk context (pruning resource husks on destroy), but the more precise call-chain tracing in Response B is more valuable for someone trying to navigate the codebase. Both are strong; Response B has a slight edge in grounding and completeness of the call path.
 ```
 
 </details>
@@ -10961,7 +10415,7 @@ Both responses correctly identify `walk` at `context_walk.go:86` and describe it
 **Prompt:** Where is `NewContext` defined and what does it initialize before returning a terraform.Context?
 
 - Interactions: no_budi=3 / with_budi=2
-- Cost USD: no_budi=$0.0846 / with_budi=$0.0669
+- Cost USD: no_budi=$0.0383 / with_budi=$0.0308
 - Hook: reason=ok context_chars=550
 
 #### Injected context
@@ -10988,64 +10442,66 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-`NewContext` is defined at `internal/terraform/context.go:120`. Here's what it initializes before returning a `*Context`:
+`NewContext` is defined at `internal/terraform/context.go:120`. Before returning a `*Context`, it does the following:
 
-1. **Hooks + stopHook** (lines 127-130) — Copies the caller's hooks into a new slice and appends a freshly allocated `stopHook` (`sh`) at the end, so the original slice isn't mutated.
+1. **Copies hooks and appends a `stopHook`** (lines 127–130) — creates a new slice with all user-provided hooks plus a freshly allocated `stopHook` (`sh`), avoiding mutation of the caller's `opts.Hooks`.
 
-2. **Parallelism** (lines 136-148) — Reads `opts.Parallelism`. Returns an error diagnostic if negative. Defaults to `10` if zero.
+2. **Validates and defaults parallelism** (lines 136–148) — returns an error diagnostic if `opts.Parallelism` is negative; defaults to `10` if zero.
 
-3. **Plugins** (line 150) — Calls `newContextPlugins(opts.Providers, opts.Provisioners, opts.PreloadedProviderSchemas)` to bundle provider/provisioner factories and any preloaded schemas.
+3. **Creates context plugins** (line 150) — calls `newContextPlugins` with the providers, provisioners, and preloaded provider schemas from opts.
 
-4. **Returned `Context` struct** (lines 154-165):
-   - `hooks` — the copied hooks slice (including the stop hook)
-   - `meta` — directly from `opts.Meta`
-   - `uiInput` — directly from `opts.UIInput`
+4. **Builds and returns the `Context` struct** (lines 154–165) with:
+   - `hooks` — the merged hook slice
+   - `meta` — from `opts.Meta`
+   - `uiInput` — from `opts.UIInput`
    - `graphOpts` — an empty `&ContextGraphOpts{}`
-   - `plugins` — the context plugins built above
-   - `parallelSem` — a new `Semaphore` sized to the parallelism value
+   - `plugins` — the plugin set built above
+   - `parallelSem` — a semaphore sized to `par`
    - `providerInputConfig` — an empty `map[string]map[string]cty.Value`
-   - `sh` — the stop hook
-
-Fields like `runContext`, `runContextCancel`, and `runCond` are left as zero values and get set later when an operation actually runs.
+   - `sh` — the `stopHook` (used by `Context.Stop()`)
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`NewContext` is defined at `internal/terraform/context.go:120`. Before returning a `*Context`, it initializes:
+**File:** `internal/terraform/context.go:120-166`
 
-1. **Hooks** (lines 127–130) — Copies `opts.Hooks` into a new slice and appends a `stopHook` (`sh`) at the end, avoiding mutation of the caller's slice.
-2. **Parallelism** (lines 136–148) — Uses `opts.Parallelism`, returning an error if negative, defaulting to `10` if zero.
-3. **Plugins** (line 150) — Calls `newContextPlugins` with the provided providers, provisioners, and preloaded schemas.
+`NewContext` initializes the following before returning a `*Context`:
+
+1. **Hooks with stop hook** (lines 127–130) — Copies `opts.Hooks` into a new slice and appends a `stopHook` (`sh`). This avoids mutating the caller's slice.
+
+2. **Parallelism** (lines 136–148) — Uses `opts.Parallelism`, defaulting to `10` if zero. Returns an error diagnostic if negative.
+
+3. **Plugins** (line 150) — Calls `newContextPlugins` with providers, provisioners, and preloaded provider schemas from opts.
 
 The returned `Context` struct is populated with:
 
-| Field                | Value                                      |
-|----------------------|--------------------------------------------|
-| `hooks`              | copied hooks + `stopHook`                  |
-| `meta`               | `opts.Meta`                                |
-| `uiInput`            | `opts.UIInput`                             |
-| `graphOpts`          | empty `&ContextGraphOpts{}`                |
-| `plugins`            | assembled plugin set                       |
-| `parallelSem`        | semaphore sized to `par`                   |
-| `providerInputConfig`| empty `map[string]map[string]cty.Value`    |
-| `sh`                 | the `stopHook` instance                    |
+| Field | Value |
+|---|---|
+| `hooks` | copied hooks + stop hook |
+| `meta` | `opts.Meta` |
+| `uiInput` | `opts.UIInput` |
+| `graphOpts` | empty `&ContextGraphOpts{}` |
+| `plugins` | from `newContextPlugins` |
+| `parallelSem` | `NewSemaphore(par)` (default 10) |
+| `providerInputConfig` | empty map |
+| `sh` | the `stopHook` instance |
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify the correct file and line, describe the same initialization steps with accurate line references, and enumerate the same struct fields. Response A includes a note about zero-value fields set later, while Response B uses a table for the struct fields. These are stylistic differences; the content and accuracy are equivalent.
+Both responses are nearly identical in content, accuracy, and grounding. They correctly identify the definition at internal/terraform/context.go:120, describe the same three initialization steps (hooks copying, parallelism validation/defaulting, plugin creation), and enumerate the same struct fields with the same values. Response B uses a table for the struct fields which is marginally more scannable, while Response A uses a bulleted list which is equally clear. The substance is the same and both are well-grounded in the actual code with correct line references. Neither has any factual errors or omissions relative to the other.
 ```
 
 </details>
 
-<details><summary>Terraform P5 | winner=no_budi | Q 9→7 G 9→7</summary>
+<details><summary>Terraform P5 | winner=no_budi | Q 8→7 G 8→7</summary>
 
 **Prompt:** Where is `Plan` defined and what steps does it take from a loaded configuration to producing a plan?
 
-- Interactions: no_budi=9 / with_budi=4
-- Cost USD: no_budi=$0.1965 / with_budi=$0.0792
+- Interactions: no_budi=11 / with_budi=3
+- Cost USD: no_budi=$0.2916 / with_budi=$0.0713
 - Hook: reason=ok context_chars=782
 
 #### Injected context
@@ -11074,33 +10530,40 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-Now I have a clear picture. Here's the full answer:
+Here's a complete picture of where `Plan` is defined and the steps from loaded configuration to a finished plan:
 
 ---
 
-## `Plan` struct — definition
+## Data structure: `plans.Plan`
 
-Defined at `internal/plans/plan.go:34`. It's the top-level type representing a **planned set of changes** — a summary of what must happen to move from the current state to the desired state derived from configuration. Key fields include `Changes`, `PriorState`, `PrevRunState`, `DriftedResources`, `DeferredResources`, `Applyable`, `Complete`, and `Errored`.
+Defined at `internal/plans/plan.go:34`. It's the top-level value object holding the result of planning — changes, drift, prior/prev-run state, variable values, checks, deferred resources, timestamps, etc.
 
-## Flow from configuration to plan
+## Entry point: `(*Context).Plan`
 
-The entry point is `(*Context).Plan` at `internal/terraform/context_plan.go:180`, which delegates to `PlanAndEval` (line 194). Here's the sequence:
+Defined at `internal/terraform/context_plan.go:180`. It delegates immediately to `PlanAndEval`.
 
-### 1. Validation & option checking (lines 198–336)
-- Defaults nil `config`, `prevRunState`, and `opts`
-- **`checkConfigDependencies`** — verifies provider/Terraform version constraints
-- **`checkStateDependencies`** — verifies state is compatible
-- **`checkExternalProviders`** — validates externally-supplied providers
-- Validates the plan **mode** (`NormalMode`, `DestroyMode`, `RefreshOnlyMode`) and rejects incompatible option combinations (e.g. `ForceReplace` outside normal mode, `Forget` outside destroy mode)
-- **`checkInputVariables`** — ensures all root module variables have values
+## Steps from config to plan
 
-### 2. Mode dispatch (lines 341–350)
-- `NormalMode` → `c.plan()` (line 485)
-- `DestroyMode` → `c.destroyPlan()` (line 541) — runs a refresh plan first, then a destroy walk
-- `RefreshOnlyMode` → `c.refreshOnlyPlan()` (line 497)
+### 1. Validation & guard rails (`PlanAndEval`, line 194)
+- Deep-copies / defaults `config`, `prevRunState`, `opts` if nil.
+- `checkConfigDependencies` — ensures required provider/Terraform versions are met.
+- `checkStateDependencies` — validates state is compatible.
+- `checkExternalProviders` — validates any pre-configured providers passed in.
+- Validates the plan `Mode` (Normal / Destroy / RefreshOnly) and rejects illegal option combos (e.g. `-replace` with destroy mode, `-target` + action invocations).
+- `checkInputVariables` — confirms all root module variables are set.
 
-All three ultimately call **`c.planWalk()`*
-...[truncated 1916 chars]
+### 2. Mode dispatch (line 341)
+Calls the appropriate internal method based on mode:
+- **NormalMode** → `c.plan()` (line 485)
+- **DestroyMode** → `c.destroyPlan()` (line 541) — runs a refresh plan first, then a destroy plan.
+- **RefreshOnlyMode** → `c.refreshOnlyPlan()` (line 497)
+
+All three ultimately call `c.planWalk()`.
+
+### 3. `planWalk` — the core orchestration (line 747)
+
+1. **Apply moves*
+...[truncated 3056 chars]
 ```
 
 #### Response (`with_budi`)
@@ -11108,36 +10571,35 @@ All three ultimately call **`c.planWalk()`*
 ```text
 `Plan` is defined at `internal/terraform/context_plan.go:180`. It's a thin wrapper that delegates to `PlanAndEval` (line 194) and discards the evaluation scope.
 
-Here are the steps `PlanAndEval` takes from a loaded configuration to producing a plan:
+Here's the sequence of steps `PlanAndEval` takes from a loaded config to producing a plan:
 
-1. **Acquire run lock** (line 195) — `c.acquireRun("plan")` ensures exclusive access.
+1. **Acquire run lock** (line 195) — `c.acquireRun("plan")` ensures only one operation runs at a time.
 
-2. **Default nil arguments** (lines 201–211) — substitutes empty config, empty state, or default `PlanOpts` (NormalMode) if any are nil.
+2. **Default nil arguments** (lines 201–211) — substitutes empty config, empty state, and default `NormalMode` opts if any are nil.
 
-3. **Check dependencies** (lines 213–223) — `checkConfigDependencies` and `checkStateDependencies` verify the config and state are compatible with this Terraform version. Bails early on errors.
+3. **Check dependencies** (lines 213–223) — `checkConfigDependencies` and `checkStateDependencies` verify that the config and state are compatible with this version of Terraform. Bails early on errors.
 
-4. **Check external providers** (lines 225–229) — `checkExternalProviders` validates provider configuration against the state and external provider settings.
+4. **Check external providers** (lines 225–229) — validates externally-supplied provider configurations against the config and state.
 
 5. **Validate plan mode & option combinations** (lines 231–297):
-   - Only `NormalMode`, `DestroyMode`, `RefreshOnlyMode` are accepted.
-   - `-replace` is only allowed in NormalMode.
-   - `-forget` requires DestroyMode.
-   - `ActionTargets` can't coexist with `Targets` and requires RefreshOnlyMode.
+   - Rejects unknown modes.
+   - Rejects `SkipRefresh` in `RefreshOnlyMode` (unless there are action targets).
+   - Rejects `ForceReplace` outside `NormalMode`.
+   - Rejects `Forget` outside `DestroyMode`.
+   - Rejects mixing `Targets` with `ActionTargets`, and `ActionTargets` outside `RefreshOnlyMode`.
 
-6. **Check input variables** (line 306) — `checkInputVariables` ensures all root module variables have values.
+6. **Check input variables** (line 306) — ensures all root module variables have values.
 
-7. **Emit targeting warning** (lines 309–317) — warns if `-target` is in effect.
+7. **Emit targeting warning** (lines 309–317) — warns when `-target` is in use.
 
-8. **Validate query resources** (lines 319–336) — if `opts.Query` is set, checks that the config actually contains list resources.
-
-9. **Dispatch to mode-specific planner** (l
-...[truncated 1046 chars]
+8. **Validate query mode** (lines 319–336) — if `opts.Query` is set, checks that the config actually contains queryable resources
+...[truncated 857 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Response A correctly distinguishes between the `Plan` struct (`internal/plans/plan.go:34`) and the `Plan` method (`context_plan.go:180`), while Response B only identifies the method as the definition, missing the struct entirely. More importantly, Response A covers the full pipeline including `planWalk` internals (move statements, graph building, graph walking, drift detection, change encoding, completeness determination), which is where the actual planning work happens. Response B treats the mode-specific planners as a black box and only details the pre- and post-planning steps in `PlanAndEval`. For a question about "what steps does it take to produce a plan," omitting the core planning logic is a significant gap. Response B does provide good sequential detail on `PlanAndEval` with precise line numbers, but its coverage is incomplete compared to Response A's end-to-end walkthrough.
+Response A (no_budi) is stronger for several reasons: (1) It correctly identifies both the `plans.Plan` data structure at `internal/plans/plan.go:34` AND the `(*Context).Plan` method at `context_plan.go:180`, while Response B only identifies the method, missing the struct definition which is a key part of "where is Plan defined." (2) Response A covers the full pipeline end-to-end: PlanAndEval validation → mode dispatch → planWalk (moves, graph building, graph walking, drift computation, change encoding, plan assembly) → graph transformer details. Response B provides a granular walkthrough of PlanAndEval but stops there, never describing planWalk, graph building, or how the plan object is actually assembled. (3) Response A's coverage of ~25 graph transformers in PlanGraphBuilder gives a much more complete picture of how configuration becomes a plan. Response B is more precise with line numbers within PlanAndEval itself, which is a minor advantage, but the missing depth into the core planning machinery (planWalk, graph building) is a significant gap. Response A was truncated at the end, costing it some points, but it still covers substantially more of the pipeline.
 ```
 
 </details>
@@ -11146,135 +10608,98 @@ Response A correctly distinguishes between the `Plan` struct (`internal/plans/pl
 
 **Prompt:** Trace the call chain from a `terraform apply` CLI invocation to the point where resources are actually created — what functions are called in order?
 
-- Interactions: no_budi=35 / with_budi=25
-- Cost USD: no_budi=$0.8522 / with_budi=$0.4302
-- Hook: reason=ok context_chars=779
-
-#### Injected context
-
-```text
-[structural context]
-UniqueKey  (unique_key.go:18)
-  → refs: isuniquekey
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: internal/configs/configload/loader.go
-  span: 36-52
-  anchor: type Config struct {
-  proof:
-    - ModulesDir string
-    - Services *disco.Disco
-    - IncludeQueryFiles bool
-- file: internal/collections/unique_key.go
-  span: 18-27
-  anchor: type UniqueKey[T any] interface {
-  proof:
-    - IsUniqueKey(T)
-- file: internal/terraform/node_action_trigger_instance_plan.go
-  span: 207-212
-  anchor: func (n *nodeActionTriggerPlanInstance) Path() addrs.ModuleInstance {
-  proof:
-    - return n.actionAddress.Module
-```
+- Interactions: no_budi=26 / with_budi=21
+- Cost USD: no_budi=$0.5346 / with_budi=$0.4546
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Now I have the full picture. Here's the complete call chain:
+That's enough to trace the full chain. Here's the complete call chain:
 
 ---
 
-## `terraform apply` Call Chain: CLI to Resource Creation
+## `terraform apply` Call Chain
 
 ### 1. CLI Entry Point
-**`main.go`** → `cli.Run()` dispatches to `"apply"` command registered in `commands.go:123`
+- **`main()`** → **`realMain()`** in `main.go:61-65` — parses args, selects the command via the `hashicorp/cli` framework
 
-### 2. Command Layer
-**`internal/command/apply.go:27`** — `ApplyCommand.Run()`
-1. Parses flags via `arguments.ParseApply()`
-2. `c.PrepareBackend()` — loads and configures the backend (`:195`)
-3. `c.OperationRequest()` — builds `backendrun.Operation` with `Type = OperationTypeApply` (`:244`)
-4. **`c.RunOperation(be, opReq)`** (`:122`) — hands off to the backend
+### 2. Command Dispatch
+- **`ApplyCommand.Run()`** in `internal/command/apply.go:27` — parses flags, loads plan file (if any), then:
+  - `c.PrepareBackend()` (`:195`) — initializes the backend (local, remote, cloud)
+  - `c.OperationRequest()` (`:244`) — builds the `backendrun.Operation` struct with `Type: OperationTypeApply`
+  - **`c.RunOperation(be, opReq)`** (`:122`) — delegates to `Meta.RunOperation` in `internal/command/meta.go:483`
 
-### 3. Meta → Backend Dispatch
-**`internal/command/meta.go:483`** — `Meta.RunOperation()`
-- Calls **`b.Operation(ctx, opReq)`** (`:491`) on the backend
+### 3. Backend Operation
+- **`Local.Operation()`** in `internal/backend/local/backend.go:298` — switches on `op.Type`, selects **`b.opApply`** for apply
 
-### 4. Local Backend Routing
-**`internal/backend/local/backend.go:298`** — `Local.Operation()`
-- Switches on `op.Type` → selects **`b.opApply`** (`:311`)
-- Launches `f(stopCtx, cancelCtx, op, runningOp)` in a goroutine
+### 4. Local Apply Orchestrator
+- **`Local.opApply()`** in `internal/backend/local/backend_apply.go:34`:
+  - `b.localRun(op)` (`:61`) — loads config, state, creates a `terraform.Context` (the core engine)
+  - **`lr.Core.Plan()`** (`:100`) — if no plan file provided, plans first (combined plan+apply)
+  - Prompts user for confirmation (unless `-auto-approve`)
+  - **`lr.Core.Apply(plan, lr.Config, &ApplyOpts{...})`** (`:429`) — the core apply call
 
-### 5. Apply Orchestration
-**`internal/backend/local/backend_apply.go:34`** — `Local.opApply()`
-1. **`b.localRun(op)`** (`:61`) — initializes `terraform.Context`, loads config/state
-2. **`lr.Core.Plan(lr.Config, lr.InputState, lr.PlanOpts)`** (`:100`) — generates a plan (if no plan file was provided)
-3. Prompts for user confirmation (unless `-auto-approve`)
-4. **`lr.Core.Apply(plan, lr.Config, &terraform.ApplyOpts{...})`** (`:429`) — the core apply call
-
-### 6. Terraform Core Apply
-**`internal/terraform/context_appl
-...[truncated 2247 chars]
+### 5. Terraform Core — Apply
+- **`Context.Apply()`** in `internal/terraform/context_apply.go:81` → delegates to **`Context.ApplyAndEval()`** (`:95`):
+  - **`c.applyGraph(plan, config, opts, true)`*
+...[truncated 2402 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Now I have the full chain. Here's the summary:
+Now I have the full chain. Here's the trace:
 
----
-
-## `terraform apply` Call Chain (CLI → Resource Creation)
+## Call Chain: `terraform apply` → Resource Creation
 
 ### 1. CLI Entry Point
-**`ApplyCommand.Run()`** — `internal/command/apply.go:27`
-- Parses flags, loads plan file (if any), prepares the backend, builds the operation request
+**`ApplyCommand.Run`** — `internal/command/apply.go:27`
+- Parses flags, loads plan file, prepares backend
+- Builds an operation request with `opReq.Type = backendrun.OperationTypeApply`
+- Calls `c.RunOperation(be, opReq)`
 
-### 2. Run the Operation
-**`Meta.RunOperation()`** — `internal/command/meta.go:483`
-- Calls `b.Operation(ctx, opReq)` on the backend, which dispatches based on `opReq.Type`
+### 2. Run Operation
+**`Meta.RunOperation`** — `internal/command/meta.go:483`
+- Delegates to the backend's `Operation()` method
 
 ### 3. Local Backend Apply
-**`Local.opApply()`** — `internal/backend/local/backend_apply.go:34`
-- Calls `b.localRun(op)` to set up the terraform `Context`, config, and state
-- If no plan file provided: calls **`lr.Core.Plan()`** to generate a plan, then prompts for confirmation
-- Then calls **`lr.Core.Apply(plan, config, opts)`** at line 429
+**`Local.opApply`** — `internal/backend/local/backend_apply.go:34`
+- Calls `b.localRun(op)` to build the terraform `Context` (`lr.Core`)
+- If no saved plan: calls **`lr.Core.Plan()`** to generate a plan
+- Prompts for user confirmation (unless `-auto-approve`)
+- Calls **`lr.Core.Apply(plan, lr.Config, &terraform.ApplyOpts{...})`** (line 429)
 
-### 4. Context.Apply → ApplyAndEval
-**`Context.Apply()`** — `internal/terraform/context_apply.go:81`
-- Delegates to **`Context.ApplyAndEval()`** (line 95)
-- Builds the apply graph via **`c.applyGraph()`** (line 167)
-- Walks the graph via **`c.walk(graph, operation, walkOpts)`** (line 192)
+### 4. Context.Apply
+**`Context.Apply`** → **`Context.ApplyAndEval`** — `internal/terraform/context_apply.go:81-95`
+- Validates the plan, decodes changes
+- Builds the apply graph via **`c.applyGraph(plan, config, opts, true)`** (line 167)
+- Walks the graph via **`c.walk(graph, operation, ...)`** (line 192)
 
 ### 5. Graph Walk
-**`Context.walk()`** — `internal/terraform/context_walk.go`
-- Creates a `ContextGraphWalker` and calls `graph.Walk(walker)` 
-- The graph walker visits each node and calls its `Execute()` method in dependency order
+**`Context.walk`** — `internal/terraform/context_walk.go:86`
+- Creates a `ContextGraphWalker`
+- Calls **`graph.Walk(walker)`** (line 95) — walks the DAG, executing each node in dependency order
 
-### 6. Resource Instance Node Execution
-**`NodeApplyableResourceInstance.Execute()`** — `internal/terraform/node_resource_apply_instance.go:95`
-- Dispatches by resource m
-...[truncated 1375 chars]
+### 6. Resource Node Execution
+**`NodeApplyableResourceInstance.Execute`** — `internal/terraform/node_resource_apply_instance.go:95`
+...[truncated 2158 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the identical call chain with the same file paths, line numbers, and function names. Response A includes slightly more granular detail (e.g., graph.go internals, commands.go registration line, more sub-steps in managedResourceExecute like checkPlannedChange), while Response B is marginally more concise and readable. Both end with an equivalent summary diagram. The grounding is equally strong — same specific line references (apply.go:27, meta.go:483, backend_apply.go:34, context_apply.go:81, node_resource_apply_instance.go:95/204, node_resource_abstract_instance.go:2561/2685). The differences are stylistic rather than substantive, making this a clear tie.
+Both responses trace essentially the same call chain with the same file paths and line numbers. Response A is slightly more complete at the top (includes main() → realMain() and Local.Operation() dispatch), while Response B is slightly more complete at the bottom (includes provisioners and postApplyHook). Both reference the same key functions: ApplyCommand.Run, Meta.RunOperation, Local.opApply, Context.Apply/ApplyAndEval, Graph.Walk, NodeApplyableResourceInstance.Execute, managedResourceExecute, apply(), and provider.ApplyResourceChange. The grounding in repository specifics is equivalent — both cite the same files and line numbers. The practical usefulness is also comparable, with clear summaries and linear chain diagrams. The minor differences balance out.
 ```
 
 </details>
 
-<details><summary>Terraform P7 | winner=tie | Q 9→9 G 8→8</summary>
+<details><summary>Terraform P7 | winner=with_budi | Q 8→9 G 8→9</summary>
 
 **Prompt:** Trace what happens when a provider returns an error during apply — how does Terraform catch and propagate it?
 
-- Interactions: no_budi=29 / with_budi=31
-- Cost USD: no_budi=$0.4610 / with_budi=$0.5483
+- Interactions: no_budi=27 / with_budi=27
+- Cost USD: no_budi=$0.3679 / with_budi=$0.4172
 - Hook: reason=ok context_chars=2643
 
 #### Injected context
@@ -11310,26 +10735,23 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-Now I have the full picture. Here's the trace:
+Now I have a complete picture. Here's the trace:
 
 ---
 
 ## Error Propagation: Provider Apply Error → User
 
-Here's the full chain, bottom-up:
+The flow has 6 layers. Here's the path, bottom-up:
 
-### 1. Provider returns diagnostics in `ApplyResourceChangeResponse`
+### 1. Provider returns diagnostics in the response
 
-**`internal/providers/provider.go:634`** — The provider's `ApplyResourceChange` RPC returns an `ApplyResourceChangeResponse` containing:
-- `NewState` — partial state (may be incomplete on error)
-- `Diagnostics` — the actual errors/warnings from the provider
+The provider's `ApplyResourceChange` RPC returns an `ApplyResourceChangeResponse` (`internal/providers/provider.go:634`) whose `Diagnostics` field carries any errors. The provider may also return a **partial `NewState`** — the last-known state of the resource even if the apply failed.
 
-### 2. `NodeAbstractResourceInstance.apply()` catches the response
+### 2. `NodeAbstractResourceInstance.apply()` processes the response
 
-**`internal/terraform/node_resource_abstract_instance.go:2685-2704`**
+At `internal/terraform/node_resource_abstract_instance.go:2700`:
 
 ``\`go
-resp = provider.ApplyResourceChange(providers.ApplyResourceChangeRequest{...})
 applyDiags := resp.Diagnostics
 if applyConfig != nil {
     applyDiags = applyDiags.InConfigBody(applyConfig.Config, n.Addr.String())
@@ -11337,17 +10759,17 @@ if applyConfig != nil {
 diags = diags.Append(applyDiags)
 ``\`
 
-Key behaviors **even when errors occur**:
-- **Nil state recovery** (line 2713-2737): If the provider returns `cty.NilVal`, Terraform falls back to `change.Before` (prior state) so the object isn't lost from state.
-- **Schema conformance check** (line 2740-2756): Validates the returned value matches the schema; bails if it doesn't.
-- The method **continues processing** after appending errors — it doesn't short-circuit. This is intentional because the provider may have returned a partial state.
+Key: **it does NOT return early on error**. The comment at line 2706 explains why:
 
-### 3. `managedResourceExecute()` handles post-apply consequences
+> Even if there are errors in the returned diagnostics, the provider may have returned a _partial_ state for an object that already exists but failed to fully configure, and so the remaining code must always run to completion.
 
-**`internal/terraform/node_resource_apply_instance.go:311-388`**
+It then performs defensive handling:
+- If `NewState` is nil, it falls back to `change.Before` (prior state) so the object isn't lost (line 2714-2718)
+- Validates type conformance, replaces unknowns with nulls, etc.
+- Returns `(state, diags)` — always returning both the best-effort state **and** the accumulated diagnostics.
 
-``\`
-...[truncated 3139 chars]
+### 3. `managedResourceExecute()` taints on creat
+...[truncated 2917 chars]
 ```
 
 #### Response (`with_budi`)
@@ -11357,44 +10779,43 @@ Now I have the full picture. Here's the trace:
 
 ---
 
-## Apply Error Propagation Path
+## Error propagation from provider `ApplyResourceChange` to user
 
-### 1. Provider returns error via `ApplyResourceChangeResponse.Diagnostics`
+The chain has **4 layers**: gRPC transport → diagnostics conversion → apply logic → graph walker → CLI output.
 
-The provider populates `resp.Diagnostics` with error diagnostics. For example, the offline provider stub at `internal/stacks/stackruntime/internal/stackeval/stubs/offline.go:182-193` shows this pattern directly.
+### 1. gRPC layer (`internal/plugin6/grpc_provider.go:747`)
 
-### 2. `apply()` method processes the response (`node_resource_abstract_instance.go:2700-2756`)
+`GRPCProvider.ApplyResourceChange` makes the gRPC call to the provider plugin process at line 817:
 
-At line **2700**, the response diagnostics are extracted and appended:
 ``\`go
-applyDiags := resp.Diagnostics
-applyDiags = applyDiags.InConfigBody(applyConfig.Config, n.Addr.String())  // annotates with source location
-diags = diags.Append(applyDiags)
+protoResp, err := p.client.ApplyResourceChange(p.ctx, protoReq)
 ``\`
 
-Even with errors, the code **continues running** (line 2706 comment: "the remaining code must always run to completion") to handle partial state. It:
-- Falls back to prior state if `resp.NewState` is nil (line 2713-2737)
-- Validates schema conformance (line 2740-2756)
-- Replaces unknown values with nulls (line 2788-2814)
+Two error paths here:
+- **Transport/gRPC error** (line 818-820): If the RPC itself fails, `grpcErr(err)` wraps it into a diagnostic and returns immediately.
+- **Provider-level diagnostics** (line 822): `convert.ProtoToDiagnostics(protoResp.Diagnostics)` converts the protobuf diagnostic messages (severity, summary, detail, attribute path) into Terraform's `tfdiags.Diagnostics`.
 
-### 3. `managedResourceExecute()` handles post-apply bookkeeping (`node_resource_apply_instance.go:311-387`)
+Both are returned in `resp.Diagnostics`.
 
-At line **311**, the `apply()` result is received:
+### 2. Core apply logic (`internal/terraform/node_resource_abstract_instance.go:2685`)
+
+The `apply()` method calls `provider.ApplyResourceChange(...)` and captures the response:
+
 ``\`go
-state, applyDiags := n.apply(ctx, state, diffApply, n.Config, repeatData, n.CreateBeforeDestroy())
-diags = diags.Append(applyDiags)
+resp = provider.ApplyResourceChange(providers.ApplyResourceChangeRequest{...})
 ``\`
 
-Then critically at line **322**, `maybeTainted()` is called:
-``\`go
-state = maybeTainted(addr.Absolute(ctx.Path()), state, diffApply, diags.Err()
-...[truncated 2929 chars]
+**Key error handling (lines 2700-2756):**
+- `resp.Diagnostics` is appended to the running `diags` (line 2704)
+- Even with errors, execution **continues** — the code handles partial state from the provider (line 2706-2710 comment)
+- If `resp.NewState` is nil, Terraform falls back to the prior state to keep tracking the object (line 2713-273
+...[truncated 2373 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the identical propagation path (provider → apply() → managedResourceExecute → graph walker → DAG cascading → Context.Apply) with nearly the same level of detail, referencing the same files and line numbers. Response A includes an extra step (Walker.Wait() filtering upstream-failed diagnostics) while Response B adds a concrete example via the offline provider stub. Both correctly explain maybeTainted(), partial state handling, CBD rollback considerations, and diagnostic cascading through the DAG. The structural clarity, code snippets, and summary diagrams are comparable. Neither has meaningful inaccuracies. The minor differences (A's extra Walker.Wait step vs B's offline stub reference) balance out.
+Both responses are strong and trace the error propagation path with specific file paths, line numbers, and code snippets. Response B edges ahead by including the gRPC transport layer (internal/plugin6/grpc_provider.go:747), which is a genuine and important part of the trace from provider plugin to core — distinguishing transport errors from provider-level diagnostics. Response B also covers CBD rollback handling (lines 346-378) and the post-apply hook, which are meaningful error-path behaviors that Response A omits. Response A compensates with a nice summary table and explicit mention of Context.ApplyAndEval, but the gRPC layer omission is a notable gap for a "trace" question. Response B's summary flow diagram is concise and effective. Both correctly identify the key design insight about partial state persistence and taint-on-create-error.
 ```
 
 </details>
@@ -11404,8 +10825,8 @@ Both responses trace the identical propagation path (provider → apply() → ma
 **Prompt:** What calls `managedResourceExecute` and what arguments does each call site pass?
 
 - Interactions: no_budi=2 / with_budi=2
-- Cost USD: no_budi=$0.0257 / with_budi=$0.0286
-- Hook: reason=ok context_chars=656
+- Cost USD: no_budi=$0.0759 / with_budi=$0.0812
+- Hook: reason=ok context_chars=1099
 
 #### Injected context
 
@@ -11413,6 +10834,8 @@ Both responses trace the identical propagation path (provider → apply() → ma
 [structural context]
 Execute  (node_resource_plan_instance.go:68)
   → refs: dataresourceexecute, ephemeralresourceexecute, listresourceexecute
+Execute  (node_resource_plan_orphan.go:55)
+  → refs: dataresourceexecute, managedresourceexecute, resourceinstanceaddr
 
 [budi context]
 rules:
@@ -11426,56 +10849,63 @@ evidence_cards:
     - return n.managedResourceExecute(ctx)
     - return n.dataResourceExecute(ctx)
     - return n.ephemeralResourceExecute(ctx)
+- file: internal/terraform/node_resource_plan_orphan.go
+  span: 55-67
+  anchor: func (n *NodePlannableResourceInstanceOrphan) Execute(ctx EvalContext, op walkOperation) tfdiags.Diagnostics {
+  proof:
+    - return n.managedResourceExecute(ctx)
+    - return n.dataResourceExecute(ctx)
+    - addr := n.ResourceInstanceAddr()
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here are all call sites of `managedResourceExecute` and their arguments:
+There are 6 distinct types, each with its own `managedResourceExecute` method (these are different receiver types, not one shared function). Here are the call sites:
 
-| File | Caller | Args |
-|---|---|---|
-| `node_resource_plan_instance.go:74` | `NodePlannableResourceInstance.Execute` | `(ctx)` |
-| `node_resource_plan_orphan.go:61` | `NodePlannableResourceInstanceOrphan.Execute` | `(ctx)` |
-| `node_resource_plan_destroy.go:56` | `NodePlanDestroyableResourceInstance.Execute` | `(ctx, op)` — passes both the `EvalContext` and the `walkOperation` |
-| `node_resource_plan_partialexp.go:112` | `nodePlannablePartialExpandedResource.Execute` | `(ctx)` — returns `(*plans.ResourceInstanceChange, tfdiags.Diagnostics)` |
-| `node_resource_destroy.go:136` | `NodeDestroyResourceInstance.Execute` | `(ctx)` |
-| `node_resource_apply_instance.go:123` | `NodeApplyableResourceInstance.Execute` | `(ctx)` |
+| File | Caller | Call | Args |
+|---|---|---|---|
+| `node_resource_plan_partialexp.go:112` | `nodePlannablePartialExpandedResource` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_plan_destroy.go:56` | `NodePlanDestroyableResourceInstance` | `n.managedResourceExecute(ctx, op)` | `ctx EvalContext, op walkOperation` |
+| `node_resource_plan_orphan.go:61` | `NodePlannableResourceInstanceOrphan` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_destroy.go:136` | `NodeDestroyResourceInstance` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_plan_instance.go:74` | `NodePlannableResourceInstance` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_apply_instance.go:123` | `NodeApplyableResourceInstance` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
 
-Each is a method on its own struct (receiver `n`), called from that struct's `Execute` method. All pass the `EvalContext` (`ctx`); the only outlier is `NodePlanDestroyableResourceInstance` which also passes `op walkOperation`. The partial-expanded variant is also unique in returning a `*plans.ResourceInstanceChange` alongside diagnostics.
+All pass `ctx EvalContext` as the first argument. The only outlier is `NodePlanDestroyableResourceInstance`, which also passes `op walkOperation` as a second argument.
 ```
 
 #### Response (`with_budi`)
 
 ```text
-There are **6 call sites**, each on a different receiver type. All pass `ctx` (an `EvalContext`), and one also passes `op`:
+Six call sites, each within its own type's `Execute` method:
 
-| File | Caller | Arguments |
-|---|---|---|
-| `node_resource_plan_instance.go:74` | `NodePlannableResourceInstance.Execute` | `(ctx)` |
-| `node_resource_plan_orphan.go:61` | `NodePlannableResourceInstanceOrphan.Execute` | `(ctx)` |
-| `node_resource_plan_destroy.go:56` | `NodePlanDestroyableResourceInstance.Execute` | `(ctx, op)` |
-| `node_resource_plan_partialexp.go:112` | `nodePlannablePartialExpandedResource.Execute` | `(ctx)` — returns `(*plans.ResourceInstanceChange, tfdiags.Diagnostics)` |
-| `node_resource_apply_instance.go:123` | `NodeApplyableResourceInstance.Execute` | `(ctx)` |
-| `node_resource_destroy.go:136` | `NodeDestroyResourceInstance.Execute` | `(ctx)` |
+| File | Caller | Call | Args passed |
+|---|---|---|---|
+| `node_resource_plan_instance.go:74` | `NodePlannableResourceInstance.Execute` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_plan_orphan.go:61` | `NodePlannableResourceInstanceOrphan.Execute` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_plan_destroy.go:56` | `NodePlanDestroyableResourceInstance.Execute` | `n.managedResourceExecute(ctx, op)` | `ctx EvalContext, op walkOperation` |
+| `node_resource_plan_partialexp.go:112` | `nodePlannablePartialExpandedResource.execute` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` (returns `(*plans.ResourceInstanceChange, tfdiags.Diagnostics)`) |
+| `node_resource_destroy.go:136` | `NodeDestroyResourceInstance.Execute` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
+| `node_resource_apply_instance.go:123` | `NodeApplyableResourceInstance.Execute` | `n.managedResourceExecute(ctx)` | `ctx EvalContext` |
 
-The only call site that passes the extra `op walkOperation` argument is `NodePlanDestroyableResourceInstance` (line 56 of `node_resource_plan_destroy.go`). All others pass just `ctx EvalContext`.
+Five of the six pass only `ctx EvalContext`. The outlier is **`NodePlanDestroyableResourceInstance`** which also passes `op walkOperation`.
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify the exact same 6 call sites with identical file names, line numbers, caller types, and arguments. Both correctly note that NodePlanDestroyableResourceInstance is the only caller passing the extra `op walkOperation` argument, and both mention the unique return type of the partial-expanded variant. The only differences are cosmetic: table row ordering and minor wording variations. Quality is equivalent.
+Both responses identify the same 6 call sites with identical file paths, line numbers, caller types, and arguments. Both correctly highlight the NodePlanDestroyableResourceInstance outlier that passes an extra `op walkOperation` argument. Response B adds minor details like `.Execute` method name suffixes and return type info for the partial expanded case, while Response A includes a useful introductory note about these being different receiver types. These differences are cosmetic; the substantive content is equivalent.
 ```
 
 </details>
 
-<details><summary>Terraform P9 | winner=with_budi | Q 6→8 G 6→8</summary>
+<details><summary>Terraform P9 | winner=with_budi | Q 6→8 G 7→8</summary>
 
 **Prompt:** What calls `evaluateExpr` and when is it triggered during plan evaluation?
 
 - Interactions: no_budi=7 / with_budi=3
-- Cost USD: no_budi=$0.0844 / with_budi=$0.0426
+- Cost USD: no_budi=$0.0910 / with_budi=$0.0501
 - Hook: reason=ok context_chars=977
 
 #### Injected context
@@ -11509,81 +10939,72 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-Here's a summary of the two `evaluateExpr` methods and their callers:
+There are two separate `evaluateExpr` functions with different roles:
 
 ---
 
 ### 1. `ExprEvaluator[T, U].evaluateExpr` — `internal/terraform/expressions.go:73`
 
-A **generic helper** for evaluating a single HCL expression of a primitive type (`bool`, `number`, `string`). It's a private method called only by the public wrapper `EvaluateExpr` (line 34), which additionally converts the `cty.Value` into a Go type.
+A **generic helper** for evaluating a single HCL expression of a primitive type (bool, number, string) and converting it to a Go value. It's a private method called only by its public wrapper:
 
-**Callers of the public `EvaluateExpr`** (during **plan evaluation**):
+- **`ExprEvaluator[T, U].EvaluateExpr`** (`expressions.go:32`) — the public entry point that calls `evaluateExpr`, then converts the `cty.Value` to a Go type via `gocty.FromCtyValue` and runs optional validation.
+
+**Callers of the public `EvaluateExpr`** (during plan/validate):
 
 | Caller | File | When triggered |
 |---|---|---|
-| `NodeResourcePlanInstanceQuery` | `node_resource_plan_instance_query.go:67,79` | Planning a `list` data source — evaluates `limit` and `include_resource` expressions |
-| `NodeValidatableResource` | `node_resource_validate.go:519,530` | **Validation phase** — validates `limit` and `include_resource` with unknowns allowed |
-
-The flow: `EvaluateExpr` → `evaluateExpr` → `ctx.EvaluateExpr` (the `EvalContext` interface method that does the actual HCL evaluation via scope/refs).
+| `NodeValidatableResource` (validate `limit`, `include_resource` for list resources) | `node_resource_validate.go:519,530` | **Validation phase** — checking list-resource config expressions |
+| `NodeResourcePlanInstanceQuery` (plan `limit`, `include_resource`) | `node_resource_plan_instance_query.go:67,79` | **Plan phase** — evaluating query/list resource parameters |
 
 ---
 
 ### 2. `NodeValidatableResource.evaluateExpr` — `node_resource_validate.go:563`
 
-A **validation-specific** method on `NodeValidatableResource`. It manually builds an `EvalContext` with stub repetition data (unknown `count.index`/`each.key` values) and calls `expr.Value(hclCtx)` directly.
+A **validation-specific** method on `NodeValidatableResource`. It resolves HCL references, builds an eval scope (with `self` and repetition data like `count.index`/`each.key`), then calls `expr.Value(hclCtx)`.
 
-**Callers** (all in `validateCheckRules`, line 614):
+**Callers** — all within `validateCheckRules` (`node_resource_validate.go:614`):
 
-- **Precondition** `Condition` and `ErrorMessage` expressions (line 620–624)
-- **Postcondition** `Condition` and `ErrorMessage` expressio
-...[truncated 697 chars]
+- **Precondition** `Condition` and `ErrorMessage` expressions (li
+...[truncated 918 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`EvaluateExpr` is a method on the `EvalContext` interface, called from many places during plan evaluation. Here are the key call sites:
+Here are all the callers of `ctx.EvaluateExpr` in the plan evaluation path:
 
-**During plan evaluation:**
+| Caller | File | Line | When during plan |
+|--------|------|------|-----------------|
+| `evaluateLocalValue` | `node_local.go` | 239 | Evaluating `locals {}` blocks — resolves the HCL expression for each local value |
+| `nodeExpandOutput.Execute` | `node_output.go` | 451 | Evaluating `output {}` blocks during plan |
+| output evaluation (destroy path) | `node_output.go` | 601 | Evaluating outputs during a destroy plan |
+| `eval_count` | `eval_count.go` | 84 | Evaluating `count` meta-argument expressions |
+| `expressions.go` helper | `expressions.go` | 92 | Generic expression evaluation used by resource config bodies (e.g. `for_each`, provisioners, attributes) |
+| `node_module_install` | `node_module_install.go` | 183, 201, 320, 344 | Evaluating dynamic `source` and `version` expressions for module blocks |
+| `node_resource_plan_instance_query` | `node_resource_plan_instance_query.go` | 67, 79 | Evaluating `limit` and `include_resource` for query/list data sources |
+| `node_resource_validate` | `node_resource_validate.go` | 519, 530 | Validation of `limit`/`include_resource` during the validate walk |
 
-| Caller | File | What it evaluates |
-|---|---|---|
-| `evaluateLocalValue` | `node_local.go:239` | Local value expressions |
-| `nodeExpandOutput` / `nodeModuleOutput` | `node_output.go:451,601` | Output value expressions |
-| `evaluateCountExpression` | `eval_count.go:84` | `count` meta-argument |
-| `evaluateExpressionValue` | `expressions.go:92` | Generic expression evaluation (used by `for_each`, conditions, etc.) |
-| `limitEvaluator.EvaluateExpr` | `node_resource_plan_instance_query.go:67` | Query resource `limit` |
-| `includeRscEvaluator.EvaluateExpr` | `node_resource_plan_instance_query.go:79` | Query resource `include_resource` |
-| Module install nodes | `node_module_install.go:183,201,320,344` | Module `source` and `version` expressions |
-| Resource validation | `node_resource_validate.go:519,530` | Validates `limit`/`include_resource` during validation walk |
+**How `evaluateLocalValue` specifically works** (`node_local.go:217-250`):
 
-**When `evaluateLocalValue` specifically is triggered:**
-
-It's called when Terraform's graph walker executes a `nodeExpandLocal` or `NodeLocal` node. During `plan`, the graph contains nodes for every `locals` block. When the walker reaches a local's node (after its dependencies are satisfied), it calls `evaluateLocalValue`, which:
-
-1. Checks for self-references in the expression
-2. Calls `ctx.EvaluateExpr(expr, cty.DynamicPseudoType, nil)` to resolve
-...[truncated 294 chars]
+1. Extracts `config.Expr` (the HCL expression from `locals { foo = <expr> }`)
+2. Parses references in the expression and checks for self-references (circular `local.foo` referencing itself) — returns early with an error if found
+...[truncated 634 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Response A focuses narrowly on two methods both named `evaluateExpr` — the generic helper in expressions.go and the validation-specific one in node_resource_validate.go. While this is accurate for those specific methods, it misses the broader picture: the question asks about what calls `evaluateExpr` during plan evaluation, and the `EvalContext.EvaluateExpr` interface method is called from many more sites than just the query resource and validation nodes. Response A only identifies 2 callers for plan evaluation (NodeResourcePlanInstanceQuery and NodeValidatableResource).
-
-Response B correctly identifies `EvaluateExpr` as an `EvalContext` interface method and provides a much more comprehensive list of call sites: local value evaluation (node_local.go), output evaluation (node_output.go), count expression evaluation (eval_count.go), module install nodes (node_module_install.go), plus the query resource and validation sites. This gives a much fuller picture of when expression evaluation happens during planning. It also explains the flow of `evaluateLocalValue` as a concrete example, showing how the graph walker triggers expression evaluation when dependencies are satisfied.
-
-Response B is better grounded in the repository's actual structure and more actionable because it covers the breadth of callers a developer would encounter when tracing plan evaluation, not just a narrow subset.
+Response B provides a significantly more comprehensive answer to "what calls evaluateExpr during plan evaluation." It covers the major plan-phase callers (locals, outputs, count, module install, resource queries) whereas Response A only identifies two narrow call sites (limit/include_resource for list resources, and precondition/postcondition validation). Response B's detailed walkthrough of evaluateLocalValue demonstrates deep understanding of the plan evaluation flow. Response A's interpretation — focusing on two private methods literally named evaluateExpr — is technically valid but misses the broader picture the question is asking about. Both provide specific file and line references grounded in the repo, but Response B's wider coverage makes it far more actionable for someone trying to understand expression evaluation during planning.
 ```
 
 </details>
 
-<details><summary>Terraform P10 | winner=with_budi | Q 8→8 G 8→8</summary>
+<details><summary>Terraform P10 | winner=with_budi | Q 7→8 G 7→8</summary>
 
 **Prompt:** How does Terraform load provider configuration — trace from the config file to a provider being initialized?
 
-- Interactions: no_budi=27 / with_budi=28
-- Cost USD: no_budi=$0.5313 / with_budi=$0.3805
+- Interactions: no_budi=24 / with_budi=24
+- Cost USD: no_budi=$0.4277 / with_budi=$0.3688
 - Hook: reason=ok context_chars=1687
 
 #### Injected context
@@ -11626,166 +11047,168 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-Now I have a complete picture. Here's the trace:
+Now I have a clear picture. Here's the full trace:
 
 ---
 
-## How Terraform Loads Provider Configuration: End-to-End Trace
+## Terraform Provider Configuration Loading: End-to-End Trace
 
-### 1. Parse HCL config files → `configs.Provider` structs
+### 1. HCL Parsing → `configs.Provider` struct
 
-**`internal/configs/parser_config.go:24`** — `Parser.LoadConfigFile()` reads an HCL file and calls `parseConfigFile()`.
+**Entry point:** `Parser.LoadConfigFile()` at `internal/configs/parser_config.go:24`
 
-**`internal/configs/parser_config.go:178-183`** — When a `"provider"` block is found, it calls `decodeProviderBlock(block, false)`.
-
-**`internal/configs/provider.go:54`** — `decodeProviderBlock()` extracts `name` (the label, e.g. `"aws"`), `alias`, and `version`. The provider-specific attributes (like `region`) stay as an unevaluated `hcl.Body` in `provider.Config`. This produces a `*configs.Provider` struct.
-
-### 2. Aggregate into Module → `Module.ProviderConfigs`
-
-**`internal/configs/module.go:309-329`** — Each file's `ProviderConfigs` slice is merged into the module's `ProviderConfigs` map, keyed by `"name"` or `"name.alias"`. Duplicate detection happens here.
-
-The `required_providers` block in the `terraform` block (**`parser_config.go:147-152`**) separately populates `Module.ProviderRequirements`, which maps local names to fully-qualified provider addresses (e.g. `hashicorp/aws`).
-
-### 3. Build the execution graph — provider transformer chain
-
-During `PlanGraphBuilder.Steps()` (**`graph_builder_plan.go:266`**), the call:
+The `Parser` reads `.tf` files via HCL, then `parseConfigFile()` (line 87) iterates over top-level blocks. When it encounters a `"provider"` block:
 
 ``\`go
-transformProviders(b.ConcreteProvider, b.Config, b.ExternalProviderConfigs)
+case "provider":
+    cfg, cfgDiags := decodeProviderBlock(block, false)  // line 179
 ``\`
 
-runs a chain of transformers (**`transform_provider.go:19-42`**):
+`decodeProviderBlock()` at `internal/configs/provider.go:54` extracts:
+- The provider **name** from the block label (`provider "aws" { ... }` → `"aws"`)
+- The **alias** attribute (if any)
+- The **Config** body (the remaining HCL body — left unevaluated at this point)
 
-1.
-...[truncated 3653 chars]
+It also parses `required_providers` blocks inside `terraform {}` blocks (line 148) to resolve FQNs (e.g., `hashicorp/aws`).
+
+The result is a `configs.Provider` struct with the raw `hcl.Body` stored in `Config` — **not yet evaluated**.
+
+### 2. Graph Construction — Provider Nodes
+
+During plan/apply, `transformProviders()` at `internal/terraform/transform_provider.go:19` runs a chain of graph transformers:
+
+1. **`externalProviderTransformer`** — inserts nodes for externally-provided providers (e.g., from Stacks)
+2. **`ProviderConfigTransformer`** — creates `NodeApplyableProvider` nodes from `configs.Provider` entries in the config
+3. **`MissingProviderTransformer`** — adds implicit default provider nodes for resources that re
+...[truncated 3345 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's the full trace from config file to provider initialization:
+Now I have a complete picture. Here's the trace:
 
-## Provider Configuration Flow
+---
 
-### 1. HCL Parsing → `configs.Provider` struct
-**`internal/configs/parser_config.go:178`** — When Terraform parses `.tf` files, it matches `provider` blocks and calls `decodeProviderBlock()`.
+## Provider Configuration Loading: End-to-End Trace
 
-**`internal/configs/provider.go:54`** — `decodeProviderBlock` extracts the label (provider name), alias, version constraint, and stores the raw HCL body as `Config hcl.Body` (line 28). This deferred body will be evaluated later when the actual config values are needed.
+### 1. HCL Config Parsing → `configs.Provider`
 
-### 2. Graph Construction — creating provider nodes
-**`internal/terraform/graph_builder_plan.go:332`** — During plan/apply graph building, Terraform creates `NodeApplyableProvider` nodes wrapping a `NodeAbstractProvider` that holds:
-- `Addr` — the fully-qualified provider address (`addrs.AbsProviderConfig`)
-- `Config` — pointer to the parsed `*configs.Provider` from step 1
+When Terraform loads your `.tf` files, the HCL parser finds `provider` blocks and produces `configs.Provider` structs. Each holds the raw `hcl.Body` of the block's configuration (e.g. `region = "us-east-1"`) and the provider's local name/alias.
 
-### 3. Graph Execution — `NodeApplyableProvider.Execute()`
-**`internal/terraform/node_provider.go:28-52`** — When the graph walker reaches a provider node, `Execute()` runs two phases:
+### 2. Dependency Lock File → Provider Factory Map
 
-#### Phase A: `InitProvider` — instantiate the plugin process
-``\`
-ctx.InitProvider(n.Addr, n.Config)
-``\`
-**`internal/terraform/eval_context_builtin.go:142-190`** — This:
-1. Checks if already initialized (error if so)
-2. Checks for **external providers** (pre-configured by Stacks — line 160)
-3. Calls `ctx.Plugins.NewProviderInstance(addr.Provider)` → **`internal/schemarep
-...[truncated 2140 chars]
+At CLI command time, `Meta.ProviderFactories()` (`internal/command/meta_providers.go:283`) reads the dependency lock file and calls `providerFactoriesFromLocks` (`:307`). For each locked provider, it locates the cached binary in the provider cache and creates a `providers.Factory` — a closure that, when called, will:
+
+- Launch the provider binary as a child process (`exec.Command(execFile)`)
+- Establish a gRPC connection via `go-plugin`
+- Negotiate protocol version (v5 or v6)
+- Return a `GRPCProvider` implementing `providers.Interface`
+
+This is in `providerFactory()` at `internal/command/meta_providers.go:422–456`.
+
+### 3. Plugin Registry → `loadschemas.Plugins`
+
+The factory map is passed into `loadschemas.NewPlugins()` (`internal/schemarepo/loadschemas/plugins.go:26`), which stores them as `providerFactories map[addrs.Provider]providers.Factory`. This `Plugins` object is the central registry that Terraform Core uses to instantiate providers.
+
+### 4. Graph Building — Provider Nodes
+
+During plan/apply, the graph builder (`internal/
+...[truncated 3775 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the same fundamental flow (HCL parse → configs.Provider → graph build → NodeApplyableProvider.Execute → InitProvider + ConfigureProvider → gRPC) and reference similar file paths and line numbers. Response A (no_budi) provides more intermediate detail — notably the module aggregation step (module.go:309-329), the full 5-transformer chain, and the schema attachment step — giving it slightly more depth. However, Response A is truncated mid-sentence in the ConfigureProvider section, which materially hurts its completeness. Response B (with_budi) covers the essential path cleanly and completely, includes relevant details like Mock wrapping for test files, and adds a well-structured ASCII summary diagram that significantly aids comprehension and practical navigation. The diagram alone makes the flow much more scannable and useful as a reference. Both are well-grounded in repository specifics with accurate file references. Response B wins narrowly due to being complete (not truncated) and the high-value summary diagram that makes the trace immediately actionable.
+Both responses trace the same core flow (HCL parsing → graph construction → provider node execution → InitProvider → ConfigureProvider → gRPC) with specific file paths, line numbers, and code snippets. However, Response B includes two critical intermediate steps that Response A omits entirely: (1) the dependency lock file and `Meta.ProviderFactories()` step (`meta_providers.go:283`), which explains how provider binaries are located and factory closures are created, and (2) the `loadschemas.Plugins` registry that stores the factory map for Core's use. These steps are essential to a complete trace from "config file to provider being initialized" — without them, the reader doesn't understand how the provider binary is discovered and launched. Response B also separates `BuiltinEvalContext.ConfigureProvider` into its own section with the gRPC request details. Response A's coverage of graph transformers is slightly more detailed (listing all 5 transformers), but this doesn't compensate for the missing factory-creation step. Both are well-grounded in repo specifics with accurate file/line references.
 ```
 
 </details>
 
-<details><summary>Terraform P11 | winner=with_budi | Q 7→9 G 3→10</summary>
+<details><summary>Terraform P11 | winner=tie | Q 8→8 G 8→8</summary>
 
 **Prompt:** Which environment variables does Terraform read at startup and how do they affect runtime behavior?
 
-- Interactions: no_budi=2 / with_budi=13
-- Cost USD: no_budi=$0.0400 / with_budi=$0.2311
+- Interactions: no_budi=24 / with_budi=21
+- Cost USD: no_budi=$0.2693 / with_budi=$0.3135
 - Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
-Here's a comprehensive overview of the environment variables Terraform reads and how they affect behavior:
+Here's a comprehensive summary of the environment variables Terraform reads at startup and their effects, based on the source code in this repository:
 
-## Core Behavior
+## Core Runtime
 
-| Variable | Effect |
-|---|---|
-| `TF_LOG` | Enables detailed logging. Values: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`. |
-| `TF_LOG_PATH` | Redirects log output to a file instead of stderr. |
-| `TF_LOG_CORE` | Like `TF_LOG` but only for Terraform core (not providers). |
-| `TF_LOG_PROVIDER` | Like `TF_LOG` but only for provider plugins. |
-| `TF_INPUT` | Set to `false` or `0` to disable interactive prompts (equivalent to `-input=false`). |
-| `TF_DATA_DIR` | Changes the location of the `.terraform` directory where plugins/modules are cached. Default: `.terraform`. |
-| `TF_WORKSPACE` | Selects the workspace, equivalent to `terraform workspace select`. |
-| `TF_IN_AUTOMATION` | Set to any non-empty value to adjust output for CI/CD (suppresses hints about next commands). |
+| Variable | File | Effect |
+|---|---|---|
+| `TF_CLI_ARGS` | `main.go:36` | Injects additional CLI arguments into every Terraform command |
+| `TF_CLI_ARGS_<cmd>` | (convention) | Injects CLI args for a specific subcommand (e.g., `TF_CLI_ARGS_plan`) |
+| `TF_INPUT` | `internal/command/meta.go:346` | When set to `0` or `false`, disables interactive prompts |
+| `TF_IN_AUTOMATION` | `commands.go:31` | Suppresses messages that assume a human is at the terminal |
+| `TF_WORKSPACE` | `internal/command/meta.go:761` | Selects the active workspace; also used by the cloud backend (`internal/cloud/backend.go:582`) |
+| `TF_DATA_DIR` | `commands.go:86` | Overrides the default `.terraform` data directory location |
+| `TF_CLI_CONFIG_FILE` | `internal/command/cliconfig/cliconfig.go:439` | Overrides the CLI configuration file path |
+| `TF_VAR_<name>` | `internal/command/arguments/vars.go:25` | Sets input variable values (prefix `TF_VAR_`) |
 
-## Input Variables
+## Logging & Debugging
 
-| Variable | Effect |
-|---|---|
-| `TF_VAR_<name>` | Sets the value of an input variable. E.g., `TF_VAR_region=us-east-1` sets `var.region`. |
-
-## CLI Behavior
-
-| Variable | Effect |
-|---|---|
-| `TF_CLI_ARGS` | Injects additional arguments into **every** Terraform command. |
-| `TF_CLI_ARGS_<command>` | Injects arguments into a specific command only. E.g., `TF_CLI_ARGS_plan="-parallelism=5"`. |
-| `TF_PLUGIN_CACHE_DIR` | Directory for caching provider plugins across projects (avoids re-downloading). |
-| `TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE` | Set to any value 
-...[truncated 1671 chars]
+| Variable | File | Effect |
+|---|---|---|
+| `TF_LOG` | `internal/logging/logging.go:20` | Sets the global log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF`, or `JSON`) |
+| `TF_LOG_PATH` | `internal/logging/logging.go:21` | Redirects log output to a file |
+| `TF_LOG_CORE` | `internal/logging/logging.go:26` | Sets log level for core Terraform (overridden by `T
+...[truncated 4124 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's a comprehensive summary of the environment variables Terraform reads at startup and their effects, based on the source code in this repository:
+Here's a comprehensive summary of the environment variables Terraform reads at startup and their runtime effects, based on this codebase:
 
-## CLI & General Behavior
+## CLI & Input
 
-| Variable | Effect | Source |
-|---|---|---|
-| **`TF_CLI_ARGS`** | Extra CLI arguments prepended to every command | `main.go:36` |
-| **`TF_CLI_ARGS_<command>`** | Extra CLI arguments for a specific subcommand (e.g. `TF_CLI_ARGS_plan`) | `main.go:272-275` |
-| **`TF_IN_AUTOMATION`** | Suppresses interactive/human-oriented messages when set to any non-empty value | `commands.go:31` |
-| **`TF_DATA_DIR`** | Overrides the default `.terraform` data directory location | `commands.go:86` |
-| **`TF_WORKSPACE`** | Overrides the active workspace (ignored by `workspace new`/`workspace delete`) | `internal/command/meta.go:761` |
-| **`TF_VAR_<name>`** | Sets input variable values (prefix-based) | `internal/command/arguments/vars.go:25` |
+| Variable | Effect |
+|---|---|
+| **`TF_CLI_ARGS`** | Extra CLI arguments prepended to every command (`main.go:36`) |
+| **`TF_CLI_ARGS_<command>`** | Extra CLI arguments for a specific subcommand (e.g. `TF_CLI_ARGS_plan`) (`main.go:272-275`) |
+| **`TF_INPUT`** | Set to `"false"` or `"0"` to disable interactive prompts (same as `-input=false`) (`internal/command/meta.go:346`) |
+| **`TF_IN_AUTOMATION`** | Any non-empty value suppresses messages meant for interactive use (`commands.go:31`) |
 
-## Logging & Debugging
+## Logging
 
-| Variable | Effect | Source |
-|---|---|---|
-| **`TF_LOG`** | Global log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF`, `JSON`). Falls back for subsystems if their specific vars aren't set | `internal/logging/logging.go:20` |
-| **`TF_LOG_CORE`** | Log level for Terraform core only | `logging.go:26` |
-| **`TF_LOG_PROVIDER`** | Log level for provider plugins only | `logging.go:27` |
-| **`TF_LOG_CLOUD`** | Log level for the cloud/TFE plugin | `logging.go:28` |
-| **`TF_LOG_STACKS`** | Log level for the stacks plugin | `logging.go:29` |
-| **`TF_LOG_PAT
-...[truncated 3333 chars]
+| Variable | Effect |
+|---|---|
+| **`TF_LOG`** | Global log level: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `OFF`, or `JSON` (`internal/logging/logging.go:20`) |
+| **`TF_LOG_CORE`** | Log level for Terraform core only (overridden by `TF_LOG` if set) (`logging.go:26`) |
+| **`TF_LOG_PROVIDER`** | Log level for provider plugins (`logging.go:27`) |
+| **`TF_LOG_CLOUD`** | Log level for cloud/TFC integration (`logging.go:28`) |
+| **`TF_LOG_STACKS`** | Log level for stacks subsystem (`logging.go:29`) |
+| **`TF_LOG_PATH`** | File path to write logs to instead of stderr (`logging.go:21`) |
+| **`TF_TEMP_LOG_PATH`** | Internal: additional log sink file used by the parent crash-log process (`main.go:39`) |
+| **`TF_GRAPH_TRACE`** | Enables extra graph-builder trace output (`logging.go:33`) |
+
+## Configuration & Data
+
+| Variable | Effect 
+...[truncated 2518 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Response B is clearly superior in grounding: every variable includes a specific source file and line reference (e.g., `main.go:36`, `internal/logging/logging.go:20`), making it verifiable against the actual codebase. It also surfaces internal/undocumented variables that only a code-level analysis would reveal — TF_GRAPH_TRACE, TF_TEMP_LOG_PATH, TF_REATTACH_PROVIDERS, TF_DISABLE_PLUGIN_TLS, TF_APPEND_USER_AGENT, TF_FORCE_LOCAL_BACKEND, OTEL_TRACES_EXPORTER, TF_ENABLE_PLUGGABLE_STATE_STORAGE, TF_LOG_CLOUD, TF_LOG_STACKS, and the JSON log level option. Response A is a solid general-knowledge answer with useful extras (provider-specific vars, precedence notes, CHECKPOINT_DISABLE) but is entirely ungrounded in the repository — it could have been written without access to the code at all. The truncation in Response B is a minor drawback but doesn't significantly diminish its value given the depth already provided.
+Both responses are comprehensive, well-organized, and grounded in the repository with specific file paths and line numbers. Response A goes deeper on stacks-related and cloud plugin variables, while Response B uniquely covers practically useful variables like CHECKPOINT_DISABLE, TF_REGISTRY_DISCOVERY_RETRY, TF_REGISTRY_CLIENT_TIMEOUT, TF_APPEND_USER_AGENT, TERRAFORM_CONFIG (legacy alias), and TF_WARN_OUTPUT_ERRORS. Both are truncated. The coverage tradeoffs roughly balance out—A has more depth in experimental/stacks features, B has broader coverage of operational variables. Neither has significant inaccuracies. Overall quality is very similar.
 ```
 
 </details>
 
-<details><summary>Terraform P12 | winner=tie | Q 8→8 G 8→8</summary>
+<details><summary>Terraform P12 | winner=no_budi | Q 8→6 G 8→5</summary>
 
 **Prompt:** What tests cover the plan command and where do they live in the repo?
 
-- Interactions: no_budi=4 / with_budi=4
-- Cost USD: no_budi=$0.0391 / with_budi=$0.0485
-- Hook: reason=ok context_chars=1918
+- Interactions: no_budi=3 / with_budi=4
+- Cost USD: no_budi=$0.0485 / with_budi=$0.0500
+- Hook: reason=ok context_chars=2087
 
 #### Injected context
 
@@ -11814,109 +11237,101 @@ evidence_cards:
     - return resp
     - return providers.PlanResourceChangeResponse{
     
-...[truncated 300 chars]
+...[truncated 298 chars]
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here's a breakdown of where the `plan` command tests live, organized by layer:
+Here's a breakdown of where `plan` command tests live, organized by layer:
 
-### CLI Command Layer
-- **`internal/command/plan_test.go`** — Main tests for the `plan` CLI command (flag parsing, end-to-end command execution)
-- **`internal/command/arguments/plan_test.go`** — Argument/flag parsing for the plan command
-- **`internal/command/views/plan_test.go`** — Rendering/display of plan output
-- **`internal/command/jsonformat/plan_test.go`** — JSON formatting of plan output
-- **`internal/command/jsonplan/plan_test.go`** — JSON plan structure tests
-- **`internal/command/e2etest/primary_test.go`**, **`automation_test.go`** — End-to-end integration tests that exercise the plan command
+### CLI command layer
+- **`internal/command/plan_test.go`** — primary tests for the `plan` CLI command itself
+- **`internal/command/arguments/plan_test.go`** — argument/flag parsing tests
+- **`internal/command/e2etest/primary_test.go`** / `automation_test.go` — end-to-end tests that exercise `terraform plan` as a subprocess
 
-### Core Planning Engine (`internal/terraform/`)
-- **`context_plan_test.go`** and **`context_plan2_test.go`** — Core plan logic (the bulk of planning tests)
-- **`context_plan_import_test.go`** — Plan with import blocks
-- **`context_plan_query_test.go`** — Plan in query/data-only mode
-- **`context_plan_actions_test.go`** — Plan action determination (create, update, delete)
-- **`context_plan_ephemeral_test.go`** — Ephemeral resources in plans
-- **`context_plan_identity_test.go`** — Identity tracking in plans
-- **`graph_builder_plan_test.go`** — Plan graph construction
-- **`node_resource_plan_orphan_test.go`** — Planning for orphaned resources
+### Views / output formatting
+- **`internal/command/views/plan_test.go`** — plan output rendering (human & JSON)
+- **`internal/command/jsonformat/plan_test.go`** — JSON format plan output
+- **`internal/command/jsonplan/plan_test.go`** / `values_test.go` — JSON plan structure
 
-### Plan File / Object Layer
-- **`internal/plans/plan_test.go`** — Plan data structure tests
-- **`internal/plans/planfile/tfplan_test.go`** — Plan file serial
-...[truncated 556 chars]
+### Backend execution
+- **`internal/backend/local/backend_plan_test.go`** — local backend plan execution
+- **`internal/backend/remote/backend_plan_test.go`** — remote backend plan
+- **`internal/cloud/backend_plan_test.go`** — HCP/cloud backend plan
+- **`internal/cloud/cloudplan/saved_plan_test.go`** — saved cloud plans
+
+### Core planning engine (`internal/terraform/`)
+- **`context_plan_test.go`** and **`context_plan2_test.go`** — the largest test files; cover the core `Context.Plan()` logic
+- **`context_plan_import_test.go`** — plan with import blocks
+- **`context_plan_query_test.go`** — plan with query/data sources
+- **`context_plan_actions_test.go`** — plan actions (create/update/delete)
+- **`context_plan_ephemeral_test.go`** — ephemeral resources in plans
+- **`context_plan_identity_test.go`** — identity tr
+...[truncated 907 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here are the main test locations covering the plan command, grouped by layer:
+Here are the main test locations covering the plan command:
 
-### CLI Command Layer
-- **`internal/command/plan_test.go`** — tests for the `plan` CLI command itself
-- **`internal/command/arguments/plan_test.go`** — argument parsing for the plan command
-- **`internal/command/views/plan_test.go`** — plan output rendering/views
-- **`internal/command/jsonformat/plan_test.go`** — JSON formatting of plans
-- **`internal/command/jsonplan/plan_test.go`** — JSON plan structure tests (also `values_test.go`)
+### CLI / Command layer
+- **`internal/command/plan_test.go`** — Tests for the `plan` CLI command itself (argument parsing, execution flow, output)
+- **`internal/command/arguments/plan_test.go`** — Tests for plan command argument/flag parsing
+- **`internal/command/views/plan_test.go`** — Tests for plan output rendering/views
 
-### Core Planning Engine (`internal/terraform/`)
-- **`context_plan_test.go`** and **`context_plan2_test.go`** — main plan logic tests
-- **`context_plan_import_test.go`** — plan with import
-- **`context_plan_query_test.go`** — plan queries
-- **`context_plan_actions_test.go`** — plan actions
-- **`context_plan_ephemeral_test.go`** — ephemeral resources in plan
-- **`context_plan_identity_test.go`** — identity handling in plan
-- **`graph_builder_plan_test.go`** — plan graph construction
-- **`node_resource_plan_orphan_test.go`** — orphaned resource planning
+### Plan formatting / serialization
+- **`internal/command/jsonplan/plan_test.go`** — Tests for JSON plan output format
+- **`internal/command/jsonformat/plan_test.go`** — Tests for JSON plan formatting
 
-### Plan File / Object Change
-- **`internal/plans/plan_test.go`** — plan data structure tests
-- **`internal/plans/planfile/tfplan_test.go`** — plan file serialization
-- **`internal/plans/objchange/plan_valid_test.go`** — validating planned object changes
+### Core planning engine
+- **`internal/terraform/context_plan_test.go`** — The largest test file; tests the core `Context.Plan()` logic (resource changes, modules, provider inheritance, prevent_destroy, etc.). Hundreds of `TestContext2Plan_*` tests live here.
+- **`internal/plans/plan_test.go`** — Tests for the plan data structures themselves
 
-### Backend Layer
-- **`internal/cloud/backend_plan_test.go`** — cloud/TFC backend plan
-- **`internal/backend/remote/backend_plan_test.go`** — remote backend plan
-- **
-...[truncated 634 chars]
+### Stacks
+- **`internal/stacks/stackruntime/plan_test.go`** — Tests for stack-level planning
+
+### Provider-level plan handling
+- **`internal/plugin6/grpc_provider_test.go`** — Tests for `PlanResourceChange` over the gRPC provider protocol
+- **`internal/stacks/stackruntime/internal/stackeval/stubs/unknown.go`** — Contains plan-related stub logic for unknown providers (from the evidence cards)
+- **`internal/backend/local/testing.go`** — `TestLocalProvider` sets up mock `PlanResourceChange` responses for backend tests
+
+The bulk of plan logic testing is in `inte
+...[truncated 88 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are nearly identical in structure, organization, and content. They cover the same major categories (CLI, core engine, plan file/object, backend, stacks, e2e) and list the same key test files. Response B adds a few extra files (backend_local_test.go, planned_change_test.go, values_test.go mention) and has a slightly cleaner organization with a separate E2E section, but these are marginal differences. Response A includes brief parenthetical descriptions for each file which add context. Neither response can be verified without checking the repo, but both appear well-grounded in Terraform's known project structure. The quality difference is too small to declare a winner.
+Response A is significantly more comprehensive, listing test files across CLI, views, backend (local/remote/cloud), core planning engine, plan data structures, and stacks layers. It names many specific files like context_plan2_test.go, context_plan_import_test.go, backend_plan_test.go, etc. that are plausible and well-organized. Response B covers fewer files and includes non-test files (unknown.go, testing.go) as if they were plan tests, which is misleading. The mention of "evidence cards" in Response B reveals it's pulling from external context rather than the repo itself, reducing grounding. Response A's organization by layer and clear callout of the most important entry points makes it more actionable.
 ```
 
 </details>
 
-<details><summary>Terraform P13 | winner=tie | Q 8→8 G 9→8</summary>
+<details><summary>Terraform P13 | winner=no_budi | Q 8→7 G 8→7</summary>
 
 **Prompt:** Where is `ReadStateBytes` defined and what does it do when loading resource state from a provider?
 
-- Interactions: no_budi=8 / with_budi=3
-- Cost USD: no_budi=$0.1059 / with_budi=$0.0551
-- Hook: reason=ok context_chars=1117
+- Interactions: no_budi=8 / with_budi=2
+- Cost USD: no_budi=$0.1112 / with_budi=$0.0440
+- Hook: reason=ok context_chars=1086
 
 #### Injected context
 
 ```text
 [structural context]
-ReadStateBytes  (provider6.go:996)
-  → refs: int64, read, readstatebytes
 ReadStateBytes  (grpc_provider.go:1537)
   → refs: append, bytes, cancel
+cancel  (backend.go:875)
+  ← called by: confirm, Stop, Run
+  → refs: cancel, color, colorize
 
 [budi context]
 rules:
 - Use only file paths shown in snippets for exact-path answers.
 - If snippets support fewer files than requested, return fewer instead of guessing.
 evidence_cards:
-- file: internal/grpcwrap/provider6.go
-  span: 996-1059
-  anchor: func (p *provider6) ReadStateBytes(req *tfplugin6.ReadStateBytes_Request, srv tfplugin6.Provider_ReadStateBytesServer) error {
-  proof:
-    - stateReadResp := p.provider.ReadStateBytes(providers.ReadStateBytesRequest{
-    - state := stateReadResp.Bytes
-    - reader := bytes.NewReader(state)
 - file: internal/plugin6/grpc_provider.go
   span: 1537-1660
   anchor: func (p *GRPCProvider) ReadStateBytes(r providers.ReadStateBytesRequest) (resp providers.ReadStateBytesResponse) {
@@ -11924,12 +11339,19 @@ evidence_cards:
     - logger.Trace("GRPCProvider.v6: ReadStateBytes")
     - resp.Diagnostics = resp.Diagnostics.Append(fmt.Errorf("unknown state store type %q", r.TypeName))
     - protoReq := &proto6.ReadStateBytes_Request{
+- file: internal/backend/remote/backend.go
+  span: 875-912
+  anchor: func (b *Remote) cancel(cancelCtx context.Context, op *backendrun.Operation, r *tfe.Run) error {
+  proof:
+    - return generalError("Failed asking to cancel", err)
+    - return nil
+    - return generalError("Failed to cancel run", err)
 ```
 
 #### Response (`no_budi`)
 
 ```text
-Here's the summary:
+Here's the full picture:
 
 ### Interface definition
 
@@ -11940,59 +11362,55 @@ Here's the summary:
 ReadStateBytes(ReadStateBytesRequest) ReadStateBytesResponse
 ``\`
 
-**Request** (`internal/providers/provider.go:892`): takes a `TypeName` (state store name) and `StateId` (which state file to read).
+### Request/Response types (`internal/providers/provider.go:892-904`)
 
-**Response** (`internal/providers/provider.go:899`): returns the reassembled `Bytes` and `Diagnostics`.
+- **`ReadStateBytesRequest`** — carries `TypeName` (the state store type) and `StateId` (which state file to read).
+- **`ReadStateBytesResponse`** — returns the reassembled `Bytes` of the state file plus `Diagnostics`.
 
 ### Primary GRPC implementation
 
-The main implementation that Terraform core uses is in `internal/plugin6/grpc_provider.go:1537`. It does the following:
+The main implementation lives in `internal/plugin6/grpc_provider.go:1537-1659`. When Terraform calls `ReadStateBytes` on a provider over gRPC (plugin protocol v6), it:
 
-1. **Schema validation** — fetches the provider schema and checks `r.TypeName` exists in `schema.StateStores`. Returns an error if the state store type is unknown.
-
-2. **Initiates a streaming gRPC call** — sends a `ReadStateBytes_Request` (with `TypeName` and `StateId`) to the provider plugin over a server-streaming RPC, using a dedicated context that's cancelled when the function returns.
-
-3. **Receives chunked data** — loops over `client.Recv()` calls, accumulating byte chunks into a `bytes.Buffer`:
-   - Records the `TotalLength` from the first chunk.
-   - **Validates chunk sizes** against the negotiated `stateChunkSize` for that type — all chunks except the last must match exactly; the last chunk must not exceed the agreed size. Mismatches produce warnings.
-   - Stops on `io.EOF` (stream end)
-...[truncated 501 chars]
+1. **Validates** the state store type exists in the provider schema.
+2. **Opens a server-streaming gRPC call** (`Provider_ReadStateBytes`) to the provider plugin, sending the `TypeName` and `StateId`.
+3. **Receives chunks in a loop** via `client.Recv()`:
+   - Each chunk carries `Bytes`, `TotalLength`, a `Range`, and optional `Diagnostics`.
+   - It validates that each chunk's size matches the previously negotiated `chunkSize` for that state store (all-but-last chunks must match exactly; the last chunk must not exceed it).
+   - Chunk bytes are appended to an in-memory `bytes.Buffer`.
+4. **Verifies completeness** — the total bytes received must equal the `TotalLength` reported in the first chun
+...[truncated 317 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-`ReadStateBytes` is defined in two files, each playing a different side of the gRPC boundary:
+Here's what `ReadStateBytes` does when loading resource state from a provider:
 
----
+**Purpose**: It reads raw state bytes from a provider's state store via a **streaming gRPC call**, reassembling chunked data into a complete byte slice.
 
-### 1. Server side — `internal/grpcwrap/provider6.go:996`
+**Flow**:
 
-This is the **gRPC server handler** that wraps an in-process provider. When called:
+1. **Schema validation** (lines 1546–1555) — Fetches the provider schema and verifies the requested `TypeName` exists in the provider's `StateStores`. Returns an error diagnostic if the state store type is unknown.
 
-1. Delegates to the underlying provider's `ReadStateBytes` to get the full state blob (`stateReadResp.Bytes`).
-2. **Streams the state back in chunks** using a server-streaming RPC (`srv.Send`). It reads from a `bytes.Reader` in `p.chunkSize`-sized pieces.
-3. Each response message includes the chunk bytes, the `TotalLength` of the full state, and a `Range` (start/end offsets) so the client can reassemble.
-4. On read error it sends a diagnostic with zero values; on EOF (zero bytes read) it returns, ending the stream.
+2. **Streaming gRPC call** (lines 1565–1572) — Opens a streaming `ReadStateBytes` RPC to the provider plugin, with a cancellable context and a capped max receive message size (`grpcMaxMessageSize`).
 
----
+3. **Chunk reassembly loop** (lines 1576–1632) — Iterates over streamed `Recv()` chunks:
+   - Records the `TotalLength` from the first chunk.
+   - **Validates chunk sizes** against a pre-negotiated `stateChunkSize` for the type — all non-final chunks must match exactly, and the final chunk must not exceed the agreed size. Mismatches produce warnings.
+   - Appends each chunk's bytes into a `bytes.Buffer`.
 
-### 2. Client side — `internal/plugin6/grpc_provider.go:1537`
+4. **Integrity check** (lines 1639–1646) — After the stream ends, verifies the total received bytes match the declared `TotalLength`. Returns an error if they don't.
 
-This is the **gRPC client** that Terraform core uses to talk to an out-of-process provider. When called:
+5. **Finalization** (lines 1650–1657) — Closes the gRPC send stream and sets `resp.Bytes` to the fully assembled state data.
 
-1. **Validates** the `TypeName` exists in the provider's schema (`schema.StateStores`).
-2. Opens a streaming RPC to the provider with `p.client.ReadStateBytes(ctx, protoReq, opts)`.
-3. **Receives chunks in a loop** (`client.Recv()`), reassembling them into a `bytes.Buffer`.
-4. For each chunk it **validates the chunk size** against the negotiated `p.stateChunkSize[r.TypeName]` — non-final chunks must match exactly, the final chunk must not exceed it. Mismatches produce warnings.
-5. After the stream ends, it **verifies** that `buf.Len() == expectedTotalLen
-...[truncated 424 chars]
+In short, it's a chunked streaming reader with size negotiation and integrity validation, designed to handle potentially large state file
+...[truncated 24 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are accurate and well-grounded. Response A has a slight edge in grounding because it includes the interface definition at `internal/providers/provider.go:127` and the Request/Response types with line numbers, which directly answers "where is it defined." Response B omits the interface definition but compensates with a more detailed server-side explanation (including Range offsets) and a clearer summary of why chunked streaming exists (avoiding gRPC message size limits). The client-side descriptions are nearly identical in both. Overall the two responses are complementary — A is more complete on definitions, B is more insightful on the server side and purpose — making this effectively a tie.
+Both responses accurately describe the gRPC streaming implementation of ReadStateBytes with correct detail about chunk validation and reassembly. However, Response A more completely answers the "where is it defined" part of the question by identifying the interface declaration at internal/providers/provider.go:127, the Request/Response types at lines 892-904, and the primary gRPC implementation file. It also includes the actual interface code snippet. Response B focuses almost entirely on the implementation flow with line-number references but omits the interface definition location and doesn't name the implementation file explicitly, making it less navigable. Response A provides a fuller architectural picture spanning multiple locations in the codebase.
 ```
 
 </details>
@@ -12001,8 +11419,8 @@ Both responses are accurate and well-grounded. Response A has a slight edge in g
 
 **Prompt:** Where is `managedResourceExecute` defined on NodeApplyableResourceInstance and what does it do step by step?
 
-- Interactions: no_budi=4 / with_budi=4
-- Cost USD: no_budi=$0.0783 / with_budi=$0.0727
+- Interactions: no_budi=3 / with_budi=4
+- Cost USD: no_budi=$0.0758 / with_budi=$0.0802
 - Hook: reason=ok context_chars=954
 
 #### Injected context
@@ -12037,96 +11455,78 @@ evidence_cards:
 ```text
 Defined at `internal/terraform/node_resource_apply_instance.go:204`. Here's the step-by-step breakdown:
 
-1. **Get provider & schema** (lines 211–216) — Resolves the provider and its schema for the resource instance.
+### 1. **Setup** (lines 207–216)
+Declares `state`, `createBeforeDestroyEnabled`, and `deposedKey` variables. Resolves the resource address and fetches the provider + schema.
 
-2. **Read the planned diff** (lines 218–229) — Reads the saved diff from the plan. Returns early if there's no diff or if the action is `Delete` (destroys are handled by `NodeDestroyResourceInstance`).
+### 2. **Read the planned diff** (lines 218–232)
+Calls `n.readDiff()` to get the saved planned change. Returns early if the diff is `nil` or a `Delete` (destroys are handled by `NodeDestroyResourceInstance`). Errors on `Read` actions as a bug.
 
-3. **Determine create-before-destroy (CBD)** (lines 234–251) — Checks if the action is a replace and whether CBD is enabled. If so, **deposes the current state object** (moves it aside under a deposed key) so the new object can be created first.
+### 3. **Determine Create-Before-Destroy (CBD)** (lines 234–251)
+Checks if the action involves replacement. If CBD is enabled, it **deposes** the current state object (moves it aside with a deposed key) so the new object can be created first.
 
-4. **Read current state** (lines 253–257) — Reads the resource instance's current state from the state store.
+### 4. **Read current state** (lines 253–257)
+Reads the resource instance's current state from the state store.
 
-5. **Re-read the diff** (lines 259–264) — Reads the saved diff again (state may have changed due to depose).
+### 5. **Re-plan with updated values** (lines 259–284)
+Calls `n.plan()` again to produce a fresh diff that incorporates any new values learned during the apply phase. Errors if the provider tries to defer the resource during apply (only allowed during plan).
 
-6. **Re-plan** (lines 268–284) — Calls `n.plan()` to produce an updated diff incorporating any new values learned during apply. If the provider unexpectedly defers the resource, it errors out.
+### 6. **Verify plan consistency** (lines 287–290)
+Calls `n.checkPlannedChange()` to ensure the re-computed diff is compatible with the original plan. Mismatches indicate provider or Terraform bugs.
 
-7. **Check planned change consistency** (lines 287–290) — Calls `checkPlannedChange` to verify the re-planned diff is compatible with the original plan. Mismatches indicate provider or Terraform bugs.
+### 7. **Reduce the plan** (line 292)
+Calls `reducePlan()` which may simplify the diff to `NoOp` if only a destroy is needed (handled elsewhere).
 
-8. **Reduce plan** (line 292) — Calls `reducePlan` to simplify the diff, potentially converting it to `NoOp` if only a destroy is needed (handled elsewhere).
-
-9. **Pre-apply hook** (lines 300–303) — Fires the pre-app
-...[truncated 1560 chars]
+### 8. **Pr
+...[truncated 1686 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Defined at `internal/terraform/node_resource_apply_instance.go:204`. Here's the step-by-step breakdown:
+**Defined at** `internal/terraform/node_resource_apply_instance.go:204` as a method on `NodeApplyableResourceInstance`.
 
-1. **Setup** (lines 207–216) — Declares `state`, `createBeforeDestroyEnabled`, `deposedKey`. Resolves the resource address and fetches the provider schema.
+Here's what it does step by step:
 
-2. **Read the planned diff** (lines 219–232) — Reads the saved diff. Returns early if `nil` or `Delete` (destroys are handled by `NodeDestroyResourceInstance`). Errors on a `Read` action as a bug.
+1. **Setup** (lines 207–216) — Declares local state variables (`state`, `createBeforeDestroyEnabled`, `deposedKey`). Resolves the resource address and fetches the provider schema.
 
-3. **Determine create-before-destroy (CBD)** (lines 234–251) — Sets `createBeforeDestroyEnabled` if the action is `CreateThenDelete` or if both `destroy` and `n.CreateBeforeDestroy()` are true. If CBD is enabled, **deposes** the current state object (moves it aside under a deposed key) so the new object can be created first.
+2. **Read the planned diff** (lines 218–232) — Reads the saved diff. Returns early if the diff is nil or a pure `Delete` (destroys are handled by `NodeDestroyResourceInstance`). Errors on a `Read` action as nonsensical.
 
-4. **Re-read state** (lines 253–257) — Reads the current resource instance state (which, after deposing, is now empty for CBD).
+3. **Determine create-before-destroy (CBD)** (lines 234–240) — Checks if the action is a replace and whether CBD is enabled, either from the plan (`CreateThenDelete`) or from the node's `CreateBeforeDestroy()` flag.
 
-5. **Re-plan** (lines 260–284) — Re-reads the diff and calls `n.plan()` to produce an updated diff incorporating any new values learned during apply. Errors if the provider unexpectedly defers the resource.
+4. **Depose the prior object for CBD** (lines 242–251) — If CBD is enabled, moves the current state object to a "deposed" slot (using a preallocated key or generating a new one). This preserves the old object while the new one is being created.
 
-6. **Check planned change** (lines 287–290) — Calls `checkPlannedChange` to verify the new diff is consistent with the original plan.
+5. **Re-read current state** (lines 253–257) — Reads the resource instance's current state from the state store.
 
-7. **Reduce plan** (lines 292–298) — Calls `reducePlan` which may simplify the diff to `NoOp` if only a destroy is needed (handled elsewhere).
+6. **Re-read diff and re-plan** (lines 259–284) — Reads the diff again, then calls `n.plan()` to produce an updated diff that incorporates any values learned during apply. If the provider unexpectedly defers the resource, it errors out.
 
-8. **Pre-apply hook** (line 300) — Fires the pre-apply UI hook.
-
-9. **NoOp short-circuit** (line
-...[truncated 1331 chars]
+7. **Check planned change consistency** (lines 287–290) — Compares the original plan diff with the re-planned diff via `checkPl
+...[truncated 1542 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses identify the same definition location (node_resource_apply_instance.go:204) and provide nearly identical step-by-step breakdowns with accurate line references. Response A has 19 steps while Response B has 18, but they cover the same logic. Response A adds a minor detail about the Read action error check being absent from its list (Response B correctly notes the Read action bug check in step 2), and Response A mentions the postcondition rationale slightly more clearly. Response B correctly notes the Read action error in step 2 which is a small accuracy advantage. Overall both are thorough, well-grounded in the actual code, and highly actionable. The differences are negligible.
+Both responses identify the same definition location (node_resource_apply_instance.go:204) and provide detailed, accurate step-by-step breakdowns covering the same content with consistent line references. Response A uses 18 finer-grained steps while Response B uses 17 slightly more consolidated steps—both are valid organizational choices. The explanations are substantively equivalent: both correctly describe setup, diff reading, CBD handling, re-planning, consistency checks, apply, state writing, provisioners, CBD error recovery, hooks, and postconditions. Neither contains notable errors or omissions relative to the other. This is a tie.
 ```
 
 </details>
 
-<details><summary>Terraform P15 | winner=no_budi | Q 8→7 G 9→7</summary>
+<details><summary>Terraform P15 | winner=tie | Q 9→9 G 9→9</summary>
 
 **Prompt:** What calls `ContextGraphWalker.Execute` and what node types does it dispatch to?
 
-- Interactions: no_budi=7 / with_budi=8
-- Cost USD: no_budi=$0.0992 / with_budi=$0.0775
-- Hook: reason=ok context_chars=589
-
-#### Injected context
-
-```text
-[structural context]
-Execute  (graph_walk_context.go:165)
-  → refs: acquire, execute, release
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: internal/terraform/graph_walk_context.go
-  span: 165-171
-  anchor: func (w *ContextGraphWalker) Execute(ctx EvalContext, n GraphNodeExecutable) tfdiags.Diagnostics {
-  proof:
-    - return n.Execute(ctx, w.Operation)
-    - w.Context.parallelSem.Acquire()
-    - defer w.Context.parallelSem.Release()
-```
+- Interactions: no_budi=7 / with_budi=11
+- Cost USD: no_budi=$0.1048 / with_budi=$0.1166
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
 
 ```text
 Here's the full picture:
 
-## Caller
+### Caller
 
-`ContextGraphWalker.Execute` is called from **one place**: `internal/terraform/graph.go:143`, inside the graph walking loop:
+`ContextGraphWalker.Execute` is called from **`Graph.walk`** at `internal/terraform/graph.go:143`:
 
 ``\`go
 if ev, ok := v.(GraphNodeExecutable); ok {
@@ -12134,131 +11534,27 @@ if ev, ok := v.(GraphNodeExecutable); ok {
 }
 ``\`
 
-The graph walker iterates over vertices, checks if each implements `GraphNodeExecutable`, and dispatches to `walker.Execute`. The `ContextGraphWalker.Execute` method itself just acquires the parallelism semaphore and delegates to `n.Execute(ctx, w.Operation)`.
+Each vertex in the dependency graph is type-asserted to `GraphNodeExecutable`, and if it matches, `walker.Execute` is called. The `ContextGraphWalker.Execute` method itself just acquires a parallelism semaphore and delegates to `n.Execute(ctx, w.Operation)` (line 170).
 
-## Node types implementing `GraphNodeExecutable`
+### GraphNodeExecutable implementations
 
-The dispatch fans out to these concrete node types:
+The interface is defined in `internal/terraform/execute.go:10`. These node types implement it:
 
-| Node Type | File |
+| Node type | File |
 |---|---|
-| `NodeApplyableOutput` | `node_output.go:305` |
-| `NodeDestroyableOutput` | `node_output.go:623` |
-| `nodeEphemeralResourceClose` | `node_resource_ephemeral.go:220` |
-| `graphNodeImportState` | `node_resource_import.go:29` |
-| `graphNodeImportStateSub` | `node_resource_import.go:234` |
-| `nodeVariableValidation` | `node_variable_validation.go:48` |
-| `nodeActionTriggerApplyInstance` | `node_action_trigger_instance_apply.go:29` |
-| `nodeModuleVariable` | `node_module_variable.go:190` |
-| `NodePlannableResourceInstance` | `node_resource_plan_instance.go:64` |
-| `NodeDestroyableDataResourceInstance` | `node_data_destroy.go:19` |
-| `nodeActionInvokeInstance` | `node_action_invoke.go:128` |
-| `NodeDestroyResourceInstance` | `node_resource_destroy.go:33` |
-| `NodePlannableResourceInstanceOrphan` | `node_resource_plan_orpha
-...[truncated 1414 chars]
-```
-
-#### Response (`with_budi`)
-
-```text
-Here's the full call chain:
-
-### Caller
-
-`ContextGraphWalker.Execute` is called from **`Graph.walk`** at `internal/terraform/graph.go:143`. During the DAG walk, each vertex is type-asserted to `GraphNodeExecutable` and, if it matches, dispatched via `walker.Execute(vertexCtx, ev)`.
-
-### Dispatch
-
-`ContextGraphWalker.Execute` (`graph_walk_context.go:165-171`) acquires the parallelism semaphore and then calls `n.Execute(ctx, w.Operation)` — the `GraphNodeExecutable` interface method defined in `execute.go:10-12`.
-
-### Node types implementing `GraphNodeExecutable`
-
-All of these implement `Execute(EvalContext, walkOperation) tfdiags.Diagnostics`:
-
-**Resource lifecycle nodes:**
-- `node_resource_validate.go` — resource validation
-- `node_resource_plan_instance.go` — plan for a resource instance
-- `node_resource_plan_destroy.go` — plan destruction
-- `node_resource_plan_orphan.go` — plan for orphaned resources
-- `node_resource_plan_partialexp.go` — plan for partially-expanded resources
-- `node_resource_apply_instance.go` — apply a resource instance
-- `node_resource_destroy.go` — destroy a resource
-- `node_resource_destroy_deposed.go` — destroy deposed resource objects
-- `node_resource_ephemeral.go` — ephemeral resources
-- `node_resource_forget.go` — forget (remove from state)
-- `node_resource_import.go` — import existing infrastructure
-
-**Provider/provisioner nodes:**
-- `node_provider_eval.go` / `node_provider.go` — provider configuration
-- `transform_provider.go` — provider transfor
-...[truncated 866 chars]
-```
-
-#### Judge rationale
-
-```text
-Both responses correctly identify Graph.walk at graph.go:143 as the caller of ContextGraphWalker.Execute and correctly describe the dispatch mechanism through GraphNodeExecutable. Response A is more precisely grounded: it lists specific concrete types with their exact file locations and line numbers (e.g., NodeApplyableOutput at node_output.go:305), making it highly actionable for navigation. Response B organizes by category which aids understanding but is less precise — it lists files rather than concrete types, and includes some questionable entries (transform_provider.go, node_action_validate.go, node_resource_apply_instance.go, node_resource_plan_destroy.go) that may not actually implement GraphNodeExecutable.Execute directly. Response B does add value by mentioning the test framework nodes in internal/moduletest/graph/, which Response A omits, but some of its other file-level entries appear speculative. Response A's specificity with type names and line numbers makes it more trustworthy and directly useful for code navigation.
-```
-
-</details>
-
-<details><summary>Terraform P16 | winner=tie | Q 9→9 G 8→8</summary>
-
-**Prompt:** What calls `planWalk` and what does it do before returning the plan?
-
-- Interactions: no_budi=5 / with_budi=5
-- Cost USD: no_budi=$0.0728 / with_budi=$0.0809
-- Hook: reason=ok context_chars=728
-
-#### Injected context
-
-```text
-[structural context]
-plan  (context_plan.go:485)
-  ← called by: ApplyStackChanges, planfile.pb.go, main_apply.go
-  → refs: append, planwalk
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: internal/terraform/context_plan.go
-  span: 485-495
-  anchor: func (c *Context) plan(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, *lang.Scope, tfdiags.Diagnostics) {
-  proof:
-    - panic(fmt.Sprintf("called Context.plan with %s", opts.Mode))
-    - plan, evalScope, walkDiags := c.planWalk(config, prevRunState, opts)
-    - return plan, evalScope, diags
-```
-
-#### Response (`no_budi`)
-
-```text
-Here's the summary:
-
-## Callers of `planWalk`
-
-Three methods in `context_plan.go` call `c.planWalk(...)`:
-
-1. **`Context.plan`** (line 485) — normal planning mode
-2. **`Context.refreshOnlyPlan`** (line 497) — refresh-only mode
-3. **`Context.destroyPlan`** (line 604, not shown in detail) — destroy mode
-
-## What `planWalk` does before returning the plan
-
-`planWalk` (starting at line 747) performs these steps:
-
-1. **Deep-copies** the previous run state to avoid mutating the caller's object.
-2. **Finds and applies move statements** (`prePlanFindAndApplyMoves`) — handles `moved` blocks.
-3. **Validates targeted moves** (`prePlanVerifyTargetedMoves`) — ensures resource targeting doesn't conflict with moves.
-4. **Builds the plan graph** (`c.planGraph`) based on config, state, and options.
-5. **Walks the graph** (`c.walk`) — the core evaluation step that produces `changes`, using the graph and a `graphWalkOpts` struct bundling config, state, move results, overrides, deferrals, etc.
-6. **Post-plan validates moves** (`postPlanValidateMoves`) — validates move statements against the expanded instances (done after the walk because validation depends on planning results).
-7. **Reports blocked moves** as warnings if any exist and there are no errors.
-8. **Closes walker state** — finalizes `PrevRunState` and `RefreshState`, removing deferred data resource objects from the refresh state.
-9. **Computes drifted resources** (`c.driftedResources`) — compares prev run state to the refreshed prior s
-...[truncated 825 chars]
+| `NodePlannableResourceInstance` | `node_resource_plan_instance.go` |
+| `NodePlannableResourceInstanceOrphan` | `node_resource_plan_orphan.go` |
+| `NodePlanDestroyableResourceInstance` | `node_resource_plan_destroy.go` |
+| `nodePlannablePartialExpandedResource` | `node_resource_plan_partialexp.go` |
+| `NodeApplyableResourceInstance` | `node_resource_apply_instance.go` |
+| `NodeDestroyResourceInstance` | `node_resource_destroy.go` |
+| `NodeForgetResourceInstance` | `node_resource_forget.go` |
+| `NodeDestroyableDataResourceInstance` | `node_data_destroy.go` |
+| `NodeValidatableResource` | `node_resource_validate.go` |
+| `graphNodeImportState` / `graphNodeImportStateSub` | `node_resource_import.go` |
+| `NodePlanDeposedResourceInstanceObject` | `node_resource_destroy_deposed.go` |
+| `NodeDestroyDeposedR
+...[truncated 1572 chars]
 ```
 
 #### Response (`with_budi`)
@@ -12266,43 +11562,121 @@ Three methods in `context_plan.go` call `c.planWalk(...)`:
 ```text
 Here's the full picture:
 
-## Callers of `planWalk`
+## Caller
 
-Three methods in `context_plan.go` call `c.planWalk(...)`:
+`ContextGraphWalker.Execute` is called from **one place**: the graph vertex walk function in `internal/terraform/graph.go:143`. During the DAG walk, each vertex is type-asserted to `GraphNodeExecutable`, and if it matches, `walker.Execute(vertexCtx, ev)` is called. The method itself (`graph_walk_context.go:165–171`) acquires the parallelism semaphore, then dispatches to `n.Execute(ctx, w.Operation)`.
 
-1. **`plan()`** (line 491) — normal mode, simply returns the result with appended diagnostics.
-2. **`refreshOnlyPlan()`** (line 504) — refresh-only mode, additionally validates that no resource changes were generated (would be a bug).
-3. **`destroyPlan()`** (line 604) — destroy mode, first does a refresh via a normal-mode `plan()` call, then runs `planWalk` for the actual destroy plan.
+## `GraphNodeExecutable` implementors
 
-## What `planWalk` does before returning the plan
+These are all the node types that `Execute` dispatches to:
 
-`planWalk` (line 747) performs these steps in order:
-
-1. **Deep-copies** `prevRunState` to avoid mutating the caller's object.
-2. **Finds and applies moves** (`prePlanFindAndApplyMoves`) — processes `moved` blocks, updating state addresses.
-3. **Verifies targeted moves** (`prePlanVerifyTargetedMoves`) — ensures resource targeting doesn't conflict with move results.
-4. **Builds the plan graph** (`c.planGraph`) — constructs the dependency graph for the plan operation.
-5. **Walks the graph** (`c.walk`) — executes the graph, populating `changes`, `MoveResults`, deferrals, etc.
-6. **Post-plan validates moves** (`postPlanValidateMoves`) — validates move statements against the expanded instances; move validation errors take precedence over other errors since incomplete moves can cascade.
-7. **Reports blocked moves** as warnings (if no errors).
-8. **Closes walker state** — finalizes `PrevRunState` and `RefreshState` (removing deferred data r
-...[truncated 678 chars]
+| Node type | File |
+|---|---|
+| `NodeApplyableOutput` | `node_output.go:305` |
+| `NodeDestroyableOutput` | `node_output.go:623` |
+| `nodeEphemeralResourceClose` | `node_resource_ephemeral.go:220` |
+| `graphNodeImportState` | `node_resource_import.go:29` |
+| `graphNodeImportStateSub` | `node_resource_import.go:234` |
+| `NodePlannableResourceInstance` | `node_resource_plan_instance.go:64` |
+| `nodeVariableValidation` | `node_variable_validation.go:48` |
+| `NodeRootVariable` | `node_root_variable.go:62` |
+| `NodeForgetResourceInstance` | `node_resource_forget.go:27` |
+| `NodeActionTriggerPartialExpanded` | `node_action_trigger_partialexp.go:48` |
+| `nodeActionTriggerPlanInstance` | `node_action_trigger_instance_plan.go:24` |
+| `NodePlannableResourceInstanceOrphan` | `node_resource_plan_orphan.go:46` |
+| `NodeValidatableResource` | `node_resource_validate.go:35` |
+| `NodeActionDeclarationPartialExpanded` | `node_action_partialexp.go:33` |
+| `NodePl
+...[truncated 1073 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses are remarkably similar in structure, depth, and accuracy. They identify the same three callers (plan, refreshOnlyPlan, destroyPlan) and enumerate essentially identical 14-step sequences of what planWalk does before returning. Minor differences: Response A includes a note about the line 884 comment regarding post-return field population and provides more detail on applyability logic (refresh-only vs other modes). Response B provides slightly more context about what the callers themselves do (e.g., destroyPlan first does a refresh, refreshOnlyPlan validates no resource changes) and adds a nuance about move validation errors taking precedence. Line numbers differ slightly between the two (A: 485/497, B: 491/504) — without verifying against the actual file, neither can be confirmed more accurate. Both are well-grounded, thorough, and highly actionable. The differences are marginal and complementary rather than one being clearly superior.
+Both responses correctly identify Graph.walk at internal/terraform/graph.go:143 as the sole caller and provide comprehensive tables of GraphNodeExecutable implementors. Response A lists slightly more types (e.g., NodeApplyableProvider, nodeExternalProvider, nodeExpandModule, nodeCloseModule, nodeValidateModule, NodeAbstractActionInstance, NodeDestroyableDataResourceInstance, NodeApplyableResourceInstance) and includes a useful summary categorizing the node types. Response B provides specific line numbers for every implementor, making it more navigable. The tradeoffs roughly balance out: A has broader coverage, B has more precise source locations. Both are well-grounded and accurate. Response B gets a slight actionability edge for the per-entry line numbers which directly support code navigation.
 ```
 
 </details>
 
-<details><summary>Terraform P17 | winner=with_budi | Q 7→8 G 7→8</summary>
+<details><summary>Terraform P16 | winner=tie | Q 9→9 G 9→9</summary>
+
+**Prompt:** What calls `planWalk` and what does it do before returning the plan?
+
+- Interactions: no_budi=6 / with_budi=8
+- Cost USD: no_budi=$0.0974 / with_budi=$0.1085
+- Hook: reason=skip:low-score context_chars=0
+
+#### Response (`no_budi`)
+
+```text
+Here's the full picture:
+
+## Callers
+
+`planWalk` is called by three methods on `*Context`, all in `context_plan.go`:
+
+1. **`plan()`** (line 491) — for `NormalMode` plans. Simply calls `planWalk` and returns the result with no additional processing.
+
+2. **`refreshOnlyPlan()`** (line 504) — for `RefreshOnlyMode`. After `planWalk`, it validates that the plan contains **no resource changes** (since refresh-only shouldn't propose any), returning an error if it does.
+
+3. **`destroyPlan()`** (line 604) — for `DestroyMode`. Before calling `planWalk`, it optionally runs a normal `plan()` to refresh the prior state. After `planWalk`, it restores the original `PrevRunState` if refresh wasn't skipped.
+
+## What `planWalk` does before returning the plan
+
+After the graph walk (`c.walk`) completes, `planWalk` (lines 747–937) performs these steps:
+
+1. **Post-plan move validation** (line 811) — validates `moved` block statements against the expanded instances; if invalid, returns early with only move errors.
+2. **Blocked moves warning** (line 823) — emits a warning if any moves were blocked (only when no other errors exist).
+3. **Closes walker states** (lines 837–842) — finalizes `PrevRunState` and `RefreshState` (after removing planned-but-deferred data resource objects).
+4. **Drift detection** (line 844) — compares `prevRunState` vs `priorState` to identify drifted resources.
+5. **Forgotten resources warning** (lines 847–860) — collects resources with `plans.Forget` action and emits a warnin
+...[truncated 685 chars]
+```
+
+#### Response (`with_budi`)
+
+```text
+Here's the summary:
+
+## Callers
+
+`planWalk` is called by three methods on `*Context`, all in `context_plan.go`:
+
+1. **`plan()`** (line 491) — normal planning mode. Just passes through the result with no extra processing.
+2. **`refreshOnlyPlan()`** (line 504) — refresh-only mode. After the walk, it verifies no resource changes were proposed (safety check).
+3. **`destroyPlan()`** (line 604) — destroy mode. It first does a refresh-only plan, then calls `planWalk` with the refreshed state to produce the actual destroy plan.
+
+## What `planWalk` does before returning the plan
+
+After the graph walk completes and before returning, `planWalk` (lines 747–937) performs these post-processing steps:
+
+1. **Validates move statements** (`postPlanValidateMoves`, line 811) — if invalid, returns early with only move errors.
+2. **Reports blocked moves** as warnings (line 823).
+3. **Closes walker state** — finalizes `PrevRunState` and `RefreshState` (removing deferred data resource objects).
+4. **Computes resource drift** (`driftedResources`, line 844) — compares prev-run and prior (refreshed) state.
+5. **Collects forgotten resources** and emits a warning listing them (line 847).
+6. **Encodes changes** using schemas (`changes.Encode`, line 866).
+7. **Builds the `plans.Plan` struct** (line 872) with all the collected data.
+8. **Processes deferred resources and action invocations** (lines 888–894).
+9. **Determines `Complete` and `Applyable` flags** (lines 900–926):
+   - `Complete` = true if no targ
+...[truncated 308 chars]
+```
+
+#### Judge rationale
+
+```text
+Both responses are nearly identical in structure, content, and quality. They identify the same three callers (plan, refreshOnlyPlan, destroyPlan) with matching line numbers, and list the same 10 post-processing steps in planWalk with consistent line references. The only meaningful difference is in the description of destroyPlan: Response A says it "optionally runs a normal plan() to refresh the prior state" and restores PrevRunState afterward, while Response B says it "first does a refresh-only plan, then calls planWalk with the refreshed state." Both are reasonable characterizations. Response A is marginally more detailed in spots (mentioning test harness, PrevRunState restoration), but the overall information conveyed is equivalent. This is a clear tie.
+```
+
+</details>
+
+<details><summary>Terraform P17 | winner=tie | Q 8→7.5 G 7.5→7.5</summary>
 
 **Prompt:** I want to add a new Terraform command. What files and functions would I need to modify or create?
 
-- Interactions: no_budi=9 / with_budi=9
-- Cost USD: no_budi=$0.1145 / with_budi=$0.0812
+- Interactions: no_budi=13 / with_budi=15
+- Cost USD: no_budi=$0.1387 / with_budi=$0.1215
 - Hook: reason=ok context_chars=1255
 
 #### Injected context
@@ -12345,67 +11719,64 @@ evidence_cards:
 #### Response (`no_budi`)
 
 ```text
-Here's what you need to add a new Terraform command (using `apply` as the reference pattern):
+Here's a summary of what you need to add a new Terraform command, using `output` as a reference:
 
 ## Files to create
 
-1. **`internal/command/<yourcommand>.go`** — The command implementation struct and methods:
-   - Struct embedding `Meta` (e.g., `type YourCommand struct { Meta }`)
+1. **`internal/command/yourcommand.go`** — The command implementation struct and methods:
+   - Struct embedding `Meta` (e.g. `type YourCommand struct { Meta }`)
    - `Run(rawArgs []string) int` — main logic
    - `Help() string` — detailed help text
    - `Synopsis() string` — one-line description
 
-2. **`internal/command/arguments/<yourcommand>.go`** — Flag parsing:
-   - Define an args struct (e.g., `type YourCommand struct { ... }`)
-   - `ParseYourCommand(args []string) (*YourCommand, tfdiags.Diagnostics)` function
+2. **`internal/command/arguments/yourcommand.go`** — Argument parsing (flags, positional args). Defines a struct for parsed args and a `ParseYourCommand()` function.
 
-3. **`internal/command/views/<yourcommand>.go`** — Output rendering:
-   - Interface + human/JSON implementations for displaying results and diagnostics
+3. **`internal/command/views/yourcommand.go`** — View/output layer. Handles rendering output in human, JSON, or raw formats.
+
+4. **`internal/command/yourcommand_test.go`** — Tests for the command.
 
 ## Files to modify
 
-4. **`commands.go`** (root) — Register the command in `initCommands()`:
-   - Add an entry to the `Commands` map (~line 122):
-     ``\`go
-     "yourcommand": func() (cli.Command, error) {
-         return &command.YourCommand{
-             Meta: meta,
-         }, nil
-     },
-     ``\`
-   - Optionally add to `PrimaryCommands` (if it's a top-level workflow command) or `HiddenCommands`
+1. **`commands.go`** (~line 122) — Register the command in the `Commands` map inside `initCommands()`:
+   ``\`go
+   "yourcommand": func() (cli.Command, error) {
+       return &command.YourCommand{
+           Meta: meta,
+       }, nil
+   },
+   ``\`
 
-## Tests to create
+2. **`commands.go`** (~line 467) — Optionally add to `PrimaryCommands` (if it's a top-level workflow command) or `HiddenCommands` (if it should be hidden from help).
 
-5. **`internal/command/<yourcommand>_test.go`**
-6. **`internal/command/arguments/<yourcommand>_test.go`**
-7. **`internal/command/views/<yourcommand>_test.go`**
+## Key patterns to follow
 
-## Key types/interfaces
-
-- Your command struct must satisfy `cli.Command` (from `github.com/hashicorp/cli`) which requires `
-...[truncated 289 chars]
+- Parse global view args first with `arguments.ParseView(rawArgs)`, then parse command-specific args
+- Use `c.View.Configure(common)` for view setup
+- Return `0` for success, `1` for errors
+- Use `c.View.Diagnostics(diags)` for error reporting
+- The `Meta` s
+...[truncated 131 chars]
 ```
 
 #### Response (`with_budi`)
 
 ```text
-Here's what you need to add a new Terraform command:
+Here's what you'd need to create/modify, using `console` as a reference:
 
-## Files to create
+### Files to **create**
 
-1. **`internal/command/mycommand.go`** — The command implementation. Define a struct embedding `Meta`, and implement the `cli.Command` interface:
+1. **`internal/command/mycommand.go`** — The command implementation. Define a struct embedding `Meta`, then implement the `cli.Command` interface:
    - `Run(args []string) int` — main logic
    - `Help() string` — detailed help text
    - `Synopsis() string` — one-line description
 
-   See `internal/command/console.go` for a clean example.
+2. **`internal/command/arguments/mycommand.go`** — Argument parsing. Define a struct for parsed args and a `ParseMyCommand(args []string)` function that uses `extendedFlagSet` to parse flags.
 
-2. **`internal/command/mycommand_test.go`** — Tests for the command.
+3. **`internal/command/mycommand_test.go`** — Tests for the command.
 
-## Files to modify
+### Files to **modify**
 
-3. **`commands.go`** — Register your command in the `initCommands` function. Add an entry to the `Commands` map (around line 129):
+4. **`commands.go`** (root of repo) — Register the command in the `initCommands` function. Add an entry to the `Commands` map like:
    ``\`go
    "mycommand": func() (cli.Command, error) {
        return &command.MyCommand{
@@ -12413,147 +11784,96 @@ Here's what you need to add a new Terraform command:
        }, nil
    },
    ``\`
-   If it's a primary workflow command, add it to `PrimaryCommands`. If it's internal/deprecated, add it to `HiddenCommands`.
+   If it's a primary command, also add it to `PrimaryCommands`. If it should be hidden, add it to `HiddenCommands`.
 
-## Optional files depending on your command
+### Pattern summary
 
-4. **`internal/command/arguments/mycommand.go`** — If your command has flags/arguments, define a parsing function here (pattern used by newer commands like `console` via `arguments.ParseConsole`).
-
-5. **`internal/command/views/mycommand.go`** — If your command needs structured output (human/JSON), add a view type here (used by commands like `plan`, `apply`).
-
-6. **`website/docs/cli/commands/mycommand.mdx`** — Documentation page.
-
-## Key patterns
-
-- All commands embed the `Meta` struct (`internal/command/meta.go`) which provides shared functionality: 
-...[truncated 388 chars]
+Each command follows this structure:
+- **Struct** in `internal/command/` embeds `Meta` (which provides common helpers like `Meta.process()`, UI streams, backend loading, etc.)
+- **Argument parsing** is separated into `internal/command/arguments/`
+- **Registration** happens in `commands.go:initCommands()`
+- The command implements the `cli.Command` interface from `github.com/hashicorp/cli` (`Run`, `Help`, `Synopsis`)
 ```
 
 #### Judge rationale
 
 ```text
-Both responses correctly identify the core files: command implementation in internal/command/, registration in commands.go's initCommands(), the Meta struct embedding, and the cli.Command interface. Response B is slightly better in several ways: (1) It correctly distinguishes required vs optional files — arguments/ and views/ files are only needed for commands with flags or structured output, while Response A presents them as mandatory. (2) It references a concrete example (console.go) for a clean pattern to follow. (3) It mentions documentation (website/docs/cli/commands/) which is a real part of adding a command. (4) It mentions c.Meta.process(args) for global flag handling. Response A's mention of arguments.ParseView is a useful detail but presenting arguments and views as required creates is slightly misleading since simpler commands don't need them. Both are well-structured and actionable.
+Both responses are well-structured and cover the essential steps: creating a command file with Meta embedding, argument parsing in internal/command/arguments/, tests, and registration in commands.go:initCommands(). Response A adds the views layer (internal/command/views/) and provides approximate line numbers and specific patterns (ParseView, c.View.Configure, c.View.Diagnostics), making it slightly more comprehensive. Response B correctly identifies the cli.Command interface from github.com/hashicorp/cli and mentions extendedFlagSet, showing good grounding. The differences are minor — both would successfully guide someone to add a new command. Response A's extra detail on views and specific patterns gives it a slight edge in actionability, but not enough to declare a clear winner.
 ```
 
 </details>
 
-<details><summary>Terraform P18 | winner=with_budi | Q 8→9 G 8→9</summary>
+<details><summary>Terraform P18 | winner=with_budi | Q 7→8 G 8→8</summary>
 
 **Prompt:** How does Terraform decide which provider to use for a given resource — trace from the resource block in config to provider selection?
 
-- Interactions: no_budi=26 / with_budi=20
-- Cost USD: no_budi=$0.4284 / with_budi=$0.3095
-- Hook: reason=ok context_chars=1557
-
-#### Injected context
-
-```text
-[structural context]
-ProviderConfigAddr  (action.go:288)
-  → refs: addr, impliedprovider
-
-[budi context]
-rules:
-- Use only file paths shown in snippets for exact-path answers.
-- If snippets support fewer files than requested, return fewer instead of guessing.
-evidence_cards:
-- file: internal/providers/provider.go
-  span: 437-448
-  anchor: type ConfigureProviderRequest struct {
-  proof:
-    - Config cty.Value
-    - TerraformVersion string
-    - ClientCapabilities ClientCapabilities
-- file: internal/terraform/node_module_variable.go
-  span: 168-184
-  anchor: type nodeModuleVariable struct {
-  proof:
-    - Config *configs.Variable // Config is the var in the config
-    - Expr hcl.Expression // Expr is the value expression given in the call
-    - Addr addrs.AbsInputVariableInstance
-- file: internal/genconfig/generate_config.go
-  span: 135-144
-  anchor: type ResourceListElement struct {
-  proof:
-    - Config cty.Value
-    - Identity cty.Value
-    - ExpansionEnum int
-- file: internal/deprecation/schema.go
-  span: 58-63
-  anchor: func schemaDeprecationMessage(schema *configschema.Block) string {
-  proof:
-    - return "Deprecated resource used as value. Refer to the provider documentation 
-...[truncated 300 chars]
-```
+- Interactions: no_budi=19 / with_budi=17
+- Cost USD: no_budi=$0.2529 / with_budi=$0.2874
+- Hook: reason=skip:low-score context_chars=0
 
 #### Response (`no_budi`)
-
-```text
-Now I have the full picture. Here's the trace:
-
----
-
-## Provider Selection: Config to Resolution
-
-The flow has **three phases**: HCL decoding, module-level FQN assignment, and graph-level provider wiring.
-
-### Phase 1: Parsing the `provider` attribute
-
-In `internal/configs/resource.go:172-176`, when decoding a resource block, if the `provider` attribute exists, it's parsed into a `ProviderConfigRef` (local name + optional alias):
-
-``\`go
-if attr, exists := content.Attributes["provider"]; exists {
-    r.ProviderConfigRef, providerDiags = decodeProviderConfigRef(attr.Expr, "provider")
-}
-``\`
-
-If no `provider` attribute is set, `ProviderConfigRef` stays `nil`.
-
-### Phase 2: Determining the provider FQN (config loading)
-
-In `internal/configs/module.go:407-419`, when assembling the module, each resource gets its `Provider` field (an `addrs.Provider` FQN) set:
-
-**Path A — explicit `provider` attribute:** If `ProviderConfigRef != nil`, it calls `m.ProviderForLocalConfig()` → `m.ImpliedProviderForUnqualifiedType(localName)`, which looks up the local name in `required_providers`. If found there, it uses that FQN.
-
-**Path B — no `provider` attribute:** The resource type is split at the first `_` to get the implied provider name. For `aws_instance`, `ImpliedProvider()` at `internal/addrs/resource.go:96-103` returns `"aws"`. Then `ImpliedProviderForUnqualifiedType("aws")` is called, which:
-1. Checks `m.ProviderRequirements.RequiredProviders["aws"]` — if a `required_providers` entry exists 
-...[truncated 2129 chars]
-```
-
-#### Response (`with_budi`)
 
 ```text
 I now have a complete picture. Here's the full trace:
 
 ---
 
-## Provider Resolution: Config to Provider Selection
+## Provider Resolution: Config → Provider Instance
 
-The flow has **two phases**: FQN resolution at config load time, and provider graph wiring at plan/apply time.
+The resolution happens in **two phases**: config loading (FQN resolution) and graph building (provider node wiring).
 
-### Phase 1: Config Loading — Determine the Provider FQN
+### Phase 1: Config Loading — Resolve the Provider FQN
 
-When a module's files are merged (`internal/configs/module.go:~405`), each resource gets its `Provider` field (the fully-qualified name) set:
+When a module's files are loaded, each resource gets its `Provider` (fully-qualified name) set in `internal/configs/module.go:405-416`. There are two paths:
 
-1. **If `provider` argument is explicit** (`r.ProviderConfigRef != nil`):
-   - Call `m.ProviderForLocalConfig(r.ProviderConfigAddr())` → which calls `m.ImpliedProviderForUnqualifiedType(localName)` (`module.go:932-933`)
-   - This looks up the local name in the module's `required_providers` block. If found, uses that FQN. Otherwise falls through to step 2's default.
+**Path A — Explicit `provider` argument:**
+``\`hcl
+resource "aws_instance" "web" {
+  provider = aws.west    # explicit ProviderConfigRef
+}
+``\`
+1. The `provider` attribute is parsed into `Resource.ProviderConfigRef` (`{Name: "aws", Alias: "west"}`) during `decodeResourceBlock()` at `internal/configs/resource.go:123`.
+2. `Resource.ProviderConfigAddr()` (`resource.go:100-115`) returns `LocalProviderConfig{LocalName: "aws", Alias: "west"}`.
+3. `Module.ProviderForLocalConfig()` (`module.go:932-933`) delegates to `Module.ImpliedProviderForUnqualifiedType()` (`module.go:943-948`), which looks up the local name `"aws"` in the `required_providers` map. If found, returns the FQN from there (e.g. `registry.terraform.io/hashicorp/aws`). If not, falls back to `addrs.ImpliedProviderForUnqualifiedType()` (`addrs/provider.go:71-83`), which defaults to `registry.terraform.io/hashicorp/<name>` (or `terraform.io/builtin/terraform` for the special `"terraform"` type).
 
-2. **If no `provider` argument** (the common case):
-   - Extract the implied provider from the resource type via `r.Addr().ImpliedProvider()` (`internal/addrs/resource.go:96-103`) — this **takes the prefix before the first `_`** (e.g., `aws_instance` → `aws`)
-   - Look up that name in `required_providers`. If found, use that FQN (`module.go:944-945`)
-   - If not found, fall back to `addrs.ImpliedProviderForUnqualifiedType()` (`internal/addrs/provider.go:71-83`), which maps `"terraform"` → built-in provider, everything else → `registry.terraform.io/hashicorp/<name>`
+**Path B — No explicit `provider` argument (the common case):**
+``\`hcl
+resource "aws_instance
+...[truncated 3284 chars]
+```
 
-### Phase 2: Graph Building — Wire Resource Nodes to Provider Nodes
+#### Response (`with_budi`)
 
-During graph construction, `transformProviders()` (`transform_
-...[truncated 2151 chars]
+```text
+Here's the full trace of how Terraform selects a provider for a resource:
+
+## Provider Selection: Config to Provider
+
+### Step 1: Implied Provider from Resource Type
+`internal/addrs/resource.go:96` — `Resource.ImpliedProvider()` extracts the provider name by taking the resource type string up to the first `_`. For `aws_instance`, this yields `"aws"`.
+
+### Step 2: `ProviderConfigAddr()` on the Resource
+`internal/configs/resource.go:100` — When Terraform needs the provider config address for a resource:
+- **If `provider` argument is set** in the resource block (e.g., `provider = aws.west`): returns `LocalProviderConfig{Name: "aws", Alias: "west"}` from `ProviderConfigRef`
+- **If no `provider` argument**: falls back to `ImpliedProvider()` — returns `LocalProviderConfig{LocalName: "aws"}` (no alias)
+
+### Step 3: `ProvidedBy()` on the Graph Node
+`internal/terraform/node_resource_abstract.go:296` — The graph node's `ProvidedBy()` resolves the address with this priority:
+1. **Already resolved** (`ResolvedProvider` set) → return it exactly
+2. **Config exists** → call `Config.ProviderConfigAddr()` (Step 2), returning a `LocalProviderConfig`
+3. **State has a provider** → use the stored provider config from state (exact match, for destroy/refresh of resources whose config is gone)
+4. **Import target** has a provider ref → use that
+5. **Fallback** → `AbsProviderConfig` with the resource's FQN in its module
+
+### Step 4: Local Name → Fully Qualified Provider (FQN)
+`internal/configs/config.
+...[truncated 2274 chars]
 ```
 
 #### Judge rationale
 
 ```text
-Both responses trace the same fundamental flow (config parsing → FQN resolution → graph wiring) with specific file paths and line numbers. Response B edges ahead in several ways: (1) It covers the full transformer chain in Phase 2 — ProviderConfigTransformer, MissingProviderTransformer, ProviderTransformer, PruneProviderTransformer — and references the orchestrating `transformProviders()` function, giving a more complete picture of graph building. Response A only covers ProviderTransformer. (2) Response B's ProvidedBy priority list is more complete (5 items including import targets vs 4 in A). (3) Response B notes the practical detail that Inherited() only works for non-aliased configs and references the specific file `provider_config.go:369-384`. (4) Response B includes a helpful table of examples and a concrete HCL snippet showing required_providers override. Response A has a nice ASCII summary diagram and a clean three-phase organization (separating parsing from FQN resolution), which is a reasonable structural choice. Both are high quality, well-grounded answers; Response B is moderately more comprehensive and actionable.
+Both responses trace the same fundamental flow (resource type → implied provider → ProviderConfigAddr → ProvidedBy → FQN resolution → graph wiring) with specific file and line number references. Response A organizes well into two phases (config loading and graph building) and helpfully enumerates all four graph transformers (ProviderConfigTransformer, MissingProviderTransformer, ProviderTransformer, PruneProviderTransformer). However, Response A is truncated (~784 chars missing), which significantly hurts completeness and actionability. Response B is complete, covers additional details like proxy provider resolution, init-only stub creation, the error case, and includes references to `resolveProviderTypes()` and `ResolveAbsProviderAddr()` in config.go that add useful context. Both are similarly grounded with specific file:line references. Response B wins primarily on completeness and slightly better practical coverage of edge cases.
 ```
 
 </details>

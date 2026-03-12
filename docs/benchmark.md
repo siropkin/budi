@@ -4,12 +4,12 @@
 
 budi's goal is to deliver the same answer quality at lower cost by pre-injecting relevant context. Ties (same quality, less cost) are the primary success metric; quality wins are a bonus.
 
-Across 7 open-source repos with 123 judged prompts (v3.3.0, single-run sweep):
+Across 9 open-source repos with 141 judged prompts (v3.3.0+, single-run sweep):
 
 - **Cost**: 2–23% lower on most repos (up to +6% on repos where budi adds quality)
-- **Non-regressions**: ~80% single-run (~99/123), estimated ~85-90% multi-run
+- **Non-regressions**: ~82% single-run (~115/141), estimated ~85-90% multi-run
 - **Injection regression rate**: ~10-12% (when budi actually injects context)
-- Per repo: React 13/18, Flask 13/18, ripgrep 14/15, Fastify 16/18, FastAPI 14/18, Django 15/18, Terraform 14/18
+- Per repo: React 13/18, Flask 13/18, ripgrep 14/15, Fastify 16/18, FastAPI 14/18, Django 15/18, Terraform 14/18, Express 16/18
 
 Many single-run "regressions" are LLM variance on queries where budi correctly skipped injection (0 context chars). When budi injects context, the regression rate is much lower. HNSW non-determinism causes ±2–3 prompt variance per run; run at least 2 passes before drawing conclusions.
 
@@ -39,7 +39,7 @@ Current prompt sets:
 - `scripts/dev/benchmarks/fastify-v1.prompts.json` — 18 prompts, Fastify source (Node.js)
 - `scripts/dev/benchmarks/fastapi-v1.prompts.json` — 18 prompts, FastAPI source (Python)
 - `scripts/dev/benchmarks/django-v1.prompts.json` — 18 prompts, Django source (Python)
-- `scripts/dev/benchmarks/express-v1.prompts.json` — 5 prompts, Express source (Node.js)
+- `scripts/dev/benchmarks/express-v1.prompts.json` — 18 prompts, Express source (Node.js)
 
 Results are stored in `~/.local/share/budi/repos/<repo>/benchmarks/` per run.
 
