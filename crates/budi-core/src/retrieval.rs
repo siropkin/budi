@@ -1079,13 +1079,30 @@ pub fn build_query_response(
     // Broad test-coverage inventory queries ("what tests cover X and where do they
     // live") need Claude to explore the repo widely. Injecting 2-3 partial test file
     // fragments anchors Claude on those snippets instead of finding the complete test
-    // structure. Skip when the results are dominated by subject-file-seed (synthetic,
-    // not organically ranked) — i.e., the real retrieval didn't find strong matches.
+    // structure. Skip when (a) results are dominated by subject-file-seed (synthetic),
+    // or (b) none of the top test snippets mention the query's target symbol — the
+    // retrieval found wrong test files (e.g. app.router.js for "app.render").
     let test_coverage_skip = intent.kind == QueryIntentKind::TestLookup
         && is_test_coverage_inventory_query(query)
-        && scored
+        && (scored
             .first()
-            .is_some_and(|c| c.reasons.iter().any(|r| r == "test-subject-file-seed"));
+            .is_some_and(|c| c.reasons.iter().any(|r| r == "test-subject-file-seed"))
+            || {
+                // Use only distinctive tokens (>=4 chars) to avoid false matches
+                // on generic names like "app", "get", "set".
+                let distinctive: Vec<&str> = symbol_tokens
+                    .iter()
+                    .filter(|t| t.len() >= 4)
+                    .map(|t| t.as_str())
+                    .collect();
+                !distinctive.is_empty()
+                    && !scored.iter().take(5).any(|c| {
+                        runtime.chunk(c.id).is_some_and(|chunk| {
+                            let text_lower = chunk.text.to_ascii_lowercase();
+                            distinctive.iter().any(|t| text_lower.contains(t))
+                        })
+                    })
+            });
     // Low-confidence SymbolUsage skip: when the top candidate scored too low,
     // injecting marginal results anchors Claude on irrelevant code.
     // Two tiers:
@@ -4023,12 +4040,24 @@ fn extract_named_symbol_from_prose(query: &str, out: &mut Vec<String>, seen: &mu
                 && prev_lower != "that"
                 && prev_lower != "a"
                 && prev_lower != "an"
-                && prev_lower
+            {
+                if prev_lower
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && seen.insert(prev_lower.clone())
-            {
-                out.push(prev_lower);
+                    && seen.insert(prev_lower.clone())
+                {
+                    out.push(prev_lower);
+                } else if prev_lower.contains('.') {
+                    // Dotted identifier (e.g. "app.render") — extract each segment
+                    for seg in prev_lower.split('.') {
+                        if seg.len() >= 3
+                            && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            && seen.insert(seg.to_string())
+                        {
+                            out.push(seg.to_string());
+                        }
+                    }
+                }
             }
         }
     }
@@ -5066,6 +5095,23 @@ mod tests {
         let tokens = extract_query_symbol_tokens("Where is the function defined?");
         // "the" before "function" should be skipped
         assert!(!tokens.contains(&"the".to_string()));
+    }
+
+    #[test]
+    fn named_symbol_from_prose_dotted_method() {
+        let tokens = extract_query_symbol_tokens(
+            "What unit tests cover the app.render method and where do they live in the repo?",
+        );
+        assert!(
+            tokens.contains(&"render".to_string()),
+            "expected 'render' from 'the app.render method', got: {:?}",
+            tokens
+        );
+        assert!(
+            tokens.contains(&"app".to_string()),
+            "expected 'app' from 'the app.render method', got: {:?}",
+            tokens
+        );
     }
 
     #[test]
