@@ -823,6 +823,19 @@ pub fn build_query_response(
             }
         }
 
+        // FlowTrace — demote struct/type definition chunks.
+        // A FlowTrace query asks for a call chain ("trace from X to Y"), and
+        // struct/type definitions are data declarations, never execution steps.
+        // Terraform P10: `type ConfigureProviderRequest struct` scores 0.55 on
+        // "How does Terraform load provider configuration" — purely lexical+vector
+        // from the word "provider", but it's not part of any call chain.
+        // Only use text-based detection (not PascalCase hint) because in Go both
+        // types and methods are PascalCase — demoting ConfigureProvider() would hurt.
+        if intent.kind == QueryIntentKind::FlowTrace && is_struct_or_type_definition(&chunk.text) {
+            adjusted -= 0.30;
+            push_unique_reason(&mut reasons, "flow-trace-data-demote");
+        }
+
         // Pure-lexical demotion for FlowTrace, SymbolUsage, and RuntimeConfig.
         // Chunks matching only on common-word lexical hits (e.g. "call", "return",
         // "config", "env") with zero semantic/symbol/graph signal are usually noise.
@@ -5067,6 +5080,22 @@ mod tests {
             "Trace the call chain from dispatch_request to the view function",
         );
         assert!(tokens.contains(&"dispatch_request".to_string()));
+    }
+
+    // ── FlowTrace struct demotion ──────────────────────────────────────
+
+    #[test]
+    fn is_struct_or_type_definition_detects_go_type_struct() {
+        assert!(is_struct_or_type_definition(
+            "type ConfigureProviderRequest struct {\n\tConfig cty.Value\n}"
+        ));
+    }
+
+    #[test]
+    fn is_struct_or_type_definition_ignores_functions() {
+        assert!(!is_struct_or_type_definition(
+            "func (p *Provider) ConfigureProvider(req ConfigureProviderRequest) ConfigureProviderResponse {"
+        ));
     }
 
     // ── extract_named_symbol_from_prose ──────────────────────────────────
