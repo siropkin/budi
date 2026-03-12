@@ -3114,8 +3114,11 @@ Otherwise run `budi init` to restart the daemon.",
     ) {
         return Ok(());
     }
+    let log_hint = config::daemon_log_path(repo_root)
+        .map(|p| format!("\nCheck daemon log: {}", p.display()))
+        .unwrap_or_default();
     anyhow::bail!(
-        "Daemon failed to become healthy at {}",
+        "Daemon failed to become healthy at {}.{log_hint}",
         config.daemon_base_url()
     );
 }

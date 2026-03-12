@@ -196,7 +196,11 @@ pub fn find_repo_root(start: &Path) -> Result<PathBuf> {
             return Ok(current);
         }
         if !current.pop() {
-            anyhow::bail!("Unable to locate a git repository from {}", start.display());
+            anyhow::bail!(
+                "Not a git repository (or any parent up to /): {}\n\
+                 Run `git init` first, or use --repo-root to specify the repo path.",
+                start.display()
+            );
         }
     }
 }
