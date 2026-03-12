@@ -36,7 +36,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                 let card = &mut cards[existing_idx];
                 card.merged_start = new_start;
                 card.merged_end = new_end;
-                let anchor = extract_anchor_line(&snippet.text);
+                let anchor = extract_anchor_line(&snippet.text, &[]);
                 if anchor != "(empty)" {
                     card.extra_anchors.push(anchor);
                 }
@@ -144,7 +144,7 @@ pub(super) fn build_context(
 /// anchor lines are folded into the proof section (up to the 3-line limit).
 fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> String {
     let snippet = card_data.primary;
-    let anchor = extract_anchor_line(&snippet.text);
+    let anchor = extract_anchor_line(&snippet.text, query_tokens);
     let max_proof = 3;
     let mut proof_lines = extract_proof_lines(&snippet.text, max_proof, &anchor, query_tokens);
 
@@ -215,7 +215,31 @@ fn is_decorator_or_attribute(trimmed: &str) -> bool {
     false
 }
 
-fn extract_anchor_line(text: &str) -> String {
+fn extract_anchor_line(text: &str, query_tokens: &[String]) -> String {
+    // Pass 0: prefer a definition line that contains a query token (case-insensitive).
+    // When same-file merging combines multiple chunks, the first definition in the
+    // span may be a different function than the queried one. Matching query tokens
+    // ensures the anchor reflects what the user asked about.
+    if !query_tokens.is_empty() {
+        for raw_line in text.lines() {
+            let line = sanitize_evidence_line(raw_line);
+            if line.is_empty() || is_comment_only_line(line.as_str()) {
+                continue;
+            }
+            let trimmed = line.trim();
+            if is_decorator_or_attribute(trimmed) {
+                continue;
+            }
+            if is_definition_line(trimmed) {
+                let lower = trimmed.to_ascii_lowercase();
+                for token in query_tokens {
+                    if token.len() >= 4 && lower.contains(token.as_str()) {
+                        return line;
+                    }
+                }
+            }
+        }
+    }
     // Pass 1: prefer a function/class/method definition line as anchor.
     // Chunks often straddle function boundaries (stride=60, overlap=20), so the
     // first non-empty line may be a closing brace or unrelated code while the
@@ -1055,7 +1079,7 @@ mod tests {
     #[test]
     fn anchor_skips_python_decorator() {
         let text = "@setupmethod\ndef register_blueprint(self, blueprint):\n    pass";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert!(
             anchor.contains("def register_blueprint"),
             "expected function def, got: {anchor}"
@@ -1065,7 +1089,7 @@ mod tests {
     #[test]
     fn anchor_skips_decorator_with_args() {
         let text = "@app.route(\"/foo\")\ndef index():\n    return 'hello'";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert!(
             anchor.contains("def index"),
             "expected function def, got: {anchor}"
@@ -1075,7 +1099,7 @@ mod tests {
     #[test]
     fn anchor_skips_rust_attribute() {
         let text = "#[derive(Debug, Clone)]\npub struct Config {\n    name: String,\n}";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert!(
             anchor.contains("pub struct Config"),
             "expected struct def, got: {anchor}"
@@ -1139,28 +1163,28 @@ mod tests {
     #[test]
     fn anchor_falls_back_to_decorator_if_nothing_else() {
         let text = "@decorator_only";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert_eq!(anchor, "@decorator_only");
     }
 
     #[test]
     fn anchor_prefers_function_def_over_closing_brace() {
         let text = "  } else {\n    resetRenderTimer();\n  }\n}\n\nexport function performWorkOnRoot(\n  root: FiberRoot,\n): void {";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert_eq!(anchor, "export function performWorkOnRoot(");
     }
 
     #[test]
     fn anchor_prefers_def_over_bare_code() {
         let text = "return result\n\ndef process_request(self, request):\n    pass";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert_eq!(anchor, "def process_request(self, request):");
     }
 
     #[test]
     fn anchor_prefers_go_func_receiver() {
         let text = "}\n\nfunc (p *Provider) ConfigureProvider(req Request) Response {";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert_eq!(
             anchor,
             "func (p *Provider) ConfigureProvider(req Request) Response {"
@@ -1170,7 +1194,7 @@ mod tests {
     #[test]
     fn anchor_uses_first_line_when_no_definition_present() {
         let text = "  result := doSomething()\n  return result, nil";
-        let anchor = extract_anchor_line(text);
+        let anchor = extract_anchor_line(text, &[]);
         assert_eq!(anchor, "result := doSomething()");
     }
 
@@ -1188,5 +1212,32 @@ mod tests {
         assert!(!is_definition_line("} else {"));
         assert!(!is_definition_line("return result"));
         assert!(!is_definition_line("x := foo()"));
+    }
+
+    #[test]
+    fn anchor_prefers_query_matching_definition() {
+        // Simulates a merged span where peekDeferredLane comes before scheduleUpdateOnFiber.
+        // With query tokens, anchor should prefer the queried function.
+        let text = "\
+export function peekDeferredLane(): Lane {
+  return workInProgressDeferredLane;
+}
+
+export function scheduleUpdateOnFiber(root, fiber, lane) {
+  if (root === null) return;
+  markRootUpdated(root, lane);
+}";
+        let tokens = vec!["scheduleupdateonfiber".to_string()];
+        let anchor = extract_anchor_line(text, &tokens);
+        assert!(
+            anchor.contains("scheduleUpdateOnFiber"),
+            "expected scheduleUpdateOnFiber, got: {anchor}"
+        );
+        // Without query tokens, should return first definition (peekDeferredLane)
+        let anchor_no_query = extract_anchor_line(text, &[]);
+        assert!(
+            anchor_no_query.contains("peekDeferredLane"),
+            "without query, expected peekDeferredLane, got: {anchor_no_query}"
+        );
     }
 }
