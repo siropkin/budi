@@ -13,6 +13,7 @@ use budi_core::hooks::{
     AsyncSystemMessageOutput, PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput,
 };
 use budi_core::index;
+use budi_core::project_map;
 use budi_core::reason_codes::{
     HOOK_REASON_DAEMON_UNAVAILABLE, HOOK_REASON_OK, HOOK_REASON_QUERY_ERROR,
     HOOK_REASON_QUERY_HTTP_ERROR, HOOK_REASON_QUERY_TIMEOUT, HOOK_REASON_QUERY_TRANSPORT_ERROR,
@@ -148,6 +149,8 @@ enum HookCommands {
     SessionStart,
     #[command(hide = true)]
     SessionEnd,
+    #[command(hide = true)]
+    SubagentStart,
 }
 
 #[derive(Debug, Subcommand)]
@@ -364,6 +367,7 @@ fn main() -> Result<()> {
             HookCommands::PostToolUse => cmd_hook_post_tool_use(),
             HookCommands::SessionStart => cmd_hook_session_start(),
             HookCommands::SessionEnd => cmd_hook_session_end(),
+            HookCommands::SubagentStart => cmd_hook_subagent_start(),
         },
         Commands::Statusline { install } => {
             if install {
@@ -2402,6 +2406,14 @@ fn cmd_hook_post_tool_use() -> Result<()> {
 }
 
 fn cmd_hook_session_start() -> Result<()> {
+    // Read stdin to detect how the session started (startup/resume/clear/compact).
+    let mut input = String::new();
+    let _ = io::stdin().read_to_string(&mut input);
+    let source = serde_json::from_str::<Value>(&input)
+        .ok()
+        .and_then(|v| v.get("source")?.as_str().map(String::from))
+        .unwrap_or_default();
+
     let cwd = std::env::current_dir()?;
     let Ok(repo_root) = config::find_repo_root(&cwd) else {
         return Ok(());
@@ -2409,8 +2421,41 @@ fn cmd_hook_session_start() -> Result<()> {
     // Ensure daemon is running so HTTP hooks (UserPromptSubmit, PostToolUse) can reach it.
     let config = config::load_or_default(&repo_root)?;
     let _ = ensure_daemon_running(&repo_root, &config);
-    // Project map is already at .claude/budi-project-map.md (written during index build).
-    // No need to inject it on every session start — it was showing as terminal output.
+
+    // After compaction or /clear, budi's injected context is lost. Re-inject the
+    // project map so Claude immediately has the codebase overview.
+    if (source == "compact" || source == "clear")
+        && let Some(map) = project_map::read_project_map(&repo_root)
+    {
+        println!("[budi context]\n{}", map);
+    }
+    Ok(())
+}
+
+fn cmd_hook_subagent_start() -> Result<()> {
+    let mut input = String::new();
+    let _ = io::stdin().read_to_string(&mut input);
+    let cwd_str = serde_json::from_str::<Value>(&input)
+        .ok()
+        .and_then(|v| v.get("cwd")?.as_str().map(String::from));
+
+    let cwd = cwd_str
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let Ok(repo_root) = config::find_repo_root(&cwd) else {
+        return Ok(());
+    };
+
+    // Inject the project map so subagents have codebase awareness.
+    if let Some(map) = project_map::read_project_map(&repo_root) {
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SubagentStart",
+                "additionalContext": format!("[budi context]\n{}", map)
+            }
+        });
+        println!("{}", serde_json::to_string(&output)?);
+    }
     Ok(())
 }
 
@@ -2899,6 +2944,17 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
             "type": "http",
             "url": format!("{}/hook/tool-use", daemon_url),
             "timeout": 30
+          }
+        ]
+      }
+    ]);
+
+    settings["hooks"]["SubagentStart"] = json!([
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "budi hook subagent-start"
           }
         ]
       }

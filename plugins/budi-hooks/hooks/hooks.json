@@ -34,6 +34,16 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "budi hook subagent-start"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
