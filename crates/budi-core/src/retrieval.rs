@@ -626,6 +626,18 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "test-path-penalty");
         }
 
+        // SymbolUsage queries — penalise test-path chunks.
+        // Test files declare variables like `let scheduleCallback;` or import/reassign
+        // the symbol for mocking — these are not real call sites. Production callers
+        // score lower because they lack lexical match on the bare identifier, so
+        // unpenalised test declarations (0.46 fused → 0.31 after single-line-demote)
+        // easily outrank real callers at 0.22-0.26. −0.25 drops test declarations
+        // well below the sym-use floor (0.22), letting production call sites surface.
+        if intent.kind == QueryIntentKind::SymbolUsage && is_test_path(&chunk.path) {
+            adjusted -= 0.25;
+            push_unique_reason(&mut reasons, "test-path-penalty");
+        }
+
         // SymbolDefinition — demote stub/placeholder implementations.
         // Functions like `panic("not implemented")`, `unimplemented!()`, or
         // `return fmt.Errorf("unsupported ...")` are stubs — the real implementation
