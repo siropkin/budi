@@ -1,66 +1,68 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.2.0, 2026-03-11)
+## Current state (v3.4.0+1, 2026-03-12)
 
-- Branch: main, CI green (all checks pass), all 307 tests pass (282 budi-core + 21 budi-cli + 4 budi-daemon)
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (freshly copied from release build)
-- 0 clippy warnings
-- v3.2.0 released (41 commits since v3.1.0), GitHub release created
-- All 8 benchmark repos freshly re-indexed with BM25 identifier splitting
+- Branch: main, CI green (all workflows pass)
+- All 314 tests pass (289 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.4.0+1)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
+- v3.4.0 released: https://github.com/siropkin/budi/releases/tag/v3.4.0
 
-## What was done in this session (session 7, 2026-03-11)
+## What was done in session 14 (2026-03-12)
 
-### 1. Reranker full evaluation (alpha=0.5, Flask 18 prompts) — DONE
-- Score inflation: +0.15-0.25 across the board
-- Ranking changes on 5/18 prompts, but mixed: P8 is a regression (definition over callers in sym-use)
-- **Conclusion**: Fine-tuned model (AP 0.62) lacks discriminative power. Keep disabled.
+### 1. Post-compaction context re-injection — DONE
+- SessionStart hook now reads `source` field from stdin
+- On `compact` or `clear`, re-injects project map so Claude has codebase awareness
+- Previously budi's injected context was lost after compaction with no recovery
 
-### 2. Reranker base model experiments — DONE
-| Model | Params | Baseline AP | Fine-tuned AP | Change |
-|-------|--------|-------------|---------------|--------|
-| ms-marco-MiniLM-L-6-v2 | 22M | 0.5859 | **0.6219** | +0.036 |
-| UniXcoder | 125M | 0.4425 | 0.3184 | -0.124 |
-| CodeBERT | 125M | 0.3337 | 0.3799 | +0.046 |
-- **Conclusion**: ms-marco wins because pre-trained cross-encoder head > code-aware representations with 951 training pairs. Need much more data or a pre-trained code cross-encoder.
+### 2. SubagentStart hook — DONE
+- New SubagentStart command hook injects project map into spawned subagents
+- Uses `additionalContext` JSON response format
+- Explore agents, general-purpose agents, etc. now get budi's codebase context
+- Installed via `budi init` and plugin hooks.json
 
-### 3. HNSW non-determinism root cause — FOUND
-- fastembed uses `available_parallelism()` as ONNX `intra_threads`
-- InitOptions doesn't expose thread count. Fix requires forking fastembed.
+### 3. Research sweep — DONE
+- Claude Code now has 17 hook events (was 7)
+- SubagentStart can inject additionalContext — key new capability
+- Augment free tier ended Feb 2026 (competitive A/B needs paid plan)
+- Cursor uses Turbopuffer + Merkle trees (cloud-side, not comparable)
+- PreCompact hook is side-effect-only (no context injection possible)
 
-### 4. Embedding model research — DONE
-- fastembed supports nomic-embed-text-v1/v1.5 but NOT nomic-embed-code (7B, too large)
-- Switching to nomic-text-v1.5 (768 dim) would double storage and require full re-index
-- Not worth it: current AllMiniLML6V2 + 5-channel fusion achieves 91%
-
-### 5. v3.2.0 release — DONE
-- Version bump, changelog, GitHub release, CI green
-
-### 6. Stale test repo cleanup — DONE (45→15 entries)
-
-## Key insight from this session
-
-**The heuristic pipeline is the right approach.** The reranker and embedding research both show that the hand-tuned 5-channel fusion + intent-aware score floors + skip patterns is hard to beat with ML approaches at budi's data scale (951 pairs). The remaining regressions (9%) are structural (thin wrappers, HNSW variance, LLM variance) — not solvable by better scoring.
+## Updated hook configuration (5 events)
+- SessionStart: command hook, ensures daemon + re-injects project map on compact/clear
+- UserPromptSubmit: HTTP hook → daemon /hook/prompt-submit
+- PostToolUse: HTTP hook → daemon /hook/tool-use (Write|Edit|Read|Glob)
+- SubagentStart: command hook, injects project map into subagents
+- Stop: command hook, session summary
 
 ## Priority queue for next session
 
-### 1. More reranker training data — MEDIUM
-Generate synthetic (query, code, relevance) training data using Claude to label code chunks. Target 5-10K pairs to overcome the data scarcity that makes the reranker useless. This is the only path to a useful reranker.
+### 1. Verkada-Web daily-driver usage — HIGH
+Use budi for actual development work over multiple sessions. Collect real usage stats.
+This is the highest-value activity for finding real-world issues.
 
-### 2. HNSW cold-cache warmup — MEDIUM
-Mitigation: run a dummy warmup query on daemon startup to prime HNSW.
+### 2. Competitive A/B: budi vs Augment Context Engine — MEDIUM
+Augment free tier ended Feb 2026. Requires paid plan (Indie: 40K credits/mo).
+Setup: `npm install -g @augmentcode/auggie && auggie login` (user auth required).
+Then `claude mcp add-json auggie`.
+Run side-by-side on 2-3 benchmark repos. Key comparison: quality, cost, latency.
 
-### 3. Train retrieval weights from benchmark data (#33) — MEDIUM
-Build tooling to capture per-candidate channel scores during retrieval. Grid search over 30 weight parameters (5 channels × 6 intents).
+### 3. Next retrieval improvement — LOW
+Only if real-world usage surfaces specific issues. Retrieval improvements have plateaued.
+Remaining known issues:
+- SQLAlchemy sym-def broken for common class names (property-over-class)
+- Neovim daemon OOM on large C repos
+- HNSW non-determinism (fastembed thread count, requires forking)
 
-### 4. Full 8-repo revalidation — LOW
-Run full benchmarks to update baseline numbers.
+### 4. Impact analysis / git-blame indexing — LOW
+Would help "what breaks if I change X?" queries. From GitNexus research.
 
-### 5. Verkada-Web daily-driver usage — LOW
-Use budi for actual development work, collect real stats.
+### 5. Version bump and release — LOW
+Only when enough changes accumulate. Current: 1 commit since v3.4.0.
 
-## Other items on the backlog
-- Benchmark against Augment Context Engine MCP
-- Impact analysis / git-blame indexing (#34)
+## Other backlog items
 - Pre-trained code cross-encoder (if one becomes available on HuggingFace)
+- Parallel chunking (rayon) for --hard rebuilds
+- Signal index incremental updates (diminishing returns)
+- nomic-embed-code evaluation (7B, too large for local ONNX currently)
