@@ -998,32 +998,26 @@ fn cmd_search(
         return Ok(());
     }
 
-    println!("query: {}", query);
-    println!("retrieval_mode={}", mode.as_rpc_mode());
-    println!(
-        "total candidates={} returned={}",
-        response.total_candidates,
-        limited_snippets.len()
-    );
     if !response.diagnostics.intent.is_empty() {
-        println!(
-            "intent={} confidence={:.3} top_score={:.3} margin={:.3}",
-            response.diagnostics.intent,
-            response.diagnostics.confidence,
-            response.diagnostics.top_score,
-            response.diagnostics.margin
-        );
+        println!("intent: {}", response.diagnostics.intent);
     }
-    for item in &limited_snippets {
+    println!(
+        "{} results (from {} candidates)\n",
+        limited_snippets.len(),
+        response.total_candidates,
+    );
+    for (i, item) in limited_snippets.iter().enumerate() {
         println!(
-            "- {}:{}-{} score={:.4} reasons={} channels={}",
+            "  {}. {}:{}-{}  (score {:.3})",
+            i + 1,
             item.path,
             item.start_line,
             item.end_line,
             item.score,
-            format_snippet_reasons(item),
-            format_snippet_channels(item)
         );
+        if !item.reasons.is_empty() {
+            println!("     {}", item.reasons.join(", "));
+        }
     }
     Ok(())
 }
