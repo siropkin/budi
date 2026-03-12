@@ -216,19 +216,37 @@ fn is_decorator_or_attribute(trimmed: &str) -> bool {
 }
 
 fn extract_anchor_line(text: &str) -> String {
+    // Pass 1: prefer a function/class/method definition line as anchor.
+    // Chunks often straddle function boundaries (stride=60, overlap=20), so the
+    // first non-empty line may be a closing brace or unrelated code while the
+    // actual definition sits later. Scanning for definition keywords gives Claude
+    // the most informative anchor.
     for raw_line in text.lines() {
         let line = sanitize_evidence_line(raw_line);
         if line.is_empty() || is_comment_only_line(line.as_str()) {
             continue;
         }
-        // Skip decorator/attribute lines — prefer the function/class definition below
+        let trimmed = line.trim();
+        if is_decorator_or_attribute(trimmed) {
+            continue;
+        }
+        if is_definition_line(trimmed) {
+            return line;
+        }
+    }
+    // Pass 2: fall back to first non-empty non-comment non-decorator line.
+    for raw_line in text.lines() {
+        let line = sanitize_evidence_line(raw_line);
+        if line.is_empty() || is_comment_only_line(line.as_str()) {
+            continue;
+        }
         let trimmed = line.trim();
         if is_decorator_or_attribute(trimmed) {
             continue;
         }
         return line;
     }
-    // Fallback: return the first non-empty non-comment line even if it's a decorator
+    // Pass 3: anything non-empty.
     for raw_line in text.lines() {
         let line = sanitize_evidence_line(raw_line);
         if line.is_empty() || is_comment_only_line(line.as_str()) {
@@ -237,6 +255,49 @@ fn extract_anchor_line(text: &str) -> String {
         return line;
     }
     "(empty)".to_string()
+}
+
+/// Returns true if the line looks like a function, method, or class definition.
+/// Used by anchor extraction to prefer informative definition lines over
+/// arbitrary code (e.g. `} else {`, `return`, bare braces).
+fn is_definition_line(trimmed: &str) -> bool {
+    // Strip common visibility/export modifiers
+    let s = trimmed
+        .strip_prefix("export ")
+        .or_else(|| trimmed.strip_prefix("pub(crate) "))
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .or_else(|| trimmed.strip_prefix("pub "))
+        .or_else(|| trimmed.strip_prefix("async "))
+        .unwrap_or(trimmed);
+    let s = s
+        .strip_prefix("export ")
+        .or_else(|| s.strip_prefix("default "))
+        .or_else(|| s.strip_prefix("async "))
+        .or_else(|| s.strip_prefix("static "))
+        .or_else(|| s.strip_prefix("abstract "))
+        .or_else(|| s.strip_prefix("override "))
+        .or_else(|| s.strip_prefix("virtual "))
+        .unwrap_or(s);
+    // Function/method keywords across languages
+    s.starts_with("function ")
+        || s.starts_with("fn ")
+        || s.starts_with("func ")
+        || s.starts_with("def ")
+        // Class/type definitions
+        || s.starts_with("class ")
+        || s.starts_with("struct ")
+        || s.starts_with("type ")
+        || s.starts_with("interface ")
+        || s.starts_with("enum ")
+        || s.starts_with("trait ")
+        || s.starts_with("impl ")
+        // Go method receiver: func (r *Receiver) Method(
+        || (s.starts_with("func (") && s.contains(')'))
+        // Visibility-prefixed methods in Java/C#/Kotlin
+        || s.starts_with("public ")
+        || s.starts_with("private ")
+        || s.starts_with("protected ")
+        || s.starts_with("internal ")
 }
 
 fn extract_proof_lines(
@@ -1080,5 +1141,52 @@ mod tests {
         let text = "@decorator_only";
         let anchor = extract_anchor_line(text);
         assert_eq!(anchor, "@decorator_only");
+    }
+
+    #[test]
+    fn anchor_prefers_function_def_over_closing_brace() {
+        let text = "  } else {\n    resetRenderTimer();\n  }\n}\n\nexport function performWorkOnRoot(\n  root: FiberRoot,\n): void {";
+        let anchor = extract_anchor_line(text);
+        assert_eq!(anchor, "export function performWorkOnRoot(");
+    }
+
+    #[test]
+    fn anchor_prefers_def_over_bare_code() {
+        let text = "return result\n\ndef process_request(self, request):\n    pass";
+        let anchor = extract_anchor_line(text);
+        assert_eq!(anchor, "def process_request(self, request):");
+    }
+
+    #[test]
+    fn anchor_prefers_go_func_receiver() {
+        let text = "}\n\nfunc (p *Provider) ConfigureProvider(req Request) Response {";
+        let anchor = extract_anchor_line(text);
+        assert_eq!(
+            anchor,
+            "func (p *Provider) ConfigureProvider(req Request) Response {"
+        );
+    }
+
+    #[test]
+    fn anchor_uses_first_line_when_no_definition_present() {
+        let text = "  result := doSomething()\n  return result, nil";
+        let anchor = extract_anchor_line(text);
+        assert_eq!(anchor, "result := doSomething()");
+    }
+
+    #[test]
+    fn is_definition_line_detects_common_patterns() {
+        assert!(is_definition_line("function foo() {"));
+        assert!(is_definition_line("fn bar() -> Result {"));
+        assert!(is_definition_line("func main() {"));
+        assert!(is_definition_line("def process(self):"));
+        assert!(is_definition_line("class MyClass:"));
+        assert!(is_definition_line("func (r *Receiver) Method() {"));
+        assert!(is_definition_line("public void run() {"));
+        assert!(is_definition_line("private static int compute() {"));
+        // Not definitions
+        assert!(!is_definition_line("} else {"));
+        assert!(!is_definition_line("return result"));
+        assert!(!is_definition_line("x := foo()"));
     }
 }
