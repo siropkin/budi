@@ -333,6 +333,154 @@ pub fn read_repo_root_marker(data_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Detect languages/frameworks present in a repo and generate a `.budiignore`
+/// template with commented-out suggestions for common exclusion patterns.
+pub fn generate_budiignore_template(repo_root: &Path) -> String {
+    let mut sections: Vec<String> = Vec::new();
+
+    sections.push(
+        "# budi index exclusions (gitignore-style)\n\
+         # Uncomment patterns below to exclude noisy paths from indexing.\n\
+         # Prefix with ! to unignore an included path."
+            .to_string(),
+    );
+
+    // Detect languages/frameworks by presence of marker files
+    let has = |name: &str| repo_root.join(name).exists();
+    let has_dir = |name: &str| repo_root.join(name).is_dir();
+
+    // -- JavaScript / TypeScript --
+    if has("package.json") || has("tsconfig.json") {
+        let mut lines = vec!["", "# JavaScript / TypeScript"];
+        if has_dir("node_modules") {
+            lines.push("# node_modules/");
+        }
+        lines.push("# dist/");
+        lines.push("# build/");
+        lines.push("# coverage/");
+        lines.push("# __mocks__/");
+        lines.push("# *.min.js");
+        lines.push("# *.bundle.js");
+        if has("next.config.js") || has("next.config.mjs") || has("next.config.ts") {
+            lines.push("# .next/");
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    // -- Python --
+    if has("setup.py")
+        || has("setup.cfg")
+        || has("pyproject.toml")
+        || has("requirements.txt")
+        || has("Pipfile")
+    {
+        sections.push(
+            "\n# Python\n\
+             # __pycache__/\n\
+             # *.pyc\n\
+             # .venv/\n\
+             # venv/\n\
+             # *.egg-info/\n\
+             # .tox/\n\
+             # .mypy_cache/"
+                .to_string(),
+        );
+    }
+
+    // -- Rust --
+    if has("Cargo.toml") {
+        sections.push(
+            "\n# Rust\n\
+             # target/"
+                .to_string(),
+        );
+    }
+
+    // -- Go --
+    if has("go.mod") {
+        sections.push(
+            "\n# Go\n\
+             # vendor/"
+                .to_string(),
+        );
+    }
+
+    // -- Java / Kotlin / Scala --
+    if has("pom.xml") || has("build.gradle") || has("build.gradle.kts") || has("build.sbt") {
+        sections.push(
+            "\n# Java / JVM\n\
+             # build/\n\
+             # target/\n\
+             # .gradle/"
+                .to_string(),
+        );
+    }
+
+    // -- Ruby --
+    if has("Gemfile") {
+        sections.push(
+            "\n# Ruby\n\
+             # vendor/bundle/"
+                .to_string(),
+        );
+    }
+
+    // -- PHP --
+    if has("composer.json") {
+        sections.push(
+            "\n# PHP\n\
+             # vendor/"
+                .to_string(),
+        );
+    }
+
+    // -- C# / .NET --
+    let has_sln = fs::read_dir(repo_root).ok().is_some_and(|entries| {
+        entries
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "sln"))
+    });
+    if has_dir("obj") || has_sln {
+        sections.push(
+            "\n# C# / .NET\n\
+             # bin/\n\
+             # obj/"
+                .to_string(),
+        );
+    }
+
+    // -- Large repo hint --
+    // Count rough file count via a quick git ls-files (if available)
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["ls-files", "--cached", "-z"])
+        .current_dir(repo_root)
+        .output()
+    {
+        let count = if output.status.success() {
+            output
+                .stdout
+                .split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .count()
+        } else {
+            0
+        };
+        if count > 5000 {
+            sections.push(format!(
+                "\n# Large repo ({count} files tracked). Consider excluding test/doc directories:\n\
+                 # tests/\n\
+                 # test/\n\
+                 # docs/\n\
+                 # examples/"
+            ));
+        }
+    }
+
+    let mut out = sections.join("\n");
+    out.push('\n');
+    out
+}
+
 pub fn fastembed_cache_dir() -> Result<PathBuf> {
     Ok(budi_home_dir()?.join(BUDI_FASTEMBED_CACHE_DIR_NAME))
 }
@@ -370,6 +518,14 @@ pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
             "# budi global index exclusions (applies to every repo)\n# Prefix with ! to unignore an included path\n",
         )
         .with_context(|| format!("Failed writing {}", global_ignore_file.display()))?;
+    }
+
+    // Generate .budiignore with language-aware suggestions if it doesn't exist
+    let repo_ignore_file = ignore_path(repo_root)?;
+    if !repo_ignore_file.exists() {
+        let template = generate_budiignore_template(repo_root);
+        fs::write(&repo_ignore_file, &template)
+            .with_context(|| format!("Failed writing {}", repo_ignore_file.display()))?;
     }
 
     Ok(())
@@ -493,5 +649,79 @@ mod tests {
         assert!(paths[0].ends_with(BUDI_GLOBAL_IGNORE_FILE_NAME));
         assert!(paths[1].ends_with(BUDI_LOCAL_IGNORE_FILE_NAME));
         assert_eq!(paths[2], repo_root.join(BUDI_IGNORE_FILE_NAME));
+    }
+
+    #[test]
+    fn budiignore_template_empty_dir() {
+        let tmp = std::env::temp_dir().join("budi-ignore-template-empty");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let template = generate_budiignore_template(&tmp);
+        assert!(template.contains("budi index exclusions"));
+        // No language sections for empty dir
+        assert!(!template.contains("JavaScript"));
+        assert!(!template.contains("Python"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn budiignore_template_detects_node() {
+        let tmp = std::env::temp_dir().join("budi-ignore-template-node");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("package.json"), "{}").unwrap();
+        let template = generate_budiignore_template(&tmp);
+        assert!(template.contains("JavaScript / TypeScript"));
+        assert!(template.contains("# dist/"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn budiignore_template_detects_python() {
+        let tmp = std::env::temp_dir().join("budi-ignore-template-python");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("pyproject.toml"), "").unwrap();
+        let template = generate_budiignore_template(&tmp);
+        assert!(template.contains("Python"));
+        assert!(template.contains("# __pycache__/"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn budiignore_template_detects_rust() {
+        let tmp = std::env::temp_dir().join("budi-ignore-template-rust");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("Cargo.toml"), "").unwrap();
+        let template = generate_budiignore_template(&tmp);
+        assert!(template.contains("Rust"));
+        assert!(template.contains("# target/"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn budiignore_template_detects_go() {
+        let tmp = std::env::temp_dir().join("budi-ignore-template-go");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("go.mod"), "").unwrap();
+        let template = generate_budiignore_template(&tmp);
+        assert!(template.contains("Go"));
+        assert!(template.contains("# vendor/"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn budiignore_template_multi_language() {
+        let tmp = std::env::temp_dir().join("budi-ignore-template-multi");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("package.json"), "{}").unwrap();
+        std::fs::write(tmp.join("pyproject.toml"), "").unwrap();
+        let template = generate_budiignore_template(&tmp);
+        assert!(template.contains("JavaScript / TypeScript"));
+        assert!(template.contains("Python"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -389,11 +389,15 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, auto_index: bool) -> Re
 
     println!("Initialized budi in {}", repo_root.display());
     println!(
-        "  Hooks:  {}",
+        "  Hooks:   {}",
         repo_root.join(CLAUDE_LOCAL_SETTINGS).display()
     );
     println!(
-        "  Data:   {}",
+        "  Ignore:  {}",
+        repo_root.join(config::BUDI_IGNORE_FILE_NAME).display()
+    );
+    println!(
+        "  Data:    {}",
         config::repo_paths(&repo_root)?.data_dir.display()
     );
 
@@ -410,10 +414,14 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, auto_index: bool) -> Re
     println!();
     if !auto_index {
         println!("Next steps:");
-        println!("  1. budi index --hard    Build the code index");
-        println!("  2. Restart Claude Code   So hook settings take effect");
+        println!("  1. Edit .budiignore      Uncomment patterns to exclude noisy paths");
+        println!("  2. budi index --hard     Build the code index");
+        println!("  3. Restart Claude Code    So hook settings take effect");
     } else {
         println!("Restart Claude Code so hook settings take effect.");
+        println!(
+            "Edit .budiignore to exclude noisy paths, then re-index with `budi index --hard`."
+        );
     }
     println!();
     println!("Budi will automatically inject relevant code context before each prompt.");
