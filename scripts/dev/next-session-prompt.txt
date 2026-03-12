@@ -1,67 +1,63 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.5.0, 2026-03-12)
+## Current state (v3.6.0, 2026-03-12)
 
 - Branch: main, CI green (all workflows pass)
-- All 314 tests pass (289 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.5.0)
+- All 315 tests pass (290 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.6.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
-- v3.5.0 released: https://github.com/siropkin/budi/releases/tag/v3.5.0
+- v3.6.0 released: https://github.com/siropkin/budi/releases/tag/v3.6.0
 
-## What was done in session 16 (2026-03-12)
+## What was done in session 17 (2026-03-12)
 
-### 1. Benchmark revalidation with deterministic embeddings — DONE (major)
-- React: 16/18 (89%) stable across 2 runs (was 72% in session 9)
-- Flask: 15/18 (83%, best ever) after examples-path fix
-- Score stability excellent: most top scores identical between runs (±0.005)
-- Single-run benchmarks are now reliable — HNSW fix validated
+### 1. Full 8-repo benchmark sweep — DONE (major)
+All repos freshly run with deterministic embeddings:
+- Terraform: 13/18 (72%), -17%. P5 known, P9/P10/P13/P15 injected mild.
+- Fastify: 14/18 (78%), -21%. P14 known, P3/P17 LLM var.
+- FastAPI: 16/18 (89%, improved from 78%), -21%. P6 mild FlowTrace.
+- Express: 13/18 (72%), -26%. P12 FIXED (see below). 4 LLM var.
+- Ripgrep: 15/16 (94%, best ever), -8%. P13 LLM var.
+- Total: ~115/142 (~81%), ~-18% cost savings.
+- Key insight: LLM judge variance dominates. When budi injects, regression rate ~12-15%.
 
-### 2. Examples-path penalty broadened — DONE
-- Extended from Architecture-only to all intents except TestLookup
-- Flask P10 (config loading) fixed: tutorial db.py init_app filtered out
-- Flask improved from 72% to 83% (best ever)
+### 2. Express P12 TestLookup fix — DONE (v3.6.0)
+- Wrong test file injection: app.router.js retrieved for "app.render" query (Q 9→3)
+- Fixed by broadening test_coverage_skip to check distinctive symbol tokens
+- Also handle dotted identifiers in prose patterns ("app.render" → "app" + "render")
+- All 8 repos' TestLookup queries verified — no regressions
 
-### 3. ModernBERT-Embed-Large evaluation — DONE (rejected)
-- fastembed-rs already supports `lightonai/modernbert-embed-large` (1024d)
-- Compared vs AllMiniLML6V2 (384d) on 5 Flask queries × 6 chunks
-- ModernBERT wins 3/5 on ranking quality but has much worse discrimination
-- Scores cluster 0.30-0.65 (vs AllMiniLM 0.0-0.61)
-- Would require recalibrating all 50+ thresholds
-- Verdict: Keep AllMiniLM. 5-channel fusion + heuristics > raw embedding quality
+### 3. Django P9/P14 investigation — DONE (no action)
+- Both are "correct but partial" injections causing mild Q-2 regressions
+- P9: 1 real caller found (26 lines, above thin-caller threshold)
+- P14: thin wrapper + 47-line implementation
+- Analyzed single-caller pattern across all 8 repos: 6 total, only 2 regressions
+- Blanket "single-caller skip" too aggressive — would hurt 4 working cases
 
-### 4. v3.5.0 release — DONE
-- HNSW determinism fix, post-compaction context re-injection, SubagentStart hook
-- Examples-path penalty broadened, test repo pollution fix, doctor UX
-- GitHub release with binaries
-
-### 5. Research sweep — DONE
-- Claude Code Opus 4.6: 1M token context beta (budi value increases with larger contexts)
-- Hooks fixes: skill double-fire, plugin dedup, worktree config sharing
-- Qwen3-Embedding-8B tops MTEB (too large for local), pplx-embed-context (too large)
-- No new competitors
-
-### 6. Django baseline — DONE
-- 13/18 (72%), -10% cost. Same as session 9
-- P9 (get_wsgi_application) and P14 (resolve) are persistent injected regressions
+### 4. Research sweep — DONE
+- CodeRankEmbed (nomic-ai): 137M code-specialized, Apache 2.0, same size class as AllMiniLM
+- fastembed-rs 5.10.0: UserDefinedEmbeddingModel could load custom ONNX models
+- cocoindex-code: new AST-based MCP competitor, no embeddings
+- Claude Code: 18+ hook events. PreCompact, WorktreeCreate, SubagentStop new.
+- No new competitors threatening budi's position
 
 ## Priority queue for next session
 
-### 1. Full benchmark sweep with deterministic embeddings — MEDIUM
-Run Terraform, Fastify, FastAPI, Ripgrep, Express to get updated numbers.
-React + Flask already validated. Django baseline established.
+### 1. CodeRankEmbed evaluation — MEDIUM
+137M code-specialized embedding model (nomic-ai, Apache 2.0). Same parameter class as AllMiniLM.
+Would use fastembed 5.10.0's UserDefinedEmbeddingModel to load custom ONNX export.
+Test discrimination spread on React/Flask benchmarks vs AllMiniLM.
 
-### 2. Django P9/P14 investigation — MEDIUM
-Both are persistent Q-2 injected regressions across sessions. P9 injects only 1 caller
-(anchoring away from broad search). P14 injects thin wrapper + implementation (partial view).
-Could benefit from a "single-caller skip" heuristic.
-
-### 3. Verkada-Web daily-driver usage — MEDIUM
+### 2. Verkada-Web daily-driver usage — MEDIUM
 Use budi for actual development work. Collect real usage stats.
 
-### 4. cAST sibling-merging chunking — LOW
+### 3. cAST sibling-merging chunking — LOW
 arXiv 2506.15655: +4.3 Recall@5 on RepoEval by merging small AST siblings.
 Could improve chunking quality upstream of everything. Complex to implement.
+
+### 4. Context condensation — LOW
+Shift from raw chunk injection to proof-backed compact packs.
+Most valuable for repos where Claude's training knowledge is limited.
 
 ### 5. Competitive A/B: budi vs Augment — LOW
 Requires paid plan. Setup: npm install + auggie login + claude mcp add-json.
@@ -70,4 +66,4 @@ Requires paid plan. Setup: npm install + auggie login + claude mcp add-json.
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- EmbedAnything crate as alternative to fastembed (Rust-native, more models)
+- Prompt-context management (CLAUDE.md compression, deduplication)
