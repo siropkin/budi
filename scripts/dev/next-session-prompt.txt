@@ -1,61 +1,73 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.4.0+4, 2026-03-12)
+## Current state (v3.5.0, 2026-03-12)
 
 - Branch: main, CI green (all workflows pass)
 - All 314 tests pass (289 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.4.0+4)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.5.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
-- v3.4.0 released: https://github.com/siropkin/budi/releases/tag/v3.4.0
+- v3.5.0 released: https://github.com/siropkin/budi/releases/tag/v3.5.0
 
-## What was done in session 15 (2026-03-12)
+## What was done in session 16 (2026-03-12)
 
-### 1. HNSW non-determinism fix — DONE (major)
-- Configured ORT global thread pool with `intra_threads=1` before fastembed session creation
-- fastembed hardcoded `available_parallelism()` → non-deterministic float reduction
-- `init_ort_deterministic()` called in daemon startup before warmup_embedder
-- Flask sym-def score variance: ±0.40 → ±0.005
-- Cold-cache indexing ~2-3x slower (rare, worth the determinism tradeoff)
+### 1. Benchmark revalidation with deterministic embeddings — DONE (major)
+- React: 16/18 (89%) stable across 2 runs (was 72% in session 9)
+- Flask: 15/18 (83%, best ever) after examples-path fix
+- Score stability excellent: most top scores identical between runs (±0.005)
+- Single-run benchmarks are now reliable — HNSW fix validated
 
-### 2. Test repo pollution fix — DONE
-- Added `cleanup_test_repo()` helper that removes both temp dir and budi data dir entries
-- Previously each `cargo test` created ~10 stale entries (80+ accumulated)
+### 2. Examples-path penalty broadened — DONE
+- Extended from Architecture-only to all intents except TestLookup
+- Flask P10 (config loading) fixed: tutorial db.py init_app filtered out
+- Flask improved from 72% to 83% (best ever)
 
-### 3. Doctor UX + HTTP hooks detection — DONE
-- Optional ignore files only shown when present (no misleading `[!!]`)
-- `detect_hooks()` now recognizes HTTP hook format
+### 3. ModernBERT-Embed-Large evaluation — DONE (rejected)
+- fastembed-rs already supports `lightonai/modernbert-embed-large` (1024d)
+- Compared vs AllMiniLML6V2 (384d) on 5 Flask queries × 6 chunks
+- ModernBERT wins 3/5 on ranking quality but has much worse discrimination
+- Scores cluster 0.30-0.65 (vs AllMiniLM 0.0-0.61)
+- Would require recalibrating all 50+ thresholds
+- Verdict: Keep AllMiniLM. 5-channel fusion + heuristics > raw embedding quality
 
-### 4. Research sweep — DONE
-Key findings:
-- Claude Code: 2 new hook handler types (`prompt`, `agent`). Bug fixes for double-fire and no-op injection.
-- **ModernBERT-Embed** (Nomic): ONNX, 768d with Matryoshka to 256d. Worth benchmarking as AllMiniLM upgrade.
-- **cAST paper** (arXiv 2506.15655): AST sibling merging improves chunking quality. Validates budi's approach.
-- **HNSW fix**: ort exposes `with_intra_threads(1)` via GlobalThreadPoolOptions. Implemented above.
-- Competitors: No threats. Augment (cloud MCP), SWE-grep (Windsurf-only), context-mode (complementary).
+### 4. v3.5.0 release — DONE
+- HNSW determinism fix, post-compaction context re-injection, SubagentStart hook
+- Examples-path penalty broadened, test repo pollution fix, doctor UX
+- GitHub release with binaries
+
+### 5. Research sweep — DONE
+- Claude Code Opus 4.6: 1M token context beta (budi value increases with larger contexts)
+- Hooks fixes: skill double-fire, plugin dedup, worktree config sharing
+- Qwen3-Embedding-8B tops MTEB (too large for local), pplx-embed-context (too large)
+- No new competitors
+
+### 6. Django baseline — DONE
+- 13/18 (72%), -10% cost. Same as session 9
+- P9 (get_wsgi_application) and P14 (resolve) are persistent injected regressions
 
 ## Priority queue for next session
 
-### 1. Benchmark revalidation with deterministic embeddings — HIGH
-HNSW fix means single-run benchmarks are now reliable. Re-run React + Flask focused
-to see if results stabilize. If regression rate drops, update benchmark numbers.
+### 1. Full benchmark sweep with deterministic embeddings — MEDIUM
+Run Terraform, Fastify, FastAPI, Ripgrep, Express to get updated numbers.
+React + Flask already validated. Django baseline established.
 
-### 2. ModernBERT-Embed evaluation — MEDIUM
-ONNX available, 768d Matryoshka to 256d, Apache-2.0. Similar size to AllMiniLM.
-Would require re-indexing all repos but could improve retrieval quality.
-Start with Flask focused benchmark (smallest repo).
+### 2. Django P9/P14 investigation — MEDIUM
+Both are persistent Q-2 injected regressions across sessions. P9 injects only 1 caller
+(anchoring away from broad search). P14 injects thin wrapper + implementation (partial view).
+Could benefit from a "single-caller skip" heuristic.
 
 ### 3. Verkada-Web daily-driver usage — MEDIUM
 Use budi for actual development work. Collect real usage stats.
 
-### 4. Version bump and release — LOW
-4 commits since v3.4.0. HNSW fix is significant. Consider v3.5.0.
+### 4. cAST sibling-merging chunking — LOW
+arXiv 2506.15655: +4.3 Recall@5 on RepoEval by merging small AST siblings.
+Could improve chunking quality upstream of everything. Complex to implement.
 
 ### 5. Competitive A/B: budi vs Augment — LOW
 Requires paid plan. Setup: npm install + auggie login + claude mcp add-json.
 
 ## Other backlog items
-- cAST sibling-merging chunking heuristic (arXiv 2506.15655)
 - Impact analysis / git-blame indexing
-- Pre-trained code cross-encoder
+- Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
+- EmbedAnything crate as alternative to fastembed (Rust-native, more models)
