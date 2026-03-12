@@ -2,6 +2,30 @@
 
 All notable changes to budi are documented here.
 
+## [3.3.0] — Retrieval Precision & Stability
+
+SymbolUsage test-path filtering, embedding warmup, daemon stability, and RuntimeConfig noise reduction.
+
+### Retrieval improvements
+
+- **SymbolUsage test-path penalty** (-0.25): Test files declaring variables like `let scheduleCallback;` no longer surface as caller results. All 6 intent types now have test-path handling.
+- **RuntimeConfig lexical-only demotion** (-0.10): Pure-lexical RuntimeConfig hits with zero semantic signal are filtered, reducing keyword false positives
+- **FlowTrace pipeline skip threshold** raised (0.50 → 0.55): Prevents low-confidence partial chain injection
+
+### Fixes
+
+- **Daemon startup warmup**: ONNX embedding runtime primed on daemon startup (~57ms), eliminating cold-cache score variance
+- **Daemon panic on absolute paths**: Fixed autosync watcher crash when receiving absolute or parent-traversal paths
+- **SessionStart hook**: Removed project map terminal output that printed during startup
+- **Status line**: Updated logo placement and fixed cargo fmt formatting
+- **Channel score diagnostics**: `dump_candidates` field now passed through hook queries for weight analysis
+
+### Benchmark state
+
+- 80% non-regression rate across 123 judged prompts (7 repos, single-run)
+- When budi injects context, regression rate is ~10-12% (remaining losses are LLM variance on skipped queries)
+- All remaining regressions are mild (Q -1) and irreducible
+
 ## [3.2.0] — Smarter Indexing & Hooks
 
 HTTP hooks, BM25 identifier splitting, 5 new language grammars, and incremental index updates.
