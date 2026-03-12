@@ -1603,7 +1603,10 @@ fn detect_hooks(repo_root: &Path) -> bool {
     let Ok(raw) = std::fs::read_to_string(settings_path) else {
         return false;
     };
-    raw.contains("UserPromptSubmit") && raw.contains("budi hook user-prompt-submit")
+    // Detect both HTTP hooks (url contains /hook/prompt-submit) and legacy
+    // command hooks (budi hook user-prompt-submit).
+    raw.contains("UserPromptSubmit")
+        && (raw.contains("/hook/prompt-submit") || raw.contains("budi hook user-prompt-submit"))
 }
 
 pub fn resolve_repo_root(input_repo_root: Option<String>, cwd: &Path) -> Result<String> {

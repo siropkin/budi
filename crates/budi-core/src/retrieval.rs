@@ -4553,10 +4553,21 @@ fn normalize_path(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BudiConfig;
+    use crate::config::{self, BudiConfig};
     use crate::index::RepoIndexState;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Clean up both the temp repo directory and its budi data dir entry.
+    /// Must resolve the data dir BEFORE removing repo_root, because
+    /// `repo_storage_id` uses `fs::canonicalize` which needs the path to exist.
+    fn cleanup_test_repo(repo_root: &Path) {
+        let data_dir = config::repo_paths(repo_root).ok().map(|p| p.data_dir);
+        let _ = fs::remove_dir_all(repo_root);
+        if let Some(dir) = data_dir {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
 
     // ── classify_intent ───────────────────────────────────────────────────────
 
@@ -5960,7 +5971,7 @@ it("renders", () => {})
             !response2.diagnostics.intent.is_empty(),
             "should have an intent"
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6034,7 +6045,7 @@ it("renders", () => {})
             response.snippets.first().map(|s| s.path.as_str()),
             Some("src/flask/sansio/app.py")
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6117,7 +6128,7 @@ it("renders", () => {})
             "got: {:?}",
             response.diagnostics.snippet_ecosystems
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6295,7 +6306,7 @@ it("renders", () => {})
             "expected lifecycle-overview skip to block injection, got: {:?}",
             response.snippets
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6414,7 +6425,7 @@ it("renders", () => {})
             !response.snippets.is_empty(),
             "specific lifecycle query should still inject"
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6529,7 +6540,7 @@ it("renders", () => {})
             "got: {:?}",
             response.diagnostics.snippet_ecosystems
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6604,7 +6615,7 @@ it("renders", () => {})
             response.diagnostics.top_ecosystem.as_deref(),
             Some("nextjs")
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6648,7 +6659,7 @@ it("renders", () => {})
             "expected ci_skip to block low-confidence first card, got: {:?}",
             response.snippets
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
@@ -6692,7 +6703,7 @@ it("renders", () => {})
             "expected module-layout unconditional skip to block injection, got: {:?}",
             response.snippets
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     // ── extract_query_symbol_tokens ───────────────────────────────────────────
@@ -7042,7 +7053,7 @@ it("renders", () => {})
             "expected pipeline-skip to block injection, got: {:?}",
             response.snippets
         );
-        let _ = fs::remove_dir_all(&repo_root);
+        cleanup_test_repo(&repo_root);
     }
 
     #[test]
