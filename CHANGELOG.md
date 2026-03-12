@@ -2,6 +2,21 @@
 
 All notable changes to budi are documented here.
 
+## [3.4.0] — Product Polish & Express Benchmark
+
+Language-aware .budiignore templates, improved error messages, cleaner search output, and Express.js benchmark validation.
+
+### Improvements
+
+- **Language-aware .budiignore templates**: `budi init` now detects project languages (JS/TS, Python, Rust, Go, Java, Ruby, PHP, C#) and generates a tailored .budiignore with common exclusion patterns. Large repos get hints to exclude tests/docs.
+- **Better error messages**: Daemon startup failures now show the daemon log path. Git repo detection errors suggest `git init` or `--repo-root`.
+- **Cleaner search output**: `budi repo search` now shows numbered results with indented reasons. Channel scores moved to `--json` only. Removed misleading 0% confidence display.
+
+### Benchmark
+
+- **Express benchmark**: 18 prompts validated — 16/18 (89%) non-regressions, -5% cost, **0% injection regression**
+- Total: 9 repos, 141 judged prompts, ~82% single-run non-regression rate
+
 ## [3.3.0] — Retrieval Precision & Stability
 
 SymbolUsage test-path filtering, embedding warmup, daemon stability, and RuntimeConfig noise reduction.
