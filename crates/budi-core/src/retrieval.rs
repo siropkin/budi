@@ -649,17 +649,14 @@ pub fn build_query_response(
             push_unique_reason(&mut reasons, "stub-body-demote");
         }
 
-        // Architecture queries — penalise examples/ paths.
-        // Tutorial and example directories (e.g. examples/tutorial/) frequently contain
-        // snippets that mention production concepts ("application factory", "register_blueprint")
-        // but in a simplified sample context. For arch queries about the real production module
-        // layout and entry points, these samples are misleading: they describe how users integrate
-        // the library, not how the library itself is structured.
-        // −0.50 pushes tutorial files well below the arch floor in both the top≥0.60 case
-        // (floor=0.40) and the low-confidence case (floor=0.30). A score of 0.73−0.50=0.23
-        // falls below both floors. examples/ is intentionally excluded from is_test_path()
-        // (so TestLookup keeps them), so this penalty is arch-specific.
-        if intent.kind == QueryIntentKind::Architecture && is_examples_path(&chunk.path) {
+        // Penalise examples/ paths for all intents except TestLookup.
+        // Tutorial and example directories (e.g. examples/tutorial/) contain simplified
+        // sample code that mentions production concepts but in a toy context. They mislead
+        // Architecture queries about the real module layout, FlowTrace queries about the
+        // actual call chain, and SymbolDef/SymbolUsage queries about real definitions.
+        // TestLookup keeps them (examples/ excluded from is_test_path() intentionally).
+        // −0.50 pushes tutorial files well below score floors across all intents.
+        if intent.kind != QueryIntentKind::TestLookup && is_examples_path(&chunk.path) {
             adjusted -= 0.50;
             push_unique_reason(&mut reasons, "examples-path-penalty");
         }
