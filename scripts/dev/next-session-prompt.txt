@@ -1,65 +1,61 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.4.0+2, 2026-03-12)
+## Current state (v3.4.0+4, 2026-03-12)
 
 - Branch: main, CI green (all workflows pass)
 - All 314 tests pass (289 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.4.0+2)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.4.0+4)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 - v3.4.0 released: https://github.com/siropkin/budi/releases/tag/v3.4.0
 
 ## What was done in session 15 (2026-03-12)
 
-### 1. Test repo pollution fix — DONE
+### 1. HNSW non-determinism fix — DONE (major)
+- Configured ORT global thread pool with `intra_threads=1` before fastembed session creation
+- fastembed hardcoded `available_parallelism()` → non-deterministic float reduction
+- `init_ort_deterministic()` called in daemon startup before warmup_embedder
+- Flask sym-def score variance: ±0.40 → ±0.005
+- Cold-cache indexing ~2-3x slower (rare, worth the determinism tradeoff)
+
+### 2. Test repo pollution fix — DONE
 - Added `cleanup_test_repo()` helper that removes both temp dir and budi data dir entries
 - Previously each `cargo test` created ~10 stale entries (80+ accumulated)
-- Root cause: `fs::canonicalize()` needs path to exist, so data dir must be resolved before temp dir removal
 
-### 2. Doctor UX improvement — DONE
-- Optional ignore files (repo .budiignore, local budiignore, global .budiignore) only shown when present
-- No more misleading `[!!]` for absent optional files
+### 3. Doctor UX + HTTP hooks detection — DONE
+- Optional ignore files only shown when present (no misleading `[!!]`)
+- `detect_hooks()` now recognizes HTTP hook format
 
-### 3. HTTP hooks detection fix — DONE
-- `detect_hooks()` now recognizes HTTP hook format (`/hook/prompt-submit` URL)
-- Was checking for legacy command format only, causing `hooks detected: false` for all HTTP-configured repos
-
-### 4. Repo hygiene — DONE
-- Cleaned 80 stale test repos (95→15 entries)
-
-### 5. Research sweep — DONE (partial)
-- Claude Code March 2026: SessionStart double-fire on --resume FIXED, JSON-output hooks no-op injection FIXED
-- New: /simplify and /batch commands, shared project configs
-- fastembed 5.12.0 (budi already on it), still no num_threads control in InitOptions
-- No direction changes for budi
+### 4. Research sweep — DONE
+Key findings:
+- Claude Code: 2 new hook handler types (`prompt`, `agent`). Bug fixes for double-fire and no-op injection.
+- **ModernBERT-Embed** (Nomic): ONNX, 768d with Matryoshka to 256d. Worth benchmarking as AllMiniLM upgrade.
+- **cAST paper** (arXiv 2506.15655): AST sibling merging improves chunking quality. Validates budi's approach.
+- **HNSW fix**: ort exposes `with_intra_threads(1)` via GlobalThreadPoolOptions. Implemented above.
+- Competitors: No threats. Augment (cloud MCP), SWE-grep (Windsurf-only), context-mode (complementary).
 
 ## Priority queue for next session
 
-### 1. Verkada-Web daily-driver usage — HIGH
-Use budi for actual development work over multiple sessions. Collect real usage stats.
-This is the highest-value activity for finding real-world issues.
+### 1. Benchmark revalidation with deterministic embeddings — HIGH
+HNSW fix means single-run benchmarks are now reliable. Re-run React + Flask focused
+to see if results stabilize. If regression rate drops, update benchmark numbers.
 
-### 2. Competitive A/B: budi vs Augment Context Engine — MEDIUM
-Augment free tier ended Feb 2026. Requires paid plan (Indie: 40K credits/mo).
-Setup: `npm install -g @augmentcode/auggie && auggie login` (user auth required).
-Then `claude mcp add-json auggie`.
-Run side-by-side on 2-3 benchmark repos. Key comparison: quality, cost, latency.
+### 2. ModernBERT-Embed evaluation — MEDIUM
+ONNX available, 768d Matryoshka to 256d, Apache-2.0. Similar size to AllMiniLM.
+Would require re-indexing all repos but could improve retrieval quality.
+Start with Flask focused benchmark (smallest repo).
 
-### 3. Next retrieval improvement — LOW
-Only if real-world usage surfaces specific issues. Retrieval improvements have plateaued.
-Remaining known issues:
-- SQLAlchemy sym-def broken for common class names (property-over-class)
-- Neovim daemon OOM on large C repos
-- HNSW non-determinism (fastembed thread count, requires forking)
+### 3. Verkada-Web daily-driver usage — MEDIUM
+Use budi for actual development work. Collect real usage stats.
 
-### 4. Impact analysis / git-blame indexing — LOW
-Would help "what breaks if I change X?" queries. From GitNexus research.
+### 4. Version bump and release — LOW
+4 commits since v3.4.0. HNSW fix is significant. Consider v3.5.0.
 
-### 5. Version bump and release — LOW
-Only when enough changes accumulate. Current: 2 commits since v3.4.0.
+### 5. Competitive A/B: budi vs Augment — LOW
+Requires paid plan. Setup: npm install + auggie login + claude mcp add-json.
 
 ## Other backlog items
-- Pre-trained code cross-encoder (if one becomes available on HuggingFace)
+- cAST sibling-merging chunking heuristic (arXiv 2506.15655)
+- Impact analysis / git-blame indexing
+- Pre-trained code cross-encoder
 - Parallel chunking (rayon) for --hard rebuilds
-- Signal index incremental updates (diminishing returns)
-- nomic-embed-code evaluation (7B, too large for local ONNX currently)
