@@ -388,24 +388,36 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, auto_index: bool) -> Re
     }
 
     println!("Initialized budi in {}", repo_root.display());
-    println!("Config: {}", config::config_path(&repo_root)?.display());
     println!(
-        "Local data: {}",
+        "  Hooks:  {}",
+        repo_root.join(CLAUDE_LOCAL_SETTINGS).display()
+    );
+    println!(
+        "  Data:   {}",
         config::repo_paths(&repo_root)?.data_dir.display()
     );
-    println!("Hooks: {}", repo_root.join(CLAUDE_LOCAL_SETTINGS).display());
 
     if auto_index {
+        println!();
         println!("Building index (this may take a few minutes for large repos)...");
         let response = run_index_with_progress(&repo_root, &config, true, &[], &[])?;
         println!(
-            "Index ready: files={}, chunks={}, embedded={}",
-            response.indexed_files, response.indexed_chunks, response.embedded_chunks
+            "Index ready: {} files, {} chunks",
+            response.indexed_files, response.indexed_chunks
         );
-    } else {
-        println!("Run `budi index --hard` to build the first index.");
     }
-    println!("Restart Claude Code or review `/hooks` so updated hook settings are applied.");
+
+    println!();
+    if !auto_index {
+        println!("Next steps:");
+        println!("  1. budi index --hard    Build the code index");
+        println!("  2. Restart Claude Code   So hook settings take effect");
+    } else {
+        println!("Restart Claude Code so hook settings take effect.");
+    }
+    println!();
+    println!("Budi will automatically inject relevant code context before each prompt.");
+    println!("Run `budi doctor` to verify everything is working.");
     Ok(())
 }
 
@@ -735,8 +747,11 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
                 let retry = daemon_health(&config);
                 doctor_check("daemon (retry)", retry, None);
                 if !retry {
-                    issues
-                        .push("Daemon failed to start. Check logs with `budi -vv doctor`.".into());
+                    let log_hint = config::daemon_log_path(&repo_root).map_or_else(
+                        |_| "Check logs with `budi -vv doctor`.".to_string(),
+                        |p| format!("Logs: {}", p.display()),
+                    );
+                    issues.push(format!("Daemon failed to start. {log_hint}"));
                 }
             }
             Err(e) => {
@@ -821,6 +836,19 @@ fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         println!("Issues found:");
         for issue in &issues {
             println!("  - {issue}");
+        }
+    }
+
+    // First-use hint when daemon is healthy but no queries yet
+    if issues.is_empty()
+        && let Some(stats) = daemon_health(&config)
+            .then(|| fetch_daemon_stats(&config))
+            .flatten()
+    {
+        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
+        if queries == 0 {
+            println!();
+            println!("No queries yet. Start a Claude Code session to see budi in action.");
         }
     }
 
