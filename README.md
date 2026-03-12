@@ -31,15 +31,15 @@ No extra tool calls. No round trips. Just the code Claude was about to look for,
 
 ## A/B results
 
-Tested on 8 open-source repos (131 judged prompts) with an independent LLM judge:
+Tested on 7 open-source repos (123 judged prompts) with an independent LLM judge:
 
 | Metric | Result |
 |--------|--------|
-| Non-regression rate | **~91%** (same or better quality) |
-| Cost savings | **3-32%** lower on most repos |
-| Best result | FastAPI: 100% non-regression, 11 quality wins |
+| Non-regression rate | **~80%** single-run, **~85-90%** multi-run |
+| Injection regression rate | **~10-12%** (when budi injects context) |
+| Cost savings | **2-23%** lower on most repos |
 
-budi's goal: same answer quality at lower cost. Ties (same quality, less cost) are the primary success metric.
+budi's goal: same answer quality at lower cost. Ties (same quality, less cost) are the primary success metric. Many single-run "regressions" are LLM variance on queries where budi correctly skipped injection.
 
 Full methodology, prompts, and per-prompt evidence: [docs/benchmark.md](docs/benchmark.md)
 
