@@ -1056,9 +1056,11 @@ pub fn build_query_response(
     // Broad request-pipeline FlowTrace queries ("trace the call chain from an HTTP request
     // to the view function") with low top scores produce unrelated matches (admin views,
     // context processors, decorators) because "request" and "view" are ubiquitous tokens.
-    // Skip when top < 0.50 — Claude already knows the framework's request pipeline.
+    // At top 0.50-0.55, the injected snippets are correct but narrow — Claude anchors on
+    // them instead of exploring the full lifecycle, producing less comprehensive answers.
+    // Skip when top < 0.55 — Claude already knows the framework's request pipeline.
     let flowtrace_pipeline_skip = intent.kind == QueryIntentKind::FlowTrace
-        && scored.first().is_some_and(|c| c.score < 0.50)
+        && scored.first().is_some_and(|c| c.score < 0.55)
         && {
             let lq = query.to_lowercase();
             lq.contains("call chain")

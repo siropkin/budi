@@ -3485,6 +3485,11 @@ fn should_skip_index_path(
         return false;
     }
     let path = Path::new(normalized);
+    // The `ignore` crate panics if the path is absolute or escapes the root
+    // (e.g. via `..`). Guard against this by skipping non-relative paths.
+    if path.is_absolute() || normalized.contains("..") {
+        return true;
+    }
     if ignore_rules
         .excludes
         .matched_path_or_any_parents(path, is_dir)
@@ -4691,6 +4696,24 @@ mod tests {
                 .expect("unignore matcher"),
         };
         assert!(!should_skip_index_path("vendor/lib.rs", false, &rules));
+    }
+
+    #[test]
+    fn should_skip_index_path_rejects_absolute_and_parent_traversal() {
+        let rules = RepoIgnoreRules {
+            excludes: build_gitignore_matcher(Path::new("."), &[]).expect("empty excludes"),
+            unignores: build_gitignore_matcher(Path::new("."), &[]).expect("empty unignores"),
+        };
+        // Absolute paths must be rejected (ignore crate panics on them)
+        assert!(should_skip_index_path("/etc/passwd", false, &rules));
+        // Parent-directory traversal must be rejected
+        assert!(should_skip_index_path(
+            "../other-repo/src/lib.rs",
+            false,
+            &rules
+        ));
+        // Normal relative paths pass through
+        assert!(!should_skip_index_path("src/lib.rs", false, &rules));
     }
 
     #[test]

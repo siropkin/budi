@@ -2706,7 +2706,7 @@ fn cmd_statusline() -> Result<()> {
 
     if !repo_initialized {
         // budi is not set up for this project
-        println!("\x1b[36mbudi \x1b[90m· not set up\x1b[0m");
+        println!("\x1b[33m⚡\x1b[36m budi \x1b[90m· not set up\x1b[0m");
         return Ok(());
     }
 
@@ -2748,7 +2748,7 @@ fn cmd_statusline() -> Result<()> {
                 };
 
                 if queries == 0 {
-                    println!("\x1b[36mbudi \x1b[32m✓\x1b[0m ready{}", idx_suffix);
+                    println!("\x1b[33m⚡\x1b[36m budi \x1b[32m✓\x1b[0m ready{}", idx_suffix);
                 } else {
                     let skips = queries.saturating_sub(injections);
                     let mut parts: Vec<String> = Vec::new();
@@ -2766,7 +2766,7 @@ fn cmd_statusline() -> Result<()> {
                         parts.push(format!("{:.0}% accurate", hit_pct));
                     }
                     let line = format!(
-                        "\x1b[36mbudi \x1b[33m⚡\x1b[0m {}{}",
+                        "\x1b[33m⚡\x1b[36m budi\x1b[0m · {}{}",
                         parts.join(" · "),
                         idx_suffix
                     );
@@ -2776,7 +2776,7 @@ fn cmd_statusline() -> Result<()> {
         }
         _ => {
             // Daemon is not running
-            println!("\x1b[36mbudi \x1b[90m· off\x1b[0m");
+            println!("\x1b[33m⚡\x1b[36m budi \x1b[90m· off\x1b[0m");
         }
     }
     Ok(())
