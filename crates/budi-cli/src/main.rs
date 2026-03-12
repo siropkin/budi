@@ -2723,7 +2723,10 @@ fn cmd_statusline() -> Result<()> {
                 };
 
                 if queries == 0 {
-                    println!("\x1b[33m⚡\x1b[36m budi \x1b[32m✓\x1b[0m ready{}", idx_suffix);
+                    println!(
+                        "\x1b[33m⚡\x1b[36m budi \x1b[32m✓\x1b[0m ready{}",
+                        idx_suffix
+                    );
                 } else {
                     let skips = queries.saturating_sub(injections);
                     let mut parts: Vec<String> = Vec::new();
