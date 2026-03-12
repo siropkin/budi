@@ -2379,34 +2379,8 @@ fn cmd_hook_session_start() -> Result<()> {
     // Ensure daemon is running so HTTP hooks (UserPromptSubmit, PostToolUse) can reach it.
     let config = config::load_or_default(&repo_root)?;
     let _ = ensure_daemon_running(&repo_root, &config);
-    let mut message = String::new();
-    if let Some(map) = budi_core::project_map::read_project_map(&repo_root) {
-        // Cap the map at ~3000 chars to stay within Claude's context budget.
-        let truncated: String = map.chars().take(3000).collect();
-        message.push_str(&truncated);
-    }
-    // Append recently-relevant files with anchor lines from prior sessions.
-    let affinity_files = read_session_affinity(&repo_root, 5);
-    if !affinity_files.is_empty() {
-        message.push_str(
-            "\n\n## Recently Relevant Files\n(files active in prior sessions, for reference)\n",
-        );
-        for (path, anchors) in &affinity_files {
-            if anchors.is_empty() {
-                message.push_str(&format!("- {}\n", path));
-            } else {
-                message.push_str(&format!("- {} — {}\n", path, anchors.join("; ")));
-            }
-        }
-    }
-    if !message.is_empty() {
-        println!(
-            "{}",
-            serde_json::to_string(&AsyncSystemMessageOutput {
-                system_message: message,
-            })?
-        );
-    }
+    // Project map is already at .claude/budi-project-map.md (written during index build).
+    // No need to inject it on every session start — it was showing as terminal output.
     Ok(())
 }
 
@@ -2551,6 +2525,7 @@ fn log_session_end_debug(
 
 /// Read session-affinity.json and return the top N entries (path, anchors) sorted by recency.
 /// Supports both new format (AffinityEntry with ts+anchors) and old flat format (ts only).
+#[allow(dead_code)]
 fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(String, Vec<String>)> {
     let Ok(paths) = budi_core::config::repo_paths(repo_root) else {
         return Vec::new();
