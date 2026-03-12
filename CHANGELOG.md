@@ -2,6 +2,32 @@
 
 All notable changes to budi are documented here.
 
+## [3.5.0] — Deterministic Embeddings & Context Re-injection
+
+Deterministic embedding vectors, post-compaction context recovery, and subagent awareness.
+
+### Retrieval improvements
+
+- **Deterministic embeddings**: ONNX runtime now uses single-threaded global pool, producing identical embedding vectors across daemon restarts. Score variance dropped from ±0.40 to ±0.005. Single-run benchmark results are now reliable.
+- **Examples-path penalty broadened**: Tutorial/example directory penalty now applies to all intents (FlowTrace, SymbolDef, SymbolUsage, RuntimeConfig) — previously Architecture-only. TestLookup still keeps examples.
+
+### Hook improvements
+
+- **Post-compaction context re-injection**: SessionStart hook detects `compact` and `clear` events, re-injecting the project map so Claude retains codebase awareness after context window compaction.
+- **SubagentStart hook**: Spawned subagents (Explore, general-purpose) now receive the project map via `additionalContext`, enabling context-aware exploration.
+- **HTTP hooks detection**: `budi doctor` now correctly recognizes HTTP hook format (`/hook/prompt-submit` URLs).
+
+### Fixes
+
+- **Test repo pollution**: Automated test cleanup prevents stale repo entries from accumulating in the budi data directory.
+- **Doctor UX**: Optional ignore files (.budiignore, budiignore.local) only shown when present — no more misleading `[!!]` for missing optional files.
+
+### Benchmark state
+
+- React: 89% non-regression (stable across 2 runs), -15% cost
+- Flask: 83% non-regression (best ever), -25% cost
+- 9 repos, 141 judged prompts, ~82% single-run non-regression rate
+
 ## [3.4.0] — Product Polish & Express Benchmark
 
 Language-aware .budiignore templates, improved error messages, cleaner search output, and Express.js benchmark validation.
