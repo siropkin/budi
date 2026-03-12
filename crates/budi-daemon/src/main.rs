@@ -162,8 +162,9 @@ async fn main() -> Result<()> {
         .route("/hook/tool-use", post(hook_tool_use))
         .with_state(app_state);
 
-    // Prime the ONNX embedding runtime in the background so the first real
-    // query doesn't suffer cold-start score degradation.
+    // Configure ORT for deterministic embeddings (single intra-op thread) before
+    // any ONNX sessions are created. Then warm up the embedding runtime.
+    budi_core::index::init_ort_deterministic();
     tokio::task::spawn_blocking(|| {
         let start = std::time::Instant::now();
         budi_core::index::warmup_embedder();

@@ -4078,6 +4078,29 @@ pub fn embed_query(repo_root: &Path, query: &str) -> Result<Option<Vec<f32>>> {
     guard.embed_query(query)
 }
 
+/// Configure the ONNX Runtime global thread pool with a single intra-op thread.
+///
+/// By default, fastembed sets `intra_threads` to `available_parallelism()` (all CPUs),
+/// which causes non-deterministic floating-point reduction order across embedding runs.
+/// Using a global single-thread pool makes embeddings deterministic, eliminating HNSW
+/// score variance across daemon restarts. Safe to call multiple times (ort uses OnceLock).
+pub fn init_ort_deterministic() {
+    use ort::environment::GlobalThreadPoolOptions;
+    match GlobalThreadPoolOptions::default().with_intra_threads(1) {
+        Ok(opts) => {
+            let applied = ort::init().with_global_thread_pool(opts).commit();
+            if applied {
+                info!("ORT global thread pool configured with intra_threads=1 (deterministic)");
+            } else {
+                info!("ORT environment already initialized, skipping thread pool config");
+            }
+        }
+        Err(err) => {
+            tracing::warn!("Failed to configure ORT deterministic threads: {}", err);
+        }
+    }
+}
+
 /// Prime the ONNX embedding runtime so the first real query gets consistent results.
 /// Without this, cold-start queries can produce degraded HNSW scores (observed 0.0 vs 0.40).
 pub fn warmup_embedder() {
