@@ -462,7 +462,7 @@ fn collect_top_level_chunks(
             && left.end_line == right.end_line
             && left.text == right.text
     });
-    chunks
+    merge_small_siblings(chunks, lines, chunk_language, lines_per_chunk)
 }
 
 fn ast_top_level_chunks(
@@ -649,6 +649,103 @@ fn append_node_chunks(out: &mut Vec<Chunk>, node: Node<'_>, context: &NodeChunki
         language: context.chunk_language.to_string(),
         symbol_hint,
         text: snippet,
+    });
+}
+
+/// Merge consecutive small chunks into combined chunks.
+///
+/// When adjacent AST boundary nodes are each small (≤ `SMALL_THRESHOLD` lines),
+/// they produce weak embeddings individually (e.g. single-line `var x = require(...)`,
+/// `export { default as X }`, `const Y = 5`). Merging them into a single chunk
+/// produces better embeddings and reduces HNSW index clutter.
+///
+/// Inspired by the cAST paper (arXiv 2506.15655) which showed +4.3 Recall@5
+/// from sibling merging in AST-based chunking.
+fn merge_small_siblings(
+    chunks: Vec<Chunk>,
+    lines: &[&str],
+    chunk_language: &str,
+    lines_per_chunk: usize,
+) -> Vec<Chunk> {
+    const SMALL_THRESHOLD: usize = 5;
+
+    if chunks.len() <= 1 {
+        return chunks;
+    }
+
+    let mut merged: Vec<Chunk> = Vec::with_capacity(chunks.len());
+    let mut run_start: Option<usize> = None; // index of first small chunk in current run
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let span = chunk.end_line.saturating_sub(chunk.start_line) + 1;
+        // Only merge chunks that are small AND have no symbol hint.
+        // Function/class/method definitions should stay as separate chunks
+        // even when short — they're semantically distinct units.
+        let is_small = span <= SMALL_THRESHOLD && chunk.symbol_hint.is_none();
+
+        if is_small {
+            // Check gap from previous chunk in the run — if too large, flush first.
+            // This prevents merging scattered declarations with unrelated code
+            // between them (e.g., var at line 3 and var at line 79 with describe
+            // blocks in between).
+            if let Some(rs) = run_start {
+                let prev_end = chunks[i - 1].end_line;
+                let gap = chunk.start_line.saturating_sub(prev_end);
+                if gap > SMALL_THRESHOLD {
+                    flush_small_run(&chunks[rs..i], lines, chunk_language, &mut merged);
+                    run_start = None;
+                }
+            }
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+            // Check if adding this chunk would exceed lines_per_chunk
+            let rs = run_start.unwrap();
+            let run_span = chunk.end_line.saturating_sub(chunks[rs].start_line) + 1;
+            if run_span > lines_per_chunk {
+                // Flush the run so far (excluding current chunk)
+                flush_small_run(&chunks[rs..i], lines, chunk_language, &mut merged);
+                run_start = Some(i);
+            }
+        } else {
+            // Non-small chunk: flush any pending run, then emit this chunk as-is
+            if let Some(rs) = run_start.take() {
+                flush_small_run(&chunks[rs..i], lines, chunk_language, &mut merged);
+            }
+            merged.push(chunk.clone());
+        }
+    }
+
+    // Flush trailing run
+    if let Some(rs) = run_start {
+        flush_small_run(&chunks[rs..], lines, chunk_language, &mut merged);
+    }
+
+    merged
+}
+
+/// Flush a run of small chunks. If 1 chunk, emit as-is. If >=2, merge into one
+/// combined chunk spanning the full range (including any gap lines between them).
+fn flush_small_run(run: &[Chunk], lines: &[&str], chunk_language: &str, out: &mut Vec<Chunk>) {
+    if run.is_empty() {
+        return;
+    }
+    if run.len() == 1 {
+        out.push(run[0].clone());
+        return;
+    }
+    let start_line = run[0].start_line;
+    let end_line = run.last().unwrap().end_line;
+    let start_idx = start_line.saturating_sub(1);
+    let end_idx = end_line.min(lines.len());
+    let text = lines[start_idx..end_idx].join("\n");
+    let symbol_hint = dominant_symbol_hint(&lines[start_idx..end_idx]);
+    out.push(Chunk {
+        start_line,
+        end_line,
+        language: chunk_language.to_string(),
+        symbol_hint,
+        text,
     });
 }
 
@@ -1409,6 +1506,84 @@ class UserController {
         assert!(
             chunks.iter().any(|c| c.text.contains("getUsers")),
             "expected getUsers in chunks"
+        );
+    }
+
+    #[test]
+    fn sibling_merging_combines_adjacent_small_declarations() {
+        // Five single-line require statements should be merged into one chunk.
+        let content = r#"var express = require('express');
+var path = require('path');
+var logger = require('morgan');
+var cookieParser = require('cookie-parser');
+var session = require('express-session');
+"#;
+        let chunks = chunk_text("app.js", content, 80, 20);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "5 single-line vars should merge into 1 chunk, got: {:?}",
+            chunks
+                .iter()
+                .map(|c| (c.start_line, c.end_line, &c.text))
+                .collect::<Vec<_>>()
+        );
+        assert!(chunks[0].text.contains("express"));
+        assert!(chunks[0].text.contains("session"));
+    }
+
+    #[test]
+    fn sibling_merging_splits_on_large_gaps() {
+        // Vars at top, then a large gap (10+ lines), then more vars.
+        // Should produce two separate merged chunks, not one spanning the gap.
+        let mut content = String::new();
+        content.push_str("var a = require('a');\n");
+        content.push_str("var b = require('b');\n");
+        for _ in 0..10 {
+            content.push_str("// filler comment line\n");
+        }
+        content.push_str("var c = require('c');\n");
+        content.push_str("var d = require('d');\n");
+        let chunks = chunk_text("gap.js", &content, 80, 20);
+        // Should NOT be a single chunk spanning the entire file
+        assert!(
+            chunks.len() >= 2,
+            "expected >=2 chunks due to gap, got {} chunks: {:?}",
+            chunks.len(),
+            chunks
+                .iter()
+                .map(|c| (c.start_line, c.end_line))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sibling_merging_preserves_function_chunks() {
+        // Short functions should NOT be merged even though they're small.
+        let content = r#"var x = require('x');
+var y = require('y');
+
+function alpha() {
+  return 1;
+}
+
+function beta() {
+  return 2;
+}
+"#;
+        let chunks = chunk_text("funcs.js", content, 80, 20);
+        // Should have: 1 merged var chunk + 2 function chunks = 3
+        let hints: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"alpha"),
+            "alpha should be its own chunk, hints: {hints:?}"
+        );
+        assert!(
+            hints.contains(&"beta"),
+            "beta should be its own chunk, hints: {hints:?}"
         );
     }
 }
