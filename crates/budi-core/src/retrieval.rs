@@ -1274,9 +1274,7 @@ pub fn build_query_response(
     // the first candidate always bypasses the floor via the best-effort fallback.
     // Ripgrep P17: "teardown sequence" → top=0.18 (Sortr flag def, unrelated).
     let flowtrace_low_confidence_skip = intent.kind == QueryIntentKind::FlowTrace
-        && scored
-            .first()
-            .is_some_and(|c| c.score < min_score);
+        && scored.first().is_some_and(|c| c.score < min_score);
     let ci_skip = ci_skip
         || env_listing_skip
         || lifecycle_overview_skip
@@ -4966,7 +4964,9 @@ mod tests {
         // "config file" triggers RuntimeConfig even when query also says "in what order"
         // (design-change queries should not route to FlowTrace via broad "what order")
         assert_eq!(
-            classify_intent("I want to change the config file format from plain-text args to TOML. Walk me through which parts would need to change and in what order."),
+            classify_intent(
+                "I want to change the config file format from plain-text args to TOML. Walk me through which parts would need to change and in what order."
+            ),
             QueryIntentKind::RuntimeConfig
         );
     }
