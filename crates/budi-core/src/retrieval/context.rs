@@ -124,6 +124,14 @@ pub(super) fn build_context(
 
     let is_sym_def = intent == Some("symbol-definition");
 
+    // Pre-compute score-weighted budget shares. Each card gets a budget
+    // proportional to its score relative to the total.  Falls back to the
+    // old 40%/60% geometric decay when there is only one card or all
+    // scores are zero.
+    let card_scores: Vec<f32> = merged.iter().map(|c| c.primary.score.max(0.0)).collect();
+    let score_sum: f32 = card_scores.iter().sum();
+    let use_score_weights = merged.len() > 1 && score_sum > 0.0;
+
     for (idx, card_data) in merged.iter().enumerate() {
         if remaining_budget == 0 {
             break;
@@ -134,12 +142,15 @@ pub(super) fn build_context(
         if is_sym_def && idx > 0 && is_thin_delegation_wrapper(&card_data.primary.text) {
             continue;
         }
-        // Progressive truncation: top card gets up to 40% of content budget;
-        // each subsequent card gets up to 60% of what remains.
-        let card_budget = if idx == 0 {
-            (content_budget as f32 * 0.40).ceil() as usize
+        // Score-weighted budget: allocate proportional to (score / total_score).
+        // Minimum 15% per card to prevent near-zero allocations for low-scored
+        // cards that still passed the score floor.
+        let card_budget = if use_score_weights {
+            let share = (card_scores[idx] / score_sum).max(0.15);
+            (content_budget as f32 * share).ceil() as usize
         } else {
-            (remaining_budget as f32 * 0.60).ceil() as usize
+            // Single card or zero scores: give it everything
+            content_budget
         }
         .min(remaining_budget);
 
