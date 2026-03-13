@@ -295,6 +295,14 @@ impl DaemonState {
             })
             .collect();
 
+        // Refresh diagnostics.top_score after session dedup so it reflects
+        // what will actually be injected, not the pre-dedup selection.
+        response.diagnostics.top_score = response
+            .snippets
+            .first()
+            .map(|s| s.score)
+            .unwrap_or_default();
+
         // Step 4: Score-based injection decision.
         let should_inject = response
             .snippets

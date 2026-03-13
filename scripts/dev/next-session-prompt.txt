@@ -1,12 +1,12 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.11.0, 2026-03-13)
+## Current state (v3.11.0+, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass including Release)
 - All 353 tests pass (327 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.11.0)
-- Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.11.0+Explain)
+- Repo data dir clean: 16 real repos (8 benchmark + 7 wild-repos + 1 re-cloned ripgrep)
 - v3.11.0 released: https://github.com/siropkin/budi/releases/tag/v3.11.0
 
 ## What was done in session 24 continued (2026-03-13)
@@ -19,38 +19,58 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 ### 2. "What is Symbol?" classifier routing — DONE (946dfa5)
 - PascalCase, camelCase, backtick-quoted, snake_case after "what is" → SymbolDefinition
 - React "What is useState?" now finds definition (0.66 vs 0.39 before)
-- 0/144 benchmark prompts affected (all have articles/"the" or match earlier patterns)
+- 0/144 benchmark prompts affected
 
 ### 3. Version bump to v3.11.0 — DONE (0fafd8b)
 - FlowTrace precision + context compression. All CI green. Release created.
 
-### 4. Flask fast benchmark — DONE
-- 18 prompts, -13% cost savings, 2.1s faster avg. Healthy baseline.
+### 4. "Explain Symbol" prefix generalization — DONE (0560245)
+- Renamed has_symbol_after_what_is → has_symbol_after_prefix with configurable prefix list
+- "Explain QuerySet", "Explain useState" etc. now route to SymbolDefinition
+- 0/144 benchmark prompts start with "Explain" — no impact
 
-### 5. Django focused validation — DONE
-- P9 (sym-usage): Win, Q 8→9, G 7→9. P17 (flow-trace): Tie. 0% regression.
+### 5. Full 8-repo benchmark sweep — DONE
+- Ripgrep re-cloned (1969 chunks) and re-indexed
+- All 144 prompts judged across 8 repos
 
 ### 6. Research sweep — DONE
-- Claude Code: WorktreeCreate/WorktreeRemove hooks available
-- No 384d embedding upgrade. ContextBench paper for external validation.
+- Claude Code: HTTP hooks available, WorktreeCreate/WorktreeRemove confirmed
+- SessionStart double-fire on resume fixed. JSON-output hooks no-op injection fixed
+- No new embedding models. fastembed-rs still at 5.12.0. No new competitors
 
-## Current benchmark state (v3.11.0, 8 repos, 144 judged prompts)
+### 7. Session dedup diagnostic insight
+- High `retrieval_top_score` + `snippets_count=0` cases (React P14 top=0.94, ctx=0) explained by session dedup: diagnostics.top_score is set before daemon session dedup strips already-seen snippets. This is correct behavior — session dedup prevents re-injection
 
-Same as v3.10.0 baseline (the session 24 changes are targeted — FlowTrace precision + compression).
-- Flask: 18/18 (100%), Fastify: 18/18 (100%)
-- Django: 16/18 (89%), Express: 15/18 (83%), React: 15/18 (83%), FastAPI: 15/18 (83%)
-- Ripgrep: ~14/18 (78% expected with P8+P18 fixes)
-- Terraform: 12/18 (67% judge noise)
-- **Overall: ~85% non-regression, ~4% average cost savings**
+## Current benchmark state (v3.11.0+Explain, 8 repos, 144 judged prompts)
+
+| Benchmark | Non-reg | Rate | Cost | Notes |
+|-----------|---------|------|------|-------|
+| Flask | 16/18 | 89% | -9% | P13/P18 mild (Q-1) |
+| Fastify | 16/18 | 89% | -15% | P4/P14 mild (Q-1) |
+| React | 16/18 | 89% | +13% | P1 extreme judge noise (9→4) |
+| Express | 15/18 | 83% | -15% | P8 ctx=0 variance (9→5) |
+| Django | 15/18 | 83% | -8% | P14 persistent sym-def |
+| FastAPI | 16/18 | 89% | -5% | P6/P15 mild (Q-1) |
+| Ripgrep | 13/18 | 87%* | -4% | P10/P14 mild, 3 n/a |
+| Terraform | 14/18 | 78% | -10% | P5/P13 known noise |
+| **Total** | **~121/144** | **~84%** | **~-7%** | Judge noise dominates |
+
+*87% of 15 judged. Note: Flask+Fastify went 100%→89% with identical code = judge variance.
+
+## Key analysis: ctx=0 cases
+
+110/144 prompts (76%) are ctx=0 skips. Of those:
+- 90+ are Q ties or mild (±1) — judge noise
+- 4 sharp regressions (Q ≥-2): React P1 (9→4), Express P8 (9→5), Django P11 (9→7), Terraform P17 (8→6)
+- All 4 are ctx=0 — budi injected nothing, so these are pure LLM response variance
 
 ## Priority queue for next session
 
 ### 1. Version bump to v3.12.0 — LOW
-- "What is Symbol?" classifier + any other changes deserve a minor bump
-- Full 8-repo benchmark sweep recommended for release validation
+- "Explain X" routing is the only change since v3.11.0. Could bundle with next feature.
 
-### 2. Full 8-repo benchmark sweep — MEDIUM
-- Validate v3.11.0 changes across all repos. Ripgrep needs re-cloning.
+### 2. Diagnostics top_score post-dedup — LOW
+- `diagnostics.top_score` should reflect post-session-dedup state. Currently misleading for deduped queries. Minor UX improvement for debug/analysis.
 
 ### 3. WorktreeCreate hook — LOW
 - Auto-warm indexes when Claude Code creates worktrees for agents
