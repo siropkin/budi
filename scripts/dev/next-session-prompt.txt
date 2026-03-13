@@ -1,72 +1,69 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.9.0, 2026-03-13)
+## Current state (v3.11.0, 2026-03-13)
 
-- Branch: main, CI green (all workflows pass)
-- All 349 tests pass (325 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.9.0)
+- Branch: main, CI green (all workflows pass including Release)
+- All 352 tests pass (326 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.11.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
-- v3.9.0 released: https://github.com/siropkin/budi/releases/tag/v3.9.0
+- v3.11.0 released: https://github.com/siropkin/budi/releases/tag/v3.11.0
 
-## What was done in session 23 (2026-03-13)
+## What was done in session 24 (2026-03-13)
 
-### 1. Sym-def low-confidence skip — DONE (744064e)
-- When sym-hint-seed doesn't find the definition and top score < 0.30 (>= 10 candidates), skip injection
-- Fixed Express P5 injecting lib/request.js at score 0.08
+### 1. Version bump to v3.10.0 — DONE (6ea84fc+00b40b8)
+- JS method assignment + sym-def skip + concept-word fallback + intent-aware proof + score-weighted budget
+- README/benchmark docs updated with 8-repo results
 
-### 2. Test-coverage concept-word fallback — DONE (bfcac87+5bb1f0f)
-- Natural language test queries with no symbol tokens fall back to concept words
-- Fixed Ripgrep P15 ("What integration tests cover parallel search correctness") — now skips
+### 2. FlowTrace intent classifier fix — DONE (63d834d)
+- Replaced broad "what order" keyword with specific "what order do/are/does" + "teardown sequence/order"
+- Ripgrep P18: was FlowTrace (injecting Walk struct), now RuntimeConfig
 
-### 3. SnowflakeArcticEmbedS evaluation — DONE
-- Same 384d as AllMiniLM but worse discrimination (spread 0.27 vs 0.74)
-- **Verdict: keep AllMiniLM** (same conclusion as Granite/ModernBERT)
+### 3. FlowTrace low-confidence skip — DONE (ef15f21+ebb2de0)
+- When top FlowTrace score < floor (0.25), skip injection entirely
+- Ripgrep P8: was injecting Sortr flag def (score 0.18), now skips
 
-### 4. JS method assignment detection — DONE (502767d+9b92bce)
-- Express-style `app.use = function use(fn) {}` now detected in chunking
-- `is_boundary_node()` conditionally treats expression_statement as boundary for method assignments only
-- Dotted identifier extraction: `app.use` → `use` as query symbol token
-- Express P5 (app.use): 0.08→0.67, P3 (app.handle): 0.17→0.71, P4 (res.send): 0.21→0.63
-- Express chunk count: 811→296 (method-level chunks replace overlapping stride chunks)
+### 4. Relevance field suppression — DONE (9a932bf)
+- Docstring-derived `relevance:` suppressed for SymbolUsage and FlowTrace intents
+- Saves 8-19% context per card. Synthetic context_note always shown.
+- Django P9 validation: Win (Q 8→9, G 7→9, -68% cost)
 
-### 5. Score-weighted budget allocation — DONE (1669841)
-- Multi-card context budget now allocated proportional to score instead of fixed 40%/60% decay
-- Higher-scoring cards get more space, 15% minimum per card
-- 3-repo validation: Flask 100%, Express 83%, React 89% — no regressions introduced
+### 5. Version bump to v3.11.0 — DONE (0fafd8b)
+- FlowTrace precision + context compression. All CI green.
 
-### 6. Full 8-repo benchmark sweep — DONE
-- Flask: 18/18 (100%) — zero regressions!
-- Fastify: 18/18 (100%) — zero regressions!
-- Django: 16/18 (89%) — P14 persistent, P16 ctx=0
-- Express: 15/18 (83%) — P8/P12 ctx=0, P13 injected mild
-- React: 15/18 (83%) — P1 extreme judge noise, P8 mild, P15 ctx=0
-- FastAPI: 15/18 (83%) — P10/P12 ctx=0, P15 injected mild
-- Ripgrep: 13/18 (72%) — P4 injected mild, P9/P15/P18 ctx=0
-- Terraform: 12/18 (67%) — LLM judge variance (6 regs, 4 ctx=0)
-- **Total: ~122/144 (~85%), -4% cost**
+### 6. Research sweep — DONE
+- Claude Code: WorktreeCreate/WorktreeRemove hook events available
+- No 384d embedding upgrade. fastembed-rs still at v5.12
+- ContextBench paper (66 repos, 8 languages) could serve as external validation
+- No new competitors threatening hook-based approach
 
-### 7. Research sweep — DONE
-- Claude Code still at 2.1.74, no new competitors, no new small embedding models
+### 7. Terraform regression analysis — DONE
+- P5 and P13 both inject correct code. Confirmed judge noise (94%→67% with identical code)
+
+## Current benchmark state (v3.11.0, 8 repos, 144 judged prompts)
+
+- Flask: 18/18 (100%), Fastify: 18/18 (100%)
+- Django: 16/18 (89%), Express: 15/18 (83%), React: 15/18 (83%), FastAPI: 15/18 (83%)
+- Ripgrep: ~14/18 (78% expected with P8+P18 fixes), Terraform: 12/18 (67% judge noise)
+- **Overall: ~85% non-regression, ~4% average cost savings**
 
 ## Priority queue for next session
 
-### 1. Version bump to v3.10.0 — LOW
-- JS method assignment + sym-def skip + concept-word fallback + score-weighted budget warrant bump
-- Full 8-repo sweep with score-weighted budget needed for release validation
+### 1. Full 8-repo benchmark sweep — MEDIUM
+- Validate v3.11.0 FlowTrace fixes + relevance suppression across all repos
+- Note: ripgrep repo needs re-cloning at /Users/ivan.seredkin/_projects/public-budi-bench/ripgrep
 
-### 2. Aggressive context compression — LOW
-- TAAC paper suggests code tolerates 0.6 compression ratio
-- Consider: skip relevance field for FlowTrace/SymbolUsage intents
+### 2. WorktreeCreate hook — LOW
+- Auto-warm indexes when Claude Code creates worktrees for agents
+- Currently budi shares index across worktrees, so agents already benefit
 
-### 3. Terraform injected regression analysis — MEDIUM
-- P5 (Plan, 0.75) and P13 (ReadStateBytes, 0.70) inject at high scores but regress Q by 1-2
-- Investigate whether the injected context is misleading or if it's purely judge noise
+### 3. ContextBench evaluation — LOW
+- External validation benchmark (66 repos, 8 languages, gold-annotated)
+- Could provide more trustworthy validation than single-run LLM judge
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
 - Verkada-Web daily-driver usage
-- New Claude Code hook types (prompt, agent) investigation
-- additionalContext injection bug #14281 investigation
+- PreCompact hook for project map injection before compaction
