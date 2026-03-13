@@ -252,5 +252,7 @@ pub(crate) fn build_react_effect_lifecycle_card(
         channel_scores: QueryChannelScores::default(),
         text: text_lines.join("\n"),
         context_note: Some("React effect lifecycle summary".to_string()),
+        callers: Vec::new(),
+        refs: Vec::new(),
     })
 }

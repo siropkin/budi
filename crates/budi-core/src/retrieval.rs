@@ -1354,6 +1354,8 @@ pub fn build_query_response(
                 channel_scores: QueryChannelScores::default(),
                 text: cont.text.clone(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             })
         });
         if let Some(cont_item) = continuation {
@@ -1390,6 +1392,8 @@ pub fn build_query_response(
                         channel_scores: QueryChannelScores::default(),
                         text: cont2.text.clone(),
                         context_note: None,
+                        callers: Vec::new(),
+                        refs: Vec::new(),
                     });
                 }
             }
@@ -1510,6 +1514,8 @@ pub fn build_query_response(
                 channel_scores: QueryChannelScores::default(),
                 text: cont.text.clone(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             })
         });
         if let Some(cont_item) = rtcfg_continuation {
@@ -1744,6 +1750,53 @@ pub fn build_call_graph_summary(
     Some(out)
 }
 
+/// Populate `callers` and `refs` fields on each snippet from the call graph.
+/// This integrates structural context directly into evidence cards instead of
+/// a separate section, saving ~15-20% of injection overhead.
+pub fn populate_snippet_call_graph(runtime: &RuntimeIndex, snippets: &mut [QueryResultItem]) {
+    for (idx, snippet) in snippets.iter_mut().enumerate() {
+        if idx >= 5 {
+            break;
+        }
+
+        let chunk = runtime
+            .all_chunks()
+            .iter()
+            .find(|c| c.path == snippet.path && c.start_line == snippet.start_line);
+
+        let symbol = match chunk.and_then(|c| c.symbol_hint.as_deref()) {
+            Some(s) if !s.is_empty() && !is_generic_symbol_hint(s) => s,
+            _ => continue,
+        };
+
+        let chunk_id = chunk.map(|c| c.id);
+
+        // callers: chunks that call this symbol
+        let callers = runtime.callers_of(symbol);
+        snippet.callers = callers
+            .iter()
+            .take(3)
+            .map(|c| {
+                let sym = c
+                    .symbol_hint
+                    .as_deref()
+                    .unwrap_or_else(|| last_path_component(&c.path));
+                truncate_to(sym, 40).to_string()
+            })
+            .collect();
+
+        // callees/refs: symbols this chunk references
+        if let Some(id) = chunk_id {
+            snippet.refs = runtime
+                .callees_of(id)
+                .into_iter()
+                .take(3)
+                .map(|t| truncate_to(&t, 40).to_string())
+                .collect();
+        }
+    }
+}
+
 fn should_prefer_same_file_definition_continuation(
     def_item: &QueryResultItem,
     continuation: &ChunkRecord,
@@ -1812,6 +1865,8 @@ fn build_symbol_definition_first_steps_card(
         channel_scores: QueryChannelScores::default(),
         text: text_lines.join("\n"),
         context_note: Some("same-file first steps summary".to_string()),
+        callers: Vec::new(),
+        refs: Vec::new(),
     })
 }
 
@@ -1946,6 +2001,8 @@ fn build_web_request_flow_chain_card(
         channel_scores: QueryChannelScores::default(),
         text,
         context_note: Some("request-to-view chain summary".to_string()),
+        callers: Vec::new(),
+        refs: Vec::new(),
     })
 }
 
@@ -2064,6 +2121,8 @@ fn maybe_inject_symbol_definition_delegate_pack(
         channel_scores: QueryChannelScores::default(),
         text: callee_chunk.text.clone(),
         context_note: None,
+        callers: Vec::new(),
+        refs: Vec::new(),
     };
     selection.snippets.clear();
     selection.snippets.push(delegator_item);
@@ -2138,6 +2197,8 @@ fn query_result_item_from_scored(
         channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
         context_note: None,
+        callers: Vec::new(),
+        refs: Vec::new(),
     })
 }
 
@@ -2891,6 +2952,8 @@ fn build_test_file_inventory_card(
         channel_scores: QueryChannelScores::default(),
         text: lines.join("\n"),
         context_note: Some("same-file test coverage inventory".to_string()),
+        callers: Vec::new(),
+        refs: Vec::new(),
     })
 }
 
@@ -3252,6 +3315,8 @@ pub fn prefetch_neighbors_for_file(
             },
             text: chunk.text.clone(),
             context_note: None,
+            callers: Vec::new(),
+            refs: Vec::new(),
         });
     }
 
@@ -3388,6 +3453,8 @@ fn try_push_scored_chunk(
         channel_scores: candidate.channel_scores,
         text: chunk.text.clone(),
         context_note: None,
+        callers: Vec::new(),
+        refs: Vec::new(),
     });
     selection.selected_chunk_ids.push(candidate.id);
     *selection
@@ -5192,6 +5259,8 @@ mod tests {
             channel_scores: Default::default(),
             text: String::new(),
             context_note: None,
+            callers: Vec::new(),
+            refs: Vec::new(),
         });
         // The overlapping check logic
         let path = "src/ReactFiberCommitWork.js";
@@ -5647,6 +5716,8 @@ it("renders", () => {})
             channel_scores: QueryChannelScores::default(),
             text: "func (c *Context) Plan(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, tfdiags.Diagnostics) {\n    plan, _, diags := c.PlanAndEval(config, prevRunState, opts)\n    return plan, diags\n}".to_string(),
             context_note: None,
+            callers: Vec::new(),
+            refs: Vec::new(),
         };
         let continuation = ChunkRecord {
             id: 1,
@@ -5775,6 +5846,8 @@ it("renders", () => {})
             channel_scores: QueryChannelScores::default(),
             text: "def make_response(*args):\n    response = current_app.make_response(args)\n    response.headers['X-Test'] = '1'\n    return response\n".to_string(),
             context_note: None,
+            callers: Vec::new(),
+            refs: Vec::new(),
         };
         let continuation = ChunkRecord {
             id: 2,

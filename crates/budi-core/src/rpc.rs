@@ -85,6 +85,12 @@ pub struct QueryResultItem {
         alias = "slm_relevance_note"
     )]
     pub context_note: Option<String>,
+    /// Caller symbol names (populated by daemon from call graph).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
+    /// Callee/ref symbol names (populated by daemon from call graph).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

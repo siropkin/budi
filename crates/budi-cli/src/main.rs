@@ -3819,6 +3819,8 @@ mod tests {
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "from_envvar".to_string(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             },
             QueryResultItem {
                 path: "tests/test_config.py".to_string(),
@@ -3830,6 +3832,8 @@ mod tests {
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "test".to_string(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             },
             QueryResultItem {
                 path: "examples/tutorial/flaskr/__init__.py".to_string(),
@@ -3841,6 +3845,8 @@ mod tests {
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "example".to_string(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             },
             QueryResultItem {
                 path: "src/flask/cli.py".to_string(),
@@ -3852,6 +3858,8 @@ mod tests {
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "load_dotenv".to_string(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             },
             QueryResultItem {
                 path: "src/flask/app.py".to_string(),
@@ -3863,6 +3871,8 @@ mod tests {
                 channel_scores: budi_core::rpc::QueryChannelScores::default(),
                 text: "app".to_string(),
                 context_note: None,
+                callers: Vec::new(),
+                refs: Vec::new(),
             },
         ];
 
@@ -3887,6 +3897,8 @@ mod tests {
             channel_scores: budi_core::rpc::QueryChannelScores::default(),
             text: "app".to_string(),
             context_note: None,
+            callers: Vec::new(),
+            refs: Vec::new(),
         }];
         let context = build_runtime_guard_context(&snippets);
         assert!(context.is_empty());

@@ -229,6 +229,8 @@ fn build_nextjs_app_router_card(runtime: &RuntimeIndex, score: f32) -> Option<Qu
         channel_scores: QueryChannelScores::default(),
         text: text_lines.join("\n"),
         context_note: Some("Next.js app-router boundary summary".to_string()),
+        callers: Vec::new(),
+        refs: Vec::new(),
     })
 }
 

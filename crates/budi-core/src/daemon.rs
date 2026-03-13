@@ -307,32 +307,21 @@ impl DaemonState {
             Some("low-score".to_string())
         };
 
-        // Step 5: Call graph summary (structural oracle) — prepended to context.
-        // Use per-intent call-graph budgets: suppress for breadth intents and boost for flow-trace.
-        // FlowTrace budget is gated on top-snippet confidence (≥0.30 → 1200, else 600).
-        let call_graph_budget = match response.detected_intent.as_deref() {
-            Some("flow-trace") => {
-                let top_score = response.snippets.first().map(|s| s.score).unwrap_or(0.0);
-                if top_score >= 0.30 { 1200 } else { 600 }
-            }
-            Some("symbol-definition") | Some("symbol-usage") => 800,
-            Some("architecture")
-            | Some("test-lookup")
-            | Some("runtime-config")
-            | Some("path-lookup") => 0,
-            _ => 600,
-        };
-        let runtime_guard = runtime.lock().await;
-        let call_graph = if should_inject && call_graph_budget > 0 {
-            retrieval::build_call_graph_summary(
-                &runtime_guard,
-                &response.snippets,
-                call_graph_budget,
-            )
-        } else {
-            None
-        };
-        drop(runtime_guard);
+        // Step 5: Populate caller/callee fields on snippets (integrated structural context).
+        // Suppress for breadth intents where call graph adds noise.
+        let populate_call_graph = should_inject
+            && !matches!(
+                response.detected_intent.as_deref(),
+                Some("architecture")
+                    | Some("test-lookup")
+                    | Some("runtime-config")
+                    | Some("path-lookup")
+            );
+        if populate_call_graph {
+            let runtime_guard = runtime.lock().await;
+            retrieval::populate_snippet_call_graph(&runtime_guard, &mut response.snippets);
+            drop(runtime_guard);
+        }
         let t_callgraph_ms = t_start.elapsed().as_millis() as u64;
 
         // Per-intent snippet budget.
@@ -351,31 +340,21 @@ impl DaemonState {
         }
         .min(config.context_char_budget);
 
-        // Deduct call graph from snippet budget so total ≤ intent_snippet_budget.
-        let base_budget = if call_graph.is_some() {
-            intent_snippet_budget.saturating_sub(call_graph_budget)
-        } else {
-            intent_snippet_budget
-        };
         // Extract query tokens for query-aware proof line selection.
         let query_tokens = retrieval::extract_query_proof_tokens(&request.prompt);
-        // Rebuild context after dedup + prepend call graph summary.
-        let base_context = if request.session_id.is_some() || call_graph.is_some() {
+        // Rebuild context after dedup.
+        let base_context = if request.session_id.is_some() || populate_call_graph {
             retrieval::format_context(
                 &response.snippets,
-                base_budget,
+                intent_snippet_budget,
                 &query_tokens,
                 response.detected_intent.as_deref(),
             )
         } else {
             response.context.clone()
         };
-        response.context = if let Some(ref cg) = call_graph {
-            format!("{}\n{}", cg, base_context)
-        } else {
-            base_context
-        };
-        response.call_graph_summary = call_graph;
+        response.context = base_context;
+        response.call_graph_summary = None;
 
         // Update query stats (global + per-session).
         let ctx_len = response.context.len() as u64;

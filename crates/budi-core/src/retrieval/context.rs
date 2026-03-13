@@ -13,6 +13,8 @@ struct MergedCard<'a> {
     extra_anchors: Vec<String>,
     /// Full texts of secondary snippets for proof line extraction.
     extra_texts: Vec<&'a str>,
+    /// Secondary snippets (for collecting callers/refs across merged chunks).
+    secondary_snippets: Vec<&'a QueryResultItem>,
 }
 
 /// Group snippets by file path. Same-file snippets are merged into one card:
@@ -41,6 +43,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                     card.extra_anchors.push(anchor);
                 }
                 card.extra_texts.push(&snippet.text);
+                card.secondary_snippets.push(snippet);
             } else {
                 // Span would be too large — create a separate card.
                 cards.push(MergedCard {
@@ -49,6 +52,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                     merged_end: snippet.end_line,
                     extra_anchors: Vec::new(),
                     extra_texts: Vec::new(),
+                    secondary_snippets: Vec::new(),
                 });
             }
         } else {
@@ -59,6 +63,7 @@ fn merge_same_file_snippets(snippets: &[QueryResultItem]) -> Vec<MergedCard<'_>>
                 merged_end: snippet.end_line,
                 extra_anchors: Vec::new(),
                 extra_texts: Vec::new(),
+                secondary_snippets: Vec::new(),
             });
         }
     }
@@ -198,6 +203,18 @@ fn render_merged_card(
     let mut out = String::new();
     out.push_str(&format!("- file: {}\n", snippet.path));
     out.push_str(&format!("  anchor: {}\n", anchor));
+
+    // Integrated structural context: callers/refs from call graph.
+    // Merging these into the card avoids the separate [structural context] section.
+    let all_callers = collect_callers(card_data);
+    if !all_callers.is_empty() {
+        out.push_str(&format!("  callers: {}\n", all_callers.join(", ")));
+    }
+    let all_refs = collect_refs(card_data);
+    if !all_refs.is_empty() {
+        out.push_str(&format!("  refs: {}\n", all_refs.join(", ")));
+    }
+
     if let Some(note) = &snippet.context_note {
         out.push_str(&format!("  relevance: {}\n", note));
     } else if let Some(doc) = extract_first_docstring_line(&snippet.text) {
@@ -212,6 +229,44 @@ fn render_merged_card(
         }
     }
     out
+}
+
+/// Collect deduplicated caller names from primary + secondary snippets in a merged card.
+fn collect_callers<'a>(card: &'a MergedCard<'a>) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for c in &card.primary.callers {
+        if seen.insert(c.as_str()) {
+            result.push(c.as_str());
+        }
+    }
+    for sec in &card.secondary_snippets {
+        for c in &sec.callers {
+            if seen.insert(c.as_str()) {
+                result.push(c.as_str());
+            }
+        }
+    }
+    result
+}
+
+/// Collect deduplicated ref names from primary + secondary snippets in a merged card.
+fn collect_refs<'a>(card: &'a MergedCard<'a>) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for r in &card.primary.refs {
+        if seen.insert(r.as_str()) {
+            result.push(r.as_str());
+        }
+    }
+    for sec in &card.secondary_snippets {
+        for r in &sec.refs {
+            if seen.insert(r.as_str()) {
+                result.push(r.as_str());
+            }
+        }
+    }
+    result
 }
 
 /// Returns true for decorator/attribute lines that should be skipped when picking an anchor.
@@ -894,6 +949,8 @@ mod tests {
             channel_scores: QueryChannelScores::default(),
             text: text.to_string(),
             context_note: None,
+            callers: Vec::new(),
+            refs: Vec::new(),
         }
     }
 
@@ -1282,6 +1339,64 @@ mod tests {
             proof_count, 3,
             "flow-trace should have 3 proof lines, got {proof_count}: {out}"
         );
+    }
+
+    // ── integrated structural context (callers/refs) ──────────────────────────
+
+    #[test]
+    fn callers_and_refs_rendered_in_evidence_card() {
+        let mut s = make_snippet(
+            "src/resolvers.py",
+            "def get_resolver(urlconf=None):\n    if urlconf is None:\n        urlconf = settings.ROOT_URLCONF\n    return _get_cached_resolver(urlconf)",
+            0.9,
+        );
+        s.callers = vec![
+            "check_url_config".to_string(),
+            "resolve_request".to_string(),
+        ];
+        s.refs = vec!["_get_cached_resolver".to_string()];
+        let snippets = vec![s];
+        let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
+        assert!(
+            out.contains("callers: check_url_config, resolve_request"),
+            "callers missing: {out}"
+        );
+        assert!(
+            out.contains("refs: _get_cached_resolver"),
+            "refs missing: {out}"
+        );
+    }
+
+    #[test]
+    fn merged_card_collects_callers_from_secondary_snippets() {
+        let mut s1 = make_snippet(
+            "src/query.py",
+            "class QuerySet(AltersData):\n    \"\"\"Represent a lazy database lookup.\"\"\"\n    pass",
+            0.9,
+        );
+        s1.start_line = 303;
+        s1.end_line = 305;
+        // Primary has no callers (class definition)
+        let mut s2 = make_snippet(
+            "src/query.py",
+            "def __init__(self, model=None, query=None):\n    self._query = query",
+            0.5,
+        );
+        s2.start_line = 306;
+        s2.end_line = 321;
+        s2.callers = vec![
+            "AsyncClientHandler".to_string(),
+            "ManyToManyRel".to_string(),
+        ];
+        s2.refs = vec!["query".to_string()];
+        let snippets = vec![s1, s2];
+        let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
+        // Callers from secondary snippet should appear on the merged card
+        assert!(
+            out.contains("callers: AsyncClientHandler, ManyToManyRel"),
+            "secondary callers missing: {out}"
+        );
+        assert!(out.contains("refs: query"), "secondary refs missing: {out}");
     }
 
     // ── path_diversity_bucket ────────────────────────────────────────────────
