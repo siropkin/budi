@@ -1269,6 +1269,14 @@ pub fn build_query_response(
                 .chunk(c.id)
                 .is_some_and(|chunk| chunk.end_line.saturating_sub(chunk.start_line) <= 80)
         });
+    // FlowTrace low-confidence skip: when the top candidate is below the FlowTrace
+    // score floor (0.25), the result is irrelevant keyword noise. Without this guard,
+    // the first candidate always bypasses the floor via the best-effort fallback.
+    // Ripgrep P17: "teardown sequence" → top=0.18 (Sortr flag def, unrelated).
+    let flowtrace_low_confidence_skip = intent.kind == QueryIntentKind::FlowTrace
+        && scored
+            .first()
+            .is_some_and(|c| c.score < min_score);
     let ci_skip = ci_skip
         || env_listing_skip
         || lifecycle_overview_skip
@@ -1280,7 +1288,8 @@ pub fn build_query_response(
         || sym_use_thin_caller_skip
         || sym_use_no_call_site_skip
         || flowtrace_callee_skip
-        || sym_def_low_confidence_skip;
+        || sym_def_low_confidence_skip
+        || flowtrace_low_confidence_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
         || flowtrace_pipeline_skip
@@ -1292,6 +1301,7 @@ pub fn build_query_response(
         || sym_use_no_call_site_skip
         || flowtrace_callee_skip
         || sym_def_low_confidence_skip
+        || flowtrace_low_confidence_skip
     {
         f32::MAX
     } else if ci_skip {
