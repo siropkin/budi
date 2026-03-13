@@ -229,9 +229,16 @@ fn render_merged_card(
         out.push_str(&format!("  refs: {}\n", all_refs.join(", ")));
     }
 
+    // Relevance field: always show synthetic context_note (from packs).
+    // For SymbolUsage/FlowTrace, suppress docstring-derived relevance —
+    // these intents care about usage sites and call chains, not what the
+    // symbol does. Saves 8-19% context per card on those intents.
+    let suppress_docstring_relevance = matches!(intent, Some("symbol-usage") | Some("flow-trace"));
     if let Some(note) = &snippet.context_note {
         out.push_str(&format!("  relevance: {}\n", note));
-    } else if let Some(doc) = extract_first_docstring_line(&snippet.text) {
+    } else if !suppress_docstring_relevance
+        && let Some(doc) = extract_first_docstring_line(&snippet.text)
+    {
         out.push_str(&format!("  relevance: {}\n", doc));
     }
     out.push_str("  proof:\n");
@@ -1780,6 +1787,81 @@ def test_basic_routing(self):
         assert!(
             proof.iter().any(|l| l.contains("assert")),
             "test-lookup should pick assertion lines: {proof:?}"
+        );
+    }
+
+    #[test]
+    fn relevance_suppressed_for_symbol_usage_and_flow_trace() {
+        use crate::rpc::QueryResultItem;
+        let snippet = QueryResultItem {
+            path: "src/app.py".into(),
+            start_line: 1,
+            end_line: 10,
+            language: "python".into(),
+            score: 0.5,
+            reasons: vec![],
+            channel_scores: Default::default(),
+            text: "class App:\n    \"\"\"The main application object.\"\"\"\n    def run(self):\n        pass".into(),
+            context_note: None,
+            callers: vec![],
+            refs: vec![],
+        };
+        // SymbolDefinition should include relevance.
+        let ctx = build_context(
+            std::slice::from_ref(&snippet),
+            2000,
+            &[],
+            Some("symbol-definition"),
+        );
+        assert!(
+            ctx.contains("relevance:"),
+            "sym-def should include relevance"
+        );
+        // SymbolUsage should suppress docstring relevance.
+        let ctx = build_context(
+            std::slice::from_ref(&snippet),
+            2000,
+            &[],
+            Some("symbol-usage"),
+        );
+        assert!(
+            !ctx.contains("relevance:"),
+            "sym-usage should suppress relevance"
+        );
+        // FlowTrace should suppress docstring relevance.
+        let ctx = build_context(
+            std::slice::from_ref(&snippet),
+            2000,
+            &[],
+            Some("flow-trace"),
+        );
+        assert!(
+            !ctx.contains("relevance:"),
+            "flow-trace should suppress relevance"
+        );
+    }
+
+    #[test]
+    fn relevance_context_note_always_shown() {
+        use crate::rpc::QueryResultItem;
+        let snippet = QueryResultItem {
+            path: "src/app.py".into(),
+            start_line: 1,
+            end_line: 10,
+            language: "python".into(),
+            score: 0.5,
+            reasons: vec![],
+            channel_scores: Default::default(),
+            text: "def run():\n    pass".into(),
+            context_note: Some("pack: web-request-flow".into()),
+            callers: vec![],
+            refs: vec![],
+        };
+        // Even for symbol-usage, synthetic context_note should be kept.
+        let ctx = build_context(&[snippet], 2000, &[], Some("symbol-usage"));
+        assert!(
+            ctx.contains("relevance: pack: web-request-flow"),
+            "context_note should always show: {ctx}"
         );
     }
 
