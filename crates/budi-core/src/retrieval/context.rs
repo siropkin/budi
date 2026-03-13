@@ -412,14 +412,7 @@ fn extract_proof_lines(
     // Others: general needles.
     let fixed_needles: &[&str] = match intent {
         Some("flow-trace") => &[
-            "call(",
-            "invoke",
-            "dispatch",
-            "schedule",
-            "commit",
-            "return",
-            ".apply(",
-            ".send(",
+            "call(", "invoke", "dispatch", "schedule", "commit", "return", ".apply(", ".send(",
             ".emit(",
         ],
         Some("runtime-config") => &[
@@ -442,13 +435,7 @@ fn extract_proof_lines(
             "return",
         ],
         _ => &[
-            "return",
-            "call(",
-            "invoke",
-            "dispatch",
-            "route",
-            "handler",
-            "listen(",
+            "return", "call(", "invoke", "dispatch", "route", "handler", "listen(",
         ],
     };
 
