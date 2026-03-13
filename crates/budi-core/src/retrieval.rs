@@ -4097,6 +4097,39 @@ fn extract_query_symbol_tokens(query: &str) -> Vec<String> {
     // E.g. "Where is the resolve function defined" → extract "resolve".
     extract_named_symbol_from_prose(query, &mut out, &mut seen);
 
+    // Dotted identifier pattern: "app.use", "res.send", "req.query".
+    // Common in JS/Node.js method references. Split on dots and extract the
+    // method name (last component). Only triggers for x.y patterns where x is
+    // a short lowercase prefix (< 8 chars) — avoids matching prose like
+    // "e.g." or "i.e." via minimum component length of 2.
+    for raw in query
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '(' || c == ')')
+        .filter(|t| !t.is_empty())
+    {
+        // Strip trailing punctuation (e.g., "app.use?" → "app.use")
+        let cleaned = raw.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+        if let Some(dot_pos) = cleaned.rfind('.') {
+            let prefix = &cleaned[..dot_pos];
+            let method = &cleaned[dot_pos + 1..];
+            // Must look like a code reference: prefix is a short identifier
+            if prefix.len() >= 2
+                && prefix.len() <= 8
+                && method.len() >= 2
+                && prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                && method
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                let normalized = method.to_ascii_lowercase();
+                if seen.insert(normalized.clone()) {
+                    out.push(normalized);
+                }
+            }
+        }
+    }
+
     out
 }
 

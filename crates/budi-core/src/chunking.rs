@@ -54,6 +54,55 @@ fn looks_like_symbol(line: &str) -> bool {
         || trimmed.starts_with("export enum ")
         || trimmed.starts_with("export const ")
         || trimmed.starts_with("export type ")
+        // JS object/prototype method assignment:
+        //   app.use = function use(fn) { ... }
+        //   Response.prototype.send = function send(body) { ... }
+        //   exports.query = function query(req, res) { ... }
+        || is_js_method_assignment(trimmed)
+}
+
+/// Detect JS object/prototype method assignment patterns:
+///   `identifier.method = function ...`
+///   `Identifier.prototype.method = function ...`
+///   `exports.name = function ...`
+fn is_js_method_assignment(trimmed: &str) -> bool {
+    // Must contain " = function " and start with an identifier
+    if let Some(eq_pos) = trimmed.find(" = function") {
+        let prefix = &trimmed[..eq_pos];
+        // Must have at least one dot (object.method or Object.prototype.method)
+        prefix.contains('.') && prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
+    } else {
+        false
+    }
+}
+
+/// For JS method assignment lines, extract the function name after `function `.
+/// Returns None if this is not a method assignment pattern.
+fn symbol_from_js_method_assignment(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !is_js_method_assignment(trimmed) {
+        return None;
+    }
+    // Extract the name after "= function "
+    let func_pos = trimmed.find(" = function ")?;
+    let after_func = &trimmed[func_pos + " = function ".len()..];
+    let name: String = after_func
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.len() >= 2 {
+        Some(name)
+    } else {
+        // Fallback: extract the method name from the prefix (before "=")
+        // e.g., "app.use = function(fn)" → "use"
+        let prefix = &trimmed[..func_pos];
+        let method = prefix.rsplit('.').next()?;
+        if method.len() >= 2 {
+            Some(method.to_string())
+        } else {
+            None
+        }
+    }
 }
 
 /// Language keywords to skip when extracting the symbol name.
@@ -132,6 +181,10 @@ fn symbol_from_line(line: &str) -> Option<String> {
     }
     if trimmed.starts_with('@') || trimmed.starts_with("#[") {
         return None;
+    }
+    // JS method assignment: extract function name, not object prefix
+    if let Some(sym) = symbol_from_js_method_assignment(line) {
+        return Some(sym);
     }
     if let Some(rest) = trimmed.strip_prefix("func") {
         let rest = rest.trim_start();
@@ -327,6 +380,11 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
                 | "class_declaration"
                 | "lexical_declaration"
                 | "variable_declaration"
+                // expression_statement captures object/prototype method assignments:
+                //   res.send = function send(body) { ... }
+                //   app.use = function use(fn) { ... }
+                // Short expression statements (console.log, etc.) merge via merge_small_siblings.
+                | "expression_statement"
         ),
         // TS-parsed JS files omit lexical/variable declarations to avoid
         // creating 1-line const/let chunks inside large Flow-typed functions.
@@ -1097,6 +1155,62 @@ func (c *Context) Plan(opts *PlanOpts) (*plans.Plan, error) {
                 .iter()
                 .map(|c| c.symbol_hint.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn js_method_assignment_gets_symbol_hint() {
+        let content = r#"
+var res = Object.create(http.ServerResponse.prototype)
+
+res.send = function send(body) {
+    var chunk = body;
+    var encoding;
+    var req = this.req;
+    var type;
+
+    if (arguments.length === 2) {
+        if (typeof arguments[0] !== 'number' && typeof arguments[1] === 'number') {
+            deprecate('res.send(body, status): Use res.status(status).send(body) instead');
+            this.statusCode = arguments[1];
+        }
+    }
+    return this;
+}
+
+res.json = function json(obj) {
+    var val = obj;
+    return this;
+}
+"#;
+        let chunks = chunk_text("lib/response.js", content, 80, 20);
+        let hints: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"send"),
+            "expected 'send' symbol hint from res.send = function send(...), got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn js_prototype_method_assignment_gets_symbol_hint() {
+        let content = r#"
+app.use = function use(fn) {
+    var offset = 0;
+    var path = '/';
+    return this;
+}
+"#;
+        let chunks = chunk_text("lib/application.js", content, 80, 20);
+        let hints: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| c.symbol_hint.as_deref())
+            .collect();
+        assert!(
+            hints.contains(&"use"),
+            "expected 'use' symbol hint from app.use = function use(...), got: {hints:?}"
         );
     }
 
