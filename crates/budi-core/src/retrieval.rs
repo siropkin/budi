@@ -1662,7 +1662,6 @@ fn first_matching_ecosystem<'a>(
         .map(String::as_str)
 }
 
-
 /// Populate `callers` and `refs` fields on each snippet from the call graph.
 /// This integrates structural context directly into evidence cards instead of
 /// a separate section, saving ~15-20% of injection overhead.
