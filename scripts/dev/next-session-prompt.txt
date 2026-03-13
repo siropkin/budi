@@ -23,12 +23,15 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 ### 3. Session dedup diagnostic insight + fix — DONE (7ce0d9f)
 - Found: high retrieval_top_score + snippets_count=0 cases caused by session dedup
 - diagnostics.top_score was set before daemon session dedup, now refreshed post-dedup
-- React P14 "flushPassiveEffects" had score 0.94 but ctx=0 (correctly deduped)
 
 ### 4. Research sweep — DONE
-- Claude Code: HTTP hooks, WorktreeCreate/WorktreeRemove confirmed, SessionStart double-fire fixed
+- Claude Code: HTTP hooks, WorktreeCreate/WorktreeRemove, TeammateIdle, TaskCompleted hooks
+- Agent/skill frontmatter hooks, memory frontmatter with user/project/local scope
 - PreCompact hook available but budi already handles compact via SessionStart source detection
-- No new embedding models. fastembed-rs still at 5.12.0. No new competitors
+- No new 384d code embedding models. AllMiniLM remains best
+- fastembed-rs still at 5.12.0. Qwen3 and BAAI/bge-m3 support added in v5.8+
+- ContextBench (arxiv 2602.05892): 66 repos, 8 langs, gold-annotated. Block-level F1 < 0.45 for SOTA
+- Codified Context paper (arxiv 2602.20478): hot/cold memory split mirrors budi architecture
 
 ### 5. Version bump to v3.12.0 — DONE (f2c95fd)
 - "Explain X" routing + post-dedup diagnostics accuracy. All CI + Release green.
@@ -57,26 +60,37 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Only 3 regressions on injected queries (Django P14 persistent, Terraform P5/P13 noise)
 - Express P15 had dramatic win (+3, Q 5→8)
 
-## Key findings
+## Key analysis insights
 - 110/144 (76%) queries get ctx=0 (budi correctly skips)
-- 4 sharp regressions (Q ≥-2) are all ctx=0 = pure LLM response variance
+- All 4 sharp regressions (Q ≥-2) are ctx=0 = pure LLM response variance
+- Django P14 "resolve" is ambiguous-symbol problem — multiple definitions across files, budi picks internal URLResolver.resolve but misses public API django/urls/base.py:22
 - PreCompact hook not needed — SessionStart already re-injects project map on compact/clear
 - WorktreeCreate hook not needed — resolve_storage_root() shares index, configs shared across worktrees
 
 ## Priority queue for next session
 
-### 1. WorktreeCreate auto-init — LOW
-- Auto-register new worktrees with budi (currently manual `budi init` needed)
-- Scope: detect worktree via resolve_storage_root, skip init if already registered
+### 1. Ambiguous-symbol multi-definition support — MEDIUM
+- When multiple definitions of the same symbol exist across different files, consider including top 2-3 definitions instead of just the highest-scoring one
+- Django P14 "resolve" is the persistent test case (URLResolver.resolve vs base.resolve)
+- Needs careful design to avoid context bloat for unambiguous symbols
 
 ### 2. ContextBench evaluation — LOW
-- External validation benchmark (66 repos, 8 languages, gold-annotated)
+- External validation benchmark (66 repos, 8 languages, gold-annotated contexts)
+- Measures context retrieval recall/precision at file/block/line granularity
+- Designed for issue-resolution tasks — would need adaptation for budi's query-based model
 
 ### 3. Session dedup analytics — LOW
 - Log dedup count alongside skip reason to better attribute ctx=0 causes in benchmarks
+- Would make benchmark analysis easier (currently need to cross-reference session IDs)
+
+### 4. EmbeddingGemma evaluation — LOW
+- Google's 308M model with Matryoshka truncation to 384d
+- Would need ONNX export and integration with fastembed-rs
+- Not code-specialized, but Matryoshka truncation is interesting
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
 - Explore reducing false skips on sym-use queries (largest category of ctx=0)
+- fastembed-rs v5.12+ has Qwen3 and BAAI/bge-m3 — evaluate if relevant
