@@ -1,72 +1,72 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.7.0, 2026-03-12)
+## Current state (v3.8.0, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass)
-- All 336 tests pass (311 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.7.0)
+- All 338 tests pass (312 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.8.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
-- v3.7.0 released: https://github.com/siropkin/budi/releases/tag/v3.7.0
+- v3.8.0 released: https://github.com/siropkin/budi/releases/tag/v3.8.0
 
-## What was done in session 19 (2026-03-12)
+## What was done in session 20 (2026-03-13)
 
-### 1. Full 8-repo benchmark revalidation — DONE (major)
-All repos freshly run on v3.7.0 (post-sibling-merge + docstring extraction):
-- React: 17/18 (94%), -12% cost. Best ever.
-- Flask: 16/18 (89%), -9% cost. 0% injection regression.
-- Django: 12/18 (67%), -13% cost. 4 ctx=0 LLM var, P13/P14 injected (known).
-- Terraform: 16/18 (89%), -17% cost. P5 known thin wrapper.
-- Fastify: **18/18 (100%)**, -11% cost. Perfect! 7 wins.
-- FastAPI: **18/18 (100%)**, -6% cost. Perfect! 9 wins.
-- Express: 14/18 (78%), -19% cost. From session 18.
-- Ripgrep: running (session 19 re-run in progress).
-- Total (7 repos, 126 judged): ~111/126 (~88%), ~-12% cost.
-- Key insight: Real injection regressions = 3/126 (2.4%), ALL sym-def thin wrappers.
+### 1. Ripgrep revalidation (final) — DONE
+- 12/13 (92%), -11% cost. Best ever.
+- Only P1 (arch, ctx=0, Q 9→8.5) is LLM variance.
+- 3 wins, 9 ties.
 
-### 2. Granite-embedding-small-r2 evaluation — DONE (no action)
-- ONNX now available on HuggingFace (onnx-community/granite-embedding-small-english-r2-ONNX)
-- Loaded via fastembed UserDefinedEmbeddingModel (quantized, ~52MB)
-- Verdict: Keep AllMiniLM. Same discrimination problem as ModernBERT.
-- Granite score spread: 0.03-0.14 vs AllMiniLM 0.15-0.47
-- Scores cluster 0.70-0.88 vs AllMiniLM 0.09-0.63
-- Would require recalibrating all 50+ thresholds for worse separation
+### 2. Context condensation — DONE (3ddfcd7)
+Three changes to reduce injection overhead:
+- Rules compressed from 2 lines (152 chars) to 1 line (63 chars)
+- `span:` field removed from evidence cards (file + anchor suffice)
+- Intent-specific proof budget: SymbolDef gets 2 proof lines, others get 3
+- Django P13 injection: 648 → 494 chars (-24%)
+- 2 new tests
 
-### 3. Docstring evidence card relevance — DONE (1edcc30)
-- Extract first meaningful docstring line from chunk text
-- Added as `relevance:` field in evidence cards
-- Supports: Python triple-quote, Rust ///, Go/JS //, JSDoc /** */
-- Django QuerySet: "Represent a lazy database lookup for a set of objects"
-- Flask class: "The flask object implements a WSGI application..."
-- 9 new tests
+### 3. Research sweep — DONE
+- **LongCodeZip** (arXiv 2510.00446): Two-stage code compression, 5.6x. Validates budi's evidence card approach.
+- **Augment Code Context Engine MCP**: Most serious competitor (semantic dep graph, cloud-hosted embeddings).
+- **SnowflakeArcticEmbedS**: 33M, 384d, in fastembed 5.12.0. Retrieval-specialized. Worth evaluating.
+- **Claude Code**: HTTP hooks stable. additionalContext injection bug #14281.
+- **fastembed-rs 5.12.0**: Latest, no newer versions.
+- No new competitors threatening budi's hooks-based advantage.
 
-### 4. Research sweep — DONE
-- RAG vs agentic debate validates budi's hybrid pre-injection approach
-- fastembed-rs: no new small ONNX code models (Qwen3/Nomic use candle)
-- Claude Code: 15 hook events, HTTP hooks. No new relevant hooks.
-- No new competitors threatening budi's position.
+### 4. Benchmark revalidation — DONE
+- Django: 14/18 (78%), -28% cost. Improved from 67% (s19). Best cost savings.
+- React: 14/18 (78%), -3% cost. 1 injected regression (P16 sym-use), 3 ctx=0 LLM noise.
+- Ripgrep: 12/13 (92%), -11% cost. Best ever.
+
+### 5. v3.8.0 release — DONE
+- https://github.com/siropkin/budi/releases/tag/v3.8.0
 
 ## Priority queue for next session
 
-### 1. Complete Ripgrep revalidation — HIGH
-Running now. Check for results in ~/.local/share/budi/repos/ripgrep-*/benchmarks/
+### 1. Thin-wrapper sym-def investigation — MEDIUM
+- Django P14 and Terraform P5 are persistent sym-def regressions caused by thin delegation wrappers
+- P14: `def resolve(path, urlconf=None): return get_resolver(urlconf).resolve(path)` — 4 lines
+- P5: `func (c *Context) Plan(...) { plan, _, diags := c.PlanAndEval(...); return plan, diags }`
+- Possible fix: when merged card primary is a thin wrapper, swap anchor to the substantial function
+- Risk: false positives on legitimate short functions
 
-### 2. Context condensation — MEDIUM
-Docstring extraction is done. Other ideas:
-- Intent-specific card formatting (SymbolDef: signature + docstring, FlowTrace: call chain emphasis)
-- Better proof line selection for specific intents
-- Cross-file relationship annotations
+### 2. Structural context integration — MEDIUM
+- Structural context is ~22% of total injection for sym-def queries
+- Currently separate [structural context] and [budi context] sections
+- Could merge caller/callee info into evidence cards to save overhead
+- Bigger refactor but significant space savings
 
-### 3. Prompt-context management research — MEDIUM
-- Study how to reduce total context load (CLAUDE.md + system reminders + budi injection)
-- Agent config file discovery (gitignored files like CLAUDE.md)
-- Deduplication when budi injection overlaps with existing context
+### 3. Embedding model evaluation — LOW
+- SnowflakeArcticEmbedS (33M, 384d) is in fastembed 5.12.0, purpose-built for retrieval
+- Same recalibration concern as Granite/ModernBERT, but different architecture
+- Jina Code Embeddings 0.5B with Matryoshka truncation to 384d is future candidate
 
-### 4. Version bump + release — LOW
-If Ripgrep results are good, bump to v3.8.0 and release.
+### 4. Full 8-repo benchmark sweep — LOW
+- Flask, Terraform, Fastify, FastAPI, Express not yet revalidated on v3.8.0
+- Only Django, React, Ripgrep have fresh results
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
 - Verkada-Web daily-driver usage
+- additionalContext injection bug #14281 investigation
