@@ -1108,11 +1108,53 @@ pub fn build_query_response(
                     .filter(|t| t.len() >= 4)
                     .map(|t| t.as_str())
                     .collect();
-                !distinctive.is_empty()
+                // When symbol_tokens is empty (no backtick/camelCase/snake_case
+                // identifiers), fall back to distinctive concept words from the
+                // query itself. Filter out common test/code stopwords.
+                // Ripgrep P15: "parallel search correctness" has no symbol tokens,
+                // but "parallel" is a distinctive concept — if no top-5 result
+                // mentions it, the retrieved tests are about unrelated topics.
+                let concept_fallback: Vec<String> = if distinctive.is_empty() {
+                    const STOP: &[&str] = &[
+                        // question words
+                        "what", "which", "where", "when", "how", "does",
+                        // test vocabulary
+                        "test", "tests", "spec", "specs", "cover", "covers",
+                        "covered", "integration", "unit",
+                        // common prose
+                        "that", "this", "them", "they", "the", "and", "are",
+                        "for", "from", "with", "have", "live", "repo", "file",
+                        "files", "code", "codebase", "correctness",
+                        // ubiquitous code domain words (appear in nearly every
+                        // file in their respective codebases, useless for
+                        // discriminating between test topics)
+                        "search", "config", "parse", "handle", "request",
+                        "response", "error", "data", "type", "function",
+                        "method", "module", "import", "export", "logic",
+                        "parsing",
+                    ];
+                    let words: Vec<String> = query
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .filter(|w| w.len() >= 4)
+                        .map(|w| w.to_ascii_lowercase())
+                        .filter(|w| !STOP.contains(&w.as_str()))
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    words
+                } else {
+                    Vec::new()
+                };
+                let has_concepts = !distinctive.is_empty() || !concept_fallback.is_empty();
+                has_concepts
                     && !scored.iter().take(5).any(|c| {
                         runtime.chunk(c.id).is_some_and(|chunk| {
                             let text_lower = chunk.text.to_ascii_lowercase();
-                            distinctive.iter().any(|t| text_lower.contains(t))
+                            if !distinctive.is_empty() {
+                                distinctive.iter().any(|t| text_lower.contains(t))
+                            } else {
+                                concept_fallback.iter().any(|t| text_lower.contains(t.as_str()))
+                            }
                         })
                     })
             });
