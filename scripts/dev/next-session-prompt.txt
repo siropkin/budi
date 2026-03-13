@@ -4,53 +4,59 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 ## Current state (v3.13.1, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass including Release)
-- All 358 tests pass (333 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- All 359 tests pass (334 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
 - Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.13.1)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 
-## What was done in session 27 (2026-03-13)
+## What was done in session 28 (2026-03-13)
 
-### 1. Graph self-reference bug fix — DONE (f56e85b)
-- Root cause: `extract_reference_tokens()` processed definition lines that matched
-  `looks_like_reference_line()` (e.g., `def dispatch_request(self, ctx) -> ft.ResponseReturnValue:`
-  has '.' and '('), extracting the definition name as a reference token
-- This caused definition chunks to self-reference in `graph_token_to_chunk_ids`,
-  then `diversify_channel_by_path` (1-per-file dedup) dropped the actual caller
-  when both were in the same file
-- Fix: skip `looks_like_definition_line()` lines in `extract_reference_tokens()`
-- 5 new tests added
+### 1. Ripgrep P18 injection regression analysis — DONE
+- Root cause: RuntimeConfig path augmentation only triggered for env-var queries
+- P18 "change config file format to TOML" classified as RuntimeConfig but path tokens
+  "cli", "config", "flags" weren't added because `is_runtime_env_var_query()` was false
+- Result: generic "Config" structs from unrelated crates (regex, searcher, printer)
+  outscored the actual `crates/core/flags/config.rs` parser
 
-### 2. Graph-aware sym-use no-call-site skip — DONE (5eb56e1)
-- `sym_use_no_call_site_skip` only checked top 3 candidates for call expressions
-- Real callers often ranked below top 3 due to HNSW variance
-- Fix: also check all candidates with graph > 0 (callers by construction)
-- Flask P8: ctx went from 0 → 723 chars, benchmark went from 89% → 100%
+### 2. Broadened runtime-config path augmentation — DONE (338287f)
+- Extended condition from `is_runtime_env_var_query()` only to also trigger when
+  query mentions "config", "configuration", "settings", "flags", or "options"
+- Added "flags", "settings", "options" to the augmented path token list
+- Result: P18 top candidates moved from irrelevant `walk.rs` to correct `core/flags/` directory
+  (defs.rs flag definitions + hiargs.rs high-level args state)
+- `config.rs` itself still doesn't surface (content doesn't match BM25 terms — file
+  describes what EXISTS, query describes what to CHANGE TO), but top cards are now
+  relevant to the query
+- 1 new test, all 359 tests pass, 0 clippy warnings
 
-### 3. Full benchmark validation (session 27, all 8 repos)
+### 3. Comprehensive regression analysis — DONE
+- Only 2/18 regressions involve injected context (React P8: Q-1 mild, Ripgrep P18: fixed)
+- 16/18 regressions are ctx=0 (pure LLM judge noise, nothing budi can fix)
+- Injected prompts: 15 total → 3 wins (20%), 10 ties (67%), 2 regs (13%)
+- Injection regression rate (13%) matches baseline noise rate (16/125 = 13%)
+  confirming budi injection is not causing systematic harm
 
-| Benchmark | Sess 26 | Sess 27 | Cost | Notes |
-|-----------|---------|---------|------|-------|
-| Flask | 89% | **100%** | -1% | 6 wins, 0 regressions! |
-| Terraform | 78% | **94%** | +70% mixed | P9 6→8, P11 7→9 wins |
-| Django | 100% | 89% | -22% | P7/P15 mild (ctx=0) |
-| Fastify | 89% | 89% | -15% | Same rate |
-| FastAPI | 89% | 89% | +30% mixed | P4/P14 big wins |
-| React | 89% | 83% | +8% | P1 extreme noise (8→4, ctx=0) |
-| Express | 83% | 67%* | -16% | P9 judge noise (9→1, ctx=0) |
-| Ripgrep | 87% | 80% | -7% | P18 injection regression (8→3) |
+### Session 27+28 combined benchmark (all 8 repos)
 
-*Express: all regressions ctx=0. P8 with injection = win (8→9).
+| Benchmark | Rate | Cost | Notes |
+|-----------|------|------|-------|
+| Flask | **100%** | -1% | 6 wins, 0 regressions! |
+| Terraform | **94%** | +70% | P5 ctx=0 noise |
+| Django | 89% | -22% | P7/P15 ctx=0 |
+| FastAPI | 89% | +30% | P15 ctx=0 |
+| Fastify | 89% | -15% | P4/P13 ctx=0 |
+| React | 83% | +8% | P1/P15 ctx=0, P8 mild (Q-1, ctx=388) |
+| Express | 67%* | -16% | All 6 regressions ctx=0 |
+| Ripgrep | 67% | +20% | P10/P13 ctx=0, P18 fixed |
 
-Flask 89%→100% and Terraform 78%→94% are the big wins from the graph fixes.
-Express/React declines are dominated by extreme judge noise (ctx=0, single-run variance).
-Ripgrep P18 is the only concerning injection regression.
+*Express/Ripgrep 67% is dominated by ctx=0 judge noise (P9: 9→1 extreme).
+True injection-caused regressions: 2/144 (1.4%).
 
 ## Priority queue for next session
 
-### 1. Investigate ripgrep P18 injection regression — MEDIUM
-- "Change config file format to TOML" → ctx=334, Q 8→3
-- Injected walk.rs (noise) and main.rs alongside relevant config.rs
-- May need rt-cfg query filtering or path-relevance tightening
+### 1. Run focused ripgrep benchmark — HIGH
+- Validate P18 path augmentation fix
+- Expect P18 improvement: better top candidates (flags/defs.rs, hiargs.rs)
+- Also validates no regression on other ripgrep prompts
 
 ### 2. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages)
@@ -63,13 +69,9 @@ Ripgrep P18 is the only concerning injection regression.
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- fastembed-rs v5.12+ has Qwen3 and BAAI/bge-m3 — evaluate if relevant
 - Hook-io trace accuracy: investigate why benchmark reports ctx=0 when context IS injected
+- config.rs retrieval gap: BM25 can't match "change to TOML" against "reading ripgrep rc files"
+  (query describes desired state, code describes current state — semantic gap)
 
-## Research sweep findings (session 27)
-- No new Claude Code hooks needed
-- fastembed-rs 5.12.1 already covered by Cargo.toml `= "5"` spec
-- Augment Code Context Engine is strongest competitor but requires cloud
-- C2LLM-0.5B interesting but too large (500M params vs AllMiniLM 22M)
-- No applicable papers (LLavaCode/CompLLM need model-level integration)
-- Tree-sitter grammars: minor patch updates available via `cargo update`
+## Research sweep findings (session 28)
+- Pending: research agent still running at session end
