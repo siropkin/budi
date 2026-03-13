@@ -2,6 +2,16 @@
 
 All notable changes to budi are documented here.
 
+## [3.11.0] — FlowTrace Precision & Context Compression
+
+More precise FlowTrace classification and leaner evidence cards.
+
+### Retrieval improvements
+
+- **FlowTrace keyword precision**: Replaced broad "what order" FlowTrace trigger with specific patterns ("what order do/are/does", "teardown sequence/order"). Prevents design-change prompts from being misclassified as FlowTrace.
+- **FlowTrace low-confidence skip**: When top FlowTrace score is below the intent floor (0.25), injection is skipped entirely instead of forcing a low-quality first candidate through.
+- **Relevance field compression**: Docstring-derived `relevance:` field suppressed for SymbolUsage and FlowTrace intents — these care about usage sites and call chains, not what the symbol does. Saves 8–19% context per card. Synthetic context notes from packs always shown.
+
 ## [3.10.0] — JS Method Detection & Smarter Skip Patterns
 
 Better chunking for Express-style codebases, smarter skip patterns, and score-aware budget allocation.
