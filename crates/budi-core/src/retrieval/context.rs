@@ -139,7 +139,19 @@ pub(super) fn build_context(
         // For sym-def, skip secondary cards that are thin delegation wrappers.
         // These add noise without new information (e.g. a 4-line function that
         // just calls the real implementation found in the primary card).
-        if is_sym_def && idx > 0 && is_thin_delegation_wrapper(&card_data.primary.text) {
+        // Exception: keep thin wrappers that have hint-path-relevance — they are
+        // entry points in the domain-relevant file the user asked about (e.g.
+        // django/urls/base.py:resolve delegates to resolvers.py:URLResolver.resolve,
+        // but base.py is the public API the user wants to see).
+        if is_sym_def
+            && idx > 0
+            && is_thin_delegation_wrapper(&card_data.primary.text)
+            && !card_data
+                .primary
+                .reasons
+                .iter()
+                .any(|r| r == "hint-path-relevance")
+        {
             continue;
         }
         // Score-weighted budget: allocate proportional to (score / total_score).
@@ -1340,6 +1352,37 @@ mod tests {
         assert!(
             !out.contains("file: src/base.py"),
             "thin wrapper should be skipped in sym-def: {out}"
+        );
+    }
+
+    #[test]
+    fn thin_wrapper_with_path_relevance_kept_in_sym_def() {
+        let mut s1 = make_snippet(
+            "src/resolvers.py",
+            "def resolve(self, path):\n    match = self.pattern.match(path)\n    if match:\n        new_path, args, kwargs = match\n        for pattern in self.url_patterns:\n            sub_match = pattern.resolve(new_path)\n            return ResolverMatch(\n                sub_match.func,\n            )",
+            0.9,
+        );
+        s1.start_line = 670;
+        s1.end_line = 717;
+        let mut s2 = make_snippet(
+            "src/urls/base.py",
+            "def resolve(path, urlconf=None):\n    if urlconf is None:\n        urlconf = get_urlconf()\n    return get_resolver(urlconf).resolve(path)",
+            0.7,
+        );
+        s2.start_line = 22;
+        s2.end_line = 25;
+        s2.reasons = vec!["hint-match-boost".to_string(), "hint-path-relevance".to_string()];
+        let snippets = vec![s1, s2];
+        let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
+        // Primary card should be present
+        assert!(
+            out.contains("file: src/resolvers.py"),
+            "primary card missing: {out}"
+        );
+        // Thin wrapper with path-relevance should be KEPT (it's the public API entry point)
+        assert!(
+            out.contains("file: src/urls/base.py"),
+            "path-relevant thin wrapper should be kept in sym-def: {out}"
         );
     }
 

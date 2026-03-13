@@ -20,7 +20,10 @@ from typing import Any
 
 _print_lock = threading.Lock()
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEV_BIN_DIR = REPO_ROOT / "target" / "debug"
+_RELEASE_BIN_DIR = REPO_ROOT / "target" / "release"
+_DEBUG_BIN_DIR = REPO_ROOT / "target" / "debug"
+# Prefer release binaries (optimized, faster cold-start) over debug
+DEV_BIN_DIR = _RELEASE_BIN_DIR if (_RELEASE_BIN_DIR / "budi").exists() else _DEBUG_BIN_DIR
 
 
 def _print(*args, **kwargs) -> None:
