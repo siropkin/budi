@@ -7358,4 +7358,20 @@ it("renders", () => {})
             &tokens
         ));
     }
+
+    #[test]
+    fn dotted_identifier_extracts_method_name() {
+        let tokens = extract_query_symbol_tokens(
+            "Where is app.use defined and how does it register middleware?",
+        );
+        assert!(
+            tokens.contains(&"use".to_string()),
+            "expected 'use' from app.use, got: {tokens:?}"
+        );
+        let tokens2 = extract_query_symbol_tokens("Where is res.send defined?");
+        assert!(
+            tokens2.contains(&"send".to_string()),
+            "expected 'send' from res.send, got: {tokens2:?}"
+        );
+    }
 }

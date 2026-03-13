@@ -70,7 +70,10 @@ fn is_js_method_assignment(trimmed: &str) -> bool {
     if let Some(eq_pos) = trimmed.find(" = function") {
         let prefix = &trimmed[..eq_pos];
         // Must have at least one dot (object.method or Object.prototype.method)
-        prefix.contains('.') && prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
+        prefix.contains('.')
+            && prefix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
     } else {
         false
     }
@@ -371,6 +374,27 @@ fn ast_language_for_path(file_path: &str) -> Option<(AstLanguageKind, Language)>
     None
 }
 
+/// Check if a node should be treated as a chunk boundary.
+/// For most node kinds this is purely based on the kind string, but for
+/// `expression_statement` in JavaScript we only break at method assignment
+/// patterns (`app.use = function use(fn) { ... }`), not at every expression.
+fn is_boundary_node(kind: &str, language: AstLanguageKind, first_line: &str) -> bool {
+    if is_boundary_kind(kind, language) {
+        return true;
+    }
+    // JS method assignment: expression_statement that starts with "ident.method = function"
+    if kind == "expression_statement"
+        && matches!(
+            language,
+            AstLanguageKind::JavaScript | AstLanguageKind::JavaScriptTSFallback
+        )
+        && is_js_method_assignment(first_line.trim())
+    {
+        return true;
+    }
+    false
+}
+
 fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
     match language {
         AstLanguageKind::JavaScript => matches!(
@@ -380,11 +404,6 @@ fn is_boundary_kind(kind: &str, language: AstLanguageKind) -> bool {
                 | "class_declaration"
                 | "lexical_declaration"
                 | "variable_declaration"
-                // expression_statement captures object/prototype method assignments:
-                //   res.send = function send(body) { ... }
-                //   app.use = function use(fn) { ... }
-                // Short expression statements (console.log, etc.) merge via merge_small_siblings.
-                | "expression_statement"
         ),
         // TS-parsed JS files omit lexical/variable declarations to avoid
         // creating 1-line const/let chunks inside large Flow-typed functions.
@@ -509,7 +528,8 @@ fn collect_top_level_chunks(
         let Some(node) = root.named_child(idx) else {
             continue;
         };
-        if !is_boundary_kind(node.kind(), language_kind) {
+        let first_line = lines.get(node.start_position().row).copied().unwrap_or("");
+        if !is_boundary_node(node.kind(), language_kind, first_line) {
             continue;
         }
         append_node_chunks(&mut chunks, node, &context);
@@ -591,6 +611,7 @@ fn ast_top_level_chunks(
 fn collect_boundary_descendants<'a>(
     node: Node<'a>,
     language_kind: AstLanguageKind,
+    lines: &[&str],
     out: &mut Vec<Node<'a>>,
 ) {
     let count = node.named_child_count();
@@ -601,10 +622,11 @@ fn collect_boundary_descendants<'a>(
         let Some(child) = node.named_child(i) else {
             continue;
         };
-        if is_boundary_kind(child.kind(), language_kind) {
+        let first_line = lines.get(child.start_position().row).copied().unwrap_or("");
+        if is_boundary_node(child.kind(), language_kind, first_line) {
             out.push(child);
         } else {
-            collect_boundary_descendants(child, language_kind, out);
+            collect_boundary_descendants(child, language_kind, lines, out);
         }
     }
 }
@@ -648,7 +670,12 @@ fn append_node_chunks(out: &mut Vec<Chunk>, node: Node<'_>, context: &NodeChunki
         // This handles cases like createChildReconciler (1600+ lines) containing many
         // nested function declarations that each deserve their own chunk.
         let mut boundary_children: Vec<Node<'_>> = Vec::new();
-        collect_boundary_descendants(node, context.language_kind, &mut boundary_children);
+        collect_boundary_descendants(
+            node,
+            context.language_kind,
+            context.lines,
+            &mut boundary_children,
+        );
         if !boundary_children.is_empty() {
             // Emit a chunk for the preamble BEFORE the first boundary child.
             // For Python/Java classes, this captures the class declaration, docstring,
