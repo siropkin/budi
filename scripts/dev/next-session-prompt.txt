@@ -4,66 +4,62 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 ## Current state (v3.11.0, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass including Release)
-- All 352 tests pass (326 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- All 353 tests pass (327 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
 - Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.11.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 - v3.11.0 released: https://github.com/siropkin/budi/releases/tag/v3.11.0
 
-## What was done in session 24 (2026-03-13)
+## What was done in session 24 continued (2026-03-13)
 
-### 1. Version bump to v3.10.0 — DONE (6ea84fc+00b40b8)
-- JS method assignment + sym-def skip + concept-word fallback + intent-aware proof + score-weighted budget
-- README/benchmark docs updated with 8-repo results
-
-### 2. FlowTrace intent classifier fix — DONE (63d834d)
-- Replaced broad "what order" keyword with specific "what order do/are/does" + "teardown sequence/order"
-- Ripgrep P18: was FlowTrace (injecting Walk struct), now RuntimeConfig
-
-### 3. FlowTrace low-confidence skip — DONE (ef15f21+ebb2de0)
-- When top FlowTrace score < floor (0.25), skip injection entirely
-- Ripgrep P8: was injecting Sortr flag def (score 0.18), now skips
-
-### 4. Relevance field suppression — DONE (9a932bf)
+### 1. Relevance field suppression — DONE (9a932bf)
 - Docstring-derived `relevance:` suppressed for SymbolUsage and FlowTrace intents
 - Saves 8-19% context per card. Synthetic context_note always shown.
 - Django P9 validation: Win (Q 8→9, G 7→9, -68% cost)
 
-### 5. Version bump to v3.11.0 — DONE (0fafd8b)
-- FlowTrace precision + context compression. All CI green.
+### 2. "What is Symbol?" classifier routing — DONE (946dfa5)
+- PascalCase, camelCase, backtick-quoted, snake_case after "what is" → SymbolDefinition
+- React "What is useState?" now finds definition (0.66 vs 0.39 before)
+- 0/144 benchmark prompts affected (all have articles/"the" or match earlier patterns)
+
+### 3. Version bump to v3.11.0 — DONE (0fafd8b)
+- FlowTrace precision + context compression. All CI green. Release created.
+
+### 4. Flask fast benchmark — DONE
+- 18 prompts, -13% cost savings, 2.1s faster avg. Healthy baseline.
+
+### 5. Django focused validation — DONE
+- P9 (sym-usage): Win, Q 8→9, G 7→9. P17 (flow-trace): Tie. 0% regression.
 
 ### 6. Research sweep — DONE
-- Claude Code: WorktreeCreate/WorktreeRemove hook events available
-- No 384d embedding upgrade. fastembed-rs still at v5.12
-- ContextBench paper (66 repos, 8 languages) could serve as external validation
-- No new competitors threatening hook-based approach
-
-### 7. Terraform regression analysis — DONE
-- P5 and P13 both inject correct code. Confirmed judge noise (94%→67% with identical code)
+- Claude Code: WorktreeCreate/WorktreeRemove hooks available
+- No 384d embedding upgrade. ContextBench paper for external validation.
 
 ## Current benchmark state (v3.11.0, 8 repos, 144 judged prompts)
 
+Same as v3.10.0 baseline (the session 24 changes are targeted — FlowTrace precision + compression).
 - Flask: 18/18 (100%), Fastify: 18/18 (100%)
 - Django: 16/18 (89%), Express: 15/18 (83%), React: 15/18 (83%), FastAPI: 15/18 (83%)
-- Ripgrep: ~14/18 (78% expected with P8+P18 fixes), Terraform: 12/18 (67% judge noise)
+- Ripgrep: ~14/18 (78% expected with P8+P18 fixes)
+- Terraform: 12/18 (67% judge noise)
 - **Overall: ~85% non-regression, ~4% average cost savings**
 
 ## Priority queue for next session
 
-### 1. Full 8-repo benchmark sweep — MEDIUM
-- Validate v3.11.0 FlowTrace fixes + relevance suppression across all repos
-- Note: ripgrep repo needs re-cloning at /Users/ivan.seredkin/_projects/public-budi-bench/ripgrep
+### 1. Version bump to v3.12.0 — LOW
+- "What is Symbol?" classifier + any other changes deserve a minor bump
+- Full 8-repo benchmark sweep recommended for release validation
 
-### 2. WorktreeCreate hook — LOW
+### 2. Full 8-repo benchmark sweep — MEDIUM
+- Validate v3.11.0 changes across all repos. Ripgrep needs re-cloning.
+
+### 3. WorktreeCreate hook — LOW
 - Auto-warm indexes when Claude Code creates worktrees for agents
-- Currently budi shares index across worktrees, so agents already benefit
 
-### 3. ContextBench evaluation — LOW
+### 4. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages, gold-annotated)
-- Could provide more trustworthy validation than single-run LLM judge
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- Verkada-Web daily-driver usage
 - PreCompact hook for project map injection before compaction
