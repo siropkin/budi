@@ -969,7 +969,11 @@ mod tests {
         assert_eq!(file_count, 1, "same-file snippets should produce one card");
         // Merged span covers both
         // Both anchors present (primary + secondary in proof)
-        assert!(out.contains("fn alpha()"), "primary anchor missing: {}", out);
+        assert!(
+            out.contains("fn alpha()"),
+            "primary anchor missing: {}",
+            out
+        );
         // Secondary anchor folded into proof
         assert!(
             out.contains("fn beta()"),
@@ -1151,7 +1155,10 @@ mod tests {
         )];
         let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
         let proof_count = out.matches("    - ").count();
-        assert_eq!(proof_count, 2, "sym-def should have 2 proof lines, got {proof_count}: {out}");
+        assert_eq!(
+            proof_count, 2,
+            "sym-def should have 2 proof lines, got {proof_count}: {out}"
+        );
     }
 
     #[test]
@@ -1163,7 +1170,10 @@ mod tests {
         )];
         let out = build_context(&snippets, 4096, &[], Some("flow-trace"));
         let proof_count = out.matches("    - ").count();
-        assert_eq!(proof_count, 3, "flow-trace should have 3 proof lines, got {proof_count}: {out}");
+        assert_eq!(
+            proof_count, 3,
+            "flow-trace should have 3 proof lines, got {proof_count}: {out}"
+        );
     }
 
     // ── path_diversity_bucket ────────────────────────────────────────────────
