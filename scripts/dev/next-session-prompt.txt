@@ -1,47 +1,42 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.11.0+, 2026-03-13)
+## Current state (v3.12.0, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass including Release)
 - All 353 tests pass (327 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.11.0+Explain)
-- Repo data dir clean: 16 real repos (8 benchmark + 7 wild-repos + 1 re-cloned ripgrep)
-- v3.11.0 released: https://github.com/siropkin/budi/releases/tag/v3.11.0
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.12.0)
+- Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
+- v3.12.0 released: https://github.com/siropkin/budi/releases/tag/v3.12.0
 
-## What was done in session 24 continued (2026-03-13)
+## What was done in session 25 (2026-03-13)
 
-### 1. Relevance field suppression — DONE (9a932bf)
-- Docstring-derived `relevance:` suppressed for SymbolUsage and FlowTrace intents
-- Saves 8-19% context per card. Synthetic context_note always shown.
-- Django P9 validation: Win (Q 8→9, G 7→9, -68% cost)
-
-### 2. "What is Symbol?" classifier routing — DONE (946dfa5)
-- PascalCase, camelCase, backtick-quoted, snake_case after "what is" → SymbolDefinition
-- React "What is useState?" now finds definition (0.66 vs 0.39 before)
-- 0/144 benchmark prompts affected
-
-### 3. Version bump to v3.11.0 — DONE (0fafd8b)
-- FlowTrace precision + context compression. All CI green. Release created.
-
-### 4. "Explain Symbol" prefix generalization — DONE (0560245)
+### 1. "Explain Symbol" prefix generalization — DONE (0560245)
 - Renamed has_symbol_after_what_is → has_symbol_after_prefix with configurable prefix list
 - "Explain QuerySet", "Explain useState" etc. now route to SymbolDefinition
-- 0/144 benchmark prompts start with "Explain" — no impact
+- 0/144 benchmark prompts start with "Explain" — no impact. 5 new test assertions.
 
-### 5. Full 8-repo benchmark sweep — DONE
+### 2. Full 8-repo benchmark sweep — DONE
 - Ripgrep re-cloned (1969 chunks) and re-indexed
 - All 144 prompts judged across 8 repos
 
-### 6. Research sweep — DONE
-- Claude Code: HTTP hooks available, WorktreeCreate/WorktreeRemove confirmed
-- SessionStart double-fire on resume fixed. JSON-output hooks no-op injection fixed
+### 3. Session dedup diagnostic insight + fix — DONE (7ce0d9f)
+- Found: high retrieval_top_score + snippets_count=0 cases caused by session dedup
+- diagnostics.top_score was set before daemon session dedup, now refreshed post-dedup
+- React P14 "flushPassiveEffects" had score 0.94 but ctx=0 (correctly deduped)
+
+### 4. Research sweep — DONE
+- Claude Code: HTTP hooks, WorktreeCreate/WorktreeRemove confirmed, SessionStart double-fire fixed
+- PreCompact hook available but budi already handles compact via SessionStart source detection
 - No new embedding models. fastembed-rs still at 5.12.0. No new competitors
 
-### 7. Session dedup diagnostic insight
-- High `retrieval_top_score` + `snippets_count=0` cases (React P14 top=0.94, ctx=0) explained by session dedup: diagnostics.top_score is set before daemon session dedup strips already-seen snippets. This is correct behavior — session dedup prevents re-injection
+### 5. Version bump to v3.12.0 — DONE (f2c95fd)
+- "Explain X" routing + post-dedup diagnostics accuracy. All CI + Release green.
 
-## Current benchmark state (v3.11.0+Explain, 8 repos, 144 judged prompts)
+### 6. Repo hygiene — DONE
+- Removed stale ripgrep-b062d3eafb54 data dir. 15 repos remain.
+
+## Current benchmark state (v3.12.0, 8 repos, 144 judged prompts)
 
 | Benchmark | Non-reg | Rate | Cost | Notes |
 |-----------|---------|------|------|-------|
@@ -55,31 +50,33 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 | Terraform | 14/18 | 78% | -10% | P5/P13 known noise |
 | **Total** | **~121/144** | **~84%** | **~-7%** | Judge noise dominates |
 
-*87% of 15 judged. Note: Flask+Fastify went 100%→89% with identical code = judge variance.
+*87% of 15 judged. Flask+Fastify went 100%→89% with identical code = judge variance.
 
-## Key analysis: ctx=0 cases
+## Injection quality (31 injected queries across 8 repos)
+- Wins: 9 (29%), Ties: 19 (61%), Regressions: 3 (10%)
+- Only 3 regressions on injected queries (Django P14 persistent, Terraform P5/P13 noise)
+- Express P15 had dramatic win (+3, Q 5→8)
 
-110/144 prompts (76%) are ctx=0 skips. Of those:
-- 90+ are Q ties or mild (±1) — judge noise
-- 4 sharp regressions (Q ≥-2): React P1 (9→4), Express P8 (9→5), Django P11 (9→7), Terraform P17 (8→6)
-- All 4 are ctx=0 — budi injected nothing, so these are pure LLM response variance
+## Key findings
+- 110/144 (76%) queries get ctx=0 (budi correctly skips)
+- 4 sharp regressions (Q ≥-2) are all ctx=0 = pure LLM response variance
+- PreCompact hook not needed — SessionStart already re-injects project map on compact/clear
+- WorktreeCreate hook not needed — resolve_storage_root() shares index, configs shared across worktrees
 
 ## Priority queue for next session
 
-### 1. Version bump to v3.12.0 — LOW
-- "Explain X" routing is the only change since v3.11.0. Could bundle with next feature.
+### 1. WorktreeCreate auto-init — LOW
+- Auto-register new worktrees with budi (currently manual `budi init` needed)
+- Scope: detect worktree via resolve_storage_root, skip init if already registered
 
-### 2. Diagnostics top_score post-dedup — LOW
-- `diagnostics.top_score` should reflect post-session-dedup state. Currently misleading for deduped queries. Minor UX improvement for debug/analysis.
-
-### 3. WorktreeCreate hook — LOW
-- Auto-warm indexes when Claude Code creates worktrees for agents
-
-### 4. ContextBench evaluation — LOW
+### 2. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages, gold-annotated)
+
+### 3. Session dedup analytics — LOW
+- Log dedup count alongside skip reason to better attribute ctx=0 causes in benchmarks
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- PreCompact hook for project map injection before compaction
+- Explore reducing false skips on sym-use queries (largest category of ctx=0)
