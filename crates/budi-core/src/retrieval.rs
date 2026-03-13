@@ -4684,10 +4684,19 @@ fn augment_path_tokens_for_intent(
         | QueryIntentKind::SymbolDefinition
         | QueryIntentKind::TestLookup
         | QueryIntentKind::Architecture => {
-            if intent.kind == QueryIntentKind::RuntimeConfig && is_runtime_env_var_query(query) {
+            if intent.kind == QueryIntentKind::RuntimeConfig
+                && (is_runtime_env_var_query(query)
+                    || contains_any(
+                        &lower,
+                        &["config", "configuration", "settings", "flags", "options"],
+                    ))
+            {
                 add_path_tokens(
                     path_tokens,
-                    &["cli", "helpers", "helper", "config", "dotenv", "startup"],
+                    &[
+                        "cli", "helpers", "helper", "config", "dotenv", "startup", "flags",
+                        "settings", "options",
+                    ],
                 );
             }
             if contains_any(&lower, &["service", "client", "api", "request", "helper"]) {
@@ -6223,6 +6232,37 @@ it("renders", () => {})
         assert!(
             path_tokens.iter().any(|t| t == "helpers"),
             "got: {path_tokens:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_config_query_with_config_keyword_augments_path_tokens() {
+        let query = "I want to change the config file format from plain-text args to TOML key-value pairs. Walk me through which parts of the codebase would need to change and in what order.";
+        let intent_kind = classify_intent(query);
+        assert_eq!(
+            intent_kind,
+            QueryIntentKind::RuntimeConfig,
+            "Expected runtime-config intent"
+        );
+        let intent = QueryIntent {
+            kind: intent_kind,
+            code_related: true,
+            allow_docs: false,
+            weights: weights_for_intent(intent_kind),
+        };
+        let mut path_tokens = extract_query_path_tokens(query);
+        augment_path_tokens_for_intent(query, &intent, &mut path_tokens);
+        assert!(
+            path_tokens.iter().any(|t| t == "flags"),
+            "Should augment with 'flags' for config-mentioning runtime-config query, got: {path_tokens:?}"
+        );
+        assert!(
+            path_tokens.iter().any(|t| t == "settings"),
+            "Should augment with 'settings', got: {path_tokens:?}"
+        );
+        assert!(
+            path_tokens.iter().any(|t| t == "cli"),
+            "Should augment with 'cli', got: {path_tokens:?}"
         );
     }
 
