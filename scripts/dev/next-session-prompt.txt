@@ -7,6 +7,7 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - All 343 tests pass (318 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
 - Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.9.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
+- v3.9.0 released: https://github.com/siropkin/budi/releases/tag/v3.9.0
 
 ## What was done in session 22 (2026-03-13)
 
@@ -23,23 +24,27 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Express: 11/18 (61%), -28% cost — same (ctx=0 noise dominated)
 - Ripgrep: 16/18 (89%), -9% cost
 - **Total: ~123/144 (~85%), up from ~81% in session 21**
+- Real injection regressions: only 4/144 (~2.8%)
+
+### 3. Research sweep — DONE
+- **Claude Code 2.1.74** (Mar 12): Memory leak fix, `/context` improvements, `autoMemoryDirectory`. No hook changes.
+- **Augment Context Engine MCP**: UI polish, removed agent spawn cap. No new retrieval features. Still MCP-based.
+- **New competitors**: rag-cli (Chroma-based), mcp-local-rag, context-rag. None threaten budi (all MCP-based or lack code-aware retrieval).
+- **Embedding models**: No new small ONNX code-specialized models. EmbeddingGemma-300M too large.
+- **v3.9.0 released**: https://github.com/siropkin/budi/releases/tag/v3.9.0 — CI green, all workflows pass.
 
 ## Priority queue for next session
 
-### 1. Release v3.9.0 — HIGH
-- All benchmarks validated, CI green, version bumped
-- Create GitHub release with changelog
-
-### 2. Express investigation — MEDIUM
+### 1. Express investigation — MEDIUM
 - 61% non-regression persistent across sessions
 - 5/7 regressions are ctx=0 (no budi injection) — pure LLM judge noise
 - Consider: is Express too small (220 chunks) for meaningful evaluation? Drop from benchmark suite?
 
-### 3. Research sweep — MEDIUM
+### 2. Research sweep — MEDIUM
 - Check for new competitors, embedding models, Claude Code changes
 - CodeRankEmbed-137M still most actionable embedding upgrade candidate (needs ONNX)
 
-### 4. Aggressive context compression — LOW
+### 3. Aggressive context compression — LOW
 - TAAC paper suggests code tolerates 0.6 compression ratio
 - Could truncate proof lines more aggressively or compress evidence card format further
 
