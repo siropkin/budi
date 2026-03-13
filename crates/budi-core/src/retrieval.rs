@@ -1246,12 +1246,26 @@ pub fn build_query_response(
     // Flask P15: "What calls handle_exception" → injected log_exception (a callee
     // OF handle_exception, not a caller) and handle_url_build_error (unrelated).
     // Neither contained `handle_exception(` as a call expression.
+    //
+    // Check top 3 candidates AND any graph-channel hit. Graph hits are callers
+    // by construction (graph_token_to_chunk_ids maps callee→caller chunks), so
+    // they're the most reliable signal for actual call sites. Without this,
+    // real callers that rank below top 3 (due to HNSW variance or low vector
+    // similarity) would be missed, causing false skips.
+    // Flask P8: full_dispatch_request (rank 6, graph=0.15) contains the call
+    // but wasn't in top 3, causing false skip and ctx=0.
     let sym_use_no_call_site_skip = intent.kind == QueryIntentKind::SymbolUsage
         && !exact_match_symbol_tokens.is_empty()
         && !scored.iter().take(3).any(|c| {
             runtime.chunk(c.id).is_some_and(|chunk| {
                 text_contains_call_to_any(&chunk.text, &exact_match_symbol_tokens)
             })
+        })
+        && !scored.iter().any(|c| {
+            c.channel_scores.graph > 0.0
+                && runtime.chunk(c.id).is_some_and(|chunk| {
+                    text_contains_call_to_any(&chunk.text, &exact_match_symbol_tokens)
+                })
         });
     // FlowTrace callee-query skip: "What functions does X call and what does each return?"
     // When a thin delegation function is found (≤25 lines), the injection shows only the
