@@ -117,9 +117,17 @@ pub(super) fn build_context(
         _ => 3,
     };
 
+    let is_sym_def = intent == Some("symbol-definition");
+
     for (idx, card_data) in merged.iter().enumerate() {
         if remaining_budget == 0 {
             break;
+        }
+        // For sym-def, skip secondary cards that are thin delegation wrappers.
+        // These add noise without new information (e.g. a 4-line function that
+        // just calls the real implementation found in the primary card).
+        if is_sym_def && idx > 0 && is_thin_delegation_wrapper(&card_data.primary.text) {
+            continue;
         }
         // Progressive truncation: top card gets up to 40% of content budget;
         // each subsequent card gets up to 60% of what remains.
@@ -560,6 +568,47 @@ fn extract_first_docstring_line(text: &str) -> Option<String> {
         return None;
     }
     None
+}
+
+/// Detect thin delegation wrappers: short functions (≤6 non-empty code lines)
+/// whose body ends with a single `return <call>(...)`. These add noise when
+/// the primary card already contains the real implementation.
+fn is_thin_delegation_wrapper(text: &str) -> bool {
+    let code_lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with('#')
+                && !l.starts_with("//")
+                && !l.starts_with("/*")
+                && !l.starts_with('*')
+                && !l.starts_with("\"\"\"")
+                && !l.starts_with("'''")
+        })
+        .collect();
+    if code_lines.len() > 8 {
+        return false;
+    }
+    // Body lines = code lines excluding the definition (first) and closing braces
+    let body: Vec<&str> = code_lines
+        .iter()
+        .skip(1)
+        .copied()
+        .filter(|l| !matches!(*l, "}" | "};" | "});" | "})"))
+        .collect();
+    if body.is_empty() || body.len() > 4 {
+        return false;
+    }
+    // Check: body has a return and at most one function call (the delegation)
+    let has_return = body
+        .iter()
+        .any(|l| l.starts_with("return ") || *l == "return");
+    let call_count = body
+        .iter()
+        .filter(|l| l.contains('(') && !is_definition_line(l))
+        .count();
+    has_return && call_count <= 2
 }
 
 fn truncate_docstring(s: &str) -> String {
@@ -1141,6 +1190,65 @@ mod tests {
             !proof.iter().any(|l| l.contains("returnFiber: Fiber,")),
             "should NOT include param declaration: {:?}",
             proof
+        );
+    }
+
+    // ── thin delegation wrapper detection ────────────────────────────────────
+
+    #[test]
+    fn thin_wrapper_python_return_call() {
+        let text = "def resolve(path, urlconf=None):\n    if urlconf is None:\n        urlconf = get_urlconf()\n    return get_resolver(urlconf).resolve(path)";
+        assert!(
+            is_thin_delegation_wrapper(text),
+            "4-line delegation wrapper should be detected"
+        );
+    }
+
+    #[test]
+    fn thin_wrapper_go_return_call() {
+        let text = "func (c *Context) Plan(config *configs.Config, prevRunState *states.State, opts *PlanOpts) (*plans.Plan, tfdiags.Diagnostics) {\n\tplan, _, diags := c.PlanAndEval(config, prevRunState, opts)\n\treturn plan, diags\n}";
+        assert!(
+            is_thin_delegation_wrapper(text),
+            "Go delegation wrapper should be detected"
+        );
+    }
+
+    #[test]
+    fn thin_wrapper_rejects_substantial_function() {
+        let text = "def get_response(self, request):\n    set_urlconf(settings.ROOT_URLCONF)\n    response = self._middleware_chain(request)\n    response.headers['X-Frame-Options'] = 'DENY'\n    if hasattr(response, 'render'):\n        response.render()\n    signal.send(sender=self.__class__)\n    return response";
+        assert!(
+            !is_thin_delegation_wrapper(text),
+            "8-line function should not be flagged as thin wrapper"
+        );
+    }
+
+    #[test]
+    fn sym_def_skips_thin_wrapper_secondary_cards() {
+        let mut s1 = make_snippet(
+            "src/resolvers.py",
+            "def resolve(self, path):\n    match = self.pattern.match(path)\n    if match:\n        new_path, args, kwargs = match\n        for pattern in self.url_patterns:\n            sub_match = pattern.resolve(new_path)\n            return ResolverMatch(\n                sub_match.func,\n            )",
+            0.9,
+        );
+        s1.start_line = 670;
+        s1.end_line = 717;
+        let mut s2 = make_snippet(
+            "src/base.py",
+            "def resolve(path, urlconf=None):\n    if urlconf is None:\n        urlconf = get_urlconf()\n    return get_resolver(urlconf).resolve(path)",
+            0.7,
+        );
+        s2.start_line = 22;
+        s2.end_line = 25;
+        let snippets = vec![s1, s2];
+        let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
+        // Primary card should be present
+        assert!(
+            out.contains("file: src/resolvers.py"),
+            "primary card missing: {out}"
+        );
+        // Thin wrapper secondary card should be skipped
+        assert!(
+            !out.contains("file: src/base.py"),
+            "thin wrapper should be skipped in sym-def: {out}"
         );
     }
 
