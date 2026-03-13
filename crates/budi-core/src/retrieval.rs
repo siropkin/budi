@@ -3758,11 +3758,11 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
     ) {
         return QueryIntentKind::SymbolDefinition;
     }
-    // "What is X?" where X looks like a symbol (PascalCase, camelCase, or `backtick`).
-    // This routes to sym-def so the definition gets seeded. Checked on the original
-    // prompt (not lowered) to detect casing. Must come after explicit sym-def keywords
-    // and before FlowTrace to avoid shadowing "What is the execution order...".
-    if lower.contains("what is ") && has_symbol_after_what_is(prompt) {
+    // "What is X?" / "Explain X" where X looks like a symbol (PascalCase, camelCase,
+    // `backtick`, or snake_case). Routes to sym-def so the definition gets seeded.
+    // Checked on the original prompt to detect casing. Must come after explicit
+    // sym-def keywords and before FlowTrace to avoid shadowing other patterns.
+    if has_symbol_after_prefix(prompt, &lower, &["what is ", "explain "]) {
         return QueryIntentKind::SymbolDefinition;
     }
     if contains_any(
@@ -3906,40 +3906,41 @@ fn contains_any(input: &str, patterns: &[&str]) -> bool {
 /// Uses the original (not lowered) prompt to detect PascalCase/camelCase.
 /// Matches: "What is useState?", "What is `QuerySet`?", "What is MyClass?"
 /// Does NOT match: "What is the architecture?", "What is a hook?"
-fn has_symbol_after_what_is(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-    for (idx, _) in lower.match_indices("what is ") {
-        let after = &prompt[idx + 8..]; // skip "what is "
-        let word = after
-            .split(|c: char| c.is_whitespace() || c == '?')
-            .next()
-            .unwrap_or("");
-        if word.is_empty() {
-            continue;
-        }
-        // Backtick-quoted symbol: `QuerySet`
-        if word.starts_with('`') {
-            return true;
-        }
-        // PascalCase: two+ uppercase letters with at least one lowercase between.
-        // Matches: QuerySet, MyClass, WSGIHandler
-        // Rejects: "the", "a", "HTTP"
-        let has_upper = word.chars().any(|c| c.is_uppercase());
-        let has_lower = word.chars().any(|c| c.is_lowercase());
-        let starts_upper = word.starts_with(|c: char| c.is_uppercase());
-        if has_upper && has_lower && starts_upper {
-            return true;
-        }
-        // camelCase: starts lowercase, has uppercase.
-        // Matches: useState, getConfig
-        let starts_lower = word.starts_with(|c: char| c.is_lowercase());
-        if starts_lower && has_upper {
-            return true;
-        }
-        // snake_case: contains underscore.
-        // Matches: get_config, my_function
-        if word.contains('_') && word.len() > 2 {
-            return true;
+fn has_symbol_after_prefix(prompt: &str, lower: &str, prefixes: &[&str]) -> bool {
+    for prefix in prefixes {
+        for (idx, _) in lower.match_indices(prefix) {
+            let after = &prompt[idx + prefix.len()..];
+            let word = after
+                .split(|c: char| c.is_whitespace() || c == '?')
+                .next()
+                .unwrap_or("");
+            if word.is_empty() {
+                continue;
+            }
+            // Backtick-quoted symbol: `QuerySet`
+            if word.starts_with('`') {
+                return true;
+            }
+            // PascalCase: two+ uppercase letters with at least one lowercase between.
+            // Matches: QuerySet, MyClass, WSGIHandler
+            // Rejects: "the", "a", "HTTP"
+            let has_upper = word.chars().any(|c| c.is_uppercase());
+            let has_lower = word.chars().any(|c| c.is_lowercase());
+            let starts_upper = word.starts_with(|c: char| c.is_uppercase());
+            if has_upper && has_lower && starts_upper {
+                return true;
+            }
+            // camelCase: starts lowercase, has uppercase.
+            // Matches: useState, getConfig
+            let starts_lower = word.starts_with(|c: char| c.is_lowercase());
+            if starts_lower && has_upper {
+                return true;
+            }
+            // snake_case: contains underscore.
+            // Matches: get_config, my_function
+            if word.contains('_') && word.len() > 2 {
+                return true;
+            }
         }
     }
     false
@@ -4878,6 +4879,28 @@ mod tests {
         );
         assert_eq!(
             classify_intent("What is a hook in this project?"),
+            QueryIntentKind::Architecture
+        );
+        // "Explain" prefix — same symbol detection
+        assert_eq!(
+            classify_intent("Explain QuerySet"),
+            QueryIntentKind::SymbolDefinition
+        );
+        assert_eq!(
+            classify_intent("Explain useState"),
+            QueryIntentKind::SymbolDefinition
+        );
+        assert_eq!(
+            classify_intent("Explain `resolve`"),
+            QueryIntentKind::SymbolDefinition
+        );
+        assert_eq!(
+            classify_intent("Explain get_config"),
+            QueryIntentKind::SymbolDefinition
+        );
+        // "Explain" with non-symbol → Architecture
+        assert_eq!(
+            classify_intent("Explain the routing layer"),
             QueryIntentKind::Architecture
         );
     }
