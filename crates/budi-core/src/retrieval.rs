@@ -3385,12 +3385,14 @@ fn min_selection_score(candidates: &[ScoredChunk], intent_kind: QueryIntentKind)
         QueryIntentKind::TestLookup => relative.max(0.22),
         // When top score is high (≥0.60, strong rt-cfg signal), raise floor to 0.40
         // to filter noise cards (brew formulas, hyperlink env-var code) at 0.33-0.38.
-        // When top is low (< 0.60, weak signal like React __DEV__ flags), keep floor at 0.18.
+        // When top is moderate (< 0.60), raise floor to 0.35 to filter generic "Config"
+        // structs from unrelated crates that match on common BM25 terms.
+        // Ripgrep P18: top 0.41 (flags/defs.rs), noise at 0.29-0.34 → floor 0.35 cuts noise.
         QueryIntentKind::RuntimeConfig => {
             if top.score >= 0.60 {
                 relative.max(0.40)
             } else {
-                relative.max(0.18)
+                relative.max(0.35)
             }
         }
         // Raised from none to 0.22: filters lexical noise at ~0.19 for sym-use queries.
@@ -5230,14 +5232,14 @@ mod tests {
     }
 
     #[test]
-    fn min_score_runtime_config_low_confidence_uses_0_18_floor() {
-        // top < 0.60 → keep 0.18 floor (React __DEV__ scenario)
+    fn min_score_runtime_config_low_confidence_uses_0_35_floor() {
+        // top < 0.60 → floor 0.35 to cut generic "Config" struct noise
         let chunks = vec![make_scored_chunk(1, 0.40)];
         let floor = min_selection_score(&chunks, QueryIntentKind::RuntimeConfig);
-        // relative = 0.40 * 0.40 = 0.16; clamped to 0.18
+        // relative = 0.40 * 0.40 = 0.16; clamped to 0.35
         assert!(
-            (floor - 0.18).abs() < 1e-5,
-            "expected 0.18 floor, got {floor}"
+            (floor - 0.35).abs() < 1e-5,
+            "expected 0.35 floor, got {floor}"
         );
     }
 
