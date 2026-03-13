@@ -1372,7 +1372,6 @@ export function scheduleUpdateOnFiber(root, fiber, lane) {
     }
 
     #[test]
-    #[test]
     fn docstring_python_triple_quote_multiline() {
         let text = r#"def wsgi_app(self, environ, start_response):
     """The actual WSGI application.  This is not implemented in
