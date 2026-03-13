@@ -1,60 +1,43 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.8.0, 2026-03-13)
+## Current state (v3.9.0, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass)
 - All 343 tests pass (318 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.8.0)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.9.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
-- v3.8.0 released: https://github.com/siropkin/budi/releases/tag/v3.8.0
 
-## What was done in session 21 (2026-03-13)
+## What was done in session 22 (2026-03-13)
 
-### 1. Thin-wrapper sym-def detection — DONE (ce17b40)
-- Detects short functions (≤8 code lines, ≤4 body lines) that delegate via return-call
-- Drops them from sym-def evidence when appearing as secondary cards
-- Django P14 (resolve) improved from Q 9→7 to Q 9→8
-- 4 new tests
+### 1. Version bump to v3.9.0 — DONE (9b2a4ac)
+- Bumped from v3.8.0 for thin-wrapper detection + structural context integration
 
-### 2. Structural context integration — DONE (378fa67 + 86fb2c8)
-- Merged caller/callee info into evidence card fields (callers:, refs:)
-- Eliminated separate [structural context] section entirely
-- Same-file merged cards collect callers/refs from both primary and secondary snippets
-- Django P4 injection: 680→398 chars (-41%)
-- Removed unused build_call_graph_summary function
-- 2 new tests
-
-### 3. Research sweep — DONE
-- **Augment Context Engine MCP** (GA Feb 2026): Most direct competitor. Local + Remote modes. MCP-based (requires tool call round trip). Budi's hooks-based pre-injection differentiated.
-- **Claude Code**: New `prompt` and `agent` hook types. `last_assistant_message` on Stop hooks. 18 hook events total.
-- **TAAC compression** (arxiv 2602.15843): Code tolerates ratio ≥ 0.6 compression. Validates budi's aggressive condensation.
-- **CodeRankEmbed-137M** (Nomic): Code-specialized bi-encoder, 8192 context. Needs ONNX conversion.
-- **fastembed-rs 5.12.0**: Still latest.
-
-### 4. Full 7-repo benchmark sweep — DONE
-- React: 15/18 (83%), -13% cost
-- Flask: 15/18 (83%), -23% cost
-- Django: 14/18 (78%), -12% cost
-- Terraform: 14/18 (78%), -2% cost
-- Fastify: 15/18 (83%), -7% cost
-- FastAPI: 15/18 (83%), -4% cost
-- Express: 11/18 (61%), -10% cost (6/7 regressions are ctx=0 noise)
-- Ripgrep: (pending)
+### 2. Full 8-repo benchmark sweep (v3.9.0) — DONE
+- React: 15/18 (83%), -3% cost — same as s21
+- Flask: 16/18 (89%), -19% cost — up from 83%
+- Django: 17/18 (94%), +5% cost — up from 78%, best ever!
+- Terraform: 15/18 (83%), -14% cost — up from 78%
+- Fastify: 17/18 (94%), -1% cost — up from 83%, best ever!
+- FastAPI: 16/18 (89%), +1% cost — up from 83%
+- Express: 11/18 (61%), -28% cost — same (ctx=0 noise dominated)
+- Ripgrep: 16/18 (89%), -9% cost
+- **Total: ~123/144 (~85%), up from ~81% in session 21**
 
 ## Priority queue for next session
 
-### 1. Version bump + release — HIGH
-- Significant changes since v3.8.0: structural context integration, thin-wrapper detection
-- Consider v3.9.0 release
+### 1. Release v3.9.0 — HIGH
+- All benchmarks validated, CI green, version bumped
+- Create GitHub release with changelog
 
-### 2. Benchmark revalidation with structural context — MEDIUM
-- Django and React benchmarks running with new binary (awaiting results)
-- The -41% injection reduction should improve cost savings further
+### 2. Express investigation — MEDIUM
+- 61% non-regression persistent across sessions
+- 5/7 regressions are ctx=0 (no budi injection) — pure LLM judge noise
+- Consider: is Express too small (220 chunks) for meaningful evaluation? Drop from benchmark suite?
 
-### 3. Embedding model evaluation — LOW
-- CodeRankEmbed-137M (Nomic): Code-specialized, 8192 context. Convert to ONNX and evaluate.
-- Same recalibration concern: 50+ calibrated thresholds would need adjustment
+### 3. Research sweep — MEDIUM
+- Check for new competitors, embedding models, Claude Code changes
+- CodeRankEmbed-137M still most actionable embedding upgrade candidate (needs ONNX)
 
 ### 4. Aggressive context compression — LOW
 - TAAC paper suggests code tolerates 0.6 compression ratio
@@ -67,3 +50,4 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Verkada-Web daily-driver usage
 - New Claude Code hook types (prompt, agent) investigation
 - additionalContext injection bug #14281 investigation
+- Ripgrep P14/P15 test-lookup regressions (both test intent)
