@@ -1131,6 +1131,19 @@ pub fn build_query_response(
             let threshold = if no_symbol_signal { 0.35 } else { 0.28 };
             c.score < threshold
         });
+    // SymbolDefinition low-confidence skip: when sym-hint-seed didn't find the
+    // definition (no hint-match-boost) and the top score is below the absolute
+    // floor (0.30), the empty-selection fallback would force-inject a noise
+    // snippet. Express P5: "Where is app.use defined…" → top=0.08 (lexical
+    // noise from require() lines), sym-hint-seed missed because Express
+    // defines app.use via prototype assignment not detected by symbol index.
+    // Guard: skip only when there are enough candidates that low scores are
+    // meaningful (>= 10). Tiny indices (e.g. 2-chunk unit tests) produce low
+    // scores purely from sparse data, not from irrelevant results.
+    let sym_def_low_confidence_skip = intent.kind == QueryIntentKind::SymbolDefinition
+        && !sym_def_seeded
+        && scored.len() >= 10
+        && scored.first().is_some_and(|c| c.score < 0.30);
     // SymbolUsage thin-caller skip: when the top non-definition card spans a
     // very short file (start_line <= 2, end_line <= 15), the caller is likely a
     // boilerplate entry point (__main__.py, main.rs wrapper). Such trivial call
@@ -1183,7 +1196,8 @@ pub fn build_query_response(
         || sym_use_low_confidence_skip
         || sym_use_thin_caller_skip
         || sym_use_no_call_site_skip
-        || flowtrace_callee_skip;
+        || flowtrace_callee_skip
+        || sym_def_low_confidence_skip;
     let min_score = if env_listing_skip
         || lifecycle_overview_skip
         || flowtrace_pipeline_skip
@@ -1194,6 +1208,7 @@ pub fn build_query_response(
         || sym_use_thin_caller_skip
         || sym_use_no_call_site_skip
         || flowtrace_callee_skip
+        || sym_def_low_confidence_skip
     {
         f32::MAX
     } else if ci_skip {
