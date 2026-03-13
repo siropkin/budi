@@ -508,9 +508,7 @@ fn extract_first_docstring_line(text: &str) -> Option<String> {
         }
 
         if in_triple_quote {
-            let content = trimmed
-                .trim_start_matches(['"', '\''])
-                .trim();
+            let content = trimmed.trim_start_matches(['"', '\'']).trim();
             if !content.is_empty() && content.len() >= 10 {
                 return Some(truncate_docstring(content));
             }
