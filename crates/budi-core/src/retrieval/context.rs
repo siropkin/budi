@@ -1371,7 +1371,10 @@ mod tests {
         );
         s2.start_line = 22;
         s2.end_line = 25;
-        s2.reasons = vec!["hint-match-boost".to_string(), "hint-path-relevance".to_string()];
+        s2.reasons = vec![
+            "hint-match-boost".to_string(),
+            "hint-path-relevance".to_string(),
+        ];
         let snippets = vec![s1, s2];
         let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
         // Primary card should be present

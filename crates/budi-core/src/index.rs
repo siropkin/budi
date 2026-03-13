@@ -2387,7 +2387,7 @@ fn extract_reference_tokens(text: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if !looks_like_reference_line(trimmed) {
+        if !looks_like_reference_line(trimmed) || looks_like_definition_line(trimmed) {
             continue;
         }
         for token in extract_signal_tokens(trimmed) {
@@ -4474,6 +4474,201 @@ mod tests {
                 .any(|token| token == "featureclient_fetchflags")
         );
         assert!(tokens.iter().any(|token| token == "post"));
+    }
+
+    #[test]
+    fn call_token_extraction_self_method_produces_bare_callee() {
+        // Python `self.dispatch_request(ctx)` should produce `dispatch_request`
+        // as a call token so the graph maps callers correctly.
+        let tokens = extract_call_tokens(
+            "        try:\n            rv = self.dispatch_request(ctx)\n        except Exception:\n            pass",
+        );
+        assert!(
+            tokens.iter().any(|t| t == "dispatch_request"),
+            "Expected 'dispatch_request' in call tokens, got: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn call_sites_from_full_dispatch_request_text() {
+        // The actual Flask full_dispatch_request chunk text should produce
+        // a call site for dispatch_request.
+        let text = "    def full_dispatch_request(self, ctx):\n        self._got_first_request = True\n        try:\n            request_started.send(self)\n            rv = self.preprocess_request(ctx)\n            if rv is None:\n                rv = self.dispatch_request(ctx)\n        except Exception as e:\n            rv = self.handle_user_exception(ctx, e)\n        return self.finalize_request(ctx, rv)";
+        let sites = extract_call_sites(text);
+        let callees: Vec<&str> = sites.iter().map(|s| s.callee.as_str()).collect();
+        assert!(
+            callees.contains(&"dispatch_request"),
+            "Expected dispatch_request in call sites, got: {callees:?}"
+        );
+    }
+
+    #[test]
+    fn graph_index_maps_self_method_caller_to_definition() {
+        // When chunk A defines `dispatch_request` and chunk B calls
+        // `self.dispatch_request(ctx)`, searching graph for "dispatch_request"
+        // should return chunk B (the caller).
+        // Uses exact Flask chunk texts to reproduce the real index behavior.
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/flask/app.py".into(),
+                text: concat!(
+                    "def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:\n",
+                    "        \"\"\"Does the request dispatching.\"\"\"\n",
+                    "        req = ctx.request\n",
+                    "        if req.routing_exception is not None:\n",
+                    "            self.raise_routing_exception(req)\n",
+                    "        rule: Rule = req.url_rule\n",
+                    "        if (\n",
+                    "            getattr(rule, \"provide_automatic_options\", False)\n",
+                    "            and req.method == \"OPTIONS\"\n",
+                    "        ):\n",
+                    "            return self.make_default_options_response(ctx)\n",
+                    "        view_args: dict[str, t.Any] = req.view_args\n",
+                    "        return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)\n",
+                ).to_string(),
+                start_line: 966,
+                end_line: 990,
+                symbol_hint: Some("dispatch_request".into()),
+                language: "python".into(),
+                embedding: vec![],
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/flask/app.py".into(),
+                text: concat!(
+                    "def full_dispatch_request(self, ctx: AppContext) -> Response:\n",
+                    "        \"\"\"Dispatches the request and on top of that performs request\n",
+                    "        pre and postprocessing as well as HTTP exception catching and\n",
+                    "        error handling.\n",
+                    "\n",
+                    "        .. versionadded:: 0.7\n",
+                    "        \"\"\"\n",
+                    "        if not self._got_first_request and self.should_ignore_error is not None:\n",
+                    "            import warnings\n",
+                    "\n",
+                    "            warnings.warn(\n",
+                    "                \"The 'should_ignore_error' method is deprecated\",\n",
+                    "                DeprecationWarning,\n",
+                    "                stacklevel=1,\n",
+                    "            )\n",
+                    "\n",
+                    "        self._got_first_request = True\n",
+                    "\n",
+                    "        try:\n",
+                    "            request_started.send(self, _async_wrapper=self.ensure_sync)\n",
+                    "            rv = self.preprocess_request(ctx)\n",
+                    "            if rv is None:\n",
+                    "                rv = self.dispatch_request(ctx)\n",
+                    "        except Exception as e:\n",
+                    "            rv = self.handle_user_exception(ctx, e)\n",
+                    "        return self.finalize_request(ctx, rv)\n",
+                ).to_string(),
+                start_line: 992,
+                end_line: 1019,
+                symbol_hint: Some("full_dispatch_request".into()),
+                language: "python".into(),
+                embedding: vec![],
+            },
+        ];
+        let (
+            _sym,
+            _sym_fam,
+            _sym_prefix,
+            _path,
+            graph_token_to_chunk_ids,
+            _graph_fam,
+            _graph_prefix,
+            _doc,
+            chunk_to_graph_tokens,
+        ) = build_retrieval_signal_indexes(Path::new(""), &chunks);
+
+        // Chunk 2 calls dispatch_request, so graph should map dispatch_request → chunk 2
+        let callers = graph_token_to_chunk_ids
+            .get("dispatch_request")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            callers.contains(&2),
+            "Expected chunk 2 (full_dispatch_request) to be a caller of dispatch_request, got callers: {callers:?}"
+        );
+        // Chunk 2's graph tokens should include dispatch_request
+        let callees = chunk_to_graph_tokens.get(&2).cloned().unwrap_or_default();
+        assert!(
+            callees.contains(&"dispatch_request".to_string()),
+            "Expected chunk 2's graph tokens to include 'dispatch_request', got: {callees:?}"
+        );
+    }
+
+    #[test]
+    fn reference_tokens_skip_definition_lines() {
+        // A definition line like `def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:`
+        // matches looks_like_reference_line (has '.' and '('), but should be skipped to avoid
+        // registering the definition chunk as a caller of itself.
+        let text = concat!(
+            "def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:\n",
+            "        req = ctx.request\n",
+            "        return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)\n",
+        );
+        let refs = extract_reference_tokens(text);
+        assert!(
+            !refs.contains(&"dispatch_request".to_string()),
+            "Definition name should not appear as a reference token, got: {refs:?}"
+        );
+        // Non-definition reference lines should still produce tokens
+        assert!(
+            refs.iter().any(|t| t == "ensure_sync"),
+            "Should extract tokens from non-definition reference lines, got: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn graph_index_no_self_reference_for_definition_chunk() {
+        // Definition chunks must not be registered as callers of their own symbol.
+        // This was a bug: `def dispatch_request(self, ctx) -> ft.ResponseReturnValue:`
+        // matched looks_like_reference_line, causing the definition to self-reference
+        // via graph_token_to_chunk_ids, which then blocked the real caller via
+        // diversify_channel_by_path (same-file dedup).
+        let chunks = vec![
+            ChunkRecord {
+                id: 1,
+                path: "src/flask/app.py".into(),
+                text: concat!(
+                    "def dispatch_request(self, ctx: AppContext) -> ft.ResponseReturnValue:\n",
+                    "        req = ctx.request\n",
+                    "        return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)\n",
+                ).to_string(),
+                start_line: 966,
+                end_line: 990,
+                symbol_hint: Some("dispatch_request".into()),
+                language: "python".into(),
+                embedding: vec![],
+            },
+            ChunkRecord {
+                id: 2,
+                path: "src/flask/app.py".into(),
+                text: "def full_dispatch_request(self, ctx):\n        rv = self.dispatch_request(ctx)\n        return self.finalize_request(ctx, rv)\n".to_string(),
+                start_line: 992,
+                end_line: 1019,
+                symbol_hint: Some("full_dispatch_request".into()),
+                language: "python".into(),
+                embedding: vec![],
+            },
+        ];
+        let (_, _, _, _, graph_token_to_chunk_ids, _, _, _, _) =
+            build_retrieval_signal_indexes(Path::new(""), &chunks);
+        let callers = graph_token_to_chunk_ids
+            .get("dispatch_request")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !callers.contains(&1),
+            "Definition chunk should NOT self-reference in graph_token_to_chunk_ids, got callers: {callers:?}"
+        );
+        assert!(
+            callers.contains(&2),
+            "Caller chunk should be in graph_token_to_chunk_ids, got callers: {callers:?}"
+        );
     }
 
     #[test]

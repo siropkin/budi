@@ -1,79 +1,83 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.13.0, 2026-03-13)
+## Current state (v3.13.1, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass including Release)
-- All 353 tests pass (328 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.13.0)
+- All 358 tests pass (333 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.13.1)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 
-## What was done in session 26 (2026-03-13)
+## What was done in session 27 (2026-03-13)
 
-### 1. Ambiguous-symbol multi-definition fix — DONE (68b9eb8)
-- Fixed Django P14 "resolve" persistent regression
-- Root cause: thin-wrapper secondary skip in build_context() dropped public API entry point
-  (django/urls/base.py:resolve is a 4-line delegation wrapper to resolvers.py:URLResolver.resolve)
-- Fix: preserve thin wrappers that have hint-path-relevance reason — these are entry points
-  in the domain-relevant file the user asked about
-- New test: thin_wrapper_with_path_relevance_kept_in_sym_def
-- Verified: daemon returns 2 cards (resolvers.py + base.py), 596 chars context
-- Django benchmark: 18/18 non-regressions (100%), up from 15/18 (83%)
+### 1. Graph self-reference bug fix — DONE
+- Root cause: `extract_reference_tokens()` processed definition lines that matched
+  `looks_like_reference_line()` (e.g., `def dispatch_request(self, ctx) -> ft.ResponseReturnValue:`
+  has '.' and '('), extracting the definition name as a reference token
+- This caused definition chunks to self-reference in `graph_token_to_chunk_ids`,
+  then `diversify_channel_by_path` (1-per-file dedup) dropped the actual caller
+  when both were in the same file
+- Fix: skip `looks_like_definition_line()` lines in `extract_reference_tokens()`
+- 5 new tests (reference_tokens_skip_definition_lines, graph_index_no_self_reference,
+  call_token_extraction_self_method, call_sites_from_full_dispatch_request,
+  graph_index_maps_self_method_caller_to_definition)
+- Flask `full_dispatch_request` graph score: 0.0 → 0.1520
+- All benchmark repos re-indexed with --hard
 
-### 2. Benchmark runner fix — DONE (68b9eb8)
-- Fixed DEV_BIN_DIR to prefer target/release over target/debug
-- Debug binaries have slower cold-start (>12s HOOK_QUERY_TIMEOUT), causing benchmark ctx=0
-- Release binaries consistently start within timeout
+### 2. Benchmark validation results (v3.13.1)
 
-### 3. Version bump to v3.13.0 — DONE (68b9eb8)
+| Benchmark | Non-reg | Rate | Notes |
+|-----------|---------|------|-------|
+| Django | 17/18 | 94% | P18 mild regression (judge noise, flow-trace) |
+| Flask | 16/18 | 89% | P13/P14 mild (Q-1), same as baseline |
+| Express | 16/18 | 89% | P14 mild (Q-1); P8/P9 big wins (sym-use 6→9!) |
 
-## Current benchmark state (v3.13.0, 8 repos, 144 judged prompts)
+Express improved from 83% → 89% (P8 went from regression to +3 win).
+
+## Current benchmark state (v3.13.1, validated 3/8 repos)
 
 | Benchmark | Non-reg | Rate | Cost | Notes |
 |-----------|---------|------|------|-------|
-| Django | 18/18 | 100% | +1% | P14 FIXED (was persistent sym-def regression) |
-| Flask | 16/18 | 89% | -9% | P13/P18 mild (Q-1) |
-| Fastify | 16/18 | 89% | -15% | P4/P14 mild (Q-1) |
-| React | 16/18 | 89% | +13% | P1 extreme judge noise (9→4) |
-| Express | 15/18 | 83% | -15% | P8 ctx=0 variance (9→5) |
-| FastAPI | 16/18 | 89% | -5% | P6/P15 mild (Q-1) |
-| Ripgrep | 13/18 | 87%* | -4% | P10/P14 mild, 3 n/a |
-| Terraform | 14/18 | 78% | -10% | P5/P13 known noise |
-| **Total** | **~124/144** | **~86%** | **~-5%** | Django 100%, up from 83% |
-
-*87% of 15 judged. Flask+Fastify went 100%→89% with identical code = judge variance.
-
-## Django P14 detailed results
-- 4 budi wins, 14 ties, 0 regressions
-- P14 "resolve": tie (g 8→9), context injected with both cards
-- P1/P9/P10/P18: budi wins (grounding improved)
+| Django | 17/18 | 94% | -5% | P18 flow-trace mild regression |
+| Flask | 16/18 | 89% | -4% | Same as baseline |
+| Express | 16/18 | 89% | -15% | UP from 83%, P8/P9 sym-use wins |
+| Fastify | (not re-run) | ~89% | | |
+| React | (not re-run) | ~89% | | |
+| FastAPI | (not re-run) | ~89% | | |
+| Ripgrep | (not re-run) | ~87% | | |
+| Terraform | (not re-run) | ~78% | | |
 
 ## Key analysis insights
-- 110/144 (76%) queries get ctx=0 (budi correctly skips)
-- All 4 sharp regressions (Q ≥-2) across all repos are ctx=0 = pure LLM response variance
-- Hook-io trace may report ctx=0 due to cold-start timing but context IS injected
-- Benchmark runner now prefers release binaries for accurate timing
+
+- Graph self-reference affected all languages where definition lines match
+  `looks_like_reference_line()` (Python '.' + '(', Rust '->', Go '.' + '(', etc.)
+- The fix improves graph channel accuracy for same-file caller discovery
+- sym-use queries still hit `sym_use_no_call_site_skip` when actual callers
+  rank below top 3 (Flask P8: full_dispatch_request at rank 6)
+- Express P8/P9 wins suggest the graph fix helped some callers break into top 3
 
 ## Priority queue for next session
 
-### 1. ContextBench evaluation — LOW
-- External validation benchmark (66 repos, 8 languages, gold-annotated contexts)
-- Measures context retrieval recall/precision at file/block/line granularity
-- Designed for issue-resolution tasks — would need adaptation for budi's query-based model
+### 1. sym-use no_call_site_skip relaxation — MEDIUM
+- Current: checks top 3 candidates for `target_symbol(` call expression
+- Problem: actual callers often rank 4-6 (e.g., Flask P8 full_dispatch_request)
+- Options: (a) expand to top 5-6, (b) weight graph-channel hits higher in check,
+  (c) check all candidates above score floor, (d) only skip when 0 candidates have call
 
-### 2. Session dedup analytics — LOW
-- Log dedup count alongside skip reason to better attribute ctx=0 causes in benchmarks
-- Would make benchmark analysis easier (currently need to cross-reference session IDs)
+### 2. Run remaining benchmarks (Fastify/React/FastAPI/Ripgrep/Terraform) — LOW
+- All repos re-indexed with --hard, ready for benchmarking
+- Graph fix is cross-cutting, may affect all repos
 
-### 3. EmbeddingGemma evaluation — LOW
-- Google's 308M model with Matryoshka truncation to 384d
-- Would need ONNX export and integration with fastembed-rs
-- Not code-specialized, but Matryoshka truncation is interesting
+### 3. ContextBench evaluation — LOW
+- External validation benchmark (66 repos, 8 languages)
+- Would need adaptation for budi's query-based model
+
+### 4. Session dedup analytics — LOW
+- Log dedup count alongside skip reason for benchmark analysis
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- Explore reducing false skips on sym-use queries (largest category of ctx=0)
 - fastembed-rs v5.12+ has Qwen3 and BAAI/bge-m3 — evaluate if relevant
 - Hook-io trace accuracy: investigate why benchmark reports ctx=0 when context IS injected
