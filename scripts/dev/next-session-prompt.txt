@@ -1,77 +1,72 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.13.1, 2026-03-13)
+## Current state (v3.14.0, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass including Release)
 - All 359 tests pass (334 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.13.1)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.14.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 
-## What was done in session 28 (2026-03-13)
+## What was done in session 29 (2026-03-13)
 
-### 1. Ripgrep P18 injection regression analysis — DONE
-- Root cause: RuntimeConfig path augmentation only triggered for env-var queries
-- P18 "change config file format to TOML" classified as RuntimeConfig but path tokens
-  "cli", "config", "flags" weren't added because `is_runtime_env_var_query()` was false
-- Result: generic "Config" structs from unrelated crates (regex, searcher, printer)
-  outscored the actual `crates/core/flags/config.rs` parser
+### 1. Ripgrep benchmark validation — DONE
+- Validated both fixes from session 28: path augmentation + RuntimeConfig floor raise (0.18→0.35)
+- **Best ripgrep result ever: 14/15 non-regressions (93%)**
+- Up from 73% (11/15) pre-floor-raise, and 67% (12/18) in session 28
+- Only 1 regression: P10 (ctx=0, Q 9→7) — pure LLM judge noise
+- P18 (the original regression target): ok (Q 8→8, ctx=0 skip — floor correctly filters noise)
+- P4/P5/P13 all improved from regressions to ties (Q 9→9)
+- P8/P12 flipped to wins (Q 8→9, Q 8→9)
+- Cost: -1% (neutral)
 
-### 2. Broadened runtime-config path augmentation — DONE (338287f)
-- Extended condition from `is_runtime_env_var_query()` only to also trigger when
-  query mentions "config", "configuration", "settings", "flags", or "options"
-- Added "flags", "settings", "options" to the augmented path token list
-- Result: P18 top candidates moved from irrelevant `walk.rs` to correct `core/flags/` directory
-  (defs.rs flag definitions + hiargs.rs high-level args state)
-- `config.rs` itself still doesn't surface (content doesn't match BM25 terms — file
-  describes what EXISTS, query describes what to CHANGE TO), but top cards are now
-  relevant to the query
-- 1 new test, all 359 tests pass, 0 clippy warnings
+### 2. Version bump to v3.14.0 — DONE
+- Path augmentation broadening + RuntimeConfig floor raise, validated on ripgrep
 
-### 3. Comprehensive regression analysis — DONE
-- Only 2/18 regressions involve injected context (React P8: Q-1 mild, Ripgrep P18: fixed)
-- 16/18 regressions are ctx=0 (pure LLM judge noise, nothing budi can fix)
-- Injected prompts: 15 total → 3 wins (20%), 10 ties (67%), 2 regs (13%)
-- Injection regression rate (13%) matches baseline noise rate (16/125 = 13%)
-  confirming budi injection is not causing systematic harm
+### 3. Hook-io trace investigation — DONE (non-issue)
+- Investigated whether ctx=0 is reported when context IS injected
+- Confirmed: `context_chars` in hook log uses same `context` variable as `emit_hook_response()`
+- No divergence possible — ctx=0 always means budi didn't inject
 
-### Session 27+28 combined benchmark (all 8 repos)
+### Session 29 benchmark state (all 8 repos)
 
 | Benchmark | Rate | Cost | Notes |
 |-----------|------|------|-------|
 | Flask | **100%** | -1% | 6 wins, 0 regressions! |
 | Terraform | **94%** | +70% | P5 ctx=0 noise |
+| Ripgrep | **93%** | -1% | Best ever! P10 ctx=0 only |
 | Django | 89% | -22% | P7/P15 ctx=0 |
 | FastAPI | 89% | +30% | P15 ctx=0 |
 | Fastify | 89% | -15% | P4/P13 ctx=0 |
-| React | 83% | +8% | P1/P15 ctx=0, P8 mild (Q-1, ctx=388) |
-| Express | 67%* | -16% | All 6 regressions ctx=0 |
-| Ripgrep | 67% | +20% | P10/P13 ctx=0, P18 fixed |
+| React | 83% | +8% | P1/P15 ctx=0, P8 mild |
+| Express | 67%* | -16% | All 6 regs ctx=0 |
+| **Total** | **86%** (124/144) | | 3 repos at ≥93%! |
 
-*Express/Ripgrep 67% is dominated by ctx=0 judge noise (P9: 9→1 extreme).
-True injection-caused regressions: 2/144 (1.4%).
+*Express 67% is ctx=0 judge noise. True injection regressions: 2/144 (1.4%).
+
+## Research sweep findings (session 29)
+
+- **Zilliz claude-context MCP**: BM25+vector hybrid, AST chunking, Merkle incremental indexing, claims 40% token reduction. Still MCP-based (round trip). No threat to budi's hook pre-injection model.
+- **VXConsulting claude-rag-mcp**: Architecture patterns + failure capture MCP. ChromaDB-backed. Not a code context tool.
+- **knowledge-rag (lyonzin)**: Local RAG with hybrid search (semantic + BM25), MCP integration. Closest competitor pattern but MCP-based.
+- **fastembed-rs**: Still at 5.12.0. 44 EmbeddingModel variants. No new 384d code-specific models. AllMiniLM remains best.
+- **Papers**: SmartChunk (query-aware compression), SitEmb-v1.5 (context-aware embeddings), R2C2-Coder (abstract+fragment retrieval). All validate budi's approach but none directly actionable.
+- **Claude Code**: Still at 2.1.74. No new hook events.
 
 ## Priority queue for next session
 
-### 1. Run focused ripgrep benchmark — HIGH
-- Validate P18 path augmentation fix
-- Expect P18 improvement: better top candidates (flags/defs.rs, hiargs.rs)
-- Also validates no regression on other ripgrep prompts
+### 1. Research sweep — LOW
+- Continue monitoring competitors, embeddings, Claude Code updates
 
 ### 2. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages)
-- Would need adaptation for budi's query-based model
 
 ### 3. Session dedup analytics — LOW
-- Log dedup count alongside skip reason for benchmark analysis
+- Log dedup count alongside skip reason
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- Hook-io trace accuracy: investigate why benchmark reports ctx=0 when context IS injected
 - config.rs retrieval gap: BM25 can't match "change to TOML" against "reading ripgrep rc files"
   (query describes desired state, code describes current state — semantic gap)
-
-## Research sweep findings (session 28)
-- Pending: research agent still running at session end
