@@ -2,6 +2,19 @@
 
 All notable changes to budi are documented here.
 
+## [3.12.0] — Explain Routing & Diagnostics Accuracy
+
+Broader symbol classifier coverage and more accurate debug diagnostics.
+
+### Retrieval improvements
+
+- **"Explain X" symbol routing**: `has_symbol_after_prefix` now handles both "What is" and "Explain" prefixes. "Explain QuerySet", "Explain useState" etc. route to SymbolDefinition instead of Architecture.
+- **Post-dedup diagnostics accuracy**: `diagnostics.top_score` now refreshed after session deduplication, so it accurately reflects the score of what will actually be injected rather than the pre-dedup selection.
+
+### Benchmark state (v3.12.0, 8 repos, 144 judged prompts)
+
+~84% non-regression, ~-7% average cost savings. Judge noise dominates single-run variance.
+
 ## [3.11.0] — FlowTrace Precision & Context Compression
 
 More precise FlowTrace classification and leaner evidence cards.

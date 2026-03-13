@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "budi-cli"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "budi-core",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "budi-core"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "budi-daemon"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "budi-mcp"
-version = "3.11.0"
+version = "3.12.0"
 dependencies = [
  "anyhow",
  "reqwest",
