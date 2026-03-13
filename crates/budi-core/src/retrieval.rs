@@ -3758,6 +3758,13 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
     ) {
         return QueryIntentKind::SymbolDefinition;
     }
+    // "What is X?" where X looks like a symbol (PascalCase, camelCase, or `backtick`).
+    // This routes to sym-def so the definition gets seeded. Checked on the original
+    // prompt (not lowered) to detect casing. Must come after explicit sym-def keywords
+    // and before FlowTrace to avoid shadowing "What is the execution order...".
+    if lower.contains("what is ") && has_symbol_after_what_is(prompt) {
+        return QueryIntentKind::SymbolDefinition;
+    }
     if contains_any(
         &lower,
         &[
@@ -3893,6 +3900,49 @@ fn weights_for_intent(kind: QueryIntentKind) -> IntentWeights {
 
 fn contains_any(input: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|p| input.contains(p))
+}
+
+/// Check whether the word following "what is " looks like a code symbol.
+/// Uses the original (not lowered) prompt to detect PascalCase/camelCase.
+/// Matches: "What is useState?", "What is `QuerySet`?", "What is MyClass?"
+/// Does NOT match: "What is the architecture?", "What is a hook?"
+fn has_symbol_after_what_is(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    for (idx, _) in lower.match_indices("what is ") {
+        let after = &prompt[idx + 8..]; // skip "what is "
+        let word = after
+            .split(|c: char| c.is_whitespace() || c == '?')
+            .next()
+            .unwrap_or("");
+        if word.is_empty() {
+            continue;
+        }
+        // Backtick-quoted symbol: `QuerySet`
+        if word.starts_with('`') {
+            return true;
+        }
+        // PascalCase: two+ uppercase letters with at least one lowercase between.
+        // Matches: QuerySet, MyClass, WSGIHandler
+        // Rejects: "the", "a", "HTTP"
+        let has_upper = word.chars().any(|c| c.is_uppercase());
+        let has_lower = word.chars().any(|c| c.is_lowercase());
+        let starts_upper = word.starts_with(|c: char| c.is_uppercase());
+        if has_upper && has_lower && starts_upper {
+            return true;
+        }
+        // camelCase: starts lowercase, has uppercase.
+        // Matches: useState, getConfig
+        let starts_lower = word.starts_with(|c: char| c.is_lowercase());
+        if starts_lower && has_upper {
+            return true;
+        }
+        // snake_case: contains underscore.
+        // Matches: get_config, my_function
+        if word.contains('_') && word.len() > 2 {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_runtime_env_var_query(query: &str) -> bool {
@@ -4796,6 +4846,39 @@ mod tests {
         assert_eq!(
             classify_intent("declare the interface"),
             QueryIntentKind::SymbolDefinition
+        );
+    }
+
+    #[test]
+    fn classify_what_is_symbol_routes_to_sym_def() {
+        // PascalCase
+        assert_eq!(
+            classify_intent("What is QuerySet?"),
+            QueryIntentKind::SymbolDefinition
+        );
+        // camelCase
+        assert_eq!(
+            classify_intent("What is useState?"),
+            QueryIntentKind::SymbolDefinition
+        );
+        // Backtick-quoted
+        assert_eq!(
+            classify_intent("What is `resolve`?"),
+            QueryIntentKind::SymbolDefinition
+        );
+        // snake_case
+        assert_eq!(
+            classify_intent("What is get_config?"),
+            QueryIntentKind::SymbolDefinition
+        );
+        // Non-symbol → stays Architecture
+        assert_eq!(
+            classify_intent("What is the architecture of this codebase"),
+            QueryIntentKind::Architecture
+        );
+        assert_eq!(
+            classify_intent("What is a hook in this project?"),
+            QueryIntentKind::Architecture
         );
     }
 
