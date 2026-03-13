@@ -1,69 +1,72 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.6.0, 2026-03-12)
+## Current state (v3.7.0, 2026-03-12)
 
 - Branch: main, CI green (all workflows pass)
-- All 315 tests pass (290 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.6.0)
+- All 336 tests pass (311 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.7.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
-- v3.6.0 released: https://github.com/siropkin/budi/releases/tag/v3.6.0
+- v3.7.0 released: https://github.com/siropkin/budi/releases/tag/v3.7.0
 
-## What was done in session 17 (2026-03-12)
+## What was done in session 19 (2026-03-12)
 
-### 1. Full 8-repo benchmark sweep — DONE (major)
-All repos freshly run with deterministic embeddings:
-- Terraform: 13/18 (72%), -17%. P5 known, P9/P10/P13/P15 injected mild.
-- Fastify: 14/18 (78%), -21%. P14 known, P3/P17 LLM var.
-- FastAPI: 16/18 (89%, improved from 78%), -21%. P6 mild FlowTrace.
-- Express: 13/18 (72%), -26%. P12 FIXED (see below). 4 LLM var.
-- Ripgrep: 15/16 (94%, best ever), -8%. P13 LLM var.
-- Total: ~115/142 (~81%), ~-18% cost savings.
-- Key insight: LLM judge variance dominates. When budi injects, regression rate ~12-15%.
+### 1. Full 8-repo benchmark revalidation — DONE (major)
+All repos freshly run on v3.7.0 (post-sibling-merge + docstring extraction):
+- React: 17/18 (94%), -12% cost. Best ever.
+- Flask: 16/18 (89%), -9% cost. 0% injection regression.
+- Django: 12/18 (67%), -13% cost. 4 ctx=0 LLM var, P13/P14 injected (known).
+- Terraform: 16/18 (89%), -17% cost. P5 known thin wrapper.
+- Fastify: **18/18 (100%)**, -11% cost. Perfect! 7 wins.
+- FastAPI: **18/18 (100%)**, -6% cost. Perfect! 9 wins.
+- Express: 14/18 (78%), -19% cost. From session 18.
+- Ripgrep: running (session 19 re-run in progress).
+- Total (7 repos, 126 judged): ~111/126 (~88%), ~-12% cost.
+- Key insight: Real injection regressions = 3/126 (2.4%), ALL sym-def thin wrappers.
 
-### 2. Express P12 TestLookup fix — DONE (v3.6.0)
-- Wrong test file injection: app.router.js retrieved for "app.render" query (Q 9→3)
-- Fixed by broadening test_coverage_skip to check distinctive symbol tokens
-- Also handle dotted identifiers in prose patterns ("app.render" → "app" + "render")
-- All 8 repos' TestLookup queries verified — no regressions
+### 2. Granite-embedding-small-r2 evaluation — DONE (no action)
+- ONNX now available on HuggingFace (onnx-community/granite-embedding-small-english-r2-ONNX)
+- Loaded via fastembed UserDefinedEmbeddingModel (quantized, ~52MB)
+- Verdict: Keep AllMiniLM. Same discrimination problem as ModernBERT.
+- Granite score spread: 0.03-0.14 vs AllMiniLM 0.15-0.47
+- Scores cluster 0.70-0.88 vs AllMiniLM 0.09-0.63
+- Would require recalibrating all 50+ thresholds for worse separation
 
-### 3. Django P9/P14 investigation — DONE (no action)
-- Both are "correct but partial" injections causing mild Q-2 regressions
-- P9: 1 real caller found (26 lines, above thin-caller threshold)
-- P14: thin wrapper + 47-line implementation
-- Analyzed single-caller pattern across all 8 repos: 6 total, only 2 regressions
-- Blanket "single-caller skip" too aggressive — would hurt 4 working cases
+### 3. Docstring evidence card relevance — DONE (1edcc30)
+- Extract first meaningful docstring line from chunk text
+- Added as `relevance:` field in evidence cards
+- Supports: Python triple-quote, Rust ///, Go/JS //, JSDoc /** */
+- Django QuerySet: "Represent a lazy database lookup for a set of objects"
+- Flask class: "The flask object implements a WSGI application..."
+- 9 new tests
 
 ### 4. Research sweep — DONE
-- CodeRankEmbed (nomic-ai): 137M code-specialized, Apache 2.0, same size class as AllMiniLM
-- fastembed-rs 5.10.0: UserDefinedEmbeddingModel could load custom ONNX models
-- cocoindex-code: new AST-based MCP competitor, no embeddings
-- Claude Code: 18+ hook events. PreCompact, WorktreeCreate, SubagentStop new.
-- No new competitors threatening budi's position
+- RAG vs agentic debate validates budi's hybrid pre-injection approach
+- fastembed-rs: no new small ONNX code models (Qwen3/Nomic use candle)
+- Claude Code: 15 hook events, HTTP hooks. No new relevant hooks.
+- No new competitors threatening budi's position.
 
 ## Priority queue for next session
 
-### 1. CodeRankEmbed evaluation — MEDIUM
-137M code-specialized embedding model (nomic-ai, Apache 2.0). Same parameter class as AllMiniLM.
-Would use fastembed 5.10.0's UserDefinedEmbeddingModel to load custom ONNX export.
-Test discrimination spread on React/Flask benchmarks vs AllMiniLM.
+### 1. Complete Ripgrep revalidation — HIGH
+Running now. Check for results in ~/.local/share/budi/repos/ripgrep-*/benchmarks/
 
-### 2. Verkada-Web daily-driver usage — MEDIUM
-Use budi for actual development work. Collect real usage stats.
+### 2. Context condensation — MEDIUM
+Docstring extraction is done. Other ideas:
+- Intent-specific card formatting (SymbolDef: signature + docstring, FlowTrace: call chain emphasis)
+- Better proof line selection for specific intents
+- Cross-file relationship annotations
 
-### 3. cAST sibling-merging chunking — LOW
-arXiv 2506.15655: +4.3 Recall@5 on RepoEval by merging small AST siblings.
-Could improve chunking quality upstream of everything. Complex to implement.
+### 3. Prompt-context management research — MEDIUM
+- Study how to reduce total context load (CLAUDE.md + system reminders + budi injection)
+- Agent config file discovery (gitignored files like CLAUDE.md)
+- Deduplication when budi injection overlaps with existing context
 
-### 4. Context condensation — LOW
-Shift from raw chunk injection to proof-backed compact packs.
-Most valuable for repos where Claude's training knowledge is limited.
-
-### 5. Competitive A/B: budi vs Augment — LOW
-Requires paid plan. Setup: npm install + auggie login + claude mcp add-json.
+### 4. Version bump + release — LOW
+If Ripgrep results are good, bump to v3.8.0 and release.
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
-- Prompt-context management (CLAUDE.md compression, deduplication)
+- Verkada-Web daily-driver usage
