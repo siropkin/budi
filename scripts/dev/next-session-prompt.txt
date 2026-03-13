@@ -26,31 +26,37 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Fix: also check all candidates with graph > 0 (callers by construction)
 - Flask P8: ctx went from 0 → 723 chars, benchmark went from 89% → 100%
 
-### 3. Benchmark validation (session 27 final)
+### 3. Full benchmark validation (session 27, all 8 repos)
 
-| Benchmark | Non-reg | Rate | Cost | Notes |
-|-----------|---------|------|------|-------|
-| Flask | **18/18** | **100%** | -1% | 6 wins, 0 regressions! Best ever. |
-| Django | 16/18 | 89% | -22% | P7/P15 mild (ctx=0, judge noise) |
-| Express | 12/18 | 67%* | -16% | P9 extreme judge noise (9→1, ctx=0) |
+| Benchmark | Sess 26 | Sess 27 | Cost | Notes |
+|-----------|---------|---------|------|-------|
+| Flask | 89% | **100%** | -1% | 6 wins, 0 regressions! |
+| Terraform | 78% | **94%** | +70% mixed | P9 6→8, P11 7→9 wins |
+| Django | 100% | 89% | -22% | P7/P15 mild (ctx=0) |
+| Fastify | 89% | 89% | -15% | Same rate |
+| FastAPI | 89% | 89% | +30% mixed | P4/P14 big wins |
+| React | 89% | 83% | +8% | P1 extreme noise (8→4, ctx=0) |
+| Express | 83% | 67%* | -16% | P9 judge noise (9→1, ctx=0) |
+| Ripgrep | 87% | 80% | -7% | P18 injection regression (8→3) |
 
-*Express: all regressions are ctx=0 (no injection). P8 (only sym-use with injection) = win (8→9). P9 9→1 is absurd judge noise.
+*Express: all regressions ctx=0. P8 with injection = win (8→9).
+
+Flask 89%→100% and Terraform 78%→94% are the big wins from the graph fixes.
+Express/React declines are dominated by extreme judge noise (ctx=0, single-run variance).
+Ripgrep P18 is the only concerning injection regression.
 
 ## Priority queue for next session
 
-### 1. Run remaining benchmarks (Fastify/React/FastAPI/Ripgrep/Terraform) — MEDIUM
-- All repos re-indexed with --hard, ready for benchmarking
-- Both fixes (graph self-reference + skip relaxation) are cross-cutting
+### 1. Investigate ripgrep P18 injection regression — MEDIUM
+- "Change config file format to TOML" → ctx=334, Q 8→3
+- Injected walk.rs (noise) and main.rs alongside relevant config.rs
+- May need rt-cfg query filtering or path-relevance tightening
 
-### 2. Express P9 re-run — LOW
-- P9 "What calls res.send" went 9→1 in single run (clearly judge noise)
-- Re-run to confirm it's noise (previous session: 6→9 win)
-
-### 3. ContextBench evaluation — LOW
+### 2. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages)
 - Would need adaptation for budi's query-based model
 
-### 4. Session dedup analytics — LOW
+### 3. Session dedup analytics — LOW
 - Log dedup count alongside skip reason for benchmark analysis
 
 ## Other backlog items
