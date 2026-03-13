@@ -143,7 +143,7 @@ pub(super) fn build_context(
         }
         .min(remaining_budget);
 
-        let card = render_merged_card(card_data, query_tokens, max_proof);
+        let card = render_merged_card(card_data, query_tokens, max_proof, intent);
         if card.len() <= card_budget {
             out.push_str(&card);
             remaining_budget = remaining_budget.saturating_sub(card.len());
@@ -163,10 +163,12 @@ fn render_merged_card(
     card_data: &MergedCard<'_>,
     query_tokens: &[String],
     max_proof: usize,
+    intent: Option<&str>,
 ) -> String {
     let snippet = card_data.primary;
     let anchor = extract_anchor_line(&snippet.text, query_tokens);
-    let mut proof_lines = extract_proof_lines(&snippet.text, max_proof, &anchor, query_tokens);
+    let mut proof_lines =
+        extract_proof_lines(&snippet.text, max_proof, &anchor, query_tokens, intent);
 
     // Fold secondary anchors as additional proof (they show what else is in this file).
     for extra in &card_data.extra_anchors {
@@ -188,6 +190,7 @@ fn render_merged_card(
                 max_proof - proof_lines.len(),
                 &anchor,
                 query_tokens,
+                intent,
             );
             for line in extra_proof {
                 if proof_lines.len() >= max_proof {
@@ -397,31 +400,57 @@ fn extract_proof_lines(
     max_lines: usize,
     anchor: &str,
     query_tokens: &[String],
+    intent: Option<&str>,
 ) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
     }
-    // General code proof needles (not intent-specific)
-    let fixed_needles: &[&str] = &[
-        "listen(",
-        "route",
-        "router",
-        "handler",
-        "middleware",
-        "dispatch",
-        "request",
-        "response",
-        "return",
-        "process.env",
-        "import.meta.env",
-        "os.environ",
-        "env::var",
-        // Call-graph and flow-trace needles
-        "call(",
-        "invoke",
-        "schedule",
-        "commit",
-    ];
+    // Intent-aware code proof needles.
+    // FlowTrace: focus on call/invocation patterns; skip framework-specific noise.
+    // RuntimeConfig: focus on env/config patterns.
+    // SymbolDefinition: focus on return + type hints (what it does/returns).
+    // Others: general needles.
+    let fixed_needles: &[&str] = match intent {
+        Some("flow-trace") => &[
+            "call(",
+            "invoke",
+            "dispatch",
+            "schedule",
+            "commit",
+            "return",
+            ".apply(",
+            ".send(",
+            ".emit(",
+        ],
+        Some("runtime-config") => &[
+            "process.env",
+            "import.meta.env",
+            "os.environ",
+            "env::var",
+            "getenv",
+            "config",
+            "return",
+        ],
+        Some("test-lookup") => &[
+            "assert",
+            "expect(",
+            "it(",
+            "test(",
+            "describe(",
+            "#[test]",
+            "#[cfg(test)]",
+            "return",
+        ],
+        _ => &[
+            "return",
+            "call(",
+            "invoke",
+            "dispatch",
+            "route",
+            "handler",
+            "listen(",
+        ],
+    };
 
     let mut picked = Vec::new();
     let mut seen = HashSet::new();
@@ -1231,7 +1260,7 @@ mod tests {
                      return newFiber;\n";
         let anchor =
             "fn reconcileChildFibers(returnFiber: Fiber, currentFirstChild: Fiber | null) {";
-        let proof = extract_proof_lines(text, 3, anchor, &[]);
+        let proof = extract_proof_lines(text, 3, anchor, &[], None);
         // Should pick call expressions and return, not parameter declarations
         assert!(
             proof.iter().any(|l| l.contains("deleteChild")),
@@ -1495,7 +1524,7 @@ mod tests {
                      body: Body\n\
                      }";
         let anchor = "export interface FastifyRequestType<Params = unknown> {";
-        let proof = extract_proof_lines(text, 3, anchor, &[]);
+        let proof = extract_proof_lines(text, 3, anchor, &[], None);
         assert!(
             !proof.is_empty(),
             "interface should have proof lines, got empty"
@@ -1515,7 +1544,7 @@ mod tests {
                      verbose: bool,\n\
                      }";
         let anchor = "pub struct Config {";
-        let proof = extract_proof_lines(text, 3, anchor, &[]);
+        let proof = extract_proof_lines(text, 3, anchor, &[], None);
         assert!(
             proof.iter().any(|l| l.contains("name: String")),
             "should include struct field: {:?}",
@@ -1713,6 +1742,61 @@ export function scheduleUpdateOnFiber(root, fiber, lane) {
         assert_eq!(
             doc.as_deref(),
             Some("NewContext creates a new Context structure with the given configuration")
+        );
+    }
+
+    // ── intent-aware proof lines ─────────────────────────────────────────
+
+    #[test]
+    fn flow_trace_proof_prefers_call_patterns() {
+        let text = "\
+def get_response(self, request):
+    set_urlconf(settings.ROOT_URLCONF)
+    response = self._middleware_chain(request)
+    response._handler_class = self.__class__
+    return response";
+        let anchor = "def get_response(self, request):";
+        // FlowTrace intent: should pick call expressions and return
+        let proof = extract_proof_lines(text, 3, anchor, &[], Some("flow-trace"));
+        assert!(
+            proof.iter().any(|l| l.contains("_middleware_chain")),
+            "flow-trace should pick call expression: {proof:?}"
+        );
+        assert!(
+            proof.iter().any(|l| l.contains("return response")),
+            "flow-trace should pick return: {proof:?}"
+        );
+    }
+
+    #[test]
+    fn test_lookup_proof_prefers_assertions() {
+        let text = "\
+def test_basic_routing(self):
+    adapter = self.adapter
+    url = '/basic'
+    response = adapter.get(url)
+    assert response.status_code == 200
+    assert 'expected' in response.data";
+        let anchor = "def test_basic_routing(self):";
+        let proof = extract_proof_lines(text, 3, anchor, &[], Some("test-lookup"));
+        assert!(
+            proof.iter().any(|l| l.contains("assert")),
+            "test-lookup should pick assertion lines: {proof:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_config_proof_prefers_env_patterns() {
+        let text = "\
+def load_config():
+    debug = os.environ.get('DEBUG', False)
+    secret = os.environ['SECRET_KEY']
+    return Config(debug=debug, secret=secret)";
+        let anchor = "def load_config():";
+        let proof = extract_proof_lines(text, 3, anchor, &[], Some("runtime-config"));
+        assert!(
+            proof.iter().any(|l| l.contains("os.environ")),
+            "runtime-config should pick env patterns: {proof:?}"
         );
     }
 }
