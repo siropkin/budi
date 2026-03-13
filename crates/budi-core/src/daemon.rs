@@ -361,7 +361,12 @@ impl DaemonState {
         let query_tokens = retrieval::extract_query_proof_tokens(&request.prompt);
         // Rebuild context after dedup + prepend call graph summary.
         let base_context = if request.session_id.is_some() || call_graph.is_some() {
-            retrieval::format_context(&response.snippets, base_budget, &query_tokens)
+            retrieval::format_context(
+                &response.snippets,
+                base_budget,
+                &query_tokens,
+                response.detected_intent.as_deref(),
+            )
         } else {
             response.context.clone()
         };

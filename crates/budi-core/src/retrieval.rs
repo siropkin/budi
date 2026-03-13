@@ -1581,10 +1581,12 @@ pub fn build_query_response(
     };
 
     let query_tokens = extract_query_proof_tokens(query);
+    let intent_str = intent_name(intent.kind);
     let context = build_context(
         &selection.snippets,
         config.context_char_budget,
         &query_tokens,
+        Some(intent_str),
     );
     Ok(QueryResponse {
         total_candidates: lexical.len() + vector.len() + symbol.len() + path.len() + graph.len(),
@@ -1604,8 +1606,9 @@ pub fn format_context(
     snippets: &[QueryResultItem],
     budget: usize,
     query_tokens: &[String],
+    intent: Option<&str>,
 ) -> String {
-    context::build_context(snippets, budget, query_tokens)
+    context::build_context(snippets, budget, query_tokens, intent)
 }
 
 fn selected_snippet_languages(snippets: &[QueryResultItem]) -> Vec<String> {
@@ -3252,7 +3255,7 @@ pub fn prefetch_neighbors_for_file(
         });
     }
 
-    let context = context::build_context(&snippets, context_budget, &[]);
+    let context = context::build_context(&snippets, context_budget, &[], None);
     (snippets, context)
 }
 

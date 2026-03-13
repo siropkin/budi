@@ -97,14 +97,11 @@ pub(super) fn build_context(
     snippets: &[QueryResultItem],
     budget: usize,
     query_tokens: &[String],
+    intent: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push_str("[budi context]\n");
-    out.push_str("rules:\n");
-    out.push_str("- Use only file paths shown in snippets for exact-path answers.\n");
-    out.push_str(
-        "- If snippets support fewer files than requested, return fewer instead of guessing.\n",
-    );
+    out.push_str("rules: Use snippet paths only. Return fewer over guessing.\n");
     out.push_str("evidence_cards:\n");
 
     let header_len = out.len();
@@ -112,6 +109,13 @@ pub(super) fn build_context(
     let mut remaining_budget = content_budget;
 
     let merged = merge_same_file_snippets(snippets);
+
+    // Intent-specific proof line budget: sym-def already shows the signature
+    // as anchor, so 2 proof lines suffice. Flow-trace needs more call chain evidence.
+    let max_proof = match intent {
+        Some("symbol-definition") => 2,
+        _ => 3,
+    };
 
     for (idx, card_data) in merged.iter().enumerate() {
         if remaining_budget == 0 {
@@ -126,7 +130,7 @@ pub(super) fn build_context(
         }
         .min(remaining_budget);
 
-        let card = render_merged_card(card_data, query_tokens);
+        let card = render_merged_card(card_data, query_tokens, max_proof);
         if card.len() <= card_budget {
             out.push_str(&card);
             remaining_budget = remaining_budget.saturating_sub(card.len());
@@ -142,10 +146,13 @@ pub(super) fn build_context(
 
 /// Render a merged card. When secondary same-file snippets exist, their
 /// anchor lines are folded into the proof section (up to the 3-line limit).
-fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> String {
+fn render_merged_card(
+    card_data: &MergedCard<'_>,
+    query_tokens: &[String],
+    max_proof: usize,
+) -> String {
     let snippet = card_data.primary;
     let anchor = extract_anchor_line(&snippet.text, query_tokens);
-    let max_proof = 3;
     let mut proof_lines = extract_proof_lines(&snippet.text, max_proof, &anchor, query_tokens);
 
     // Fold secondary anchors as additional proof (they show what else is in this file).
@@ -182,10 +189,6 @@ fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> St
 
     let mut out = String::new();
     out.push_str(&format!("- file: {}\n", snippet.path));
-    out.push_str(&format!(
-        "  span: {}-{}\n",
-        card_data.merged_start, card_data.merged_end
-    ));
     out.push_str(&format!("  anchor: {}\n", anchor));
     if let Some(note) = &snippet.context_note {
         out.push_str(&format!("  relevance: {}\n", note));
@@ -849,7 +852,7 @@ mod tests {
 
     #[test]
     fn empty_snippets_returns_header_only() {
-        let out = build_context(&[], 4096, &[]);
+        let out = build_context(&[], 4096, &[], None);
         assert!(out.starts_with("[budi context]"), "missing header");
         assert!(
             out.contains("evidence_cards:"),
@@ -866,9 +869,9 @@ mod tests {
             "fn commitRoot() { schedule(); }",
             0.75,
         )];
-        let out = build_context(&snippets, 4096, &[]);
+        let out = build_context(&snippets, 4096, &[], None);
         assert!(out.contains("file: src/scheduler.rs"), "missing file path");
-        assert!(out.contains("span: 1-10"), "missing span");
+        assert!(out.contains("anchor:"), "missing anchor");
         // Score and signals are stripped from emitted context (debugging metadata)
         assert!(
             !out.contains("score:"),
@@ -883,7 +886,7 @@ mod tests {
     #[test]
     fn zero_budget_returns_header_only() {
         let snippets = vec![make_snippet("src/foo.rs", "fn foo() {}", 0.8)];
-        let out = build_context(&snippets, 0, &[]);
+        let out = build_context(&snippets, 0, &[], None);
         // Budget 0 < header length, so content_budget is 0, loop breaks immediately
         assert!(out.starts_with("[budi context]"));
         assert!(
@@ -900,7 +903,7 @@ mod tests {
             make_snippet("src/b.rs", &long_text, 0.8),
         ];
         let budget = 2000;
-        let out = build_context(&snippets, budget, &[]);
+        let out = build_context(&snippets, budget, &[], None);
         assert!(
             out.len() <= budget + 20, // small tolerance for header math
             "output len {} exceeds budget {}",
@@ -919,7 +922,7 @@ mod tests {
             make_snippet("src/big.rs", &long, 0.5),
         ];
         let budget = 4096;
-        let out = build_context(&snippets, budget, &[]);
+        let out = build_context(&snippets, budget, &[], None);
         // Both files should appear since budget is generous
         assert!(out.contains("file: src/top.rs"));
         assert!(out.contains("file: src/big.rs"));
@@ -932,7 +935,7 @@ mod tests {
             "pub fn query(&self) -> Result<QueryResponse> { return Ok(resp); }",
             0.82,
         )];
-        let out = build_context(&snippets, 4096, &[]);
+        let out = build_context(&snippets, 4096, &[], None);
         assert!(out.contains("anchor:"), "missing anchor");
         assert!(out.contains("proof:"), "missing proof section");
     }
@@ -944,7 +947,7 @@ mod tests {
             "// top comment\nroute(\"/api\", handler)\nreturn response;",
             0.7,
         )];
-        let out = build_context(&snippets, 4096, &[]);
+        let out = build_context(&snippets, 4096, &[], None);
         // Should include the "route" line as a proof needle match
         assert!(out.contains("route"), "expected route proof line");
     }
@@ -960,12 +963,13 @@ mod tests {
         s2.start_line = 10;
         s2.end_line = 15;
         let snippets = vec![s1, s2];
-        let out = build_context(&snippets, 4096, &[]);
+        let out = build_context(&snippets, 4096, &[], None);
         // Only one file: card should appear
         let file_count = out.matches("file: src/foo.rs").count();
         assert_eq!(file_count, 1, "same-file snippets should produce one card");
         // Merged span covers both
-        assert!(out.contains("span: 1-15"), "span should be merged: {}", out);
+        // Both anchors present (primary + secondary in proof)
+        assert!(out.contains("fn alpha()"), "primary anchor missing: {}", out);
         // Secondary anchor folded into proof
         assert!(
             out.contains("fn beta()"),
@@ -979,7 +983,7 @@ mod tests {
             make_snippet("src/a.rs", "fn a() {}", 0.9),
             make_snippet("src/b.rs", "fn b() {}", 0.7),
         ];
-        let out = build_context(&snippets, 4096, &[]);
+        let out = build_context(&snippets, 4096, &[], None);
         assert!(out.contains("file: src/a.rs"));
         assert!(out.contains("file: src/b.rs"));
     }
@@ -993,7 +997,7 @@ mod tests {
         s2.start_line = 900;
         s2.end_line = 910;
         let snippets = vec![s1, s2];
-        let out = build_context(&snippets, 4096, &[]);
+        let out = build_context(&snippets, 4096, &[], None);
         let file_count = out.matches("file: tests/test_big.py").count();
         assert_eq!(
             file_count, 2,
@@ -1134,6 +1138,32 @@ mod tests {
             "should NOT include param declaration: {:?}",
             proof
         );
+    }
+
+    // ── intent-specific proof count ──────────────────────────────────────────
+
+    #[test]
+    fn sym_def_intent_limits_proof_to_two_lines() {
+        let snippets = vec![make_snippet(
+            "src/query.py",
+            "class QuerySet:\n    \"\"\"A lazy database lookup.\"\"\"\n    def __init__(self):\n        self.query = Query()\n        self._cache = []\n        self._result = None",
+            0.8,
+        )];
+        let out = build_context(&snippets, 4096, &[], Some("symbol-definition"));
+        let proof_count = out.matches("    - ").count();
+        assert_eq!(proof_count, 2, "sym-def should have 2 proof lines, got {proof_count}: {out}");
+    }
+
+    #[test]
+    fn flow_trace_intent_allows_three_proof_lines() {
+        let snippets = vec![make_snippet(
+            "src/handler.py",
+            "def get_response(self, request):\n    response = self._middleware(request)\n    response = self.process(response)\n    return self.finalize(response)\n    self.log(response)",
+            0.8,
+        )];
+        let out = build_context(&snippets, 4096, &[], Some("flow-trace"));
+        let proof_count = out.matches("    - ").count();
+        assert_eq!(proof_count, 3, "flow-trace should have 3 proof lines, got {proof_count}: {out}");
     }
 
     // ── path_diversity_bucket ────────────────────────────────────────────────
