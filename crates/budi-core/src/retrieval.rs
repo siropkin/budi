@@ -3765,7 +3765,11 @@ fn classify_intent(prompt: &str) -> QueryIntentKind {
             "unmount order",
             "lifecycle order",
             "removal order",
-            "what order",
+            "teardown sequence",
+            "teardown order",
+            "what order do",
+            "what order are",
+            "what order does",
         ],
     ) {
         return QueryIntentKind::FlowTrace;
@@ -4947,6 +4951,12 @@ mod tests {
         );
         assert_eq!(
             classify_intent("which build flag enables debug mode"),
+            QueryIntentKind::RuntimeConfig
+        );
+        // "config file" triggers RuntimeConfig even when query also says "in what order"
+        // (design-change queries should not route to FlowTrace via broad "what order")
+        assert_eq!(
+            classify_intent("I want to change the config file format from plain-text args to TOML. Walk me through which parts would need to change and in what order."),
             QueryIntentKind::RuntimeConfig
         );
     }
