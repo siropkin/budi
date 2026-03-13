@@ -4,65 +4,59 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 ## Current state (v3.9.0, 2026-03-13)
 
 - Branch: main, CI green (all workflows pass)
-- All 346 tests pass (321 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
+- All 349 tests pass (325 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
 - Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.9.0)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
 - v3.9.0 released: https://github.com/siropkin/budi/releases/tag/v3.9.0
 
-## What was done in session 22 (2026-03-13)
+## What was done in session 23 (2026-03-13)
 
-### 1. Version bump to v3.9.0 — DONE (9b2a4ac)
-- Bumped from v3.8.0 for thin-wrapper detection + structural context integration
+### 1. Sym-def low-confidence skip — DONE (744064e)
+- When sym-hint-seed doesn't find the definition and top score < 0.30 (>= 10 candidates), skip injection
+- Fixed Express P5 injecting lib/request.js at score 0.08
 
-### 2. Full 8-repo benchmark sweep (v3.9.0) — DONE
-- React: 15/18 (83%), -3% cost — same as s21
-- Flask: 16/18 (89%), -19% cost — up from 83%
-- Django: 17/18 (94%), +5% cost — up from 78%, best ever!
-- Terraform: 15/18 (83%), -14% cost — up from 78%
-- Fastify: 17/18 (94%), -1% cost — up from 83%, best ever!
-- FastAPI: 16/18 (89%), +1% cost — up from 83%
-- Express: 11/18 (61%), -28% cost — same (ctx=0 noise dominated)
-- Ripgrep: 16/18 (89%), -9% cost
-- **Total: ~123/144 (~85%), up from ~81% in session 21**
+### 2. Test-coverage concept-word fallback — DONE (bfcac87+5bb1f0f)
+- Natural language test queries with no symbol tokens fall back to concept words
+- Fixed Ripgrep P15 ("What integration tests cover parallel search correctness") — now skips
 
-### 3. Intent-aware proof line needles — DONE (b83207e)
-- FlowTrace: call/invoke/dispatch/schedule/commit/return/.apply/.send/.emit
-- RuntimeConfig: env var patterns (process.env, os.environ, env::var, getenv, config)
-- TestLookup: assertions (assert, expect, it(, test(, describe(, #[test])
-- General: trimmed set (return, call, invoke, dispatch, route, handler, listen)
-- Validated on 3 repos first, then full 8-repo sweep:
-- Flask: 18/18 (100%) — best ever!
-- React: 16/18 (89%), -18% cost — both regressions ctx=0
-- Django: 16/18 (89%) — P14 persistent, P7 ctx=0
-- Terraform: 17/18 (94%), -5% cost — up from 83%
-- Fastify: 17/18 (94%), -13% cost
-- FastAPI: 16/18 (89%), -13% cost
-- Express: 14/18 (78%), -1% cost — up from 61%!
-- Ripgrep: 15/18 (83%), +3% cost
-- **Total: ~129/144 (~90%), up from ~85%**
+### 3. SnowflakeArcticEmbedS evaluation — DONE
+- Same 384d as AllMiniLM but worse discrimination (spread 0.27 vs 0.74)
+- **Verdict: keep AllMiniLM** (same conclusion as Granite/ModernBERT)
 
-### 4. Research sweep — DONE
-- **Claude Code 2.1.74**: Memory leak fix, no hook changes
-- **Augment Context Engine MCP**: UI polish, still MCP-based (round trip)
-- **New competitors**: rag-cli, mcp-local-rag, context-rag — none threaten budi
-- **SnowflakeArcticEmbedS**: 384d, 33M params, in fastembed 5.12.0 — worth evaluating
-- **LongCodeZip paper**: Two-stage code compression, validates budi's evidence card approach
-- **Context condensation analysis**: Detailed findings on intent-aware budget allocation, proof line optimization
+### 4. JS method assignment detection — DONE (502767d+9b92bce)
+- Express-style `app.use = function use(fn) {}` now detected in chunking
+- `is_boundary_node()` conditionally treats expression_statement as boundary for method assignments only
+- Dotted identifier extraction: `app.use` → `use` as query symbol token
+- Express P5 (app.use): 0.08→0.67, P3 (app.handle): 0.17→0.71, P4 (res.send): 0.21→0.63
+- Express chunk count: 811→296 (method-level chunks replace overlapping stride chunks)
+
+### 5. Full 8-repo benchmark sweep — DONE
+- Flask: 18/18 (100%) — zero regressions!
+- Fastify: 18/18 (100%) — zero regressions!
+- Django: 16/18 (89%) — P14 persistent, P16 ctx=0
+- Express: 15/18 (83%) — P8/P12 ctx=0, P13 injected mild
+- React: 15/18 (83%) — P1 extreme judge noise, P8 mild, P15 ctx=0
+- FastAPI: 15/18 (83%) — P10/P12 ctx=0, P15 injected mild
+- Ripgrep: 13/18 (72%) — P4 injected mild, P9/P15/P18 ctx=0
+- Terraform: 12/18 (67%) — LLM judge variance (6 regs, 4 ctx=0)
+- **Total: ~122/144 (~85%), -4% cost**
+
+### 6. Research sweep — DONE
+- Claude Code still at 2.1.74, no new competitors, no new small embedding models
 
 ## Priority queue for next session
 
-### 1. SnowflakeArcticEmbedS evaluation — MEDIUM
-- Same 384d/33M as AllMiniLM, in fastembed 5.12.0, newer training
-- Need to evaluate score discrimination vs AllMiniLM before threshold recalibration
-
-### 2. Score-weighted budget allocation — MEDIUM
+### 1. Score-weighted budget allocation — MEDIUM
 - Current: fixed 40%/60% progressive truncation
 - Proposed: allocate proportional to (score - min) / sum
 - High-confidence cards get more space, low-confidence cards get less
 
-### 3. Aggressive context compression — LOW
+### 2. Aggressive context compression — LOW
 - TAAC paper suggests code tolerates 0.6 compression ratio
 - Consider: skip relevance field for FlowTrace/SymbolUsage intents
+
+### 3. Version bump to v3.10.0 — LOW
+- JS method assignment detection + sym-def skip + concept-word fallback warrant bump
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
@@ -71,4 +65,4 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Verkada-Web daily-driver usage
 - New Claude Code hook types (prompt, agent) investigation
 - additionalContext injection bug #14281 investigation
-- Ripgrep P14/P15 test-lookup regressions (both test intent)
+- Terraform benchmark noise: investigate why P5/P13 inject at high scores but regress
