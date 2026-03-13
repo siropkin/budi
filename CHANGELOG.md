@@ -2,6 +2,28 @@
 
 All notable changes to budi are documented here.
 
+## [3.10.0] — JS Method Detection & Smarter Skip Patterns
+
+Better chunking for Express-style codebases, smarter skip patterns, and score-aware budget allocation.
+
+### Retrieval improvements
+
+- **JS method assignment detection**: Express-style `app.use = function use(fn) { ... }` patterns now detected as chunk boundaries with proper symbol extraction. Express chunk count dropped from 811 to 296 (method-level chunks instead of overlapping strides). Scores for `app.use`, `app.handle`, `res.send` improved from 0.08–0.21 to 0.63–0.71.
+- **Score-weighted budget allocation**: Multi-card context budget now allocated proportional to retrieval score instead of fixed geometric decay. Higher-scoring cards get more space; 15% minimum per card.
+- **Intent-aware proof line needles**: Proof line extraction uses intent-specific patterns — FlowTrace focuses on call/invoke/dispatch; RuntimeConfig on env var patterns; TestLookup on assertions.
+
+### Skip pattern improvements
+
+- **Sym-def low-confidence skip**: When the symbol index has no definition and top retrieval score is below 0.30 (with 10+ candidates), injection is skipped instead of forcing noise. Fixes false injections on prototype-assigned methods.
+- **Test-coverage concept-word fallback**: Natural-language test queries without symbol tokens now fall back to concept words, filtering ubiquitous domain words. Prevents injecting unrelated test files for broad test-coverage questions.
+
+### Benchmark state (v3.10.0, 8 repos, 144 judged prompts)
+
+- Flask: 100%, Fastify: 100% — zero regressions
+- Django: 89%, Express: 83%, React: 83%, FastAPI: 83%
+- Ripgrep: 72%, Terraform: 67% (judge variance)
+- **Overall: ~85% non-regression, ~4% average cost savings**
+
 ## [3.5.0] — Deterministic Embeddings & Context Re-injection
 
 Deterministic embedding vectors, post-compaction context recovery, and subagent awareness.

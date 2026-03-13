@@ -31,13 +31,13 @@ No extra tool calls. No round trips. Just the code Claude was about to look for,
 
 ## A/B results
 
-Tested on 9 open-source repos (141 judged prompts) with an independent LLM judge:
+Tested on 8 open-source repos (144 judged prompts) with an independent LLM judge:
 
 | Metric | Result |
 |--------|--------|
-| Non-regression rate | **~82%** single-run, **~85-90%** multi-run |
-| Injection regression rate | **~10-12%** (when budi injects context) |
-| Cost savings | **2-23%** lower on most repos |
+| Non-regression rate | **~85%** single-run (Flask & Fastify 100%) |
+| Injection regression rate | **~8-10%** (when budi injects context) |
+| Cost savings | **3-25%** lower on most repos |
 
 budi's goal: same answer quality at lower cost. Ties (same quality, less cost) are the primary success metric. Many single-run "regressions" are LLM variance on queries where budi correctly skipped injection.
 
@@ -93,7 +93,7 @@ budi index --hard        # full re-index
 | **Strategy** | Pre-inject before search | Compress output after search | MCP search on demand | Knowledge graph + MCP |
 | **Latency** | Zero (hooks, no round trip) | Zero (intercept) | +1 tool call | +1 tool call |
 | **Retrieval** | 5-channel with intent routing | BM25 with fallback | Proprietary | BM25 + semantic |
-| **A/B validated** | 9 repos, 141 prompts | No | No | No |
+| **A/B validated** | 8 repos, 144 prompts | No | No | No |
 | **Privacy** | 100% local | 100% local | Cloud | 100% local |
 
 budi is complementary with output-compression tools like context-mode.
