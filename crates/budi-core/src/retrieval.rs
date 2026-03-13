@@ -1117,20 +1117,59 @@ pub fn build_query_response(
                 let concept_fallback: Vec<String> = if distinctive.is_empty() {
                     const STOP: &[&str] = &[
                         // question words
-                        "what", "which", "where", "when", "how", "does",
+                        "what",
+                        "which",
+                        "where",
+                        "when",
+                        "how",
+                        "does",
                         // test vocabulary
-                        "test", "tests", "spec", "specs", "cover", "covers",
-                        "covered", "integration", "unit",
+                        "test",
+                        "tests",
+                        "spec",
+                        "specs",
+                        "cover",
+                        "covers",
+                        "covered",
+                        "integration",
+                        "unit",
                         // common prose
-                        "that", "this", "them", "they", "the", "and", "are",
-                        "for", "from", "with", "have", "live", "repo", "file",
-                        "files", "code", "codebase", "correctness",
+                        "that",
+                        "this",
+                        "them",
+                        "they",
+                        "the",
+                        "and",
+                        "are",
+                        "for",
+                        "from",
+                        "with",
+                        "have",
+                        "live",
+                        "repo",
+                        "file",
+                        "files",
+                        "code",
+                        "codebase",
+                        "correctness",
                         // ubiquitous code domain words (appear in nearly every
                         // file in their respective codebases, useless for
                         // discriminating between test topics)
-                        "search", "config", "parse", "handle", "request",
-                        "response", "error", "data", "type", "function",
-                        "method", "module", "import", "export", "logic",
+                        "search",
+                        "config",
+                        "parse",
+                        "handle",
+                        "request",
+                        "response",
+                        "error",
+                        "data",
+                        "type",
+                        "function",
+                        "method",
+                        "module",
+                        "import",
+                        "export",
+                        "logic",
                         "parsing",
                     ];
                     let words: Vec<String> = query
@@ -1153,7 +1192,9 @@ pub fn build_query_response(
                             if !distinctive.is_empty() {
                                 distinctive.iter().any(|t| text_lower.contains(t))
                             } else {
-                                concept_fallback.iter().any(|t| text_lower.contains(t.as_str()))
+                                concept_fallback
+                                    .iter()
+                                    .any(|t| text_lower.contains(t.as_str()))
                             }
                         })
                     })

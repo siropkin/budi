@@ -5081,4 +5081,3 @@ mod tests {
         assert_eq!(TantivyBundle::bm25_text(&chunk), "const x = 1;");
     }
 }
-
