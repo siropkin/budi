@@ -30,9 +30,16 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - RuntimeConfig: env var patterns (process.env, os.environ, env::var, getenv, config)
 - TestLookup: assertions (assert, expect, it(, test(, describe(, #[test])
 - General: trimmed set (return, call, invoke, dispatch, route, handler, listen)
+- Validated on 3 repos first, then full 8-repo sweep:
 - Flask: 18/18 (100%) — best ever!
-- React: 16/18 (89%) — both regressions ctx=0
+- React: 16/18 (89%), -18% cost — both regressions ctx=0
 - Django: 16/18 (89%) — P14 persistent, P7 ctx=0
+- Terraform: 17/18 (94%), -5% cost — up from 83%
+- Fastify: 17/18 (94%), -13% cost
+- FastAPI: 16/18 (89%), -13% cost
+- Express: 14/18 (78%), -1% cost — up from 61%!
+- Ripgrep: 15/18 (83%), +3% cost
+- **Total: ~129/144 (~90%), up from ~85%**
 
 ### 4. Research sweep — DONE
 - **Claude Code 2.1.74**: Memory leak fix, no hook changes
@@ -44,20 +51,16 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 
 ## Priority queue for next session
 
-### 1. Full 8-repo revalidation with intent-aware proof — HIGH
-- Flask hit 100%, React 89% — need full sweep to confirm aggregate improvement
-- Expect ~87-88% aggregate (up from 85%)
-
-### 2. SnowflakeArcticEmbedS evaluation — MEDIUM
+### 1. SnowflakeArcticEmbedS evaluation — MEDIUM
 - Same 384d/33M as AllMiniLM, in fastembed 5.12.0, newer training
 - Need to evaluate score discrimination vs AllMiniLM before threshold recalibration
 
-### 3. Score-weighted budget allocation — MEDIUM
+### 2. Score-weighted budget allocation — MEDIUM
 - Current: fixed 40%/60% progressive truncation
 - Proposed: allocate proportional to (score - min) / sum
 - High-confidence cards get more space, low-confidence cards get less
 
-### 4. Aggressive context compression — LOW
+### 3. Aggressive context compression — LOW
 - TAAC paper suggests code tolerates 0.6 compression ratio
 - Consider: skip relevance field for FlowTrace/SymbolUsage intents
 
