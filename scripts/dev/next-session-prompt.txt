@@ -30,7 +30,12 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Express P5 (app.use): 0.08→0.67, P3 (app.handle): 0.17→0.71, P4 (res.send): 0.21→0.63
 - Express chunk count: 811→296 (method-level chunks replace overlapping stride chunks)
 
-### 5. Full 8-repo benchmark sweep — DONE
+### 5. Score-weighted budget allocation — DONE (1669841)
+- Multi-card context budget now allocated proportional to score instead of fixed 40%/60% decay
+- Higher-scoring cards get more space, 15% minimum per card
+- 3-repo validation: Flask 100%, Express 83%, React 89% — no regressions introduced
+
+### 6. Full 8-repo benchmark sweep — DONE
 - Flask: 18/18 (100%) — zero regressions!
 - Fastify: 18/18 (100%) — zero regressions!
 - Django: 16/18 (89%) — P14 persistent, P16 ctx=0
@@ -41,22 +46,22 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Terraform: 12/18 (67%) — LLM judge variance (6 regs, 4 ctx=0)
 - **Total: ~122/144 (~85%), -4% cost**
 
-### 6. Research sweep — DONE
+### 7. Research sweep — DONE
 - Claude Code still at 2.1.74, no new competitors, no new small embedding models
 
 ## Priority queue for next session
 
-### 1. Score-weighted budget allocation — MEDIUM
-- Current: fixed 40%/60% progressive truncation
-- Proposed: allocate proportional to (score - min) / sum
-- High-confidence cards get more space, low-confidence cards get less
+### 1. Version bump to v3.10.0 — LOW
+- JS method assignment + sym-def skip + concept-word fallback + score-weighted budget warrant bump
+- Full 8-repo sweep with score-weighted budget needed for release validation
 
 ### 2. Aggressive context compression — LOW
 - TAAC paper suggests code tolerates 0.6 compression ratio
 - Consider: skip relevance field for FlowTrace/SymbolUsage intents
 
-### 3. Version bump to v3.10.0 — LOW
-- JS method assignment detection + sym-def skip + concept-word fallback warrant bump
+### 3. Terraform injected regression analysis — MEDIUM
+- P5 (Plan, 0.75) and P13 (ReadStateBytes, 0.70) inject at high scores but regress Q by 1-2
+- Investigate whether the injected context is misleading or if it's purely judge noise
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
@@ -65,4 +70,3 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 - Verkada-Web daily-driver usage
 - New Claude Code hook types (prompt, agent) investigation
 - additionalContext injection bug #14281 investigation
-- Terraform benchmark noise: investigate why P5/P13 inject at high scores but regress
