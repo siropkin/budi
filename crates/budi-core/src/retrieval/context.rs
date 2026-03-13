@@ -189,6 +189,8 @@ fn render_merged_card(card_data: &MergedCard<'_>, query_tokens: &[String]) -> St
     out.push_str(&format!("  anchor: {}\n", anchor));
     if let Some(note) = &snippet.context_note {
         out.push_str(&format!("  relevance: {}\n", note));
+    } else if let Some(doc) = extract_first_docstring_line(&snippet.text) {
+        out.push_str(&format!("  relevance: {}\n", doc));
     }
     out.push_str("  proof:\n");
     if proof_lines.is_empty() {
@@ -454,6 +456,121 @@ fn extract_proof_lines(
         }
     }
     picked
+}
+
+/// Extract the first meaningful docstring line from chunk text.
+///
+/// Scans for Python triple-quote docstrings (`"""..."""`, `'''...'''`),
+/// Rust `///` doc-comments, Go/Java/C `//` or `/* ... */` doc-comments,
+/// and JSDoc `/** ... */` comments that appear right after a definition line.
+/// Returns `None` if no docstring is found or if the docstring is too short.
+fn extract_first_docstring_line(text: &str) -> Option<String> {
+    let mut saw_definition = false;
+    let mut in_triple_quote = false;
+    let mut lines = text.lines();
+
+    while let Some(raw_line) = lines.next() {
+        let trimmed = raw_line.trim();
+
+        // Track when we've passed a definition line.
+        if !saw_definition && is_definition_line(trimmed) {
+            saw_definition = true;
+            continue;
+        }
+
+        if !saw_definition {
+            continue;
+        }
+
+        // Skip blank lines and opening braces between definition and docstring.
+        if trimmed.is_empty() || trimmed == "{" || trimmed == ":" {
+            continue;
+        }
+
+        // Python triple-quote docstring: """...""" or '''...'''
+        if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
+            let quote = &trimmed[..3];
+            // Single-line docstring: """text"""
+            if trimmed.len() > 6 && trimmed[3..].contains(quote) {
+                let content = trimmed[3..].split(quote).next().unwrap_or("").trim();
+                if content.len() >= 10 {
+                    return Some(truncate_docstring(content));
+                }
+                return None;
+            }
+            // Multi-line: first line after the opening triple-quote
+            in_triple_quote = true;
+            let after_open = trimmed[3..].trim();
+            if !after_open.is_empty() && after_open.len() >= 10 {
+                return Some(truncate_docstring(after_open));
+            }
+            continue;
+        }
+
+        if in_triple_quote {
+            let content = trimmed
+                .trim_start_matches(['"', '\''])
+                .trim();
+            if !content.is_empty() && content.len() >= 10 {
+                return Some(truncate_docstring(content));
+            }
+            return None;
+        }
+
+        // Rust /// doc-comments
+        if trimmed.starts_with("///") {
+            let content = trimmed.trim_start_matches('/').trim();
+            if content.len() >= 10 {
+                return Some(truncate_docstring(content));
+            }
+            return None;
+        }
+
+        // JSDoc/Go/Java block comments: /** ... */ or /* ... */
+        if trimmed.starts_with("/**") || trimmed.starts_with("/*") {
+            let prefix_len = if trimmed.starts_with("/**") { 3 } else { 2 };
+            let after = trimmed[prefix_len..].trim().trim_end_matches("*/").trim();
+            if !after.is_empty() && after.len() >= 10 {
+                return Some(truncate_docstring(after));
+            }
+            // Check next line for content
+            if let Some(next) = lines.next() {
+                let next_trimmed = next.trim().trim_start_matches('*').trim();
+                if !next_trimmed.is_empty()
+                    && !next_trimmed.starts_with('/')
+                    && next_trimmed.len() >= 10
+                {
+                    return Some(truncate_docstring(next_trimmed));
+                }
+            }
+            return None;
+        }
+
+        // Single-line // comments (Go, Rust, JS/TS)
+        if trimmed.starts_with("//") {
+            let content = trimmed.trim_start_matches('/').trim();
+            if content.len() >= 10 {
+                return Some(truncate_docstring(content));
+            }
+            return None;
+        }
+
+        // No docstring found — hit real code after definition.
+        return None;
+    }
+    None
+}
+
+fn truncate_docstring(s: &str) -> String {
+    // Strip trailing punctuation for cleaner rendering.
+    let cleaned = s.trim_end_matches('.');
+    if cleaned.len() > 120 {
+        let mut truncated: String = cleaned.chars().take(117).collect();
+        truncated.push_str("...");
+        truncated
+    } else {
+        cleaned.to_string()
+    }
 }
 
 fn sanitize_evidence_line(raw: &str) -> String {
@@ -1238,6 +1355,104 @@ export function scheduleUpdateOnFiber(root, fiber, lane) {
         assert!(
             anchor_no_query.contains("peekDeferredLane"),
             "without query, expected peekDeferredLane, got: {anchor_no_query}"
+        );
+    }
+
+    // ── extract_first_docstring_line ─────────────────────────────────────────
+
+    #[test]
+    fn docstring_python_triple_quote_single_line() {
+        let text = r#"class QuerySet(AltersData):
+    """Represent a lazy database lookup for a set of objects."""
+    def __init__(self):
+        pass"#;
+        let doc = extract_first_docstring_line(text);
+        assert_eq!(
+            doc.as_deref(),
+            Some("Represent a lazy database lookup for a set of objects")
+        );
+    }
+
+    #[test]
+    #[test]
+    fn docstring_python_triple_quote_multiline() {
+        let text = r#"def wsgi_app(self, environ, start_response):
+    """The actual WSGI application.  This is not implemented in
+    :meth:`__call__` so that middlewares can be applied without
+    losing a reference to the app object."""
+    ctx = self.request_context(environ)"#;
+        let doc = extract_first_docstring_line(text);
+        assert_eq!(
+            doc.as_deref(),
+            Some("The actual WSGI application.  This is not implemented in")
+        );
+    }
+
+    #[test]
+    fn docstring_rust_doc_comment() {
+        let text = "/// Returns the chunk record for the given ID, or None if not found.\nfn chunk(&self, id: u64) -> Option<&ChunkRecord> {\n    self.chunks.get(&id)\n}";
+        // Definition is fn chunk, but /// comes before the definition.
+        // Our function looks for docstrings AFTER the definition line.
+        // Rust convention puts /// before fn, so this should return None.
+        let doc = extract_first_docstring_line(text);
+        assert!(doc.is_none());
+    }
+
+    #[test]
+    fn docstring_rust_doc_comment_after_def() {
+        // Some Rust code has doc-comments inside impl blocks after fn signature
+        let text = "pub fn embed_query(&mut self, query: &str) -> Result<Option<Vec<f32>>> {\n    /// Embed a single query string and return the embedding vector.\n    let rows = embedder.embed(vec![query], None)?;";
+        let doc = extract_first_docstring_line(text);
+        assert_eq!(
+            doc.as_deref(),
+            Some("Embed a single query string and return the embedding vector")
+        );
+    }
+
+    #[test]
+    fn docstring_go_block_comment() {
+        let text = "func (c *Context) Plan() (*plans.Plan, tfdiags.Diagnostics) {\n\t/* Plan generates an execution plan for the given context. */\n\top, moreDiags := c.plan()";
+        let doc = extract_first_docstring_line(text);
+        assert_eq!(
+            doc.as_deref(),
+            Some("Plan generates an execution plan for the given context")
+        );
+    }
+
+    #[test]
+    fn docstring_jsdoc() {
+        let text = "function reconcileChildFibers(returnFiber, currentFirstChild, newChild) {\n  /**\n   * Reconciles the children of a fiber node, handling additions,\n   * deletions, and moves.\n   */\n  if (typeof newChild === 'string') {";
+        let doc = extract_first_docstring_line(text);
+        assert_eq!(
+            doc.as_deref(),
+            Some("Reconciles the children of a fiber node, handling additions,")
+        );
+    }
+
+    #[test]
+    fn docstring_short_ignored() {
+        let text = "def foo():\n    \"\"\"Short.\"\"\"\n    pass";
+        let doc = extract_first_docstring_line(text);
+        assert!(
+            doc.is_none(),
+            "docstrings shorter than 10 chars should be ignored"
+        );
+    }
+
+    #[test]
+    fn docstring_no_docstring_returns_none() {
+        let text = "def foo():\n    x = 1\n    return x";
+        let doc = extract_first_docstring_line(text);
+        assert!(doc.is_none());
+    }
+
+    #[test]
+    fn docstring_go_single_line_comment() {
+        let text = "func NewContext(opts *ContextOpts) (*Context, tfdiags.Diagnostics) {\n\t// NewContext creates a new Context structure with the given configuration.\n\tvar diags tfdiags.Diagnostics";
+        let doc = extract_first_docstring_line(text);
+        assert_eq!(
+            doc.as_deref(),
+            Some("NewContext creates a new Context structure with the given configuration")
         );
     }
 }
