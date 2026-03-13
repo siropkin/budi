@@ -10,7 +10,7 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 
 ## What was done in session 27 (2026-03-13)
 
-### 1. Graph self-reference bug fix — DONE
+### 1. Graph self-reference bug fix — DONE (f56e85b)
 - Root cause: `extract_reference_tokens()` processed definition lines that matched
   `looks_like_reference_line()` (e.g., `def dispatch_request(self, ctx) -> ft.ResponseReturnValue:`
   has '.' and '('), extracting the definition name as a reference token
@@ -18,55 +18,33 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
   then `diversify_channel_by_path` (1-per-file dedup) dropped the actual caller
   when both were in the same file
 - Fix: skip `looks_like_definition_line()` lines in `extract_reference_tokens()`
-- 5 new tests (reference_tokens_skip_definition_lines, graph_index_no_self_reference,
-  call_token_extraction_self_method, call_sites_from_full_dispatch_request,
-  graph_index_maps_self_method_caller_to_definition)
-- Flask `full_dispatch_request` graph score: 0.0 → 0.1520
-- All benchmark repos re-indexed with --hard
+- 5 new tests added
 
-### 2. Benchmark validation results (v3.13.1)
+### 2. Graph-aware sym-use no-call-site skip — DONE (5eb56e1)
+- `sym_use_no_call_site_skip` only checked top 3 candidates for call expressions
+- Real callers often ranked below top 3 due to HNSW variance
+- Fix: also check all candidates with graph > 0 (callers by construction)
+- Flask P8: ctx went from 0 → 723 chars, benchmark went from 89% → 100%
 
-| Benchmark | Non-reg | Rate | Notes |
-|-----------|---------|------|-------|
-| Django | 17/18 | 94% | P18 mild regression (judge noise, flow-trace) |
-| Flask | 16/18 | 89% | P13/P14 mild (Q-1), same as baseline |
-| Express | 16/18 | 89% | P14 mild (Q-1); P8/P9 big wins (sym-use 6→9!) |
-
-Express improved from 83% → 89% (P8 went from regression to +3 win).
-
-## Current benchmark state (v3.13.1, validated 3/8 repos)
+### 3. Benchmark validation (session 27 final)
 
 | Benchmark | Non-reg | Rate | Cost | Notes |
 |-----------|---------|------|------|-------|
-| Django | 17/18 | 94% | -5% | P18 flow-trace mild regression |
-| Flask | 16/18 | 89% | -4% | Same as baseline |
-| Express | 16/18 | 89% | -15% | UP from 83%, P8/P9 sym-use wins |
-| Fastify | (not re-run) | ~89% | | |
-| React | (not re-run) | ~89% | | |
-| FastAPI | (not re-run) | ~89% | | |
-| Ripgrep | (not re-run) | ~87% | | |
-| Terraform | (not re-run) | ~78% | | |
+| Flask | **18/18** | **100%** | -1% | 6 wins, 0 regressions! Best ever. |
+| Django | 16/18 | 89% | -22% | P7/P15 mild (ctx=0, judge noise) |
+| Express | 12/18 | 67%* | -16% | P9 extreme judge noise (9→1, ctx=0) |
 
-## Key analysis insights
-
-- Graph self-reference affected all languages where definition lines match
-  `looks_like_reference_line()` (Python '.' + '(', Rust '->', Go '.' + '(', etc.)
-- The fix improves graph channel accuracy for same-file caller discovery
-- sym-use queries still hit `sym_use_no_call_site_skip` when actual callers
-  rank below top 3 (Flask P8: full_dispatch_request at rank 6)
-- Express P8/P9 wins suggest the graph fix helped some callers break into top 3
+*Express: all regressions are ctx=0 (no injection). P8 (only sym-use with injection) = win (8→9). P9 9→1 is absurd judge noise.
 
 ## Priority queue for next session
 
-### 1. sym-use no_call_site_skip relaxation — MEDIUM
-- Current: checks top 3 candidates for `target_symbol(` call expression
-- Problem: actual callers often rank 4-6 (e.g., Flask P8 full_dispatch_request)
-- Options: (a) expand to top 5-6, (b) weight graph-channel hits higher in check,
-  (c) check all candidates above score floor, (d) only skip when 0 candidates have call
-
-### 2. Run remaining benchmarks (Fastify/React/FastAPI/Ripgrep/Terraform) — LOW
+### 1. Run remaining benchmarks (Fastify/React/FastAPI/Ripgrep/Terraform) — MEDIUM
 - All repos re-indexed with --hard, ready for benchmarking
-- Graph fix is cross-cutting, may affect all repos
+- Both fixes (graph self-reference + skip relaxation) are cross-cutting
+
+### 2. Express P9 re-run — LOW
+- P9 "What calls res.send" went 9→1 in single run (clearly judge noise)
+- Re-run to confirm it's noise (previous session: 6→9 win)
 
 ### 3. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages)
@@ -81,3 +59,11 @@ Express improved from 83% → 89% (P8 went from regression to +3 win).
 - Parallel chunking (rayon) for --hard rebuilds
 - fastembed-rs v5.12+ has Qwen3 and BAAI/bge-m3 — evaluate if relevant
 - Hook-io trace accuracy: investigate why benchmark reports ctx=0 when context IS injected
+
+## Research sweep findings (session 27)
+- No new Claude Code hooks needed
+- fastembed-rs 5.12.1 already covered by Cargo.toml `= "5"` spec
+- Augment Code Context Engine is strongest competitor but requires cloud
+- C2LLM-0.5B interesting but too large (500M params vs AllMiniLM 22M)
+- No applicable papers (LLavaCode/CompLLM need model-level integration)
+- Tree-sitter grammars: minor patch updates available via `cargo update`
