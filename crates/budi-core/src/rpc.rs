@@ -6,6 +6,10 @@ fn default_chunk_language() -> String {
     "unknown".to_string()
 }
 
+fn is_zero(v: &usize) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub repo_root: String,
@@ -139,6 +143,9 @@ pub struct QueryDiagnostics {
     pub snippet_ecosystems: Vec<String>,
     pub recommended_injection: bool,
     pub skip_reason: Option<String>,
+    /// Number of snippets removed by session deduplication.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dedup_count: usize,
     /// All fused candidates with raw channel scores (only populated when dump_candidates=true).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<DiagnosticCandidate>,

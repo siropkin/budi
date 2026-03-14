@@ -1703,6 +1703,7 @@ pub fn build_query_response(
         } else {
             None
         },
+        dedup_count: 0,
         candidates: diagnostic_candidates,
     };
 

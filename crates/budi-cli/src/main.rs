@@ -2057,6 +2057,7 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
             snippet_ecosystems: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(SKIP_REASON_FORCED_SKIP.to_string()),
+            dedup_count: 0,
             candidates: Vec::new(),
         };
         log_hook_event(&repo_root, &config, || {
@@ -2168,6 +2169,9 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
         if success && let Some(obj) = payload.as_object_mut() {
             obj.insert("total_candidates".to_string(), json!(total_candidates));
             obj.insert("snippets_count".to_string(), json!(snippets_count));
+            if diagnostics.dedup_count > 0 {
+                obj.insert("dedup_count".to_string(), json!(diagnostics.dedup_count));
+            }
             obj.insert(
                 "retrieval_intent".to_string(),
                 json!(diagnostics.intent.clone()),
@@ -3724,6 +3728,7 @@ mod tests {
             snippet_ecosystems: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
+            dedup_count: 0,
             candidates: Vec::new(),
         };
         let directives = PromptDirectives::default();
@@ -3754,6 +3759,7 @@ mod tests {
             snippet_ecosystems: Vec::new(),
             recommended_injection: false,
             skip_reason: Some(budi_core::reason_codes::SKIP_REASON_LOW_CONFIDENCE.to_string()),
+            dedup_count: 0,
             candidates: Vec::new(),
         };
         let directives = PromptDirectives {
@@ -3784,6 +3790,7 @@ mod tests {
             snippet_ecosystems: Vec::new(),
             recommended_injection: true,
             skip_reason: None,
+            dedup_count: 0,
             candidates: Vec::new(),
         };
         let directives = PromptDirectives {

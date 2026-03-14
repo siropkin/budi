@@ -239,6 +239,7 @@ impl DaemonState {
                     snippet_ecosystems: Vec::new(),
                     recommended_injection: false,
                     skip_reason: Some(SKIP_REASON_NON_CODE_INTENT.to_string()),
+                    dedup_count: 0,
                     candidates: Vec::new(),
                 },
             });
@@ -277,9 +278,11 @@ impl DaemonState {
         let t_retrieval_ms = t_start.elapsed().as_millis() as u64;
 
         // Step 3: Session deduplication — remove snippets Claude already saw this session.
+        let pre_dedup_count = response.snippets.len();
         if let Some(ref sid) = request.session_id {
             self.dedup_session_snippets(sid, &mut response.snippets);
         }
+        response.diagnostics.dedup_count = pre_dedup_count - response.snippets.len();
         let t_dedup_ms = t_start.elapsed().as_millis() as u64;
 
         // Populate snippet_refs for structured analytics.

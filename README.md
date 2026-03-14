@@ -56,9 +56,8 @@ Claude will clone the repo, run the installer, and set up your project automatic
 **Step 1 — Install binaries**
 
 ```bash
-# From prebuilt release (requires gh CLI):
-git clone https://github.com/siropkin/budi.git && cd budi
-./scripts/install.sh --from-release
+# One-liner (downloads prebuilt release):
+curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh
 
 # Or build from source (requires Rust toolchain):
 git clone https://github.com/siropkin/budi.git && cd budi
