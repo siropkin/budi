@@ -55,13 +55,21 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 
 ## Priority queue for next session
 
-### 1. Research sweep — LOW
+### 1. README install overhaul — HIGH (product readiness)
+- Current Install section is misleading: implies plugin marketplace is all you need, but user must install budi CLI first
+- `budi init` already installs hooks automatically — no separate plugin step needed
+- Goal: (a) "paste this into Claude Code" one-liner that Claude can execute end-to-end, (b) clear ≤3-step manual install
+- Remove `/plugin marketplace` references. Manual flow: clone → install.sh --from-release → budi init
+- Consider curl|sh installer for prebuilt binaries (no git clone needed)
+- See item 147 in improvement-loop.md for full spec
+
+### 2. Research sweep — LOW
 - Continue monitoring competitors, embeddings, Claude Code updates
 
-### 2. ContextBench evaluation — LOW
+### 3. ContextBench evaluation — LOW
 - External validation benchmark (66 repos, 8 languages)
 
-### 3. Session dedup analytics — LOW
+### 4. Session dedup analytics — LOW
 - Log dedup count alongside skip reason
 
 ## Other backlog items

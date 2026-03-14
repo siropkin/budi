@@ -45,25 +45,18 @@ Full methodology, prompts, and per-prompt evidence: [docs/benchmark.md](docs/ben
 
 ## Install
 
-### Quick start (Claude Code plugin)
+### Quick start (paste into Claude Code)
 
-```text
-/plugin marketplace add siropkin/budi
-/plugin install budi-hooks@budi-plugins
-```
+> Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
-Then in your repo:
-
-```bash
-budi init --index
-```
-
-That's it. Use Claude Code normally.
+Claude will clone the repo, run the installer, and set up your project automatically.
 
 ### Manual install
 
+**Step 1 — Install binaries**
+
 ```bash
-# From latest GitHub release (requires gh CLI):
+# From prebuilt release (requires gh CLI):
 git clone https://github.com/siropkin/budi.git && cd budi
 ./scripts/install.sh --from-release
 
@@ -71,6 +64,17 @@ git clone https://github.com/siropkin/budi.git && cd budi
 git clone https://github.com/siropkin/budi.git && cd budi
 ./scripts/install.sh
 ```
+
+**Step 2 — Set up your repo**
+
+```bash
+cd /path/to/your/repo
+budi init --index
+```
+
+This creates the index and installs Claude Code hooks automatically. Restart Claude Code so hook settings take effect.
+
+**Step 3 — Use Claude Code normally.** Budi injects relevant context before each prompt.
 
 ## Useful commands
 
