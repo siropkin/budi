@@ -34,11 +34,14 @@ detect_target() {
   esac
 }
 
+TEMP_DIR=""
+cleanup() { [ -n "$TEMP_DIR" ] && rm -rf "$TEMP_DIR"; }
+
 main() {
   command -v curl >/dev/null 2>&1 || fail "curl is required"
   command -v tar >/dev/null 2>&1 || fail "tar is required"
 
-  local target tag asset_url temp_dir
+  local target tag asset_url
   target="$(detect_target)"
 
   # Resolve version tag.
@@ -53,26 +56,26 @@ main() {
 
   local asset_name="budi-${tag}-${target}.tar.gz"
   local base_url="https://github.com/$REPO/releases/download/$tag"
-  temp_dir="$(mktemp -d)"
-  trap 'rm -rf "$temp_dir"' EXIT
+  TEMP_DIR="$(mktemp -d)"
+  trap cleanup EXIT
 
   log "Downloading $asset_name ($tag)..."
-  curl -fSL "$base_url/$asset_name" -o "$temp_dir/$asset_name" \
+  curl -fSL "$base_url/$asset_name" -o "$TEMP_DIR/$asset_name" \
     || fail "Download failed — check that a release asset exists for $target"
 
   # Verify checksum if available.
-  if curl -fsSL "$base_url/SHA256SUMS" -o "$temp_dir/SHA256SUMS" 2>/dev/null; then
+  if curl -fsSL "$base_url/SHA256SUMS" -o "$TEMP_DIR/SHA256SUMS" 2>/dev/null; then
     local expected actual
-    expected="$(awk -v f="$asset_name" '$2 == f {print $1}' "$temp_dir/SHA256SUMS")"
+    expected="$(awk -v f="$asset_name" '$2 == f {print $1}' "$TEMP_DIR/SHA256SUMS")"
     if [ -n "$expected" ]; then
-      actual="$(sha256_of_file "$temp_dir/$asset_name")"
+      actual="$(sha256_of_file "$TEMP_DIR/$asset_name")"
       [ "$expected" = "$actual" ] || fail "Checksum mismatch for $asset_name"
       log "Checksum verified."
     fi
   fi
 
-  tar -xzf "$temp_dir/$asset_name" -C "$temp_dir"
-  local pkg_dir="$temp_dir/budi-${tag}-${target}"
+  tar -xzf "$TEMP_DIR/$asset_name" -C "$TEMP_DIR"
+  local pkg_dir="$TEMP_DIR/budi-${tag}-${target}"
   [ -d "$pkg_dir" ] || fail "Unexpected archive layout"
 
   mkdir -p "$BIN_DIR"
