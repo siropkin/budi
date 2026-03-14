@@ -1,34 +1,36 @@
 Read /Users/ivan.seredkin/.claude/plans/budi-improvement-loop.md and use it as the source of truth.
 Continue the regular improvement loop. Follow the file's non-negotiables, benchmark-repo guidance, loop protocol, and validation rules exactly.
 
-## Current state (v3.14.0, 2026-03-13)
+## Current state (v3.14.1, 2026-03-14)
 
 - Branch: main, CI green (all workflows pass including Release)
 - All 359 tests pass (334 budi-core + 21 budi-cli + 4 budi-daemon), 0 clippy warnings
-- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.14.0)
+- Installed: ~/.local/bin/budi + budi-daemon + budi-mcp (v3.14.1)
 - Repo data dir clean: 15 real repos (8 benchmark + 7 wild-repos)
+- GitHub release: https://github.com/siropkin/budi/releases/tag/v3.14.1
 
-## What was done in session 29 (2026-03-13)
+## What was done in session 32 (2026-03-14)
 
-### 1. Ripgrep benchmark validation — DONE
-- Validated both fixes from session 28: path augmentation + RuntimeConfig floor raise (0.18→0.35)
-- **Best ripgrep result ever: 14/15 non-regressions (93%)**
-- Up from 73% (11/15) pre-floor-raise, and 67% (12/18) in session 28
-- Only 1 regression: P10 (ctx=0, Q 9→7) — pure LLM judge noise
-- P18 (the original regression target): ok (Q 8→8, ctx=0 skip — floor correctly filters noise)
-- P4/P5/P13 all improved from regressions to ties (Q 9→9)
-- P8/P12 flipped to wins (Q 8→9, Q 8→9)
-- Cost: -1% (neutral)
+### 1. Research sweep — DONE
+- Claude Code 2.1.76: MCP elicitation, PostCompact hook, worktree.sparsePaths, /effort command. No new hooks useful for budi retrieval.
+- fastembed-rs still 5.12.0, no new ONNX models
+- No new competitors. Augment doing UI polish only.
+- No new small code embedding models.
 
-### 2. Version bump to v3.14.0 — DONE
-- Path augmentation broadening + RuntimeConfig floor raise, validated on ripgrep
+### 2. ContextBench evaluation — DONE
+- External validation: 5 repos, 46 tasks, 4 languages (Python, Rust, JS, Go)
+- Script: `scripts/dev/contextbench_eval.py`
+- **Candidate hit rate: 97% (32/33 tasks)** — budi finds relevant files in nearly all tasks
+- **Snippet hit rate: 45% (15/33)** — score floors filter weak candidates (expected for bug reports)
+- **Avg candidate file recall: 77%** — right files in top 100 candidates
+- pytest finding: 100% candidate hit, 17% snippet hit (test-lookup classification filters source code)
+- flipt outlier excluded: 15 gold files/task = feature-scale PRs, not budi's target
 
-### 3. Hook-io trace investigation — DONE (non-issue)
-- Investigated whether ctx=0 is reported when context IS injected
-- Confirmed: `context_chars` in hook log uses same `context` variable as `emit_hook_response()`
-- No divergence possible — ctx=0 always means budi didn't inject
+### 3. Repo hygiene — DONE
+- Cleaned stale ripgrep duplicate (0B) + contextbench temp repos
+- 15 real repos remain
 
-### Session 29 benchmark state (all 8 repos)
+### Session 32 benchmark state (unchanged from session 29)
 
 | Benchmark | Rate | Cost | Notes |
 |-----------|------|------|-------|
@@ -38,43 +40,21 @@ Continue the regular improvement loop. Follow the file's non-negotiables, benchm
 | Django | 89% | -22% | P7/P15 ctx=0 |
 | FastAPI | 89% | +30% | P15 ctx=0 |
 | Fastify | 89% | -15% | P4/P13 ctx=0 |
-| React | 83% | +8% | P1/P15 ctx=0, P8 mild |
+| React | 83% | +8% | P1/P15 ctx=0, P8 lifecycle skip (by design) |
 | Express | 67%* | -16% | All 6 regs ctx=0 |
-| **Total** | **86%** (124/144) | | 3 repos at ≥93%! |
+| **Total** | **86%** (124/144) | | 3 repos at >=93%! |
 
 *Express 67% is ctx=0 judge noise. True injection regressions: 2/144 (1.4%).
 
-## Research sweep findings (session 29)
-
-- **Zilliz claude-context MCP**: BM25+vector hybrid, AST chunking, Merkle incremental indexing, claims 40% token reduction. Still MCP-based (round trip). No threat to budi's hook pre-injection model.
-- **VXConsulting claude-rag-mcp**: Architecture patterns + failure capture MCP. ChromaDB-backed. Not a code context tool.
-- **knowledge-rag (lyonzin)**: Local RAG with hybrid search (semantic + BM25), MCP integration. Closest competitor pattern but MCP-based.
-- **fastembed-rs**: Still at 5.12.0. 44 EmbeddingModel variants. No new 384d code-specific models. AllMiniLM remains best.
-- **Papers**: SmartChunk (query-aware compression), SitEmb-v1.5 (context-aware embeddings), R2C2-Coder (abstract+fragment retrieval). All validate budi's approach but none directly actionable.
-- **Claude Code**: Still at 2.1.74. No new hook events.
-
 ## Priority queue for next session
 
-### 1. README install overhaul — HIGH (product readiness)
-- Current Install section is misleading: implies plugin marketplace is all you need, but user must install budi CLI first
-- `budi init` already installs hooks automatically — no separate plugin step needed
-- Goal: (a) "paste this into Claude Code" one-liner that Claude can execute end-to-end, (b) clear ≤3-step manual install
-- Remove `/plugin marketplace` references. Manual flow: clone → install.sh --from-release → budi init
-- Consider curl|sh installer for prebuilt binaries (no git clone needed)
-- See item 147 in improvement-loop.md for full spec
-
-### 2. Research sweep — LOW
+### 1. Research sweep — LOW
 - Continue monitoring competitors, embeddings, Claude Code updates
-
-### 3. ContextBench evaluation — LOW
-- External validation benchmark (66 repos, 8 languages)
-
-### 4. Session dedup analytics — LOW
-- Log dedup count alongside skip reason
 
 ## Other backlog items
 - Impact analysis / git-blame indexing
 - Pre-trained code cross-encoder (needs 5-10K+ training pairs)
 - Parallel chunking (rayon) for --hard rebuilds
 - config.rs retrieval gap: BM25 can't match "change to TOML" against "reading ripgrep rc files"
-  (query describes desired state, code describes current state — semantic gap)
+- WorktreeCreate hook: auto-warm index in worktree agent runs
+- ContextBench expansion: run on more repos, compute line-level recall
