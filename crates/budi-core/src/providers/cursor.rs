@@ -39,7 +39,10 @@ impl Provider for CursorProvider {
         let mut files = Vec::new();
         collect_cursor_transcripts(&projects_dir, &mut files);
         files.sort();
-        Ok(files.into_iter().map(|path| DiscoveredFile { path }).collect())
+        Ok(files
+            .into_iter()
+            .map(|path| DiscoveredFile { path })
+            .collect())
     }
 
     fn parse_file(
@@ -61,7 +64,11 @@ impl Provider for CursorProvider {
         let file_ts = file_mtime(path);
 
         Ok(parse_cursor_transcript(
-            content, offset, &session_id, cwd.as_deref(), file_ts,
+            content,
+            offset,
+            &session_id,
+            cwd.as_deref(),
+            file_ts,
         ))
     }
 
@@ -133,14 +140,11 @@ fn cwd_from_path(path: &Path) -> Option<String> {
         if let Some(parent) = current.parent() {
             if parent.file_name().is_some_and(|n| n == "agent-transcripts") {
                 if let Some(project_dir) = parent.parent() {
-                    return project_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|_| {
-                            // Use the project dir's actual path as cwd so that
-                            // the repo_id resolver can look for .git there.
-                            project_dir.display().to_string()
-                        });
+                    return project_dir.file_name().and_then(|n| n.to_str()).map(|_| {
+                        // Use the project dir's actual path as cwd so that
+                        // the repo_id resolver can look for .git there.
+                        project_dir.display().to_string()
+                    });
                 }
             }
             current = parent;
@@ -209,11 +213,7 @@ impl CursorContent {
             CursorContent::Text(s) => s.len(),
             CursorContent::Structured(parts) => parts
                 .iter()
-                .filter_map(|p| {
-                    p.get("text")
-                        .and_then(|t| t.as_str())
-                        .map(|s| s.len())
-                })
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.len()))
                 .sum(),
         }
     }
@@ -272,16 +272,10 @@ fn parse_cursor_line(
     let entry: CursorEntry = serde_json::from_str(line).ok()?;
 
     // Determine role from `role` field or `type` field.
-    let role = entry
-        .role
-        .as_deref()
-        .or(entry.entry_type.as_deref())?;
+    let role = entry.role.as_deref().or(entry.entry_type.as_deref())?;
 
     // Content can be at top level or nested under `message`.
-    let content_ref = entry
-        .message
-        .as_ref()
-        .and_then(|m| m.content.as_ref());
+    let content_ref = entry.message.as_ref().and_then(|m| m.content.as_ref());
 
     let text_length = content_ref.map(|c| c.text_length()).unwrap_or(0);
 
@@ -527,7 +521,10 @@ mod tests {
         assert_eq!(msgs[1].role, "assistant");
         assert_eq!(msgs[2].role, "assistant");
         // All share the same session
-        assert!(msgs.iter().all(|m| m.session_id.as_deref() == Some("cursor-s1")));
+        assert!(
+            msgs.iter()
+                .all(|m| m.session_id.as_deref() == Some("cursor-s1"))
+        );
         // All are cursor provider
         assert!(msgs.iter().all(|m| m.provider == "cursor"));
         // UUIDs are unique
@@ -558,7 +555,8 @@ mod tests {
 
     #[test]
     fn skip_system_role() {
-        let line = r#"{"role":"system","message":{"content":[{"type":"text","text":"You are helpful"}]}}"#;
+        let line =
+            r#"{"role":"system","message":{"content":[{"type":"text","text":"You are helpful"}]}}"#;
         let ts = Utc::now();
         assert!(parse_cursor_line(line, 0, "s", None, ts).is_none());
     }
@@ -572,7 +570,9 @@ mod tests {
 
     #[test]
     fn session_id_from_path_uuid() {
-        let path = Path::new("/home/.cursor/projects/proj/agent-transcripts/abc-def-123/abc-def-123.jsonl");
+        let path = Path::new(
+            "/home/.cursor/projects/proj/agent-transcripts/abc-def-123/abc-def-123.jsonl",
+        );
         assert_eq!(session_id_from_path(path), "cursor-abc-def-123");
     }
 

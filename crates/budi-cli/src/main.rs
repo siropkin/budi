@@ -883,12 +883,8 @@ fn cmd_stats_summary_filtered(
     provider: Option<&str>,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let summary = analytics::usage_summary_filtered(
-        conn,
-        since.as_deref(),
-        until.as_deref(),
-        provider,
-    )?;
+    let summary =
+        analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
 
     let period_label = period_label(period);
     let provider_label = provider.unwrap_or("all");
@@ -967,7 +963,8 @@ fn cmd_stats_multi_agent(
     // Per-agent breakdown
     println!("  \x1b[1mAgents\x1b[0m");
     for ps in providers {
-        let total_tokens = ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
+        let total_tokens =
+            ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
         println!(
             "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m${:.2}\x1b[0m",
             ps.display_name,
@@ -980,7 +977,8 @@ fn cmd_stats_multi_agent(
 
     // Show combined summary
     let (since, until) = period_date_range(period);
-    let summary = analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), None)?;
+    let summary =
+        analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), None)?;
 
     println!(
         "  \x1b[1mTotal\x1b[0m        {} messages, {} sessions",

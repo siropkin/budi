@@ -9,9 +9,7 @@ use crate::claude_data::{self, PlanFile, PromptEntry};
 use crate::hooks;
 use crate::jsonl::{self, ParsedMessage};
 use crate::pre_filter;
-use crate::provider::{
-    DiscoveredFile, HookHandler, ModelPricing, Provider, ProviderSetupData,
-};
+use crate::provider::{DiscoveredFile, HookHandler, ModelPricing, Provider, ProviderSetupData};
 
 /// The Claude Code provider.
 pub struct ClaudeCodeProvider;
@@ -31,7 +29,10 @@ impl Provider for ClaudeCodeProvider {
 
     fn discover_files(&self) -> Result<Vec<DiscoveredFile>> {
         let files = discover_jsonl_files()?;
-        Ok(files.into_iter().map(|path| DiscoveredFile { path }).collect())
+        Ok(files
+            .into_iter()
+            .map(|path| DiscoveredFile { path })
+            .collect())
     }
 
     fn parse_file(
