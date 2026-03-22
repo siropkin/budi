@@ -143,6 +143,7 @@ pub fn set_sync_offset(conn: &Connection, file_path: &str, offset: usize) -> Res
 }
 
 /// Insert or update a session record.
+#[allow(clippy::too_many_arguments)]
 fn upsert_session(
     conn: &Connection,
     session_id: &str,
@@ -1667,8 +1668,8 @@ pub fn provider_stats(
                 cost_params.iter().map(|b| b.as_ref()).collect();
 
             let mut cost_total = 0.0f64;
-            if let Ok(mut cost_stmt) = conn.prepare(&cost_sql) {
-                if let Ok(cost_rows) = cost_stmt.query_map(cost_refs.as_slice(), |row| {
+            if let Ok(mut cost_stmt) = conn.prepare(&cost_sql)
+                && let Ok(cost_rows) = cost_stmt.query_map(cost_refs.as_slice(), |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, u64>(1)?,
@@ -1676,15 +1677,15 @@ pub fn provider_stats(
                         row.get::<_, u64>(3)?,
                         row.get::<_, u64>(4)?,
                     ))
-                }) {
-                    for r in cost_rows.flatten() {
-                        let (model, inp, outp, cw, cr) = r;
-                        let pricing = p_obj.pricing_for_model(&model);
-                        cost_total += inp as f64 * pricing.input / 1_000_000.0;
-                        cost_total += outp as f64 * pricing.output / 1_000_000.0;
-                        cost_total += cw as f64 * pricing.cache_write / 1_000_000.0;
-                        cost_total += cr as f64 * pricing.cache_read / 1_000_000.0;
-                    }
+                })
+            {
+                for r in cost_rows.flatten() {
+                    let (model, inp, outp, cw, cr) = r;
+                    let pricing = p_obj.pricing_for_model(&model);
+                    cost_total += inp as f64 * pricing.input / 1_000_000.0;
+                    cost_total += outp as f64 * pricing.output / 1_000_000.0;
+                    cost_total += cw as f64 * pricing.cache_write / 1_000_000.0;
+                    cost_total += cr as f64 * pricing.cache_read / 1_000_000.0;
                 }
             }
             (cost_total * 100.0).round() / 100.0

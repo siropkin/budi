@@ -136,21 +136,16 @@ fn session_id_from_path(path: &Path) -> String {
 /// the repo_id resolver will handle it from there.
 fn cwd_from_path(path: &Path) -> Option<String> {
     let mut current = path;
-    loop {
-        if let Some(parent) = current.parent() {
-            if parent.file_name().is_some_and(|n| n == "agent-transcripts") {
-                if let Some(project_dir) = parent.parent() {
-                    return project_dir.file_name().and_then(|n| n.to_str()).map(|_| {
-                        // Use the project dir's actual path as cwd so that
-                        // the repo_id resolver can look for .git there.
-                        project_dir.display().to_string()
-                    });
-                }
-            }
-            current = parent;
-        } else {
-            break;
+    while let Some(parent) = current.parent() {
+        if parent.file_name().is_some_and(|n| n == "agent-transcripts")
+            && let Some(project_dir) = parent.parent()
+        {
+            return project_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|_| project_dir.display().to_string());
         }
+        current = parent;
     }
     None
 }
