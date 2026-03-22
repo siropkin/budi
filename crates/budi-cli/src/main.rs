@@ -979,7 +979,7 @@ fn cmd_stats_multi_agent(
 
     // Show combined summary
     let (since, until) = period_date_range(period);
-    let summary = analytics::usage_summary(conn, since.as_deref(), until.as_deref())?;
+    let summary = analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), None)?;
 
     println!(
         "  \x1b[1mTotal\x1b[0m        {} messages, {} sessions",

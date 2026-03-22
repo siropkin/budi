@@ -223,16 +223,12 @@ async fn analytics_summary(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        if params.provider.is_some() {
-            analytics::usage_summary_filtered(
-                &conn,
-                params.since.as_deref(),
-                params.until.as_deref(),
-                params.provider.as_deref(),
-            )
-        } else {
-            analytics::usage_summary(&conn, params.since.as_deref(), params.until.as_deref())
-        }
+        analytics::usage_summary_filtered(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            params.provider.as_deref(),
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

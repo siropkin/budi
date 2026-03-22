@@ -1748,7 +1748,9 @@ pub fn usage_summary_filtered(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    let total_sessions: u64 = if provider.is_some() {
+    let total_sessions: u64 = if where_clause.is_empty() {
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?
+    } else {
         conn.query_row(
             &format!(
                 "SELECT COUNT(DISTINCT session_id) FROM messages {}",
@@ -1757,8 +1759,6 @@ pub fn usage_summary_filtered(
             param_refs.as_slice(),
             |r| r.get(0),
         )?
-    } else {
-        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?
     };
 
     let total_messages: u64 = conn.query_row(
