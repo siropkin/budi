@@ -453,117 +453,16 @@ function updateSyncTime() {
   if (lastSyncTime) el.textContent = 'Synced ' + fmtDate(lastSyncTime.toISOString());
 }
 
+// Track which page data has been loaded to avoid re-fetching.
+let loadedPages = {};
+
 async function loadAllData() {
-  const range = dateRange(currentPeriod);
-  const q = qs(range);
-  const gran = granularityForPeriod(currentPeriod);
-  const tzOffset = -new Date().getTimezoneOffset();
-
-  const [statsResult, setupResult, plansResult, promptsResult, activityResult, activeSessionsResult, providersResult] = await Promise.all([
-    Promise.all([
-      fetch('/analytics/summary' + q).then(r => r.json()),
-      fetch('/analytics/sessions' + q).then(r => r.json()),
-      fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS).then(r => r.json()),
-      fetch('/analytics/cost' + q).then(r => r.json()),
-      fetch('/analytics/models' + q).then(r => r.json()),
-      fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset).then(r => r.json()),
-    ]),
-    Promise.all([
-      fetch('/analytics/config-files').then(r => r.json()).catch(() => []),
-      fetch('/analytics/memory').then(r => r.json()).catch(() => []),
-      fetch('/analytics/plugins').then(r => r.json()).catch(() => []),
-      fetch('/analytics/permissions').then(r => r.json()).catch(() => ({default_mode:'default',rules:[]})),
-    ]),
-    fetch('/analytics/plans').then(r => r.json()).catch(() => []),
-    fetch('/analytics/history?limit=500').then(r => r.json()).catch(() => ({total_count:0,entries:[]})),
-    fetch('/analytics/activity').then(r => r.json()).catch(() => ({daily_activity:[],hour_counts:{},total_sessions:0,total_messages:0})),
-    fetch('/analytics/active-sessions').then(r => r.json()).catch(() => []),
-    fetch('/analytics/providers' + q).then(r => r.json()).catch(() => []),
-  ]);
-
-  statsData = {
-    summary: statsResult[0],
-    sessions: statsResult[1],
-    cwds: statsResult[2],
-    insights: null,
-    cost: statsResult[3],
-    models: statsResult[4],
-    activityChart: statsResult[5],
-  };
-  setupData = {
-    configFiles: setupResult[0],
-    memory: setupResult[1],
-    plugins: setupResult[2],
-    permissions: setupResult[3],
-  };
-  plansData = plansResult;
-  promptsData = promptsResult;
-  activityData = activityResult;
-  activeSessionsData = activeSessionsResult;
-  providersData = providersResult;
-
-  // Process stats intermediates
-  lastSessionData = statsData.sessions;
-  let sortedModels = [...statsData.models];
-  sortedModels.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
-  cachedSortedModels = sortedModels.slice(0, DEFAULT_CHART_ROWS);
-  cachedActivityChartTitle = currentPeriod === 'today' ? 'Activity (Hourly)'
-    : currentPeriod === 'week' ? 'Activity (Daily)'
-    : currentPeriod === 'month' ? 'Activity (Daily)'
-    : 'Activity (Monthly)';
-
-  // Merge memory into config
-  const memoryAsConfig = setupData.memory.map(m => ({
-    path: m.path || '',
-    project: m.project || '',
-    file_type: 'memory',
-    size_bytes: m.size_bytes || 0,
-    est_tokens: m.est_tokens || 0,
-  }));
-  cachedMergedConfigFiles = [...setupData.configFiles, ...memoryAsConfig];
-  lastConfigData = cachedMergedConfigFiles;
-
-  // Process project config data
-  const byProject = {};
-  for (const f of cachedMergedConfigFiles) {
-    const p = projectName(f.project);
-    if (!byProject[p]) byProject[p] = { tokens: 0, count: 0, types: new Set() };
-    byProject[p].tokens += f.est_tokens;
-    byProject[p].count++;
-    byProject[p].types.add(f.file_type);
-  }
-  lastProjectConfigData = Object.entries(byProject).map(([proj, info]) => ({
-    project: proj, tokens: info.tokens, count: info.count, typeList: [...info.types]
-  }));
-
-  // Process other data
-  lastPlansData = plansData;
-  lastHistoryData = promptsData.entries || [];
-  lastPluginsData = setupData.plugins;
-  lastPermissionsData = (setupData.permissions.rules || []);
-
-  // Reset show counts
-  sessionShowCount = DEFAULT_TABLE_ROWS;
-  configShowCount = DEFAULT_TABLE_ROWS;
-  projectConfigShowCount = DEFAULT_TABLE_ROWS;
-  historyShowCount = DEFAULT_TABLE_ROWS;
-  plansShowCount = DEFAULT_TABLE_ROWS;
-  pluginsShowCount = DEFAULT_TABLE_ROWS;
-  permissionsShowCount = DEFAULT_TABLE_ROWS;
-
+  // Only fetch what the current view needs. Other pages lazy-load on navigation.
+  await loadStatsData();
   dataLoaded = true;
-
-  // Fetch insights in background (slow query) — re-render when it arrives.
-  fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset)
-    .then(r => r.json())
-    .then(insights => {
-      statsData.insights = insights;
-      if (dataLoaded) renderCurrentView();
-    })
-    .catch(() => {});
 }
 
-async function reloadStatsData(signal) {
+async function loadStatsData(signal) {
   const range = dateRange(currentPeriod);
   if (currentProvider) range.provider = currentProvider;
   const q = qs(range);
@@ -571,7 +470,6 @@ async function reloadStatsData(signal) {
   const tzOffset = -new Date().getTimezoneOffset();
   const opts = signal ? { signal } : {};
 
-  // Fetch core stats (fast) — don't wait for insights (slow).
   const [summary, sessions, cwds, cost, models, activityChart, activeSessions, providers] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + q, opts).then(r => r.json()),
@@ -583,13 +481,11 @@ async function reloadStatsData(signal) {
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
   ]);
 
-  // Use previous insights data as placeholder while the slow fetch runs.
   const prevInsights = statsData ? statsData.insights : null;
   statsData = { summary, sessions, cwds, insights: prevInsights, cost, models, activityChart };
   activeSessionsData = activeSessions;
   lastSessionData = sessions;
   providersData = providers;
-
   updateProviderFilter();
 
   let sortedModels = [...models];
@@ -599,10 +495,9 @@ async function reloadStatsData(signal) {
     : currentPeriod === 'week' ? 'Activity (Daily)'
     : currentPeriod === 'month' ? 'Activity (Daily)'
     : 'Activity (Monthly)';
-
   sessionShowCount = DEFAULT_TABLE_ROWS;
 
-  // Fetch insights in background — re-render when it arrives.
+  // Fetch insights in background (slow query) — re-render when it arrives.
   fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset, opts)
     .then(r => r.json())
     .then(insights => {
@@ -611,6 +506,54 @@ async function reloadStatsData(signal) {
       if (dataLoaded) renderCurrentView();
     })
     .catch(() => {});
+}
+
+async function loadSetupData() {
+  if (setupData) return; // already loaded
+  const [configFiles, memory, plugins, permissions] = await Promise.all([
+    fetch('/analytics/config-files').then(r => r.json()).catch(() => []),
+    fetch('/analytics/memory').then(r => r.json()).catch(() => []),
+    fetch('/analytics/plugins').then(r => r.json()).catch(() => []),
+    fetch('/analytics/permissions').then(r => r.json()).catch(() => ({default_mode:'default',rules:[]})),
+  ]);
+  setupData = { configFiles, memory, plugins, permissions };
+  const memoryAsConfig = memory.map(m => ({
+    path: m.path || '', project: m.project || '', file_type: 'memory',
+    size_bytes: m.size_bytes || 0, est_tokens: m.est_tokens || 0,
+  }));
+  cachedMergedConfigFiles = [...configFiles, ...memoryAsConfig];
+  lastConfigData = cachedMergedConfigFiles;
+  const byProject = {};
+  for (const f of cachedMergedConfigFiles) {
+    const p = projectName(f.project);
+    if (!byProject[p]) byProject[p] = { tokens: 0, count: 0, types: new Set() };
+    byProject[p].tokens += f.est_tokens;
+    byProject[p].count++;
+    byProject[p].types.add(f.file_type);
+  }
+  lastProjectConfigData = Object.entries(byProject).map(([proj, info]) => ({
+    project: proj, tokens: info.tokens, count: info.count, typeList: [...info.types]
+  }));
+  lastPluginsData = plugins;
+  lastPermissionsData = (permissions.rules || []);
+  configShowCount = DEFAULT_TABLE_ROWS;
+  projectConfigShowCount = DEFAULT_TABLE_ROWS;
+  pluginsShowCount = DEFAULT_TABLE_ROWS;
+  permissionsShowCount = DEFAULT_TABLE_ROWS;
+}
+
+async function loadPlansData() {
+  if (lastPlansData.length > 0) return; // already loaded
+  const plans = await fetch('/analytics/plans').then(r => r.json()).catch(() => []);
+  lastPlansData = plans;
+  plansShowCount = DEFAULT_TABLE_ROWS;
+}
+
+async function loadPromptsData() {
+  if (lastHistoryData.length > 0) return; // already loaded
+  const data = await fetch('/analytics/history?limit=500').then(r => r.json()).catch(() => ({total_count:0,entries:[]}));
+  lastHistoryData = data.entries || [];
+  historyShowCount = DEFAULT_TABLE_ROWS;
 }
 
 /* ===== Provider Filter ===== */
@@ -1480,6 +1423,31 @@ function renderCurrentView() {
   const content = $('#content');
   switch (currentView) {
     case 'stats': renderStatsView(content); break;
+    case 'setup':
+      if (!setupData) {
+        content.innerHTML = '<div class="loading">Loading setup data</div>';
+        loadSetupData().then(() => { renderSetupView(content); bindAllHandlers(); });
+        return;
+      }
+      break;
+    case 'plans':
+      if (lastPlansData.length === 0) {
+        content.innerHTML = '<div class="loading">Loading plans</div>';
+        loadPlansData().then(() => { renderPlansView(content); bindAllHandlers(); });
+        return;
+      }
+      break;
+    case 'prompts':
+      if (lastHistoryData.length === 0) {
+        content.innerHTML = '<div class="loading">Loading prompts</div>';
+        loadPromptsData().then(() => { renderPromptsView(content); bindAllHandlers(); });
+        return;
+      }
+      break;
+  }
+  // Default rendering for already-loaded pages
+  switch (currentView) {
+    case 'stats': break; // already handled above
     case 'insights': renderInsightsPageView(content); break;
     case 'setup': renderSetupView(content); break;
     case 'plans': renderPlansView(content); break;
@@ -1546,7 +1514,7 @@ function bindAllHandlers() {
       $('#providerSelect').value = currentProvider;
       const content = $('#content');
       content.innerHTML = '<div class="loading">Loading analytics</div>';
-      await reloadStatsData();
+      await loadStatsData();
       renderCurrentView();
     });
   });
@@ -1699,7 +1667,7 @@ async function switchAndReload() {
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
   try {
-    await reloadStatsData(abort.signal);
+    await loadStatsData(abort.signal);
     if (abort.signal.aborted) return;
     renderCurrentView();
   } catch (err) {
