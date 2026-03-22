@@ -865,8 +865,9 @@ fn cmd_stats(
     }
 
     // When no provider filter and multiple agents detected, show breakdown
-    if provider.is_none() {
-        let providers = analytics::provider_stats(&conn, None, None)?;
+    if provider.is_none() && analytics::provider_count(&conn)? > 1 {
+        let (since, until) = period_date_range(period);
+        let providers = analytics::provider_stats(&conn, since.as_deref(), until.as_deref())?;
         if providers.len() > 1 {
             cmd_stats_multi_agent(&conn, period, &providers)?;
             return Ok(());

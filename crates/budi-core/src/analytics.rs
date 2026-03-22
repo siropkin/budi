@@ -1564,6 +1564,16 @@ pub fn statusline_stats(conn: &Connection, today: &str) -> Result<StatuslineStat
     })
 }
 
+/// Quick check: how many distinct providers have data in the database?
+pub fn provider_count(conn: &Connection) -> Result<usize> {
+    let count: u64 = conn.query_row(
+        "SELECT COUNT(DISTINCT COALESCE(provider, 'claude_code')) FROM messages",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(count as usize)
+}
+
 /// Per-provider aggregate stats for the /analytics/providers endpoint.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderStats {
