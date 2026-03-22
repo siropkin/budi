@@ -136,7 +136,7 @@ fn cwd_from_path(path: &Path) -> Option<String> {
                     return project_dir
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .map(|slug| {
+                        .map(|_| {
                             // Use the project dir's actual path as cwd so that
                             // the repo_id resolver can look for .git there.
                             project_dir.display().to_string()
