@@ -122,21 +122,25 @@ fn session_id_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "cursor-unknown".to_string())
 }
 
-/// Try to recover the original working directory from the Cursor project slug.
-/// e.g. "Users-ivan-projects-myapp" → "/Users/ivan/projects/myapp"
+/// Extract the Cursor project slug from the transcript path and use it as cwd.
+/// The slug is a hyphenated encoding of the original path, but the encoding is
+/// lossy (e.g. dots and hyphens in the original path become hyphens too), so we
+/// don't try to reconstruct the original path. We just use the slug directly —
+/// the repo_id resolver will handle it from there.
 fn cwd_from_path(path: &Path) -> Option<String> {
-    // Walk up to find the "projects" directory, then get the project slug.
     let mut current = path;
     loop {
         if let Some(parent) = current.parent() {
             if parent.file_name().is_some_and(|n| n == "agent-transcripts") {
                 if let Some(project_dir) = parent.parent() {
-                    if let Some(slug) = project_dir.file_name().and_then(|n| n.to_str()) {
-                        // Convert slug back to path: replace hyphens with slashes.
-                        // "Users-ivan-projects-myapp" → "/Users/ivan/projects/myapp"
-                        let reconstructed = format!("/{}", slug.replace('-', "/"));
-                        return Some(reconstructed);
-                    }
+                    return project_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|slug| {
+                            // Use the project dir's actual path as cwd so that
+                            // the repo_id resolver can look for .git there.
+                            project_dir.display().to_string()
+                        });
                 }
             }
             current = parent;

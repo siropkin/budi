@@ -687,18 +687,17 @@ function renderCards(s, cost) {
     <div class="card">
       <div class="label">Conversations</div>
       <div class="value">${fmtNum(s.total_sessions)}</div>
-      <div class="sub">${fmtNum(s.total_user_messages)} your prompts / ${fmtNum(s.total_assistant_messages)} Claude responses</div>
+      <div class="sub">${fmtNum(s.total_user_messages)} prompts / ${fmtNum(s.total_assistant_messages)} responses</div>
       <div class="explainer">Each conversation = one AI coding session</div>
     </div>
     <div class="card">
-      <div class="label">Cache Savings</div>
-      <div class="value cost-value">${fmtCost(cost.cache_savings)}</div>
+      <div class="label">Cache Hit Rate</div>
+      <div class="value">${cacheHitPct.toFixed(0)}%</div>
       <div class="cache-bar">
         <div class="segment" style="width:${cacheHitPct}%;background:var(--accent2)"></div>
         <div class="segment" style="width:${100-cacheHitPct}%;background:var(--border)"></div>
       </div>
-      <div class="sub">${cacheHitPct.toFixed(0)}% cache hit rate</div>
-      <div class="explainer">Saved by <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank" rel="noopener">Anthropic's prompt caching</a> vs full-price input</div>
+      <div class="sub">${fmtCost(cost.cache_savings)} saved vs full-price input</div>
     </div>
   </div>`;
 }

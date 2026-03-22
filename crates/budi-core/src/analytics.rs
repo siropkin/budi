@@ -669,6 +669,7 @@ pub fn repo_usage(
          FROM messages
          WHERE {}
          GROUP BY repo_id
+         HAVING (inp + outp) > 0
          ORDER BY (inp + outp) DESC
          LIMIT ?{}",
         conditions.join(" AND "),
@@ -1068,16 +1069,16 @@ pub fn model_usage(
         .collect();
 
     let sql = format!(
-        "SELECT COALESCE(model, 'unknown') as m,
+        "SELECT model as m,
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0)
          FROM messages
-         {} {} role = 'assistant'
+         {} {} role = 'assistant' AND model IS NOT NULL AND model != '' AND model NOT LIKE '<%'
          GROUP BY m
-         ORDER BY cnt DESC",
+         ORDER BY (COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0)) DESC",
         where_clause,
         if where_clause.is_empty() {
             "WHERE"
@@ -2098,11 +2099,13 @@ mod tests {
         msgs[0].repo_id = Some("project-a".to_string());
         msgs[1].repo_id = Some("project-a".to_string());
         msgs[2].repo_id = Some("project-b".to_string());
+        // Give project-b's user message some tokens so it appears in results
+        msgs[2].input_tokens = 50;
         ingest_messages(&mut conn, &msgs).unwrap();
 
         let repos = repo_usage(&conn, None, None, 10).unwrap();
         assert_eq!(repos.len(), 2);
-        // project-a has 2 messages (more tokens), project-b has 1.
+        // project-a has more tokens, project-b has some.
         assert_eq!(repos[0].repo_id, "project-a");
         assert_eq!(repos[0].message_count, 2);
         assert_eq!(repos[1].repo_id, "project-b");
