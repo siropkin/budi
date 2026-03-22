@@ -1668,18 +1668,24 @@ window.addEventListener('popstate', () => {
   }
 });
 
+// Request sequencing — ignore stale responses from earlier period/filter switches
+let requestSeq = 0;
+
 // Period tab switching
 $$('.period-tabs button').forEach(btn => {
   btn.addEventListener('click', async () => {
     $$('.period-tabs button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPeriod = btn.dataset.period;
+    const seq = ++requestSeq;
     const content = $('#content');
     content.innerHTML = '<div class="loading">Loading analytics</div>';
     try {
       await reloadStatsData();
+      if (seq !== requestSeq) return; // stale
       renderCurrentView();
     } catch (err) {
+      if (seq !== requestSeq) return;
       content.innerHTML = `<div class="empty">
         Failed to load analytics.<br>
         <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
@@ -1691,12 +1697,15 @@ $$('.period-tabs button').forEach(btn => {
 // Provider filter
 $('#providerSelect').addEventListener('change', async () => {
   currentProvider = $('#providerSelect').value;
+  const seq = ++requestSeq;
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
   try {
     await reloadStatsData();
+    if (seq !== requestSeq) return;
     renderCurrentView();
   } catch (err) {
+    if (seq !== requestSeq) return;
     content.innerHTML = `<div class="empty">Failed to load analytics.</div>`;
   }
 });
