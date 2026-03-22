@@ -27,7 +27,7 @@ const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
-#[command(about = "WakaTime for Claude Code — see where your tokens go")]
+#[command(about = "budi — AI code analytics. See where your tokens go.")]
 #[command(version)]
 #[command(after_help = "Get started:\n  budi init --global")]
 struct Cli {
@@ -65,7 +65,7 @@ enum Commands {
         #[command(subcommand)]
         command: HookCommands,
     },
-    /// Show Claude Code usage analytics
+    /// Show usage analytics
     Stats {
         /// Time period to show (default: today)
         #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
@@ -76,6 +76,9 @@ enum Commands {
         /// Show most-used working directories
         #[arg(long, default_value_t = false)]
         files: bool,
+        /// Filter by provider (e.g. claude_code, cursor)
+        #[arg(long)]
+        provider: Option<String>,
         /// Output as JSON
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -89,7 +92,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// Sync Claude Code transcripts into the analytics database
+    /// Sync transcripts into the analytics database
     Sync,
     /// Show estimated token costs by model
     Cost {
@@ -118,7 +121,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// Show installed Claude Code plugins
+    /// Show installed plugins
     Plugins {
         /// Output as JSON
         #[arg(long, default_value_t = false)]
@@ -137,7 +140,7 @@ enum Commands {
     Dashboard,
     /// Update budi to the latest version
     Update,
-    /// Print a compact status line for Claude Code (reads stdin, outputs one line)
+    /// Print a compact status line (reads stdin, outputs one line)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
         #[arg(long, default_value_t = false)]
@@ -234,8 +237,9 @@ fn main() -> Result<()> {
             period,
             session,
             files,
+            provider,
             json,
-        } => cmd_stats(period, session, files, json),
+        } => cmd_stats(period, session, files, provider, json),
         Commands::Insights { period, json } => cmd_insights(period, json),
         Commands::Cost { period, json } => cmd_cost(period, json),
         Commands::Models { period, json } => cmd_models(period, json),
@@ -819,6 +823,7 @@ fn cmd_stats(
     period: StatsPeriod,
     session: Option<String>,
     files: bool,
+    provider: Option<String>,
     json_output: bool,
 ) -> Result<()> {
     let db_path = analytics::db_path()?;
@@ -849,25 +854,56 @@ fn cmd_stats(
 
     if json_output {
         let (since, until) = period_date_range(period);
-        let summary = analytics::usage_summary(&conn, since.as_deref(), until.as_deref())?;
+        let summary = analytics::usage_summary_filtered(
+            &conn,
+            since.as_deref(),
+            until.as_deref(),
+            provider.as_deref(),
+        )?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
 
-    cmd_stats_summary(&conn, period)
+    // When no provider filter and multiple agents detected, show breakdown
+    if provider.is_none() {
+        let providers = analytics::provider_stats(&conn, None, None)?;
+        if providers.len() > 1 {
+            cmd_stats_multi_agent(&conn, period, &providers)?;
+            return Ok(());
+        }
+    }
+
+    cmd_stats_summary_filtered(&conn, period, provider.as_deref())
 }
 
-fn cmd_stats_summary(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
+fn cmd_stats_summary_filtered(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    provider: Option<&str>,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let summary = analytics::usage_summary(conn, since.as_deref(), until.as_deref())?;
+    let summary = analytics::usage_summary_filtered(
+        conn,
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+    )?;
 
     let period_label = period_label(period);
+    let provider_label = provider.unwrap_or("all");
 
     println!();
-    println!(
-        "  \x1b[1;36m📊 budi stats\x1b[0m — \x1b[1m{}\x1b[0m",
-        period_label
-    );
+    if provider.is_some() {
+        println!(
+            "  \x1b[1;36m budi stats\x1b[0m — \x1b[1m{}\x1b[0m \x1b[90m({})\x1b[0m",
+            period_label, provider_label
+        );
+    } else {
+        println!(
+            "  \x1b[1;36m budi stats\x1b[0m — \x1b[1m{}\x1b[0m",
+            period_label
+        );
+    }
     println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
 
     if summary.total_messages == 0 {
@@ -891,46 +927,15 @@ fn cmd_stats_summary(conn: &rusqlite::Connection, period: StatsPeriod) -> Result
         format_tokens(total_input)
     );
     println!(
-        "    \x1b[90mdirect:       {}\x1b[0m",
-        format_tokens(summary.total_input_tokens)
-    );
-    println!(
-        "    \x1b[90mcache write:  {}\x1b[0m",
-        format_tokens(summary.total_cache_creation_tokens)
-    );
-    println!(
-        "    \x1b[32mcache read:   {}\x1b[0m",
-        format_tokens(summary.total_cache_read_tokens)
-    );
-    println!(
         "  \x1b[1mOutput tokens\x1b[0m {}",
         format_tokens(summary.total_output_tokens)
     );
-
-    if summary.total_cache_read_tokens > 0 || summary.total_cache_creation_tokens > 0 {
-        let cache_hit_pct = if total_input > 0 {
-            (summary.total_cache_read_tokens as f64 / total_input as f64) * 100.0
-        } else {
-            0.0
-        };
-        let color = if cache_hit_pct > 50.0 {
-            "\x1b[32m"
-        } else if cache_hit_pct > 20.0 {
-            "\x1b[33m"
-        } else {
-            "\x1b[31m"
-        };
-        println!(
-            "  \x1b[1mCache hit\x1b[0m     {}{:.1}%\x1b[0m",
-            color, cache_hit_pct
-        );
-    }
 
     if !summary.top_tools.is_empty() {
         println!();
         println!("  \x1b[1mTop tools\x1b[0m");
         let max_count = summary.top_tools.first().map(|(_, c)| *c).unwrap_or(1);
-        for (name, count) in &summary.top_tools {
+        for (name, count) in summary.top_tools.iter().take(10) {
             let bar_len = ((*count as f64 / max_count as f64) * 20.0) as usize;
             let bar: String = "█".repeat(bar_len);
             println!(
@@ -939,6 +944,56 @@ fn cmd_stats_summary(conn: &rusqlite::Connection, period: StatsPeriod) -> Result
             );
         }
     }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_multi_agent(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    providers: &[analytics::ProviderStats],
+) -> Result<()> {
+    let period_label = period_label(period);
+
+    println!();
+    println!(
+        "  \x1b[1;36m budi stats\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    // Per-agent breakdown
+    println!("  \x1b[1mAgents\x1b[0m");
+    for ps in providers {
+        let total_tokens = ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
+        println!(
+            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m${:.2}\x1b[0m",
+            ps.display_name,
+            ps.session_count,
+            format_tokens(total_tokens),
+            ps.estimated_cost,
+        );
+    }
+    println!();
+
+    // Show combined summary
+    let (since, until) = period_date_range(period);
+    let summary = analytics::usage_summary(conn, since.as_deref(), until.as_deref())?;
+
+    println!(
+        "  \x1b[1mTotal\x1b[0m        {} messages, {} sessions",
+        summary.total_messages, summary.total_sessions
+    );
+
+    let total_input = summary.total_input_tokens
+        + summary.total_cache_creation_tokens
+        + summary.total_cache_read_tokens;
+    println!(
+        "  \x1b[1mTokens\x1b[0m       {} in, {} out",
+        format_tokens(total_input),
+        format_tokens(summary.total_output_tokens),
+    );
 
     println!();
     Ok(())
@@ -1435,7 +1490,7 @@ fn cmd_sync() -> Result<()> {
     let db_path = analytics::db_path()?;
     let mut conn = analytics::open_db(&db_path)?;
 
-    println!("Syncing Claude Code transcripts...");
+    println!("Syncing transcripts...");
     let (files_synced, messages_ingested) = analytics::sync_all(&mut conn)?;
 
     if files_synced == 0 && messages_ingested == 0 {

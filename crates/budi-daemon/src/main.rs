@@ -70,6 +70,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/memory", get(analytics_memory))
         .route("/analytics/permissions", get(analytics_permissions))
         .route("/analytics/history", get(analytics_history))
+        .route("/analytics/providers", get(analytics_providers))
         .route("/analytics/statusline", get(analytics_statusline))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/setup", get(dashboard))
@@ -213,6 +214,7 @@ async fn sync_analytics() -> Result<Json<serde_json::Value>, (StatusCode, String
 struct SummaryParams {
     since: Option<String>,
     until: Option<String>,
+    provider: Option<String>,
 }
 
 async fn analytics_summary(
@@ -221,7 +223,16 @@ async fn analytics_summary(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::usage_summary(&conn, params.since.as_deref(), params.until.as_deref())
+        if params.provider.is_some() {
+            analytics::usage_summary_filtered(
+                &conn,
+                params.since.as_deref(),
+                params.until.as_deref(),
+                params.provider.as_deref(),
+            )
+        } else {
+            analytics::usage_summary(&conn, params.since.as_deref(), params.until.as_deref())
+        }
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -378,7 +389,12 @@ async fn analytics_cost(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        cost::estimate_cost(&conn, params.since.as_deref(), params.until.as_deref())
+        cost::estimate_cost_filtered(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            params.provider.as_deref(),
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -507,6 +523,21 @@ async fn analytics_history(
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+async fn analytics_providers(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<Vec<analytics::ProviderStats>>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::provider_stats(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
     Ok(Json(result))
 }
 

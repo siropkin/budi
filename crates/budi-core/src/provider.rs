@@ -89,7 +89,10 @@ pub trait Provider: Send + Sync {
 
 /// Returns all registered providers (whether or not their data is present).
 pub fn all_providers() -> Vec<Box<dyn Provider>> {
-    vec![Box::new(crate::providers::claude_code::ClaudeCodeProvider)]
+    vec![
+        Box::new(crate::providers::claude_code::ClaudeCodeProvider),
+        Box::new(crate::providers::cursor::CursorProvider),
+    ]
 }
 
 /// Returns only providers that have data available on this machine.

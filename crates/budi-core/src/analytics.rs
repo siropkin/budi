@@ -1,7 +1,7 @@
-//! SQLite-backed analytics storage for Claude Code usage data.
+//! SQLite-backed analytics storage for AI coding agent usage data.
 //!
-//! Stores sessions, messages, and tool usage extracted from Claude Code
-//! JSONL transcript files. Supports incremental ingestion via sync state
+//! Stores sessions, messages, and tool usage extracted from JSONL transcript
+//! files across all providers. Supports incremental ingestion via sync state
 //! tracking (byte offset per file).
 
 use std::collections::HashMap;
@@ -1563,6 +1563,275 @@ pub fn statusline_stats(conn: &Connection, today: &str) -> Result<StatuslineStat
     })
 }
 
+/// Per-provider aggregate stats for the /analytics/providers endpoint.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderStats {
+    pub provider: String,
+    pub display_name: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub estimated_cost: f64,
+}
+
+/// Query per-provider aggregate stats.
+pub fn provider_stats(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<ProviderStats>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let sql = format!(
+        "SELECT COALESCE(provider, 'claude_code') as p,
+                COUNT(DISTINCT session_id) as sess,
+                COUNT(*) as msgs,
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0)
+         FROM messages {}
+         GROUP BY p ORDER BY msgs DESC",
+        where_clause
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, u64>(5)?,
+                row.get::<_, u64>(6)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+
+    let providers = crate::provider::all_providers();
+    let mut result = Vec::new();
+
+    for (prov, sessions, messages, input, output, cache_create, cache_read) in rows {
+        let display_name = providers
+            .iter()
+            .find(|p| p.name() == prov)
+            .map(|p| p.display_name().to_string())
+            .unwrap_or_else(|| prov.clone());
+
+        // Estimate cost using provider's pricing
+        let provider_obj = providers.iter().find(|p| p.name() == prov);
+        let estimated_cost = if let Some(p_obj) = provider_obj {
+            // Query per-model breakdown for this provider to get accurate cost
+            let cost_sql = format!(
+                "SELECT COALESCE(model, 'unknown'),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_creation_tokens), 0),
+                        COALESCE(SUM(cache_read_tokens), 0)
+                 FROM messages
+                 WHERE COALESCE(provider, 'claude_code') = ?1 {}
+                 GROUP BY COALESCE(model, 'unknown')",
+                if where_clause.is_empty() {
+                    String::new()
+                } else {
+                    where_clause.replace("WHERE", "AND")
+                }
+            );
+            let mut cost_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(prov.clone())];
+            for p in &date_params {
+                cost_params.push(Box::new(p.clone()));
+            }
+            let cost_refs: Vec<&dyn rusqlite::types::ToSql> =
+                cost_params.iter().map(|b| b.as_ref()).collect();
+
+            let mut cost_total = 0.0f64;
+            if let Ok(mut cost_stmt) = conn.prepare(&cost_sql) {
+                if let Ok(cost_rows) = cost_stmt.query_map(cost_refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, u64>(3)?,
+                        row.get::<_, u64>(4)?,
+                    ))
+                }) {
+                    for r in cost_rows.flatten() {
+                        let (model, inp, outp, cw, cr) = r;
+                        let pricing = p_obj.pricing_for_model(&model);
+                        cost_total += inp as f64 * pricing.input / 1_000_000.0;
+                        cost_total += outp as f64 * pricing.output / 1_000_000.0;
+                        cost_total += cw as f64 * pricing.cache_write / 1_000_000.0;
+                        cost_total += cr as f64 * pricing.cache_read / 1_000_000.0;
+                    }
+                }
+            }
+            (cost_total * 100.0).round() / 100.0
+        } else {
+            0.0
+        };
+
+        result.push(ProviderStats {
+            provider: prov,
+            display_name,
+            session_count: sessions,
+            message_count: messages,
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: cache_create,
+            cache_read_tokens: cache_read,
+            estimated_cost,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Build a parameterized filter clause that includes optional date range and provider.
+fn date_provider_filter(
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+    keyword: &str,
+    param_start: usize,
+) -> (String, Vec<String>) {
+    let mut conditions = Vec::new();
+    let mut param_values = Vec::new();
+    if let Some(s) = since {
+        param_values.push(s.to_string());
+        conditions.push(format!(
+            "timestamp >= ?{}",
+            param_start + param_values.len()
+        ));
+    }
+    if let Some(u) = until {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_start + param_values.len()));
+    }
+    if let Some(p) = provider {
+        param_values.push(p.to_string());
+        conditions.push(format!(
+            "COALESCE(provider, 'claude_code') = ?{}",
+            param_start + param_values.len()
+        ));
+    }
+    if conditions.is_empty() {
+        (String::new(), param_values)
+    } else {
+        (
+            format!("{} {}", keyword, conditions.join(" AND ")),
+            param_values,
+        )
+    }
+}
+
+/// Query a usage summary, optionally filtered by date range and provider.
+pub fn usage_summary_filtered(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+) -> Result<UsageSummary> {
+    let (where_clause, params) = date_provider_filter(since, until, provider, "WHERE", 0);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let total_sessions: u64 = if provider.is_some() {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT session_id) FROM messages {}",
+                where_clause
+            ),
+            param_refs.as_slice(),
+            |r| r.get(0),
+        )?
+    } else {
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?
+    };
+
+    let total_messages: u64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM messages {}", where_clause),
+        param_refs.as_slice(),
+        |r| r.get(0),
+    )?;
+
+    let and_clause = if where_clause.is_empty() {
+        "WHERE"
+    } else {
+        "AND"
+    };
+    let total_user_messages: u64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM messages {} {} role = 'user'",
+            where_clause, and_clause
+        ),
+        param_refs.as_slice(),
+        |r| r.get(0),
+    )?;
+
+    let total_assistant_messages: u64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM messages {} {} role = 'assistant'",
+            where_clause, and_clause
+        ),
+        param_refs.as_slice(),
+        |r| r.get(0),
+    )?;
+
+    let (total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64) =
+        conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                        COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0)
+                 FROM messages {}",
+                where_clause
+            ),
+            param_refs.as_slice(),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+
+    let tool_clause = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "WHERE message_uuid IN (SELECT uuid FROM messages {})",
+            where_clause
+        )
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage {} GROUP BY tool_name ORDER BY cnt DESC LIMIT 50",
+        tool_clause
+    ))?;
+    let top_tools: Vec<(String, u64)> = stmt
+        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(UsageSummary {
+        total_sessions,
+        total_messages,
+        total_user_messages,
+        total_assistant_messages,
+        total_input_tokens: total_input,
+        total_output_tokens: total_output,
+        total_cache_creation_tokens: total_cache_create,
+        total_cache_read_tokens: total_cache_read,
+        top_tools,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1991,5 +2260,137 @@ mod tests {
         let stats = statusline_stats(&conn, "2026-03-14").unwrap();
         assert!(stats.total_tokens > 0);
         assert!(stats.session_count > 0);
+    }
+
+    #[test]
+    fn multi_provider_ingest_and_query() {
+        let mut conn = test_db();
+
+        // Claude Code messages
+        let claude_msgs = vec![
+            ParsedMessage {
+                uuid: "cc-u1".to_string(),
+                session_id: Some("cc-sess-1".to_string()),
+                timestamp: "2026-03-20T10:00:00Z".parse().unwrap(),
+                cwd: Some("/proj/a".to_string()),
+                role: "user".to_string(),
+                model: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                tool_names: vec![],
+                has_thinking: false,
+                stop_reason: None,
+                text_length: 10,
+                version: None,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+            },
+            ParsedMessage {
+                uuid: "cc-a1".to_string(),
+                session_id: Some("cc-sess-1".to_string()),
+                timestamp: "2026-03-20T10:01:00Z".parse().unwrap(),
+                cwd: Some("/proj/a".to_string()),
+                role: "assistant".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+                input_tokens: 1000,
+                output_tokens: 500,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                tool_names: vec!["Read".to_string()],
+                has_thinking: false,
+                stop_reason: Some("end_turn".to_string()),
+                text_length: 50,
+                version: None,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+            },
+        ];
+
+        // Cursor messages
+        let cursor_msgs = vec![
+            ParsedMessage {
+                uuid: "cu-u1".to_string(),
+                session_id: Some("cu-sess-1".to_string()),
+                timestamp: "2026-03-20T11:00:00Z".parse().unwrap(),
+                cwd: Some("/proj/b".to_string()),
+                role: "user".to_string(),
+                model: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                tool_names: vec![],
+                has_thinking: false,
+                stop_reason: None,
+                text_length: 15,
+                version: None,
+                git_branch: None,
+                repo_id: None,
+                provider: "cursor".to_string(),
+            },
+            ParsedMessage {
+                uuid: "cu-a1".to_string(),
+                session_id: Some("cu-sess-1".to_string()),
+                timestamp: "2026-03-20T11:01:00Z".parse().unwrap(),
+                cwd: Some("/proj/b".to_string()),
+                role: "assistant".to_string(),
+                model: Some("gpt-4o".to_string()),
+                input_tokens: 2000,
+                output_tokens: 800,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                tool_names: vec!["edit_file".to_string()],
+                has_thinking: false,
+                stop_reason: Some("end_turn".to_string()),
+                text_length: 80,
+                version: None,
+                git_branch: None,
+                repo_id: None,
+                provider: "cursor".to_string(),
+            },
+        ];
+
+        ingest_messages(&mut conn, &claude_msgs).unwrap();
+        ingest_messages(&mut conn, &cursor_msgs).unwrap();
+
+        // All providers: should see 4 messages, 2 sessions
+        let all = usage_summary(&conn, None, None).unwrap();
+        assert_eq!(all.total_messages, 4);
+        assert_eq!(all.total_sessions, 2);
+        assert_eq!(all.total_input_tokens, 3000); // 1000 + 2000
+        assert_eq!(all.total_output_tokens, 1300); // 500 + 800
+
+        // Filter by claude_code: 2 messages, 1 session
+        let cc = usage_summary_filtered(&conn, None, None, Some("claude_code")).unwrap();
+        assert_eq!(cc.total_messages, 2);
+        assert_eq!(cc.total_sessions, 1);
+        assert_eq!(cc.total_input_tokens, 1000);
+        assert_eq!(cc.total_output_tokens, 500);
+
+        // Filter by cursor: 2 messages, 1 session
+        let cu = usage_summary_filtered(&conn, None, None, Some("cursor")).unwrap();
+        assert_eq!(cu.total_messages, 2);
+        assert_eq!(cu.total_sessions, 1);
+        assert_eq!(cu.total_input_tokens, 2000);
+        assert_eq!(cu.total_output_tokens, 800);
+
+        // Provider stats
+        let pstats = provider_stats(&conn, None, None).unwrap();
+        assert_eq!(pstats.len(), 2);
+        let cc_stats = pstats.iter().find(|p| p.provider == "claude_code").unwrap();
+        let cu_stats = pstats.iter().find(|p| p.provider == "cursor").unwrap();
+        assert_eq!(cc_stats.session_count, 1);
+        assert_eq!(cc_stats.message_count, 2);
+        assert_eq!(cu_stats.session_count, 1);
+        assert_eq!(cu_stats.message_count, 2);
+        assert_eq!(cu_stats.display_name, "Cursor");
+
+        // Cost should be different per provider (different pricing)
+        assert!(cc_stats.estimated_cost > 0.0);
+        assert!(cu_stats.estimated_cost > 0.0);
     }
 }

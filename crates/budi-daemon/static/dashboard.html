@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>budi — Claude Code Analytics</title>
+<title>budi — AI Code Analytics</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 <style>
 :root {
@@ -50,6 +50,11 @@ a:hover { text-decoration: underline; }
 }
 .period-tabs button.active { background: var(--accent); color: #fff; }
 .period-tabs button:hover:not(.active) { color: var(--text); }
+.provider-filter select {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; cursor: pointer;
+}
+.provider-filter select:focus { outline: none; border-color: var(--accent); }
 
 .nav-tabs {
   display: flex; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 3px;
@@ -238,6 +243,9 @@ a:hover { text-decoration: underline; }
     <button data-period="month">Month</button>
     <button data-period="all">All</button>
   </div>
+  <div class="provider-filter" id="providerFilter" style="display:none">
+    <select id="providerSelect"><option value="">All Agents</option></select>
+  </div>
   <button class="sync-btn" id="syncBtn" title="Sync JSONL transcripts">&#x21bb; Sync</button>
   <span class="last-synced" id="lastSynced"></span>
 </div>
@@ -309,6 +317,10 @@ let permissionsShowCount = DEFAULT_TABLE_ROWS;
 // Search state
 let plansSearchTerm = '';
 let promptsSearchTerm = '';
+
+// Provider filter state
+let currentProvider = '';
+let providersData = [];
 
 // Cached data
 let dataLoaded = false;
@@ -543,11 +555,12 @@ async function loadAllData() {
 
 async function reloadStatsData() {
   const range = dateRange(currentPeriod);
+  if (currentProvider) range.provider = currentProvider;
   const q = qs(range);
   const gran = granularityForPeriod(currentPeriod);
   const tzOffset = -new Date().getTimezoneOffset();
 
-  const [summary, sessions, cwds, insights, cost, models, activityChart, activeSessions] = await Promise.all([
+  const [summary, sessions, cwds, insights, cost, models, activityChart, activeSessions, providers] = await Promise.all([
     fetch('/analytics/summary' + q).then(r => r.json()),
     fetch('/analytics/sessions' + q).then(r => r.json()),
     fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS).then(r => r.json()),
@@ -556,11 +569,16 @@ async function reloadStatsData() {
     fetch('/analytics/models' + q).then(r => r.json()),
     fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset).then(r => r.json()),
     fetch('/analytics/active-sessions').then(r => r.json()).catch(() => []),
+    fetch('/analytics/providers' + qs(dateRange(currentPeriod))).then(r => r.json()).catch(() => []),
   ]);
 
   statsData = { summary, sessions, cwds, insights, cost, models, activityChart };
   activeSessionsData = activeSessions;
   lastSessionData = sessions;
+  providersData = providers;
+
+  // Update provider filter dropdown
+  updateProviderFilter();
 
   let sortedModels = [...models];
   sortedModels.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
@@ -571,6 +589,63 @@ async function reloadStatsData() {
     : 'Activity (Monthly)';
 
   sessionShowCount = DEFAULT_TABLE_ROWS;
+}
+
+/* ===== Provider Filter ===== */
+function updateProviderFilter() {
+  const filter = $('#providerFilter');
+  const select = $('#providerSelect');
+  if (providersData.length > 1) {
+    filter.style.display = '';
+    const currentVal = select.value;
+    select.innerHTML = '<option value="">All Agents</option>';
+    providersData.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.provider;
+      opt.textContent = p.display_name;
+      select.appendChild(opt);
+    });
+    select.value = currentVal || '';
+  } else {
+    filter.style.display = 'none';
+  }
+}
+
+const providerColors = {
+  claude_code: '#f0883e',
+  cursor: '#58a6ff',
+};
+
+/* ===== Render: Agents Tile ===== */
+function renderAgentsTile() {
+  if (providersData.length <= 1) return '';
+  const total = providersData.reduce((s, p) => s + p.input_tokens + p.output_tokens + p.cache_creation_tokens + p.cache_read_tokens, 0);
+  return `<div class="panel section-mb">
+    <h2>Agents</h2>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${providersData.map(p => {
+        const tokens = p.input_tokens + p.output_tokens + p.cache_creation_tokens + p.cache_read_tokens;
+        const pct = total > 0 ? (tokens / total * 100) : 0;
+        const color = providerColors[p.provider] || '#8b949e';
+        return `<div style="display:flex;align-items:center;gap:10px;cursor:pointer" data-provider-click="${esc(p.provider)}">
+          <div style="width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0"></div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;justify-content:space-between;font-size:0.85rem">
+              <span style="font-weight:500">${esc(p.display_name)}</span>
+              <span style="color:var(--text-muted)">${p.session_count} sessions</span>
+            </div>
+            <div style="height:6px;background:var(--border);border-radius:3px;margin-top:3px">
+              <div style="height:100%;width:${pct}%;background:${color};border-radius:3px"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted);margin-top:2px">
+              <span>${fmtNum(tokens)} tokens</span>
+              <span>$${p.estimated_cost.toFixed(2)}</span>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
 }
 
 /* ===== Render: Active Sessions ===== */
@@ -602,7 +677,7 @@ function renderCards(s, cost) {
       <div class="label">Est. Cost</div>
       <div class="value cost-value">${fmtCost(cost.total_cost)}</div>
       <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input / ${fmtCost(cost.output_cost)} output</div>
-      <div class="explainer">Based on <a href="https://www.anthropic.com/pricing" target="_blank" rel="noopener">Anthropic API pricing</a></div>
+      <div class="explainer">Based on published API pricing</div>
     </div>
     <div class="card">
       <div class="label">Total Tokens</div>
@@ -613,7 +688,7 @@ function renderCards(s, cost) {
       <div class="label">Conversations</div>
       <div class="value">${fmtNum(s.total_sessions)}</div>
       <div class="sub">${fmtNum(s.total_user_messages)} your prompts / ${fmtNum(s.total_assistant_messages)} Claude responses</div>
-      <div class="explainer">Each conversation = one Claude Code session in your terminal</div>
+      <div class="explainer">Each conversation = one AI coding session</div>
     </div>
     <div class="card">
       <div class="label">Cache Savings</div>
@@ -1295,6 +1370,7 @@ function renderStatsView(content) {
       <h2>${cachedActivityChartTitle}</h2>
       ${renderActivityChart(activityChart)}
     </div>
+    ${renderAgentsTile()}
     <div class="grid-2 section-mb">
       <div class="panel">
         <h2>Models</h2>
@@ -1366,10 +1442,15 @@ function renderCurrentView() {
   // Update nav active state
   $$('.nav-tabs a').forEach(a => a.classList.toggle('active', a.dataset.view === currentView));
 
-  // Show/hide period tabs and sync button
+  // Show/hide period tabs, sync button, and provider filter
   const showPeriod = currentView === 'stats' || currentView === 'insights';
   $('#periodBar').style.display = showPeriod ? 'flex' : 'none';
   $('#syncBtn').style.display = showPeriod ? 'flex' : 'none';
+  if (showPeriod && providersData.length > 1) {
+    $('#providerFilter').style.display = '';
+  } else {
+    $('#providerFilter').style.display = 'none';
+  }
 
   const content = $('#content');
   switch (currentView) {
@@ -1433,6 +1514,17 @@ function bindSearchHandlers() {
 function bindAllHandlers() {
   bindSearchHandlers();
   bindTableHandlers();
+  // Agent tile click -> filter by provider
+  $$('[data-provider-click]').forEach(el => {
+    el.addEventListener('click', async () => {
+      currentProvider = el.dataset.providerClick;
+      $('#providerSelect').value = currentProvider;
+      const content = $('#content');
+      content.innerHTML = '<div class="loading">Loading analytics</div>';
+      await reloadStatsData();
+      renderCurrentView();
+    });
+  });
 }
 
 function bindTableHandlers() {
@@ -1589,6 +1681,19 @@ $$('.period-tabs button').forEach(btn => {
       </div>`;
     }
   });
+});
+
+// Provider filter
+$('#providerSelect').addEventListener('change', async () => {
+  currentProvider = $('#providerSelect').value;
+  const content = $('#content');
+  content.innerHTML = '<div class="loading">Loading analytics</div>';
+  try {
+    await reloadStatsData();
+    renderCurrentView();
+  } catch (err) {
+    content.innerHTML = `<div class="empty">Failed to load analytics.</div>`;
+  }
 });
 
 // Sync button

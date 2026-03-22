@@ -5,14 +5,12 @@ use rusqlite::Connection;
 
 use crate::provider::ModelPricing;
 
-/// Look up pricing by model string, dispatching through all registered providers.
-/// Tries each provider's `pricing_for_model` — currently Claude Code is the only
-/// registered provider, so this behaves identically to the old hardcoded lookup.
-fn pricing_for_model(model: &str) -> ModelPricing {
-    // For Phase 0, delegate to the Claude Code provider pricing directly.
-    // When multiple providers exist, this could query by provider column or
-    // try each provider's pricing.
-    crate::providers::claude_code::claude_pricing_for_model(model)
+/// Look up pricing for a model using a specific provider's pricing table.
+fn pricing_for_model_by_provider(model: &str, provider: Option<&str>) -> ModelPricing {
+    match provider {
+        Some("cursor") => crate::providers::cursor::cursor_pricing_for_model(model),
+        _ => crate::providers::claude_code::claude_pricing_for_model(model),
+    }
 }
 
 /// Estimated cost breakdown.
@@ -34,6 +32,16 @@ pub fn estimate_cost(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<CostEstimate> {
+    estimate_cost_filtered(conn, since, until, None)
+}
+
+/// Compute estimated cost with optional provider filter.
+pub fn estimate_cost_filtered(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+) -> Result<CostEstimate> {
     let mut conditions = Vec::new();
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = since {
@@ -43,6 +51,13 @@ pub fn estimate_cost(
     if let Some(u) = until {
         param_values.push(u.to_string());
         conditions.push(format!("timestamp < ?{}", param_values.len()));
+    }
+    if let Some(p) = provider {
+        param_values.push(p.to_string());
+        conditions.push(format!(
+            "COALESCE(provider, 'claude_code') = ?{}",
+            param_values.len()
+        ));
     }
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -87,7 +102,7 @@ pub fn estimate_cost(
 
     for row in rows {
         let (model, input, output, cache_write, cache_read) = row?;
-        let p = pricing_for_model(&model);
+        let p = pricing_for_model_by_provider(&model, provider);
         let ic = input as f64 * p.input / 1_000_000.0;
         let oc = output as f64 * p.output / 1_000_000.0;
         let cwc = cache_write as f64 * p.cache_write / 1_000_000.0;

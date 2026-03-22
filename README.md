@@ -5,9 +5,21 @@
 [![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-**WakaTime for Claude Code.** See where your tokens go.
+**WakaTime for AI coding agents.** See where your tokens go.
 
-`budi` tracks every Claude Code session — tokens, costs, prompts, and context composition — in a local-first analytics dashboard. No cloud. No uploads. Just insight into your AI spend.
+`budi` tracks every AI coding session — tokens, costs, prompts, and context composition — in a local-first analytics dashboard. No cloud. No uploads. Just insight into your AI spend.
+
+### Supported agents
+
+| Agent | Status | Detection |
+|-------|--------|-----------|
+| **Claude Code** | Supported | Automatic via `~/.claude/` |
+| **Cursor** | Supported | Automatic via `~/.cursor/` |
+| **Copilot CLI** | Coming soon | |
+| **Codex CLI** | Coming soon | |
+| **Cline** | Coming soon | |
+
+Agents are detected automatically — if `~/.cursor/` exists with transcripts, `budi sync` picks them up with zero config.
 
 <p align="center">
   <img src="assets/dashboard-stats.png" alt="budi dashboard — stats page" width="800">
@@ -44,7 +56,8 @@ Hooks fire as HTTP calls to a lightweight local daemon (port 7878) that aggregat
 - **Automatic** — hooks run silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Session analytics** — prompt counts, token usage, and cost per session
-- **Status line** — live session stats right in your Claude Code terminal
+- **Multi-agent** — supports Claude Code, Cursor, and more (auto-detected)
+- **Status line** — live session stats right in your terminal
 - **Web dashboard** — multi-page analytics UI at `http://localhost:7878/dashboard`
 - **Insights** — actionable recommendations based on your usage patterns
 

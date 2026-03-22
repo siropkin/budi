@@ -12,6 +12,7 @@ edition = "2024"
 license = "MIT"
 authors = ["Ivan Seredkin"]
 repository = "https://github.com/siropkin/budi"
+description = "Local-first analytics for AI coding agents — see where your tokens go"
 
 [workspace.dependencies]
 anyhow = "1"
