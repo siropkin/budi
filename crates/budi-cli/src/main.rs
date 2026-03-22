@@ -1632,11 +1632,13 @@ fn cmd_statusline() -> Result<()> {
         parts.push(format!("{color}{pct_int}% ctx{reset}"));
     }
 
-    // Session cost (real-time from Claude Code)
+    // Session cost (real-time from Claude Code) — always show to prevent jumping
     if let Some(sc) = session_cost
-        && sc > 0.0
+        && sc > 0.001
     {
         parts.push(format!("{yellow}${sc:.2}{reset} session"));
+    } else {
+        parts.push(format!("{dim}$0.00 session{reset}"));
     }
 
     // Today's total cost (from budi daemon) — always show to prevent jumping
