@@ -74,23 +74,25 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 | | budi | ccusage | Sniffly | Claude `/cost` |
 |---|---|---|---|---|
 | Real-time tracking | **Yes** (hooks) | No (parses logs) | No (parses logs) | Live only |
+| Multi-agent support | **Yes** (pluggable) | Claude Code only | Claude Code only | Claude Code only |
 | Cost history | **Per-session + daily** | Per-session | Per-session | Current session |
 | Web dashboard | **Yes** (5 pages) | No | Yes | No |
 | Status line | **Yes** | No | No | No |
 | Insights & recs | **Yes** | No | No | No |
 | Per-repo breakdown | **Yes** | No | No | No |
 | File activity tracking | **Yes** (PostToolUse) | No | No | No |
+| Multi-machine sync | **Planned** | No | No | No |
 | Privacy | 100% local | Local | Local | Built-in |
 | Setup | `budi init` | `npx ccusage` | `sniffly init` | Built-in |
 | Built with | Rust | TypeScript | Python | — |
 
 ## Install
 
-### Quick start (paste into Claude Code)
+### Quick start (paste into your AI coding agent)
 
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
-Claude will clone the repo, run the installer, and set up your project automatically.
+Your AI agent will clone the repo, run the installer, and set up your project automatically.
 
 ### Manual install
 
