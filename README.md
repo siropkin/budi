@@ -39,7 +39,13 @@ Agents are detected automatically — when a new agent's data directory appears,
 
 ## How it works
 
-Budi uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) — the official event system that lets external tools observe what Claude Code does in real time. When you run `budi init` in a repo, it registers five hooks in `.claude/settings.local.json`:
+Budi has a pluggable **provider** architecture. Each AI coding agent is a provider that knows how to discover and parse that agent's local data. A lightweight Rust daemon (port 7878) syncs data from all detected providers into a single SQLite database, powering the dashboard and CLI.
+
+**What budi does NOT collect:** file contents, prompt responses, or anything from the AI's output. Only metadata — timestamps, token counts, tool names, file paths, and costs.
+
+### Claude Code (full support)
+
+Budi uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) — the official event system that lets external tools observe what Claude Code does in real time. When you run `budi init`, it registers hooks in `.claude/settings.local.json`:
 
 | Hook | What budi captures |
 |------|-------------------|
@@ -49,9 +55,7 @@ Budi uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hoo
 | **SubagentStart** | Sub-agent spawns — tracks parallel work |
 | **Stop** | Session ends — finalizes duration, total cost |
 
-Hooks fire as HTTP calls to a lightweight local daemon (port 7878) that aggregates the data into a SQLite database. The daemon and hooks are written in Rust — hook responses return in sub-millisecond time, so you never notice them. The ~6 MB binary handles everything: data collection, analytics, web dashboard, and CLI.
-
-**What budi does NOT collect:** file contents, prompt responses, or anything from Claude's output. Only metadata — timestamps, token counts, tool names, file paths, and costs.
+Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond time, so you never notice them. The ~6 MB binary handles everything: data collection, analytics, web dashboard, and CLI.
 
 ## Features
 
