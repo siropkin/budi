@@ -74,7 +74,7 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 | | budi | ccusage | Sniffly | Claude `/cost` |
 |---|---|---|---|---|
 | Real-time tracking | **Yes** (hooks) | No (parses logs) | No (parses logs) | Live only |
-| Multi-agent support | **Yes** (pluggable) | Claude Code only | Claude Code only | Claude Code only |
+| Multi-agent support | **Planned** (pluggable architecture ready) | Claude Code only | Claude Code only | Claude Code only |
 | Cost history | **Per-session + daily** | Per-session | Per-session | Current session |
 | Web dashboard | **Yes** (5 pages) | No | Yes | No |
 | Status line | **Yes** | No | No | No |
