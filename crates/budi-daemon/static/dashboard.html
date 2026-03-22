@@ -459,7 +459,7 @@ async function loadAllData() {
   const gran = granularityForPeriod(currentPeriod);
   const tzOffset = -new Date().getTimezoneOffset();
 
-  const [statsResult, setupResult, plansResult, promptsResult, activityResult, activeSessionsResult] = await Promise.all([
+  const [statsResult, setupResult, plansResult, promptsResult, activityResult, activeSessionsResult, providersResult] = await Promise.all([
     Promise.all([
       fetch('/analytics/summary' + q).then(r => r.json()),
       fetch('/analytics/sessions' + q).then(r => r.json()),
@@ -479,6 +479,7 @@ async function loadAllData() {
     fetch('/analytics/history?limit=500').then(r => r.json()).catch(() => ({total_count:0,entries:[]})),
     fetch('/analytics/activity').then(r => r.json()).catch(() => ({daily_activity:[],hour_counts:{},total_sessions:0,total_messages:0})),
     fetch('/analytics/active-sessions').then(r => r.json()).catch(() => []),
+    fetch('/analytics/providers' + q).then(r => r.json()).catch(() => []),
   ]);
 
   statsData = {
@@ -500,6 +501,7 @@ async function loadAllData() {
   promptsData = promptsResult;
   activityData = activityResult;
   activeSessionsData = activeSessionsResult;
+  providersData = providersResult;
 
   // Process stats intermediates
   lastSessionData = statsData.sessions;
