@@ -666,7 +666,7 @@ function renderCards(s, cost) {
         <div class="segment" style="width:${cacheHitPct}%;background:var(--accent2)"></div>
         <div class="segment" style="width:${100-cacheHitPct}%;background:var(--border)"></div>
       </div>
-      <div class="sub">${fmtCost(cost.cache_savings)} saved${hasProvider('claude_code') ? ' by <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank" rel="noopener">prompt caching</a>' : ''}</div>
+      <div class="sub">${fmtCost(cost.cache_savings)} saved${hasProvider('claude_code') ? ' by <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank" rel="noopener">Anthropic prompt caching</a>' : ''}</div>
     </div>
   </div>`;
 }
