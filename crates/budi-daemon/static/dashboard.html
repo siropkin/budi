@@ -464,7 +464,6 @@ async function loadAllData() {
       fetch('/analytics/summary' + q).then(r => r.json()),
       fetch('/analytics/sessions' + q).then(r => r.json()),
       fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS).then(r => r.json()),
-      fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset).then(r => r.json()),
       fetch('/analytics/cost' + q).then(r => r.json()),
       fetch('/analytics/models' + q).then(r => r.json()),
       fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset).then(r => r.json()),
@@ -486,10 +485,10 @@ async function loadAllData() {
     summary: statsResult[0],
     sessions: statsResult[1],
     cwds: statsResult[2],
-    insights: statsResult[3],
-    cost: statsResult[4],
-    models: statsResult[5],
-    activityChart: statsResult[6],
+    insights: null,
+    cost: statsResult[3],
+    models: statsResult[4],
+    activityChart: statsResult[5],
   };
   setupData = {
     configFiles: setupResult[0],
@@ -553,6 +552,15 @@ async function loadAllData() {
   permissionsShowCount = DEFAULT_TABLE_ROWS;
 
   dataLoaded = true;
+
+  // Fetch insights in background (slow query) — re-render when it arrives.
+  fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset)
+    .then(r => r.json())
+    .then(insights => {
+      statsData.insights = insights;
+      if (dataLoaded) renderCurrentView();
+    })
+    .catch(() => {});
 }
 
 async function reloadStatsData(signal) {
@@ -563,11 +571,11 @@ async function reloadStatsData(signal) {
   const tzOffset = -new Date().getTimezoneOffset();
   const opts = signal ? { signal } : {};
 
-  const [summary, sessions, cwds, insights, cost, models, activityChart, activeSessions, providers] = await Promise.all([
+  // Fetch core stats (fast) — don't wait for insights (slow).
+  const [summary, sessions, cwds, cost, models, activityChart, activeSessions, providers] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + q, opts).then(r => r.json()),
     fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
-    fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset, opts).then(r => r.json()),
     fetch('/analytics/cost' + q, opts).then(r => r.json()),
     fetch('/analytics/models' + q, opts).then(r => r.json()),
     fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(r => r.json()),
@@ -575,12 +583,13 @@ async function reloadStatsData(signal) {
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
   ]);
 
-  statsData = { summary, sessions, cwds, insights, cost, models, activityChart };
+  // Use previous insights data as placeholder while the slow fetch runs.
+  const prevInsights = statsData ? statsData.insights : null;
+  statsData = { summary, sessions, cwds, insights: prevInsights, cost, models, activityChart };
   activeSessionsData = activeSessions;
   lastSessionData = sessions;
   providersData = providers;
 
-  // Update provider filter dropdown
   updateProviderFilter();
 
   let sortedModels = [...models];
@@ -592,6 +601,16 @@ async function reloadStatsData(signal) {
     : 'Activity (Monthly)';
 
   sessionShowCount = DEFAULT_TABLE_ROWS;
+
+  // Fetch insights in background — re-render when it arrives.
+  fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset, opts)
+    .then(r => r.json())
+    .then(insights => {
+      if (signal && signal.aborted) return;
+      statsData.insights = insights;
+      if (dataLoaded) renderCurrentView();
+    })
+    .catch(() => {});
 }
 
 /* ===== Provider Filter ===== */
@@ -969,7 +988,7 @@ function renderInsights(ins) {
 function renderInsightsPageView(content) {
   const ins = statsData ? statsData.insights : null;
   if (!ins) {
-    content.innerHTML = '<div class="empty">No insights data available. Try syncing first.</div>';
+    content.innerHTML = '<div class="loading">Loading insights</div>';
     return;
   }
 
@@ -1409,7 +1428,7 @@ function renderStatsView(content) {
       </div>
       <div class="panel">
         <h2>MCP</h2>
-        ${renderBarChart(insights.mcp_tools.slice(0, DEFAULT_CHART_ROWS),
+        ${renderBarChart((insights && insights.mcp_tools || []).slice(0, DEFAULT_CHART_ROWS),
           (m, full) => full ? m.tool : m.tool.replace(/^mcp__/, ''),
           m => m.call_count,
           () => '#f0883e',
