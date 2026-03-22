@@ -65,7 +65,7 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Session analytics** — prompt counts, token usage, and cost per session
 - **Multi-agent** — supports Claude Code, Cursor, and more (auto-detected)
-- **Status line** — live session stats right in your terminal
+- **Status line** — live session stats in your Claude Code terminal
 - **Web dashboard** — multi-page analytics UI at `http://localhost:7878/dashboard`
 - **Insights** — actionable recommendations based on your usage patterns
 
