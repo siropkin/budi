@@ -61,10 +61,10 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 
 - **Built with Rust** — ~6 MB binary, sub-millisecond hook latency, minimal CPU/memory footprint
 - **Local-first** — all data stays on your machine in a SQLite database, no cloud, no uploads
-- **Automatic** — hooks run silently in the background, no workflow changes needed
+- **Automatic** — data collection runs silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Session analytics** — prompt counts, token usage, and cost per session
-- **Multi-agent** — supports Claude Code, Cursor, and more (auto-detected)
+- **Multi-agent architecture** — pluggable provider system ready for multiple AI coding agents
 - **Status line** — live session stats in your Claude Code terminal
 - **Web dashboard** — multi-page analytics UI at `http://localhost:7878/dashboard`
 - **Insights** — actionable recommendations based on your usage patterns
@@ -73,14 +73,14 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 
 | | budi | ccusage | Sniffly | Claude `/cost` |
 |---|---|---|---|---|
-| Real-time tracking | **Yes** (hooks) | No (parses logs) | No (parses logs) | Live only |
+| Real-time tracking | **Yes** (Claude Code hooks) | No (parses logs) | No (parses logs) | Live only |
 | Multi-agent support | **Planned** (pluggable architecture ready) | Claude Code only | Claude Code only | Claude Code only |
 | Cost history | **Per-session + daily** | Per-session | Per-session | Current session |
 | Web dashboard | **Yes** (5 pages) | No | Yes | No |
 | Status line | **Yes** (Claude Code) | No | No | No |
 | Insights & recs | **Yes** | No | No | No |
 | Per-repo breakdown | **Yes** | No | No | No |
-| File activity tracking | **Yes** (PostToolUse) | No | No | No |
+| File activity tracking | **Yes** (Claude Code PostToolUse) | No | No | No |
 | Multi-machine sync | **Planned** | No | No | No |
 | Privacy | 100% local | Local | Local | Built-in |
 | Setup | `budi init` | `npx ccusage` | `sniffly init` | Built-in |
@@ -114,7 +114,7 @@ Or build from source (requires Rust toolchain):
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
 ```
 
-**Step 2 — Set up hooks**
+**Step 2 — Set up Claude Code hooks**
 
 Global (recommended — works for all repos and worktrees):
 ```bash
@@ -129,7 +129,7 @@ budi init
 
 This installs Claude Code hooks, starts the daemon, and adds the status line to your Claude Code settings. Restart Claude Code so hook settings take effect.
 
-**Step 3 — Use Claude Code normally.** Budi tracks your sessions in the background.
+**Step 3 — Use your AI coding agent normally.** Budi tracks your sessions in the background.
 
 ## Status line
 
@@ -177,7 +177,7 @@ Run `budi dashboard` to open the web UI in your browser, or click the dashboard 
 ## CLI commands
 
 ```bash
-budi init                     # set up hooks, daemon, and status line in the current repo
+budi init                     # set up hooks, daemon, and status line
 budi init --global            # install hooks globally (all repos and worktrees)
 budi doctor                   # check installation health
 budi dashboard                # open the web dashboard in the browser
@@ -185,13 +185,14 @@ budi update                   # check for updates and install the latest version
 budi stats                    # token usage summary (--period today|week|month|all)
 budi stats --session <id>     # per-session detail
 budi stats --files            # repositories ranked by usage
+budi stats --provider <name>  # filter by provider (e.g. claude_code)
 budi cost                     # estimated cost breakdown by model
 budi models                   # model usage breakdown
 budi sessions                 # list sessions with stats
-budi plugins                  # installed Claude Code plugins
+budi plugins                  # installed plugins
 budi projects                 # repositories ranked by usage
 budi insights                 # actionable recommendations
-budi sync                     # sync Claude Code transcripts into the analytics database
+budi sync                     # sync transcripts into the analytics database
 budi statusline               # print the status line (used internally by Claude Code)
 budi statusline --install     # install status line in ~/.claude/settings.json
 ```
