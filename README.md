@@ -9,17 +9,21 @@
 
 `budi` tracks every AI coding session — tokens, costs, prompts, and context composition — in a local-first analytics dashboard. No cloud. No uploads. Just insight into your AI spend.
 
-### Supported agents
+### Agent integrations
 
-| Agent | Status | Detection |
-|-------|--------|-----------|
-| **Claude Code** | Supported | Automatic via `~/.claude/` |
-| **Cursor** | Supported | Automatic via `~/.cursor/` |
-| **Copilot CLI** | Coming soon | |
-| **Codex CLI** | Coming soon | |
-| **Cline** | Coming soon | |
+budi is built on a pluggable provider architecture — each AI coding agent is a provider that's auto-detected at runtime. Today it fully supports Claude Code; more agents are coming.
 
-Agents are detected automatically — if `~/.cursor/` exists with transcripts, `budi sync` picks them up with zero config.
+| Agent | Status | Tokens | Cost | Sessions | Detection |
+|-------|--------|--------|------|----------|-----------|
+| **Claude Code** | Supported | Per-message | Per-model | Via hooks | `~/.claude/` |
+| **Cursor** | In progress | — | — | Transcript count | `~/.cursor/` |
+| **GitHub Copilot CLI** | Planned | | | | `~/.copilot/` |
+| **Codex CLI** | Planned | | | | `~/.codex/` |
+| **Cline** | Planned | | | | VS Code globalStorage |
+| **Aider** | Planned | | | | `.aider.chat.history.md` |
+| **Gemini CLI** | Planned | | | | `~/.gemini/` |
+
+Agents are detected automatically — when a new agent's data directory appears, the next `budi sync` picks it up with zero config.
 
 <p align="center">
   <img src="assets/dashboard-stats.png" alt="budi dashboard — stats page" width="800">
@@ -195,8 +199,10 @@ budi sessions --json | jq '.[0]'  # get latest session as JSON
 
 ## Roadmap
 
-- Parallel agent tracking
-- Cursor IDE integration (unified multi-editor dashboard)
+- **More agents** — Cursor, Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI (see [agent integrations](#agent-integrations) above)
+- **Cross-agent dashboard** — unified view across all AI coding tools
+- **Token estimation** — approximate token counts for agents that don't log them
+- **Multi-machine sync** — aggregate stats across devices
 
 ## Privacy
 

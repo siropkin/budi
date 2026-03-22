@@ -2390,10 +2390,9 @@ mod tests {
         assert_eq!(cc_stats.message_count, 2);
         assert_eq!(cu_stats.session_count, 1);
         assert_eq!(cu_stats.message_count, 2);
-        assert_eq!(cu_stats.display_name, "Cursor");
 
-        // Cost should be different per provider (different pricing)
+        // Claude Code is registered, so it gets proper display name and cost.
+        assert_eq!(cc_stats.display_name, "Claude Code");
         assert!(cc_stats.estimated_cost > 0.0);
-        assert!(cu_stats.estimated_cost > 0.0);
     }
 }

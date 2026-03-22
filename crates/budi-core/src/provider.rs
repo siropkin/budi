@@ -91,7 +91,10 @@ pub trait Provider: Send + Sync {
 pub fn all_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(crate::providers::claude_code::ClaudeCodeProvider),
-        Box::new(crate::providers::cursor::CursorProvider),
+        // Cursor provider is implemented but not yet registered — Cursor's
+        // JSONL transcripts lack token counts and model names, so the data
+        // isn't useful enough to show alongside Claude Code's detailed stats.
+        // See providers/cursor.rs for the implementation.
     ]
 }
 

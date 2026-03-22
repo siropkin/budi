@@ -611,6 +611,10 @@ function updateProviderFilter() {
   }
 }
 
+function hasProvider(name) {
+  return providersData.some(p => p.provider === name);
+}
+
 const providerColors = {
   claude_code: '#f0883e',
   cursor: '#58a6ff',
@@ -677,7 +681,7 @@ function renderCards(s, cost) {
       <div class="label">Est. Cost</div>
       <div class="value cost-value">${fmtCost(cost.total_cost)}</div>
       <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input / ${fmtCost(cost.output_cost)} output</div>
-      <div class="explainer">Based on published API pricing</div>
+      <div class="explainer">${hasProvider('claude_code') ? 'Based on <a href="https://www.anthropic.com/pricing" target="_blank" rel="noopener">Anthropic API pricing</a>' : 'Based on published API pricing'}</div>
     </div>
     <div class="card">
       <div class="label">Total Tokens</div>
@@ -697,7 +701,7 @@ function renderCards(s, cost) {
         <div class="segment" style="width:${cacheHitPct}%;background:var(--accent2)"></div>
         <div class="segment" style="width:${100-cacheHitPct}%;background:var(--border)"></div>
       </div>
-      <div class="sub">${fmtCost(cost.cache_savings)} saved vs full-price input</div>
+      <div class="sub">${fmtCost(cost.cache_savings)} saved${hasProvider('claude_code') ? ' by <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank" rel="noopener">prompt caching</a>' : ''}</div>
     </div>
   </div>`;
 }
