@@ -7,5 +7,7 @@ pub mod hooks;
 pub mod insights;
 pub mod jsonl;
 pub mod pre_filter;
+pub mod provider;
+pub mod providers;
 pub mod repo_id;
 pub mod rpc;

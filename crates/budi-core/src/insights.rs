@@ -436,6 +436,7 @@ mod tests {
             version: None,
             git_branch: None,
             repo_id: None,
+            provider: "claude_code".to_string(),
         }]
     }
 

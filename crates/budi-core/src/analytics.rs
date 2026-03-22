@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::jsonl::ParsedMessage;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Open (or create) the analytics database at the given path.
 pub fn open_db(db_path: &Path) -> Result<Connection> {
@@ -100,6 +100,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 3 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT 'claude_code';
+            ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT 'claude_code';
+            CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
+            CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider);
+            ",
+        )?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
     Ok(())
@@ -140,18 +151,20 @@ fn upsert_session(
     version: Option<&str>,
     git_branch: Option<&str>,
     repo_id: Option<&str>,
+    provider: &str,
 ) -> Result<()> {
     let ts = timestamp.to_rfc3339();
     conn.execute(
-        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id)
-         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)
+        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(session_id) DO UPDATE SET
            last_seen = MAX(sessions.last_seen, ?3),
            project_dir = COALESCE(?2, sessions.project_dir),
            version = COALESCE(?4, sessions.version),
            git_branch = COALESCE(?5, sessions.git_branch),
-           repo_id = COALESCE(?6, sessions.repo_id)",
-        params![session_id, cwd, ts, version, git_branch, repo_id],
+           repo_id = COALESCE(?6, sessions.repo_id),
+           provider = COALESCE(?7, sessions.provider)",
+        params![session_id, cwd, ts, version, git_branch, repo_id, provider],
     )?;
     Ok(())
 }
@@ -172,6 +185,7 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                 msg.version.as_deref(),
                 msg.git_branch.as_deref(),
                 msg.repo_id.as_deref(),
+                &msg.provider,
             )?;
         }
 
@@ -181,8 +195,8 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
             "INSERT OR IGNORE INTO messages
              (uuid, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-              has_thinking, stop_reason, text_length, cwd, repo_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              has_thinking, stop_reason, text_length, cwd, repo_id, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -198,6 +212,7 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                 msg.text_length as i64,
                 msg.cwd,
                 msg.repo_id,
+                msg.provider,
             ],
         )?;
 
@@ -260,43 +275,49 @@ pub fn db_path() -> Result<PathBuf> {
 }
 
 /// Run a full incremental sync: discover JSONL files, parse new content, ingest.
+/// Iterates all available providers, discovering and parsing their files.
 /// Returns (files_synced, messages_ingested).
 pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
-    let files = discover_jsonl_files()?;
+    let providers = crate::provider::available_providers();
     let mut total_files = 0;
     let mut total_messages = 0;
     let mut repo_cache = crate::repo_id::RepoIdCache::new();
 
-    for file_path in &files {
-        let path_str = file_path.display().to_string();
-        let offset = get_sync_offset(conn, &path_str)?;
+    for provider in &providers {
+        let files = provider.discover_files()?;
 
-        let content = std::fs::read_to_string(file_path)
-            .with_context(|| format!("Failed to read {}", file_path.display()))?;
+        for discovered in &files {
+            let file_path = &discovered.path;
+            let path_str = file_path.display().to_string();
+            let offset = get_sync_offset(conn, &path_str)?;
 
-        if offset >= content.len() {
-            continue; // Already fully synced.
-        }
+            let content = std::fs::read_to_string(file_path)
+                .with_context(|| format!("Failed to read {}", file_path.display()))?;
 
-        let (mut messages, new_offset) = crate::jsonl::parse_transcript(&content, offset);
-        if messages.is_empty() {
-            set_sync_offset(conn, &path_str, new_offset)?;
-            continue;
-        }
-
-        // Resolve repo_id for each message from its cwd.
-        for msg in &mut messages {
-            if let Some(ref cwd) = msg.cwd {
-                msg.repo_id = Some(repo_cache.resolve(Path::new(cwd)));
+            if offset >= content.len() {
+                continue; // Already fully synced.
             }
-        }
 
-        let count = ingest_messages(conn, &messages)?;
-        set_sync_offset(conn, &path_str, new_offset)?;
+            let (mut messages, new_offset) = provider.parse_file(file_path, &content, offset)?;
+            if messages.is_empty() {
+                set_sync_offset(conn, &path_str, new_offset)?;
+                continue;
+            }
 
-        if count > 0 {
-            total_files += 1;
-            total_messages += count;
+            // Resolve repo_id for each message from its cwd.
+            for msg in &mut messages {
+                if let Some(ref cwd) = msg.cwd {
+                    msg.repo_id = Some(repo_cache.resolve(Path::new(cwd)));
+                }
+            }
+
+            let count = ingest_messages(conn, &messages)?;
+            set_sync_offset(conn, &path_str, new_offset)?;
+
+            if count > 0 {
+                total_files += 1;
+                total_messages += count;
+            }
         }
     }
 
@@ -1592,6 +1613,7 @@ mod tests {
                 version: Some("2.1.76".to_string()),
                 git_branch: Some("main".to_string()),
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1611,6 +1633,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
         ];
 
@@ -1663,6 +1686,7 @@ mod tests {
                 version: Some("2.1.0".to_string()),
                 git_branch: Some("main".to_string()),
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -1682,6 +1706,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
         ];
         ingest_messages(&mut conn, &msgs).unwrap();
@@ -1716,6 +1741,7 @@ mod tests {
                 version: Some("2.1.76".to_string()),
                 git_branch: Some("main".to_string()),
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1735,6 +1761,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -1754,6 +1781,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
         ]
     }
@@ -1832,6 +1860,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -1855,6 +1884,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -1875,6 +1905,7 @@ mod tests {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             },
         ]
     }

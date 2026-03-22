@@ -127,6 +127,8 @@ pub struct ParsedMessage {
     pub git_branch: Option<String>,
     /// Canonical repository identity, resolved from cwd during sync.
     pub repo_id: Option<String>,
+    /// Which provider produced this message (e.g. "claude_code", "cursor").
+    pub provider: String,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -155,6 +157,7 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
             version: u.version,
             git_branch: u.git_branch,
             repo_id: None,
+            provider: "claude_code".to_string(),
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
@@ -196,6 +199,7 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                 version: None,
                 git_branch: None,
                 repo_id: None,
+                provider: "claude_code".to_string(),
             })
         }
         TranscriptEntry::Other => None,

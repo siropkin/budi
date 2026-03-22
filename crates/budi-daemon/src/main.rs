@@ -443,10 +443,21 @@ async fn analytics_active_sessions()
 }
 
 async fn analytics_plans() -> Result<Json<Vec<claude_data::PlanFile>>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(claude_data::read_plans)
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
+    let result = tokio::task::spawn_blocking(|| {
+        let providers = budi_core::provider::available_providers();
+        let mut all_plans = Vec::new();
+        for provider in &providers {
+            if let Ok(plans) = provider.discover_plans() {
+                all_plans.extend(plans);
+            }
+        }
+        // Sort by modified date (newest first), consistent with original behavior.
+        all_plans.sort_by(|a, b| b.modified.cmp(&a.modified));
+        Ok::<_, anyhow::Error>(all_plans)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
     Ok(Json(result))
 }
 
@@ -476,10 +487,26 @@ async fn analytics_history(
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<claude_data::PromptHistory>, (StatusCode, String)> {
     let limit = params.limit.unwrap_or(200);
-    let result = tokio::task::spawn_blocking(move || claude_data::read_prompt_history(limit))
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let providers = budi_core::provider::available_providers();
+        let mut all_entries = Vec::new();
+        for provider in &providers {
+            if let Ok(entries) = provider.prompt_history(limit) {
+                all_entries.extend(entries);
+            }
+        }
+        // Sort by timestamp descending.
+        all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_entries.truncate(limit);
+        let total_count = all_entries.len() as u64;
+        Ok::<_, anyhow::Error>(claude_data::PromptHistory {
+            total_count,
+            entries: all_entries,
+        })
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
     Ok(Json(result))
 }
 

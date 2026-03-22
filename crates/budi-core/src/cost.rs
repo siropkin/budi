@@ -1,57 +1,18 @@
-//! Token cost estimation based on Claude model pricing.
+//! Token cost estimation dispatched through the provider trait.
 
 use anyhow::Result;
 use rusqlite::Connection;
 
-/// Per-million-token pricing for a Claude model.
-struct ModelPricing {
-    input: f64,
-    output: f64,
-    cache_write: f64,
-    cache_read: f64,
-}
+use crate::provider::ModelPricing;
 
-/// Look up pricing by model string (e.g. "claude-opus-4-6", "claude-sonnet-4-6-20260321").
+/// Look up pricing by model string, dispatching through all registered providers.
+/// Tries each provider's `pricing_for_model` — currently Claude Code is the only
+/// registered provider, so this behaves identically to the old hardcoded lookup.
 fn pricing_for_model(model: &str) -> ModelPricing {
-    let m = model.to_lowercase();
-    if m.contains("opus-4-6") || m.contains("opus-4-5") {
-        ModelPricing {
-            input: 5.0,
-            output: 25.0,
-            cache_write: 6.25,
-            cache_read: 0.50,
-        }
-    } else if m.contains("opus") {
-        // opus-4-1, opus-4-0, older
-        ModelPricing {
-            input: 15.0,
-            output: 75.0,
-            cache_write: 18.75,
-            cache_read: 1.50,
-        }
-    } else if m.contains("sonnet") {
-        ModelPricing {
-            input: 3.0,
-            output: 15.0,
-            cache_write: 3.75,
-            cache_read: 0.30,
-        }
-    } else if m.contains("haiku") {
-        ModelPricing {
-            input: 1.0,
-            output: 5.0,
-            cache_write: 1.25,
-            cache_read: 0.10,
-        }
-    } else {
-        // Unknown model — use sonnet pricing as a reasonable default
-        ModelPricing {
-            input: 3.0,
-            output: 15.0,
-            cache_write: 3.75,
-            cache_read: 0.30,
-        }
-    }
+    // For Phase 0, delegate to the Claude Code provider pricing directly.
+    // When multiple providers exist, this could query by provider column or
+    // try each provider's pricing.
+    crate::providers::claude_code::claude_pricing_for_model(model)
 }
 
 /// Estimated cost breakdown.
