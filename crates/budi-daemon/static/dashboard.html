@@ -577,7 +577,9 @@ async function reloadStatsData() {
 function renderActiveSessions(activeSessions) {
   const alive = activeSessions.filter(s => s.is_alive);
   if (alive.length > 0) {
-    const projects = alive.map(s => projectName(s.cwd)).join(', ');
+    const counts = {};
+    alive.forEach(s => { const n = projectName(s.cwd); counts[n] = (counts[n] || 0) + 1; });
+    const projects = Object.entries(counts).map(([n, c]) => c > 1 ? `${n} (${c})` : n).join(', ');
     return `<div class="active-sessions">
       <span class="active-dot green"></span>
       <span class="active-label">${alive.length} active session${alive.length > 1 ? 's' : ''}</span>
