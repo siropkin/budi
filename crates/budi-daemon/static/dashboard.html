@@ -555,23 +555,24 @@ async function loadAllData() {
   dataLoaded = true;
 }
 
-async function reloadStatsData() {
+async function reloadStatsData(signal) {
   const range = dateRange(currentPeriod);
   if (currentProvider) range.provider = currentProvider;
   const q = qs(range);
   const gran = granularityForPeriod(currentPeriod);
   const tzOffset = -new Date().getTimezoneOffset();
+  const opts = signal ? { signal } : {};
 
   const [summary, sessions, cwds, insights, cost, models, activityChart, activeSessions, providers] = await Promise.all([
-    fetch('/analytics/summary' + q).then(r => r.json()),
-    fetch('/analytics/sessions' + q).then(r => r.json()),
-    fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS).then(r => r.json()),
-    fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset).then(r => r.json()),
-    fetch('/analytics/cost' + q).then(r => r.json()),
-    fetch('/analytics/models' + q).then(r => r.json()),
-    fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset).then(r => r.json()),
-    fetch('/analytics/active-sessions').then(r => r.json()).catch(() => []),
-    fetch('/analytics/providers' + qs(dateRange(currentPeriod))).then(r => r.json()).catch(() => []),
+    fetch('/analytics/summary' + q, opts).then(r => r.json()),
+    fetch('/analytics/sessions' + q, opts).then(r => r.json()),
+    fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
+    fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset, opts).then(r => r.json()),
+    fetch('/analytics/cost' + q, opts).then(r => r.json()),
+    fetch('/analytics/models' + q, opts).then(r => r.json()),
+    fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(r => r.json()),
+    fetch('/analytics/active-sessions', opts).then(r => r.json()).catch(() => []),
+    fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
   ]);
 
   statsData = { summary, sessions, cwds, insights, cost, models, activityChart };
@@ -1668,46 +1669,43 @@ window.addEventListener('popstate', () => {
   }
 });
 
-// Request sequencing — ignore stale responses from earlier period/filter switches
-let requestSeq = 0;
+// Request sequencing — cancel in-flight fetches when period/filter changes
+let currentAbort = null;
+
+// Shared reload helper — aborts previous in-flight requests
+async function switchAndReload() {
+  if (currentAbort) currentAbort.abort();
+  const abort = new AbortController();
+  currentAbort = abort;
+  const content = $('#content');
+  content.innerHTML = '<div class="loading">Loading analytics</div>';
+  try {
+    await reloadStatsData(abort.signal);
+    if (abort.signal.aborted) return;
+    renderCurrentView();
+  } catch (err) {
+    if (abort.signal.aborted) return;
+    content.innerHTML = `<div class="empty">
+      Failed to load analytics.<br>
+      <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
+    </div>`;
+  }
+}
 
 // Period tab switching
 $$('.period-tabs button').forEach(btn => {
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     $$('.period-tabs button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPeriod = btn.dataset.period;
-    const seq = ++requestSeq;
-    const content = $('#content');
-    content.innerHTML = '<div class="loading">Loading analytics</div>';
-    try {
-      await reloadStatsData();
-      if (seq !== requestSeq) return; // stale
-      renderCurrentView();
-    } catch (err) {
-      if (seq !== requestSeq) return;
-      content.innerHTML = `<div class="empty">
-        Failed to load analytics.<br>
-        <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
-      </div>`;
-    }
+    switchAndReload();
   });
 });
 
 // Provider filter
-$('#providerSelect').addEventListener('change', async () => {
+$('#providerSelect').addEventListener('change', () => {
   currentProvider = $('#providerSelect').value;
-  const seq = ++requestSeq;
-  const content = $('#content');
-  content.innerHTML = '<div class="loading">Loading analytics</div>';
-  try {
-    await reloadStatsData();
-    if (seq !== requestSeq) return;
-    renderCurrentView();
-  } catch (err) {
-    if (seq !== requestSeq) return;
-    content.innerHTML = `<div class="empty">Failed to load analytics.</div>`;
-  }
+  switchAndReload();
 });
 
 // Sync button
