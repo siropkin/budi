@@ -126,12 +126,12 @@ async fn main() -> Result<()> {
 
     // Debounced hook-triggered sync: when hooks fire, sync just the active transcript
     // file after a 500ms debounce to collapse rapid hook bursts.
-    let hook_sync_flag = app_state.syncing.clone();
+    // Runs independently of the background sync (no syncing flag) because
+    // sync_one_file is lightweight and all DB writes are idempotent.
     tokio::spawn(async move {
         let mut pending_path: Option<PathBuf> = None;
         loop {
             if pending_path.is_some() {
-                // We have a pending path — wait for more or timeout after 500ms
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(500),
                     hook_sync_rx.recv(),
@@ -142,40 +142,24 @@ async fn main() -> Result<()> {
                         pending_path = Some(path);
                         continue; // reset debounce timer
                     }
-                    Ok(None) => break, // channel closed
+                    Ok(None) => break,
                     Err(_) => {
-                        // Timeout — debounce expired, sync the file
+                        // Debounce expired — sync the file
                         let path = pending_path.take().unwrap();
-                        if hook_sync_flag
-                            .compare_exchange(
-                                false,
-                                true,
-                                std::sync::atomic::Ordering::SeqCst,
-                                std::sync::atomic::Ordering::SeqCst,
-                            )
-                            .is_ok()
-                        {
-                            let flag = hook_sync_flag.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                let result = (|| {
-                                    let db_path = analytics::db_path().ok()?;
-                                    let mut conn = analytics::open_db(&db_path).ok()?;
-                                    analytics::sync_one_file(&mut conn, &path).ok()
-                                })();
-                                flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                                result
-                            })
-                            .await;
-                        }
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let db_path = analytics::db_path().ok()?;
+                            let mut conn = analytics::open_db(&db_path).ok()?;
+                            analytics::sync_one_file(&mut conn, &path).ok()
+                        })
+                        .await;
                     }
                 }
             } else {
-                // No pending path — block until we get one
                 match hook_sync_rx.recv().await {
                     Some(path) => {
                         pending_path = Some(path);
                     }
-                    None => break, // channel closed
+                    None => break,
                 }
             }
         }
