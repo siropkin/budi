@@ -202,7 +202,9 @@ fn main() -> Result<()> {
             sessions,
             provider,
             json,
-        } => commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json),
+        } => {
+            commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json)
+        }
         Commands::Insights { period, json } => commands::insights::cmd_insights(period, json),
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),

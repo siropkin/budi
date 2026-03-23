@@ -1,8 +1,8 @@
 use anyhow::Result;
 use budi_core::{analytics, insights};
 
-use crate::StatsPeriod;
 use super::stats::{format_tokens, period_date_range, shorten_path};
+use crate::StatsPeriod;
 
 pub fn cmd_insights(period: StatsPeriod, json_output: bool) -> Result<()> {
     let db_path = analytics::db_path()?;

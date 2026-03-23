@@ -60,7 +60,10 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/timeline", get(a::analytics_timeline))
         .route("/analytics/activity", get(a::analytics_activity))
         .route("/analytics/plugins", get(a::analytics_plugins))
-        .route("/analytics/active-sessions", get(a::analytics_active_sessions))
+        .route(
+            "/analytics/active-sessions",
+            get(a::analytics_active_sessions),
+        )
         .route("/analytics/plans", get(a::analytics_plans))
         .route("/analytics/memory", get(a::analytics_memory))
         .route("/analytics/permissions", get(a::analytics_permissions))
@@ -69,10 +72,16 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/mcp-tools", get(a::analytics_mcp_tools))
         .route("/analytics/branches", get(a::analytics_branches))
         .route("/analytics/providers", get(a::analytics_providers))
-        .route("/analytics/registered-providers", get(a::analytics_registered_providers))
+        .route(
+            "/analytics/registered-providers",
+            get(a::analytics_registered_providers),
+        )
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route("/analytics/context-usage", get(a::analytics_context_usage))
-        .route("/analytics/interaction-modes", get(a::analytics_interaction_modes))
+        .route(
+            "/analytics/interaction-modes",
+            get(a::analytics_interaction_modes),
+        )
         .route("/system/integrations", get(s::system_integrations))
         .route("/dashboard", get(d::dashboard))
         .route("/dashboard/setup", get(d::dashboard))

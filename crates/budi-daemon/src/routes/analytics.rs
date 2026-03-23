@@ -240,7 +240,8 @@ pub async fn analytics_activity(
     Ok(Json(result))
 }
 
-pub async fn analytics_timeline() -> Result<Json<claude_data::ActivityTimeline>, (StatusCode, String)> {
+pub async fn analytics_timeline()
+-> Result<Json<claude_data::ActivityTimeline>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(claude_data::read_activity_timeline)
         .await
         .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -248,7 +249,8 @@ pub async fn analytics_timeline() -> Result<Json<claude_data::ActivityTimeline>,
     Ok(Json(result))
 }
 
-pub async fn analytics_plugins() -> Result<Json<Vec<claude_data::PluginInfo>>, (StatusCode, String)> {
+pub async fn analytics_plugins() -> Result<Json<Vec<claude_data::PluginInfo>>, (StatusCode, String)>
+{
     let result = tokio::task::spawn_blocking(claude_data::read_installed_plugins)
         .await
         .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -316,7 +318,8 @@ pub async fn analytics_plans(
     Ok(Json(result))
 }
 
-pub async fn analytics_memory() -> Result<Json<Vec<claude_data::MemoryFile>>, (StatusCode, String)> {
+pub async fn analytics_memory() -> Result<Json<Vec<claude_data::MemoryFile>>, (StatusCode, String)>
+{
     let result = tokio::task::spawn_blocking(claude_data::read_memory_files)
         .await
         .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -442,7 +445,8 @@ pub async fn analytics_registered_providers() -> Json<serde_json::Value> {
     Json(json!(list))
 }
 
-pub async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (StatusCode, String)> {
+pub async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (StatusCode, String)>
+{
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
