@@ -75,6 +75,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/history", get(analytics_history))
         .route("/analytics/top-tools", get(analytics_top_tools))
         .route("/analytics/mcp-tools", get(analytics_mcp_tools))
+        .route("/analytics/branches", get(analytics_branches))
         .route("/analytics/providers", get(analytics_providers))
         .route(
             "/analytics/registered-providers",
@@ -504,6 +505,21 @@ async fn analytics_models(
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::model_usage(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+async fn analytics_branches(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::branch_cost(&conn, params.since.as_deref(), params.until.as_deref())
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

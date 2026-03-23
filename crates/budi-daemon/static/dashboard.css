@@ -90,7 +90,14 @@ a:hover { text-decoration: underline; }
 
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
 
-.bar-chart .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.85rem; }
+.bar-chart .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.85rem; position: relative; }
+.bar-chart .bar-tooltip {
+  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 0.75rem; white-space: nowrap; pointer-events: none;
+  display: none; z-index: 10;
+}
+.bar-chart .bar-row:hover .bar-tooltip { display: block; }
 .bar-chart .bar-label {
   width: 180px; min-width: 180px; max-width: 180px; text-align: right; flex-shrink: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);

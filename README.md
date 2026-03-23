@@ -220,7 +220,7 @@ Run `budi dashboard` to open the web UI in your browser, or click the dashboard 
 
 | Page | What it shows |
 |------|---------------|
-| **Stats** | Cost, tokens, activity chart (input/output tokens), model breakdown, projects, tools, MCP, sessions table with search, per-agent breakdown |
+| **Stats** | Cost, tokens, activity chart, agents, models (per-provider), projects, branches (cost per git branch), tools, MCP, sessions table with search |
 | **Insights** | Recommendations, session patterns, tool diversity, daily cost trend, search/cache efficiency, context window usage, config health |
 | **Setup** | Integrations (Claude Code statusline, Starship), config files, plugins, permissions — all with search |
 | **Plans** | Plan files with server-side search and pagination |

@@ -137,6 +137,10 @@ function fmtCost(n) {
   if (n > 0) return '$' + n.toFixed(3);
   return '$0.00';
 }
+function fmtCostTokens(_, item) {
+  const cost = (item.cost_cents || 0) / 100;
+  return fmtCost(cost);
+}
 function fmtDuration(firstSeen, lastSeen) {
   if (!firstSeen || !lastSeen) return '--';
   const ms = new Date(lastSeen) - new Date(firstSeen);
@@ -292,7 +296,7 @@ async function loadStatsData(signal) {
   const opts = signal ? { signal } : {};
 
   const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
-  const [summary, sessionsResult, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes, topTools, mcpTools] = await Promise.all([
+  const [summary, sessionsResult, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes, topTools, mcpTools, branches] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
     fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
@@ -305,28 +309,33 @@ async function loadStatsData(signal) {
     fetch('/analytics/interaction-modes' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/top-tools' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/mcp-tools' + q, opts).then(r => r.json()).catch(() => []),
+    fetch('/analytics/branches' + q, opts).then(r => r.json()).catch(() => []),
   ]);
 
   const sessions = sessionsResult.sessions || [];
   sessionTotalCount = sessionsResult.total_count || 0;
-  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools };
+  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches };
   activeSessionsData = activeSessions;
   lastSessionData = sessions;
   providersData = providers;
   updateProviderFilter();
 
-  // Merge models with same normalized display name
+  // Merge models with same normalized display name per provider
   const modelMap = {};
   for (const m of models) {
-    const key = formatModelName(m.model);
+    const modelName = formatModelName(m.model);
+    const prov = m.provider || 'claude_code';
+    const key = prov + '/' + modelName;
+    const provDisplay = (registeredProviders.find(rp => rp.name === prov) || {}).display_name || prov;
     if (!modelMap[key]) {
-      modelMap[key] = { model: key, message_count: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
+      modelMap[key] = { model: modelName, provider: prov, provider_display: provDisplay, message_count: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, cost_cents: 0 };
     }
     modelMap[key].message_count += m.message_count;
     modelMap[key].input_tokens += m.input_tokens;
     modelMap[key].output_tokens += m.output_tokens;
     modelMap[key].cache_read_tokens += m.cache_read_tokens;
     modelMap[key].cache_creation_tokens += m.cache_creation_tokens;
+    modelMap[key].cost_cents += m.cost_cents || 0;
   }
   let sortedModels = Object.values(modelMap);
   sortedModels.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
@@ -435,6 +444,20 @@ const providerColors = {
   claude_code: '#f0883e',
   cursor: '#58a6ff',
 };
+
+function agentBarData() {
+  return registeredProviders.map(rp => {
+    const stats = providersData.find(p => p.provider === rp.name);
+    const cost_cents = stats ? (stats.total_cost_cents > 0 ? stats.total_cost_cents : stats.estimated_cost * 100) : 0;
+    return {
+      provider: rp.name,
+      display_name: rp.display_name,
+      input_tokens: stats ? stats.input_tokens : 0,
+      output_tokens: stats ? stats.output_tokens : 0,
+      cost_cents,
+    };
+  }).filter(p => p.cost_cents > 0 || p.input_tokens > 0 || p.output_tokens > 0);
+}
 
 /* ===== Render: Agents Tile ===== */
 function renderAgentsTile() {
@@ -551,16 +574,28 @@ function renderCards(s, cost) {
 }
 
 /* ===== Render: Bar Chart ===== */
-function renderBarChart(items, labelFn, valueFn, colorFn, emptyMsg) {
+function barTooltip(item, labelFn, valueFn) {
+  const label = labelFn(item, true);
+  const cost = (item.cost_cents || 0) / 100;
+  const inp = item.input_tokens || 0;
+  const outp = item.output_tokens || 0;
+  if (inp || outp) return `${label}: ${fmtCost(cost)} — ${fmtNum(inp)} input, ${fmtNum(outp)} output`;
+  if (valueFn) return `${label}: ${fmtNum(valueFn(item))} calls`;
+  return label;
+}
+
+function renderBarChart(items, labelFn, valueFn, colorFn, emptyMsg, formatFn) {
   if (!items.length) return `<div class="empty">${esc(emptyMsg)}</div>`;
+  const fmt = formatFn || ((v) => fmtNum(v));
   const max = Math.max(...items.map(valueFn));
   return `<div class="bar-chart">${items.map((item, i) => `
     <div class="bar-row">
-      <div class="bar-label" title="${esc(labelFn(item, true))}">${esc(labelFn(item, false))}</div>
+      <div class="bar-tooltip">${esc(barTooltip(item, labelFn, valueFn))}</div>
+      <div class="bar-label">${esc(labelFn(item, false))}</div>
       <div class="bar-track">
         <div class="bar-fill" style="width:${max > 0 ? (valueFn(item)/max*100) : 0}%;background:${colorFn(item, i)}"></div>
       </div>
-      <div class="bar-count">${fmtNum(valueFn(item))}</div>
+      <div class="bar-count">${fmt(valueFn(item), item)}</div>
     </div>`).join('')}
   </div>`;
 }
@@ -581,7 +616,7 @@ function renderActivityChart(chartData) {
     const displayLabel = bucket.label || '';
     const shortLabel = displayLabel.length > 6 ? displayLabel.slice(-5) : displayLabel;
     bars += `<div class="day-bar" style="height:100%">
-      <div class="daily-chart-tooltip">${esc(displayLabel)}: ${fmtNum(inp)} input, ${fmtNum(outp)} output</div>
+      <div class="daily-chart-tooltip">${esc(displayLabel)}: ${fmtCost((bucket.cost_cents || 0) / 100)} — ${fmtNum(inp)} input, ${fmtNum(outp)} output</div>
       <div class="bar-msg" style="height:${inH}%"></div>
       <div class="bar-tool" style="height:${outH}%"></div>
     </div>`;
@@ -1235,7 +1270,7 @@ function renderPermissionsSection(permissions) {
 
 /* ===== View Renderers ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches } = statsData;
   content.innerHTML = `
     ${renderActiveSessions(activeSessionsData)}
     ${renderCards(summary, cost)}
@@ -1243,24 +1278,54 @@ function renderStatsView(content) {
       <h2>${cachedActivityChartTitle}</h2>
       ${renderActivityChart(activityChart)}
     </div>
-    ${renderAgentsTile()}
     <div class="grid-2 section-mb">
+      <div class="panel">
+        <h2>Agents</h2>
+        ${renderBarChart(agentBarData(),
+          p => p.display_name,
+          p => p.cost_cents,
+          (p, i) => paletteColor(i),
+          'No agent data for this period',
+          fmtCostTokens
+        )}
+      </div>
       <div class="panel">
         <h2>Models</h2>
         ${renderBarChart(cachedSortedModels,
-          m => m.model,
+          (m, full) => {
+            const label = m.provider_display + ' / ' + m.model;
+            return full ? label : label;
+          },
           m => m.input_tokens + m.output_tokens,
-          m => modelColor(m.model),
-          'No model data for this period'
+          (m, i) => paletteColor(i),
+          'No model data for this period',
+          fmtCostTokens
         )}
       </div>
+    </div>
+    <div class="grid-2 section-mb">
       <div class="panel">
         <h2>Projects</h2>
         ${renderBarChart(cwds,
           (c, full) => full ? (c.repo_id || '--') : repoName(c.repo_id),
           c => c.input_tokens + c.output_tokens,
           (c, i) => paletteColor(i),
-          'No project data for this period'
+          'No project data for this period',
+          fmtCostTokens
+        )}
+      </div>
+      <div class="panel">
+        <h2>Branches${ccOnlyLabel()}</h2>
+        ${renderBarChart((branches || []).slice(0, DEFAULT_CHART_ROWS),
+          (b, full) => {
+            const branch = b.git_branch.replace(/^refs\/heads\//, '');
+            const repo = repoName(b.repo_id);
+            return repo + ' / ' + branch;
+          },
+          b => b.cost_cents,
+          (b, i) => paletteColor(i),
+          'No branch data for this period',
+          fmtCostTokens
         )}
       </div>
     </div>
@@ -1270,7 +1335,7 @@ function renderStatsView(content) {
         ${renderBarChart((topTools || []).filter(t => !t[0].startsWith('mcp__')).slice(0, DEFAULT_CHART_ROWS),
           (t) => t[0],
           t => t[1],
-          t => toolColor(t[0]),
+          (t, i) => paletteColor(i),
           'No tool usage data for this period'
         )}
       </div>

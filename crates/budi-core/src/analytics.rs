@@ -886,6 +886,7 @@ pub struct RepoUsage {
     pub message_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cost_cents: f64,
 }
 
 /// Query repository usage, grouped by repo_id, optionally filtered by date.
@@ -912,7 +913,8 @@ pub fn repo_usage(
     let sql = format!(
         "SELECT repo_id, MIN(cwd) as display_path, COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
-                COALESCE(SUM(output_tokens), 0) as outp
+                COALESCE(SUM(output_tokens), 0) as outp,
+                COALESCE(SUM(cost_cents), 0.0) as cost
          FROM messages
          WHERE {}
          GROUP BY repo_id
@@ -934,6 +936,7 @@ pub fn repo_usage(
                 message_count: row.get(2)?,
                 input_tokens: row.get(3)?,
                 output_tokens: row.get(4)?,
+                cost_cents: row.get(5)?,
             })
         })?
         .filter_map(|r| match r {
@@ -1236,6 +1239,7 @@ pub struct ActivityBucket {
     pub tool_call_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cost_cents: f64,
 }
 
 /// Query activity data with adaptive time granularity.
@@ -1278,16 +1282,17 @@ pub fn activity_chart(
     let sql = format!(
         "SELECT {} as bucket, COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0),
-                COALESCE(SUM(output_tokens), 0)
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
          FROM messages {}
          GROUP BY bucket ORDER BY bucket",
         group_expr, where_clause
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let msg_rows: Vec<(String, u64, u64, u64)> = stmt
+    let msg_rows: Vec<(String, u64, u64, u64, f64)> = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
@@ -1330,10 +1335,11 @@ pub fn activity_chart(
 
     let results = msg_rows
         .into_iter()
-        .map(|(label, count, inp, outp)| ActivityBucket {
+        .map(|(label, count, inp, outp, cost)| ActivityBucket {
             tool_call_count: tool_rows.get(&label).copied().unwrap_or(0),
             label,
             message_count: count,
+            cost_cents: cost,
             input_tokens: inp,
             output_tokens: outp,
         })
@@ -1342,15 +1348,93 @@ pub fn activity_chart(
     Ok(results)
 }
 
-/// Model usage breakdown: tokens grouped by model name.
+/// Feature cost breakdown: tokens and cost grouped by git branch.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct ModelUsage {
-    pub model: String,
+pub struct BranchCost {
+    pub git_branch: String,
+    pub repo_id: String,
+    pub session_count: u64,
     pub message_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+}
+
+/// Query feature cost grouped by git branch, optionally filtered by date range.
+pub fn branch_cost(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<BranchCost>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let sql = format!(
+        "SELECT s.git_branch,
+                COALESCE(s.repo_id, '') as repo,
+                COUNT(DISTINCT m.session_id) as sess,
+                COUNT(*) as cnt,
+                COALESCE(SUM(m.input_tokens), 0),
+                COALESCE(SUM(m.output_tokens), 0),
+                COALESCE(SUM(m.cache_read_tokens), 0),
+                COALESCE(SUM(m.cache_creation_tokens), 0),
+                COALESCE(SUM(m.cost_cents), 0.0)
+         FROM messages m
+         JOIN sessions s ON m.session_id = s.session_id
+         {} {} s.git_branch IS NOT NULL AND s.git_branch != ''
+         GROUP BY s.git_branch, s.repo_id
+         ORDER BY COALESCE(SUM(m.cost_cents), 0.0) DESC
+         LIMIT 20",
+        where_clause,
+        if where_clause.is_empty() {
+            "WHERE"
+        } else {
+            "AND"
+        }
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(BranchCost {
+                git_branch: row.get(0)?,
+                repo_id: row.get(1)?,
+                session_count: row.get(2)?,
+                message_count: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_read_tokens: row.get(6)?,
+                cache_creation_tokens: row.get(7)?,
+                cost_cents: row.get(8)?,
+            })
+        })?
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
+        })
+        .collect();
+    Ok(rows)
+}
+
+/// Model usage breakdown: tokens grouped by model name.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub provider: String,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
 }
 
 /// Query model usage stats, optionally filtered by date range.
@@ -1367,14 +1451,16 @@ pub fn model_usage(
 
     let sql = format!(
         "SELECT model as m,
+                COALESCE(provider, 'claude_code') as p,
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cache_creation_tokens), 0)
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
          FROM messages
          {} {} role = 'assistant' AND model IS NOT NULL AND model != '' AND model NOT LIKE '<%'
-         GROUP BY m
+         GROUP BY m, p
          ORDER BY (COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0)) DESC",
         where_clause,
         if where_clause.is_empty() {
@@ -1389,11 +1475,13 @@ pub fn model_usage(
         .query_map(param_refs.as_slice(), |row| {
             Ok(ModelUsage {
                 model: row.get(0)?,
-                message_count: row.get(1)?,
-                input_tokens: row.get(2)?,
-                output_tokens: row.get(3)?,
-                cache_read_tokens: row.get(4)?,
-                cache_creation_tokens: row.get(5)?,
+                provider: row.get(1)?,
+                message_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cost_cents: row.get(7)?,
             })
         })?
         .filter_map(|r| match r {
