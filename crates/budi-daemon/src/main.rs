@@ -39,7 +39,7 @@ pub struct AppState {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, dashboard as d, hooks as h, system as s};
+    use routes::{analytics as a, dashboard as d, hooks as h};
 
     Router::new()
         .route("/health", get(h::health))
@@ -53,41 +53,18 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/sessions", get(a::analytics_sessions))
         .route("/analytics/session/{id}", get(a::analytics_session_detail))
         .route("/analytics/projects", get(a::analytics_projects))
-        .route("/analytics/insights", get(a::analytics_insights))
         .route("/analytics/cost", get(a::analytics_cost))
         .route("/analytics/models", get(a::analytics_models))
-        .route("/analytics/config-files", get(a::analytics_config_files))
-        .route("/analytics/timeline", get(a::analytics_timeline))
         .route("/analytics/activity", get(a::analytics_activity))
-        .route("/analytics/plugins", get(a::analytics_plugins))
-        .route(
-            "/analytics/active-sessions",
-            get(a::analytics_active_sessions),
-        )
-        .route("/analytics/plans", get(a::analytics_plans))
-        .route("/analytics/memory", get(a::analytics_memory))
-        .route("/analytics/permissions", get(a::analytics_permissions))
-        .route("/analytics/prompts", get(a::analytics_prompts))
         .route("/analytics/top-tools", get(a::analytics_top_tools))
         .route("/analytics/mcp-tools", get(a::analytics_mcp_tools))
         .route("/analytics/branches", get(a::analytics_branches))
         .route("/analytics/providers", get(a::analytics_providers))
-        .route(
-            "/analytics/registered-providers",
-            get(a::analytics_registered_providers),
-        )
+        .route("/analytics/registered-providers", get(a::analytics_registered_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route("/analytics/context-usage", get(a::analytics_context_usage))
-        .route(
-            "/analytics/interaction-modes",
-            get(a::analytics_interaction_modes),
-        )
-        .route("/system/integrations", get(s::system_integrations))
+        .route("/analytics/interaction-modes", get(a::analytics_interaction_modes))
         .route("/dashboard", get(d::dashboard))
-        .route("/dashboard/setup", get(d::dashboard))
-        .route("/dashboard/plans", get(d::dashboard))
-        .route("/dashboard/prompts", get(d::dashboard))
-        .route("/dashboard/insights", get(d::dashboard))
         .route("/static/dashboard.css", get(d::dashboard_css))
         .route("/static/dashboard.js", get(d::dashboard_js))
         .with_state(app_state)

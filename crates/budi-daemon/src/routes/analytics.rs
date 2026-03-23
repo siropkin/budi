@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use budi_core::{analytics, claude_data, cost, insights};
+use budi_core::{analytics, cost};
 use chrono::Datelike;
 use serde_json::json;
 
@@ -118,34 +118,6 @@ pub async fn analytics_projects(
     Ok(Json(result))
 }
 
-#[derive(serde::Deserialize)]
-pub struct InsightsParams {
-    since: Option<String>,
-    until: Option<String>,
-    tz_offset: Option<i32>,
-}
-
-pub async fn analytics_insights(
-    Query(params): Query<InsightsParams>,
-) -> Result<Json<insights::Insights>, (StatusCode, String)> {
-    let tz_offset = params.tz_offset.unwrap_or(0);
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        insights::generate_insights(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            tz_offset,
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}
-
 pub async fn analytics_models(
     Query(params): Query<SummaryParams>,
 ) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, String)> {
@@ -168,20 +140,6 @@ pub async fn analytics_branches(
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::branch_cost(&conn, params.since.as_deref(), params.until.as_deref())
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}
-
-pub async fn analytics_config_files()
--> Result<Json<Vec<analytics::ConfigFileInfo>>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::config_files(&conn)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -233,152 +191,6 @@ pub async fn analytics_activity(
             &granularity,
             tz_offset,
         )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_timeline()
--> Result<Json<claude_data::ActivityTimeline>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(claude_data::read_activity_timeline)
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_plugins() -> Result<Json<Vec<claude_data::PluginInfo>>, (StatusCode, String)>
-{
-    let result = tokio::task::spawn_blocking(claude_data::read_installed_plugins)
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_active_sessions()
--> Result<Json<Vec<claude_data::ActiveSession>>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(claude_data::read_active_sessions)
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-#[derive(serde::Deserialize)]
-pub struct PlansParams {
-    limit: Option<usize>,
-    offset: Option<usize>,
-    search: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-pub struct PaginatedPlans {
-    plans: Vec<claude_data::PlanFile>,
-    total_count: u64,
-}
-
-pub async fn analytics_plans(
-    Query(params): Query<PlansParams>,
-) -> Result<Json<PaginatedPlans>, (StatusCode, String)> {
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
-    let search = params.search;
-    let result = tokio::task::spawn_blocking(move || {
-        let providers = budi_core::provider::available_providers();
-        let mut all_plans = Vec::new();
-        for provider in &providers {
-            if let Ok(plans) = provider.discover_plans() {
-                all_plans.extend(plans);
-            }
-        }
-        all_plans.sort_by(|a, b| b.modified.cmp(&a.modified));
-        if let Some(ref q) = search
-            && !q.is_empty()
-        {
-            let lower = q.to_lowercase();
-            all_plans.retain(|p| {
-                p.title.to_lowercase().contains(&lower)
-                    || p.name.to_lowercase().contains(&lower)
-                    || p.preview.to_lowercase().contains(&lower)
-            });
-        }
-        let total_count = all_plans.len() as u64;
-        let page: Vec<_> = all_plans.into_iter().skip(offset).take(limit).collect();
-        Ok::<_, anyhow::Error>(PaginatedPlans {
-            plans: page,
-            total_count,
-        })
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_memory() -> Result<Json<Vec<claude_data::MemoryFile>>, (StatusCode, String)>
-{
-    let result = tokio::task::spawn_blocking(claude_data::read_memory_files)
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_permissions()
--> Result<Json<claude_data::PermissionsSummary>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(claude_data::read_permissions)
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-#[derive(serde::Deserialize)]
-pub struct HistoryParams {
-    limit: Option<usize>,
-    offset: Option<usize>,
-    search: Option<String>,
-}
-
-pub async fn analytics_prompts(
-    Query(params): Query<HistoryParams>,
-) -> Result<Json<claude_data::PromptHistory>, (StatusCode, String)> {
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
-    let search = params.search;
-    let result = tokio::task::spawn_blocking(move || {
-        let providers = budi_core::provider::available_providers();
-        let mut all_entries = Vec::new();
-        for provider in &providers {
-            if let Ok(entries) = provider.prompt_history(1000) {
-                all_entries.extend(entries);
-            }
-        }
-        // Sort by timestamp descending.
-        all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        // Apply search filter if provided
-        if let Some(ref q) = search
-            && !q.is_empty()
-        {
-            let lower = q.to_lowercase();
-            all_entries.retain(|e| {
-                e.display.to_lowercase().contains(&lower)
-                    || e.project
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&lower)
-            });
-        }
-        let total_count = all_entries.len() as u64;
-        let page = all_entries.into_iter().skip(offset).take(limit).collect();
-        Ok::<_, anyhow::Error>(claude_data::PromptHistory {
-            total_count,
-            entries: page,
-        })
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

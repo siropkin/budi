@@ -520,10 +520,3 @@ pub fn format_timestamp(ts: &str) -> String {
         .unwrap_or_else(|_| ts.to_string())
 }
 
-pub fn shorten_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() <= 2 {
-        return path.to_string();
-    }
-    format!("…/{}", parts[parts.len() - 2..].join("/"))
-}

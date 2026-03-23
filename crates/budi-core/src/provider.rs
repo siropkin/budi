@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::claude_data::{PlanFile, PromptEntry};
 use crate::hooks;
 
 /// Per-million-token pricing for a model.
@@ -25,16 +24,6 @@ pub struct ModelPricing {
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
     pub path: PathBuf,
-}
-
-/// Setup data a provider can expose for the dashboard Setup page.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ProviderSetupData {
-    pub activity: Option<crate::claude_data::ActivityTimeline>,
-    pub plugins: Vec<crate::claude_data::PluginInfo>,
-    pub active_sessions: Vec<crate::claude_data::ActiveSession>,
-    pub memory_files: Vec<crate::claude_data::MemoryFile>,
-    pub permissions: Option<crate::claude_data::PermissionsSummary>,
 }
 
 /// Hook handler trait for providers that support hooks.
@@ -61,21 +50,6 @@ pub trait Provider: Send + Sync {
     fn pricing_for_model(&self, model: &str) -> ModelPricing;
 
     // === Optional capabilities ===
-
-    /// Config files, plugins, permissions, memory — for Setup page.
-    fn setup_data(&self) -> Option<ProviderSetupData> {
-        None
-    }
-
-    /// Plans/tasks — for Plans page.
-    fn discover_plans(&self) -> Result<Vec<PlanFile>> {
-        Ok(vec![])
-    }
-
-    /// Prompt history — for Prompts page.
-    fn prompt_history(&self, _limit: usize) -> Result<Vec<PromptEntry>> {
-        Ok(vec![])
-    }
 
     /// Hook integration — for statusline and pre-filtering.
     fn hook_support(&self) -> Option<Box<dyn HookHandler>> {

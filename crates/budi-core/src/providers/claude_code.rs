@@ -5,11 +5,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::claude_data::{self, PlanFile, PromptEntry};
 use crate::hooks;
 use crate::jsonl::{self, ParsedMessage};
 use crate::pre_filter;
-use crate::provider::{DiscoveredFile, HookHandler, ModelPricing, Provider, ProviderSetupData};
+use crate::provider::{DiscoveredFile, HookHandler, ModelPricing, Provider};
 
 /// The Claude Code provider.
 pub struct ClaudeCodeProvider;
@@ -46,25 +45,6 @@ impl Provider for ClaudeCodeProvider {
 
     fn pricing_for_model(&self, model: &str) -> ModelPricing {
         claude_pricing_for_model(model)
-    }
-
-    fn setup_data(&self) -> Option<ProviderSetupData> {
-        Some(ProviderSetupData {
-            activity: claude_data::read_activity_timeline().ok(),
-            plugins: claude_data::read_installed_plugins().unwrap_or_default(),
-            active_sessions: claude_data::read_active_sessions().unwrap_or_default(),
-            memory_files: claude_data::read_memory_files().unwrap_or_default(),
-            permissions: claude_data::read_permissions().ok(),
-        })
-    }
-
-    fn discover_plans(&self) -> Result<Vec<PlanFile>> {
-        claude_data::read_plans()
-    }
-
-    fn prompt_history(&self, limit: usize) -> Result<Vec<PromptEntry>> {
-        let history = claude_data::read_prompt_history(limit)?;
-        Ok(history.entries)
     }
 
     fn hook_support(&self) -> Option<Box<dyn HookHandler>> {
