@@ -8,7 +8,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use budi_core::analytics;
-use budi_core::claude_data;
 use budi_core::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
 use budi_core::cost;
 use budi_core::hooks::{PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput};
@@ -70,9 +69,15 @@ enum Commands {
         /// Show details for a specific session (ID or prefix)
         #[arg(long)]
         session: Option<String>,
-        /// Show most-used working directories
+        /// Show repositories ranked by usage
         #[arg(long, default_value_t = false)]
-        files: bool,
+        projects: bool,
+        /// Show model usage breakdown
+        #[arg(long, default_value_t = false)]
+        models: bool,
+        /// List sessions with stats
+        #[arg(long, default_value_t = false)]
+        sessions: bool,
         /// Filter by provider (e.g. claude_code, cursor)
         #[arg(long)]
         provider: Option<String>,
@@ -91,41 +96,8 @@ enum Commands {
     },
     /// Sync transcripts into the analytics database
     Sync,
-    /// Show model usage breakdown
-    Models {
-        /// Time period (default: all)
-        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
-        period: StatsPeriod,
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// List sessions with stats
-    Sessions {
-        /// Time period (default: today)
-        #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
-        period: StatsPeriod,
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Show installed plugins
-    Plugins {
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Show repositories ranked by usage
-    Projects {
-        /// Time period (default: all)
-        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
-        period: StatsPeriod,
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
     /// Open the budi dashboard in the browser
-    Dashboard,
+    Open,
     /// Update budi to the latest version
     Update,
     /// Print version information
@@ -233,18 +205,15 @@ fn main() -> Result<()> {
         Commands::Stats {
             period,
             session,
-            files,
+            projects,
+            models,
+            sessions,
             provider,
             json,
-        } => cmd_stats(period, session, files, provider, json),
+        } => cmd_stats(period, session, projects, models, sessions, provider, json),
         Commands::Insights { period, json } => cmd_insights(period, json),
-        // Cost command removed — merged into `budi stats`
-        Commands::Models { period, json } => cmd_models(period, json),
-        Commands::Sessions { period, json } => cmd_sessions(period, json),
-        Commands::Plugins { json } => cmd_plugins(json),
-        Commands::Projects { period, json } => cmd_projects(period, json),
         Commands::Sync => cmd_sync(),
-        Commands::Dashboard => cmd_dashboard(),
+        Commands::Open => cmd_open(),
         Commands::Update => cmd_update(),
         Commands::Version => {
             println!("budi {}", env!("CARGO_PKG_VERSION"));
@@ -835,7 +804,9 @@ fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
 fn cmd_stats(
     period: StatsPeriod,
     session: Option<String>,
-    files: bool,
+    projects: bool,
+    models: bool,
+    sessions: bool,
     provider: Option<String>,
     json_output: bool,
 ) -> Result<()> {
@@ -855,14 +826,22 @@ fn cmd_stats(
         return cmd_stats_session(&conn, sid);
     }
 
-    if files {
+    if sessions {
+        return cmd_sessions(&conn, period, json_output);
+    }
+
+    if models {
+        return cmd_models(&conn, period, json_output);
+    }
+
+    if projects {
         if json_output {
             let (since, until) = period_date_range(period);
             let data = analytics::repo_usage(&conn, since.as_deref(), until.as_deref(), 50)?;
             println!("{}", serde_json::to_string_pretty(&data)?);
             return Ok(());
         }
-        return cmd_stats_files(&conn, period);
+        return cmd_stats_projects(&conn, period);
     }
 
     if json_output {
@@ -1128,7 +1107,7 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
     Ok(())
 }
 
-fn cmd_stats_files(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
+fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
     let (since, until) = period_date_range(period);
     let repos = analytics::repo_usage(conn, since.as_deref(), until.as_deref(), 15)?;
 
@@ -1313,15 +1292,9 @@ fn cmd_insights(period: StatsPeriod, json_output: bool) -> Result<()> {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
-fn cmd_models(period: StatsPeriod, json_output: bool) -> Result<()> {
-    let db_path = analytics::db_path()?;
-    if !db_path.exists() {
-        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
-        return Ok(());
-    }
-    let conn = analytics::open_db(&db_path)?;
+fn cmd_models(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let models = analytics::model_usage(&conn, since.as_deref(), until.as_deref())?;
+    let models = analytics::model_usage(conn, since.as_deref(), until.as_deref())?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&models)?);
@@ -1363,16 +1336,10 @@ fn cmd_models(period: StatsPeriod, json_output: bool) -> Result<()> {
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
-fn cmd_sessions(period: StatsPeriod, json_output: bool) -> Result<()> {
-    let db_path = analytics::db_path()?;
-    if !db_path.exists() {
-        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
-        return Ok(());
-    }
-    let conn = analytics::open_db(&db_path)?;
+fn cmd_sessions(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
     let (since, until) = period_date_range(period);
     let result = analytics::session_list(
-        &conn,
+        conn,
         &analytics::SessionListParams {
             since: since.as_deref(),
             until: until.as_deref(),
@@ -1439,88 +1406,6 @@ fn cmd_sessions(period: StatsPeriod, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-// ─── Plugins ──────────────────────────────────────────────────────────────────
-
-fn cmd_plugins(json_output: bool) -> Result<()> {
-    let plugins = claude_data::read_installed_plugins()?;
-
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&plugins)?);
-        return Ok(());
-    }
-
-    println!();
-    println!(
-        "  \x1b[1;36m🔌 Installed plugins\x1b[0m  ({} total)",
-        plugins.len()
-    );
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
-
-    if plugins.is_empty() {
-        println!("  No plugins installed.");
-        println!();
-        return Ok(());
-    }
-
-    for p in &plugins {
-        println!("    \x1b[1m{}\x1b[0m", p.name);
-        if !p.description.is_empty() {
-            println!("      \x1b[90m{}\x1b[0m", p.description);
-        }
-    }
-
-    println!();
-    Ok(())
-}
-
-// ─── Projects ─────────────────────────────────────────────────────────────────
-
-fn cmd_projects(period: StatsPeriod, json_output: bool) -> Result<()> {
-    let db_path = analytics::db_path()?;
-    if !db_path.exists() {
-        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
-        return Ok(());
-    }
-    let conn = analytics::open_db(&db_path)?;
-    let (since, until) = period_date_range(period);
-    let repos = analytics::repo_usage(&conn, since.as_deref(), until.as_deref(), 20)?;
-
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&repos)?);
-        return Ok(());
-    }
-
-    let period_label = period_label(period);
-    println!();
-    println!(
-        "  \x1b[1;36m📁 Projects\x1b[0m — \x1b[1m{}\x1b[0m",
-        period_label
-    );
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
-
-    if repos.is_empty() {
-        println!("  No data for this period.");
-        println!();
-        return Ok(());
-    }
-
-    let max_msgs = repos.first().map(|f| f.message_count).unwrap_or(1);
-    for r in &repos {
-        let bar_len = ((r.message_count as f64 / max_msgs as f64) * 16.0) as usize;
-        let bar: String = "█".repeat(bar_len);
-        println!(
-            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
-            r.repo_id,
-            r.message_count,
-            format_tokens(r.input_tokens + r.output_tokens),
-            bar
-        );
-    }
-
-    println!();
-    Ok(())
-}
-
 // ─── Sync ─────────────────────────────────────────────────────────────────────
 
 fn cmd_sync() -> Result<()> {
@@ -1542,9 +1427,9 @@ fn cmd_sync() -> Result<()> {
     Ok(())
 }
 
-// ─── Dashboard ───────────────────────────────────────────────────────────────
+// ─── Open ────────────────────────────────────────────────────────────────────
 
-fn cmd_dashboard() -> Result<()> {
+fn cmd_open() -> Result<()> {
     let url = format!(
         "http://{}:{}/dashboard",
         config::DEFAULT_DAEMON_HOST,

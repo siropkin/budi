@@ -60,19 +60,19 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/summary", get(analytics_summary))
         .route("/analytics/sessions", get(analytics_sessions))
         .route("/analytics/session/{id}", get(analytics_session_detail))
-        .route("/analytics/cwd", get(analytics_cwd))
+        .route("/analytics/projects", get(analytics_projects))
         .route("/analytics/insights", get(analytics_insights))
         .route("/analytics/cost", get(analytics_cost))
         .route("/analytics/models", get(analytics_models))
         .route("/analytics/config-files", get(analytics_config_files))
+        .route("/analytics/timeline", get(analytics_timeline))
         .route("/analytics/activity", get(analytics_activity))
-        .route("/analytics/activity-chart", get(analytics_activity_chart))
         .route("/analytics/plugins", get(analytics_plugins))
         .route("/analytics/active-sessions", get(analytics_active_sessions))
         .route("/analytics/plans", get(analytics_plans))
         .route("/analytics/memory", get(analytics_memory))
         .route("/analytics/permissions", get(analytics_permissions))
-        .route("/analytics/history", get(analytics_history))
+        .route("/analytics/prompts", get(analytics_prompts))
         .route("/analytics/top-tools", get(analytics_top_tools))
         .route("/analytics/mcp-tools", get(analytics_mcp_tools))
         .route("/analytics/branches", get(analytics_branches))
@@ -433,7 +433,7 @@ struct CwdParams {
     limit: Option<usize>,
 }
 
-async fn analytics_cwd(
+async fn analytics_projects(
     Query(params): Query<CwdParams>,
 ) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, String)> {
     let limit = params.limit.unwrap_or(20);
@@ -554,7 +554,7 @@ struct ActivityChartParams {
     tz_offset: Option<i32>,
 }
 
-async fn analytics_activity_chart(
+async fn analytics_activity(
     Query(params): Query<ActivityChartParams>,
 ) -> Result<Json<Vec<analytics::ActivityBucket>>, (StatusCode, String)> {
     let granularity = params.granularity.unwrap_or_else(|| "day".to_string());
@@ -576,7 +576,7 @@ async fn analytics_activity_chart(
     Ok(Json(result))
 }
 
-async fn analytics_activity() -> Result<Json<claude_data::ActivityTimeline>, (StatusCode, String)> {
+async fn analytics_timeline() -> Result<Json<claude_data::ActivityTimeline>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(claude_data::read_activity_timeline)
         .await
         .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -676,7 +676,7 @@ struct HistoryParams {
     search: Option<String>,
 }
 
-async fn analytics_history(
+async fn analytics_prompts(
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<claude_data::PromptHistory>, (StatusCode, String)> {
     let limit = params.limit.unwrap_or(50);

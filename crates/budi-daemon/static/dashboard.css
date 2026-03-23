@@ -34,7 +34,6 @@ a:hover { text-decoration: underline; }
 .header-left .logo { font-size: 1.8rem; }
 .header-right { display: flex; gap: 12px; align-items: center; }
 .header-right .nav-tabs { margin-bottom: 0; }
-.last-synced { font-size: 0.75rem; color: var(--text-muted); }
 .period-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 .period-tabs { display: flex; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 3px; }
 .period-tabs button {
@@ -159,13 +158,6 @@ a:hover { text-decoration: underline; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.sync-btn {
-  background: var(--surface); border: 1px solid var(--border); color: var(--text);
-  padding: 6px 14px; border-radius: var(--radius); cursor: pointer; font-size: 0.85rem;
-  display: flex; align-items: center; gap: 6px;
-}
-.sync-btn:hover { border-color: var(--accent); }
-.sync-btn.syncing { opacity: 0.6; pointer-events: none; }
 
 .cache-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 6px; }
 .cache-bar .segment { transition: width 0.4s ease; }

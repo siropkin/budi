@@ -216,7 +216,7 @@ budi statusline --format=json      # JSON for scripting
 
 ## Web dashboard
 
-Run `budi dashboard` to open the web UI in your browser, or click the dashboard link in the status line.
+Run `budi open` to open the web UI in your browser, or click the dashboard link in the status line.
 
 | Page | What it shows |
 |------|---------------|
@@ -234,19 +234,17 @@ All tables support search, sortable columns, and paginated "Show more". Sessions
 budi init                     # set up hooks, daemon, and status line
 budi init --global            # install hooks globally (all repos and worktrees)
 budi doctor                   # check installation health
-budi dashboard                # open the web dashboard in the browser
-budi update                   # check for updates and install the latest version
-budi version                  # print version information
-budi stats                    # usage summary with cost breakdown (--period today|week|month|all)
+budi open                     # open the web dashboard in the browser
+budi stats                    # usage summary with cost breakdown
+budi stats --sessions         # list sessions with stats
+budi stats --models           # model usage breakdown
+budi stats --projects         # repositories ranked by usage
 budi stats --session <id>     # per-session detail
-budi stats --files            # repositories ranked by usage
 budi stats --provider <name>  # filter by provider (e.g. claude_code, cursor)
-budi models                   # model usage breakdown
-budi sessions                 # list sessions with stats
-budi plugins                  # installed plugins
-budi projects                 # repositories ranked by usage
 budi insights                 # actionable recommendations
 budi sync                     # sync all providers into the analytics database
+budi update                   # check for updates and install the latest version
+budi version                  # print version information
 budi statusline               # print the status line (used internally by Claude Code)
 budi statusline --install     # install status line in ~/.claude/settings.json
 budi statusline --format=starship  # plain text output for Starship / shell prompts
@@ -256,9 +254,65 @@ budi statusline --format=json      # JSON output for scripting
 All data commands support `--period today|week|month|all` and `--json` for scripting:
 
 ```bash
-budi stats --period today --json   # pipe to jq, scripts, or dashboards
-budi sessions --json | jq '.[0]'  # get latest session as JSON
+budi stats --period today --json          # pipe to jq, scripts, or dashboards
+budi stats --sessions --json | jq '.[0]'  # get latest session as JSON
 ```
+
+## Daemon API
+
+The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST API. The dashboard and CLI both use these endpoints.
+
+### System
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| POST | `/sync` | Trigger JSONL→SQLite sync |
+| POST | `/status` | Repo status (used by hooks) |
+| GET | `/system/integrations` | Integration status (statusline, Starship) |
+
+### Hooks
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/hook/prompt-submit` | Claude Code prompt hook |
+| POST | `/hook/tool-use` | Claude Code tool use hook |
+
+### Analytics (from SQLite)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/analytics/summary` | Cost and token totals |
+| GET | `/analytics/sessions` | Session list (paginated, searchable) |
+| GET | `/analytics/session/{id}` | Single session detail |
+| GET | `/analytics/projects` | Repositories ranked by usage |
+| GET | `/analytics/branches` | Cost per git branch |
+| GET | `/analytics/cost` | Cost breakdown |
+| GET | `/analytics/models` | Model usage breakdown |
+| GET | `/analytics/providers` | Per-provider breakdown |
+| GET | `/analytics/activity` | Token activity over time (bucketed) |
+| GET | `/analytics/top-tools` | Tool usage ranking |
+| GET | `/analytics/mcp-tools` | MCP tool usage |
+| GET | `/analytics/active-sessions` | Currently running sessions |
+| GET | `/analytics/context-usage` | Context window stats |
+| GET | `/analytics/interaction-modes` | Agent vs normal mode breakdown |
+| GET | `/analytics/statusline` | Day/week/month costs (used by status line) |
+| GET | `/analytics/insights` | Actionable recommendations |
+
+### Analytics (from local files)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/analytics/timeline` | Activity timeline |
+| GET | `/analytics/config-files` | Config file listing |
+| GET | `/analytics/plugins` | Installed plugins |
+| GET | `/analytics/plans` | Plan files (paginated, searchable) |
+| GET | `/analytics/prompts` | Prompt history (paginated, searchable) |
+| GET | `/analytics/memory` | Memory files |
+| GET | `/analytics/permissions` | Permission settings |
+| GET | `/analytics/registered-providers` | Available providers |
+
+Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering and `?tz_offset=<minutes>` for timezone adjustment.
 
 ## Roadmap
 

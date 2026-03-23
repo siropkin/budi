@@ -13,7 +13,6 @@ function getCurrentView() {
 
 let currentPeriod = 'today';
 let currentView = getCurrentView();
-let lastSyncTime = null;
 const DEFAULT_TABLE_ROWS = 15;
 const DEFAULT_CHART_ROWS = 15;
 
@@ -261,11 +260,6 @@ function modelColor(name) {
   return '#8b949e';
 }
 
-function updateSyncTime() {
-  const el = $('#lastSynced');
-  if (lastSyncTime) el.textContent = 'Synced ' + fmtDate(lastSyncTime.toISOString());
-}
-
 async function fetchSessions(limit, offset) {
   const range = dateRange(currentPeriod);
   const params = { ...range, sort_by: sessionSortCol, sort_asc: sessionSortAsc, limit, offset };
@@ -299,10 +293,10 @@ async function loadStatsData(signal) {
   const [summary, sessionsResult, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes, topTools, mcpTools, branches] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
-    fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
+    fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
     fetch('/analytics/cost' + q, opts).then(r => r.json()),
     fetch('/analytics/models' + q, opts).then(r => r.json()),
-    fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(r => r.json()),
+    fetch('/analytics/activity' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(r => r.json()),
     fetch('/analytics/active-sessions', opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/context-usage' + q, opts).then(r => r.json()).catch(() => ({avg_usage_pct:0,max_usage_pct:0,sessions_over_80_pct:0,total_sessions_with_data:0})),
@@ -395,7 +389,7 @@ async function fetchPlans(limit, offset) {
 async function fetchPrompts(limit, offset) {
   const params = { limit, offset };
   if (promptsSearchTerm) params.search = promptsSearchTerm;
-  return fetch('/analytics/history' + qs(params)).then(r => r.json()).catch(() => ({total_count:0,entries:[]}));
+  return fetch('/analytics/prompts' + qs(params)).then(r => r.json()).catch(() => ({total_count:0,entries:[]}));
 }
 
 async function loadPlansData() {
@@ -1418,10 +1412,9 @@ function renderCurrentView() {
   // Update nav active state
   $$('.nav-tabs a').forEach(a => a.classList.toggle('active', a.dataset.view === currentView));
 
-  // Show/hide period tabs, sync button, and provider filter
+  // Show/hide period tabs and provider filter
   const showPeriod = currentView === 'stats' || currentView === 'insights';
   $('#periodBar').style.display = showPeriod ? 'flex' : 'none';
-  $('#syncBtn').style.display = showPeriod ? 'flex' : 'none';
   $('#providerFilter').style.display = 'none';
 
   const content = $('#content');
@@ -1732,34 +1725,22 @@ $$('.period-tabs button').forEach(btn => {
   });
 });
 
-// Provider filter removed for now
-
-// Sync button
-$('#syncBtn').addEventListener('click', async () => {
-  const btn = $('#syncBtn');
-  btn.classList.add('syncing');
-  btn.textContent = 'Syncing...';
-  try {
-    const res = await fetch('/sync', { method: 'POST' });
-    const data = await res.json();
-    lastSyncTime = new Date();
-    updateSyncTime();
-    btn.textContent = `\u2713 ${data.messages_ingested} new`;
-    setTimeout(() => { btn.innerHTML = '&#x21bb; Sync'; btn.classList.remove('syncing'); }, 2000);
-    render();
-  } catch {
-    btn.textContent = '\u2717 Failed';
-    setTimeout(() => { btn.innerHTML = '&#x21bb; Sync'; btn.classList.remove('syncing'); }, 2000);
-  }
-});
-
 // Update nav active state on initial load
 $$('.nav-tabs a').forEach(a => a.classList.toggle('active', a.dataset.view === currentView));
 
 // Show/hide period tabs based on initial view
 $('#periodBar').style.display = (currentView === 'stats' || currentView === 'insights') ? 'flex' : 'none';
-$('#syncBtn').style.display = (currentView === 'stats' || currentView === 'insights') ? 'flex' : 'none';
 
-lastSyncTime = new Date();
-updateSyncTime();
 render();
+
+// Auto-refresh: poll every 30s to keep dashboard data fresh (skip if tab is hidden)
+setInterval(async () => {
+  if (document.hidden || !dataLoaded) return;
+  if (currentView === 'stats') {
+    await loadStatsData();
+  } else if (currentView === 'insights') {
+    insightsData = null;
+    await loadInsightsData();
+  }
+  renderCurrentView();
+}, 30000);

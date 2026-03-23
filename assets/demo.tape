@@ -20,10 +20,10 @@ Type "budi stats --period all"
 Enter
 Sleep 3s
 
-Type "budi cost --period all"
+Type "budi stats --models --period all"
 Enter
 Sleep 3s
 
-Type "budi sessions --period week"
+Type "budi stats --sessions --period week"
 Enter
 Sleep 4s
