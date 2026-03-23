@@ -1,0 +1,521 @@
+use anyhow::Result;
+use budi_core::{analytics, cost};
+use chrono::{Datelike, Local, NaiveDate};
+
+use crate::StatsPeriod;
+
+pub fn period_label(period: StatsPeriod) -> &'static str {
+    match period {
+        StatsPeriod::Today => "Today",
+        StatsPeriod::Week => "This week",
+        StatsPeriod::Month => "This month",
+        StatsPeriod::All => "All time",
+    }
+}
+
+pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
+    let today = Local::now().date_naive();
+    match period {
+        StatsPeriod::Today => {
+            let since = today.format("%Y-%m-%dT00:00:00").to_string();
+            (Some(since), None)
+        }
+        StatsPeriod::Week => {
+            let weekday = today.weekday().num_days_from_monday();
+            let monday = today - chrono::Duration::days(weekday as i64);
+            let since = monday.format("%Y-%m-%dT00:00:00").to_string();
+            (Some(since), None)
+        }
+        StatsPeriod::Month => {
+            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+            let since = first.format("%Y-%m-%dT00:00:00").to_string();
+            (Some(since), None)
+        }
+        StatsPeriod::All => (None, None),
+    }
+}
+
+pub fn cmd_stats(
+    period: StatsPeriod,
+    session: Option<String>,
+    projects: bool,
+    models: bool,
+    sessions: bool,
+    provider: Option<String>,
+    json_output: bool,
+) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+
+    if let Some(ref sid) = session {
+        if json_output {
+            let detail = analytics::session_detail(&conn, sid)?;
+            println!("{}", serde_json::to_string_pretty(&detail)?);
+            return Ok(());
+        }
+        return cmd_stats_session(&conn, sid);
+    }
+
+    if sessions {
+        return cmd_stats_sessions(&conn, period, json_output);
+    }
+
+    if models {
+        return cmd_stats_models(&conn, period, json_output);
+    }
+
+    if projects {
+        if json_output {
+            let (since, until) = period_date_range(period);
+            let data = analytics::repo_usage(&conn, since.as_deref(), until.as_deref(), 50)?;
+            println!("{}", serde_json::to_string_pretty(&data)?);
+            return Ok(());
+        }
+        return cmd_stats_projects(&conn, period);
+    }
+
+    if json_output {
+        let (since, until) = period_date_range(period);
+        let summary = analytics::usage_summary_filtered(
+            &conn,
+            since.as_deref(),
+            until.as_deref(),
+            provider.as_deref(),
+        )?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    // When no provider filter and multiple agents detected, show breakdown
+    if provider.is_none() && analytics::provider_count(&conn)? > 1 {
+        let (since, until) = period_date_range(period);
+        let providers = analytics::provider_stats(&conn, since.as_deref(), until.as_deref())?;
+        if providers.len() > 1 {
+            cmd_stats_multi_agent(&conn, period, &providers)?;
+            return Ok(());
+        }
+    }
+
+    cmd_stats_summary_filtered(&conn, period, provider.as_deref())
+}
+
+fn cmd_stats_summary_filtered(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    provider: Option<&str>,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let summary =
+        analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
+
+    let period_label = period_label(period);
+    let provider_label = provider.unwrap_or("all");
+
+    println!();
+    if provider.is_some() {
+        println!(
+            "  \x1b[1;36m budi stats\x1b[0m — \x1b[1m{}\x1b[0m \x1b[90m({})\x1b[0m",
+            period_label, provider_label
+        );
+    } else {
+        println!(
+            "  \x1b[1;36m budi stats\x1b[0m — \x1b[1m{}\x1b[0m",
+            period_label
+        );
+    }
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    if summary.total_messages == 0 {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    println!(
+        "  \x1b[1mMessages\x1b[0m     {} \x1b[90m({} user, {} assistant)\x1b[0m",
+        summary.total_messages, summary.total_user_messages, summary.total_assistant_messages
+    );
+    println!("  \x1b[1mSessions\x1b[0m     {}", summary.total_sessions);
+    println!();
+
+    let total_input = summary.total_input_tokens
+        + summary.total_cache_creation_tokens
+        + summary.total_cache_read_tokens;
+    println!(
+        "  \x1b[1mInput tokens\x1b[0m  {}",
+        format_tokens(total_input)
+    );
+    println!(
+        "  \x1b[1mOutput tokens\x1b[0m {}",
+        format_tokens(summary.total_output_tokens)
+    );
+
+    // Cost breakdown
+    let est = cost::estimate_cost_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
+    println!();
+    println!(
+        "  \x1b[1mEst. cost\x1b[0m     \x1b[33m${:.2}\x1b[0m",
+        est.total_cost
+    );
+    println!(
+        "  \x1b[90m  input ${:.2}  output ${:.2}  cache write ${:.2}  cache read ${:.2}\x1b[0m",
+        est.input_cost, est.output_cost, est.cache_write_cost, est.cache_read_cost
+    );
+    if est.cache_savings > 0.0 {
+        println!("  \x1b[32m  cache savings ${:.2}\x1b[0m", est.cache_savings);
+    }
+
+    let tools = analytics::top_tools(conn, since.as_deref(), until.as_deref()).unwrap_or_default();
+    if !tools.is_empty() {
+        println!();
+        println!("  \x1b[1mTop tools\x1b[0m");
+        let max_count = tools.first().map(|(_, c)| *c).unwrap_or(1);
+        for (name, count) in tools.iter().take(10) {
+            let bar_len = ((*count as f64 / max_count as f64) * 20.0) as usize;
+            let bar: String = "█".repeat(bar_len);
+            println!(
+                "    \x1b[36m{:<16}\x1b[0m {:>5}  \x1b[36m{}\x1b[0m",
+                name, count, bar
+            );
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_multi_agent(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    providers: &[analytics::ProviderStats],
+) -> Result<()> {
+    let period_label = period_label(period);
+
+    println!();
+    println!(
+        "  \x1b[1;36m budi stats\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    // Per-agent breakdown
+    println!("  \x1b[1mAgents\x1b[0m");
+    for ps in providers {
+        let total_tokens =
+            ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
+        // Use ground-truth cost_cents when available, fall back to estimated
+        let cost = if ps.total_cost_cents > 0.0 {
+            ps.total_cost_cents / 100.0
+        } else {
+            ps.estimated_cost
+        };
+        let lines_str = if ps.total_lines_added > 0 || ps.total_lines_removed > 0 {
+            format!(
+                "  +{}/\x1b[31m-{}\x1b[0m",
+                ps.total_lines_added, ps.total_lines_removed
+            )
+        } else {
+            String::new()
+        };
+        println!(
+            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m${:.2}\x1b[0m{}",
+            ps.display_name,
+            ps.session_count,
+            format_tokens(total_tokens),
+            cost,
+            lines_str,
+        );
+    }
+    println!();
+
+    // Show combined summary
+    let (since, until) = period_date_range(period);
+    let summary =
+        analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), None)?;
+
+    println!(
+        "  \x1b[1mTotal\x1b[0m        {} messages, {} sessions",
+        summary.total_messages, summary.total_sessions
+    );
+
+    let total_input = summary.total_input_tokens
+        + summary.total_cache_creation_tokens
+        + summary.total_cache_read_tokens;
+    println!(
+        "  \x1b[1mTokens\x1b[0m       {} in, {} out",
+        format_tokens(total_input),
+        format_tokens(summary.total_output_tokens),
+    );
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
+    let detail = analytics::session_detail(conn, session_id)?;
+    let Some(d) = detail else {
+        println!("Session not found: {}", session_id);
+        return Ok(());
+    };
+
+    println!();
+    let title = d
+        .session_title
+        .as_deref()
+        .unwrap_or(&d.session_id[..d.session_id.len().min(12)]);
+    println!("  \x1b[1;36m Session\x1b[0m \x1b[90m{}\x1b[0m", title);
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    // Provider and mode badges
+    let mode_badge = d.interaction_mode.as_deref().unwrap_or("unknown");
+    println!(
+        "  \x1b[1mProvider\x1b[0m  {} \x1b[90m({})\x1b[0m",
+        d.provider, mode_badge
+    );
+
+    if let Some(ref repo) = d.repo_id {
+        println!("  \x1b[1mRepo\x1b[0m      {}", repo);
+    } else if let Some(ref dir) = d.project_dir {
+        println!("  \x1b[1mProject\x1b[0m   {}", dir);
+    }
+    if let Some(ref branch) = d.git_branch {
+        println!("  \x1b[1mBranch\x1b[0m    {}", branch);
+    }
+    if let Some(ref ver) = d.version {
+        println!("  \x1b[1mClaude\x1b[0m    v{}", ver);
+    }
+    if d.lines_added > 0 || d.lines_removed > 0 {
+        println!(
+            "  \x1b[1mLines\x1b[0m     \x1b[32m+{}\x1b[0m/\x1b[31m-{}\x1b[0m",
+            d.lines_added, d.lines_removed
+        );
+    }
+    if d.cost_cents > 0.0 {
+        println!(
+            "  \x1b[1mCost\x1b[0m      \x1b[33m${:.2}\x1b[0m",
+            d.cost_cents / 100.0
+        );
+    }
+    println!(
+        "  \x1b[1mStarted\x1b[0m   {}",
+        format_timestamp(&d.first_seen)
+    );
+    println!(
+        "  \x1b[1mLast msg\x1b[0m  {}",
+        format_timestamp(&d.last_seen)
+    );
+    println!();
+
+    let total_msgs = d.user_messages + d.assistant_messages;
+    println!(
+        "  \x1b[1mMessages\x1b[0m  {} \x1b[90m({} user, {} assistant)\x1b[0m",
+        total_msgs, d.user_messages, d.assistant_messages
+    );
+
+    let total_input = d.input_tokens + d.cache_creation_tokens + d.cache_read_tokens;
+    println!(
+        "  \x1b[1mInput\x1b[0m     {} \x1b[90m(direct: {}, cache w: {}, cache r: {})\x1b[0m",
+        format_tokens(total_input),
+        format_tokens(d.input_tokens),
+        format_tokens(d.cache_creation_tokens),
+        format_tokens(d.cache_read_tokens),
+    );
+    println!(
+        "  \x1b[1mOutput\x1b[0m    {}",
+        format_tokens(d.output_tokens)
+    );
+
+    if !d.top_tools.is_empty() {
+        println!();
+        println!("  \x1b[1mTools used\x1b[0m");
+        for (name, count) in &d.top_tools {
+            println!("    \x1b[36m{:<16}\x1b[0m {}", name, count);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let repos = analytics::repo_usage(conn, since.as_deref(), until.as_deref(), 15)?;
+
+    let period_label = period_label(period);
+
+    println!();
+    println!(
+        "  \x1b[1;36m📊 Repositories\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    if repos.is_empty() {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_msgs = repos.first().map(|f| f.message_count).unwrap_or(1);
+    for r in &repos {
+        let bar_len = ((r.message_count as f64 / max_msgs as f64) * 16.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        println!(
+            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            r.repo_id,
+            r.message_count,
+            format_tokens(r.input_tokens + r.output_tokens),
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_models(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let models = analytics::model_usage(conn, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&models)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m🤖 Model usage\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
+
+    if models.is_empty() {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_msgs = models.first().map(|m| m.message_count).unwrap_or(1);
+    for m in &models {
+        let bar_len = ((m.message_count as f64 / max_msgs as f64) * 16.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        let total_tok =
+            m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
+        println!(
+            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            m.model,
+            m.message_count,
+            format_tokens(total_tok),
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_sessions(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let result = analytics::session_list(
+        conn,
+        &analytics::SessionListParams {
+            since: since.as_deref(),
+            until: until.as_deref(),
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 100,
+            offset: 0,
+        },
+    )?;
+    let sessions = result.sessions;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m📋 Sessions\x1b[0m — \x1b[1m{}\x1b[0m  ({} total)",
+        period_label,
+        sessions.len()
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(60));
+
+    if sessions.is_empty() {
+        println!("  No sessions for this period.");
+        println!();
+        return Ok(());
+    }
+
+    for s in sessions.iter().take(20) {
+        let short_id = &s.session_id[..s.session_id.len().min(8)];
+        let project = s
+            .repo_id
+            .as_deref()
+            .unwrap_or_else(|| s.project_dir.as_deref().unwrap_or(""));
+        let total_tok = s.input_tokens + s.output_tokens;
+        let cost_str = if s.cost_cents > 0.0 {
+            format!("${:.2}", s.cost_cents / 100.0)
+        } else {
+            "--".to_string()
+        };
+        println!(
+            "    \x1b[36m{}…\x1b[0m  {:>4} msgs  {:>8} tok  {:>6}  {}  \x1b[90m{}\x1b[0m",
+            short_id,
+            s.message_count,
+            format_tokens(total_tok),
+            cost_str,
+            format_timestamp(&s.first_seen),
+            project
+        );
+    }
+
+    if sessions.len() > 20 {
+        println!(
+            "    \x1b[90m… and {} more (use --json for full list)\x1b[0m",
+            sessions.len() - 20
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+// ─── Formatting Utilities ────────────────────────────────────────────────────
+
+pub fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
+pub fn format_timestamp(ts: &str) -> String {
+    // Try to parse as RFC 3339, fall back to raw string.
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| ts.to_string())
+}
+
+pub fn shorten_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() <= 2 {
+        return path.to_string();
+    }
+    format!("…/{}", parts[parts.len() - 2..].join("/"))
+}
