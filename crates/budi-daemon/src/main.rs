@@ -18,6 +18,7 @@ use budi_core::insights;
 use budi_core::pre_filter;
 use budi_core::rpc::{StatusRequest, StatusResponse};
 use clap::{Parser, Subcommand};
+use chrono::Datelike;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
@@ -666,16 +667,27 @@ async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (Sta
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        let today_start = chrono::Local::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-        let today_utc = today_start
-            .and_local_timezone(chrono::Local)
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339();
-        analytics::statusline_stats(&conn, &today_utc)
+        let now = chrono::Local::now();
+        let to_utc = |d: chrono::NaiveDateTime| -> String {
+            d.and_local_timezone(chrono::Local)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339()
+        };
+        let today = to_utc(now.date_naive().and_hms_opt(0, 0, 0).unwrap());
+        let dow = now.weekday().num_days_from_monday();
+        let week_start = to_utc(
+            (now.date_naive() - chrono::Duration::days(dow as i64))
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        let month_start = to_utc(
+            chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        analytics::statusline_stats(&conn, &today, &week_start, &month_start)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

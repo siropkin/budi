@@ -1672,23 +1672,7 @@ fn cmd_statusline() -> Result<()> {
         return Ok(());
     }
 
-    // ── Extract real-time session data from Claude Code stdin ────────────
-    let model = stdin_json
-        .as_ref()
-        .and_then(|v| v.pointer("/model/display_name"))
-        .and_then(|v| v.as_str());
-    let session_cost = stdin_json
-        .as_ref()
-        .and_then(|v| v.pointer("/cost/total_cost_usd"))
-        .and_then(|v| v.as_f64());
-    let ctx_pct = stdin_json
-        .as_ref()
-        .and_then(|v| v.pointer("/context_window/used_percentage"))
-        .and_then(|v| v.as_f64());
-    let rate_5h = stdin_json
-        .as_ref()
-        .and_then(|v| v.pointer("/rate_limits/five_hour/used_percentage"))
-        .and_then(|v| v.as_f64());
+    // (session cost removed — statusline now shows day/week/month only)
 
     // ── Fetch today's aggregate cost from budi daemon ───────────────────
     let client = daemon_client_with_timeout(Duration::from_secs(3));
@@ -1700,111 +1684,48 @@ fn cmd_statusline() -> Result<()> {
         .filter(|r| r.status().is_success())
         .and_then(|r| r.json::<Value>().ok());
 
-    // Use cost_cents (ground truth) when available, fall back to estimated_cost
     let today_cost: f64 = statusline_data
         .as_ref()
-        .and_then(|v| {
-            let cost_cents = v.get("cost_cents").and_then(|c| c.as_f64()).unwrap_or(0.0);
-            if cost_cents > 0.0 {
-                Some(cost_cents / 100.0)
-            } else {
-                v.get("estimated_cost").and_then(|c| c.as_f64())
-            }
-        })
+        .and_then(|v| v.get("today_cost").and_then(|c| c.as_f64()))
         .unwrap_or(0.0);
-
-    let provider_count: u64 = statusline_data
+    let week_cost: f64 = statusline_data
         .as_ref()
-        .and_then(|v| v.get("provider_count").and_then(|c| c.as_u64()))
-        .unwrap_or(0);
-
-    let lines_added: u64 = statusline_data
+        .and_then(|v| v.get("week_cost").and_then(|c| c.as_f64()))
+        .unwrap_or(0.0);
+    let month_cost: f64 = statusline_data
         .as_ref()
-        .and_then(|v| v.get("lines_added").and_then(|c| c.as_u64()))
-        .unwrap_or(0);
-
-    let lines_removed: u64 = statusline_data
-        .as_ref()
-        .and_then(|v| v.get("lines_removed").and_then(|c| c.as_u64()))
-        .unwrap_or(0);
+        .and_then(|v| v.get("month_cost").and_then(|c| c.as_f64()))
+        .unwrap_or(0.0);
 
     // ── Build status line segments ──────────────────────────────────────
     let dim = "\x1b[90m";
     let reset = "\x1b[0m";
     let yellow = "\x1b[33m";
-    let green = "\x1b[32m";
+
+    // Format cost like the dashboard: $1.2K, $123, $12.50, $0.42, $0
+    fn fmt_cost(c: f64) -> String {
+        if c >= 1000.0 {
+            format!("${:.1}K", c / 1000.0)
+        } else if c >= 100.0 {
+            format!("${:.0}", c)
+        } else if c >= 1.0 {
+            format!("${:.2}", c)
+        } else if c > 0.0 {
+            format!("${:.2}", c)
+        } else {
+            "$0".to_string()
+        }
+    }
 
     let mut parts: Vec<String> = Vec::new();
 
-    // Model name
-    if let Some(m) = model {
-        parts.push(format!("{dim}{m}{reset}"));
-    }
+    // Day / Week / Month costs from budi daemon
+    parts.push(format!("{yellow}{}{reset} today", fmt_cost(today_cost)));
+    parts.push(format!("{yellow}{}{reset} week", fmt_cost(week_cost)));
+    parts.push(format!("{yellow}{}{reset} month", fmt_cost(month_cost)));
 
-    // Context window % with color coding
-    if let Some(pct) = ctx_pct {
-        let pct_int = pct as u32;
-        let color = if pct_int >= 80 {
-            "\x1b[31m" // red
-        } else if pct_int >= 60 {
-            yellow
-        } else {
-            green
-        };
-        parts.push(format!("{color}{pct_int}% ctx{reset}"));
-    }
-
-    // Session cost (real-time from Claude Code) — always show to prevent jumping
-    if let Some(sc) = session_cost
-        && sc > 0.001
-    {
-        parts.push(format!("{yellow}${sc:.2}{reset} session"));
-    } else {
-        parts.push(format!("{dim}$0.00 session{reset}"));
-    }
-
-    // Today's total cost (from budi daemon) — always show to prevent jumping
-    if today_cost > 0.001 {
-        let agent_badge = if provider_count > 1 {
-            format!(" ({provider_count} agents)")
-        } else {
-            String::new()
-        };
-        parts.push(format!(
-            "{yellow}${today_cost:.2}{reset} today{agent_badge}"
-        ));
-    } else {
-        parts.push(format!("{dim}$0.00 today{reset}"));
-    }
-
-    // Lines changed today
-    if lines_added > 0 || lines_removed > 0 {
-        parts.push(format!(
-            "{green}+{lines_added}{reset}/{dim}-{lines_removed}{reset}"
-        ));
-    }
-
-    // 5h rate limit (Pro/Max only)
-    if let Some(rl) = rate_5h {
-        let color = if rl >= 80.0 {
-            "\x1b[31m"
-        } else if rl >= 50.0 {
-            yellow
-        } else {
-            dim
-        };
-        parts.push(format!("{color}5h: {rl:.0}%{reset}"));
-    }
-
-    if parts.is_empty() {
-        // No data yet — daemon may be off or no session data
-        println!(
-            "{budi_label} \x1b[90m·\x1b[0m {green}✓{reset} tracking \x1b[90m·\x1b[0m {dashboard_link}"
-        );
-    } else {
-        let joined = parts.join(&format!(" {dim}·{reset} "));
-        println!("{budi_label} {dim}·{reset} {joined} {dim}·{reset} {dashboard_link}");
-    }
+    let joined = parts.join(&format!(" {dim}·{reset} "));
+    println!("{budi_label} {dim}·{reset} {joined} {dim}·{reset} {dashboard_link}");
 
     Ok(())
 }

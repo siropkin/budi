@@ -13,15 +13,15 @@
 
 budi is built on a pluggable provider architecture — each AI coding agent is a provider that's auto-detected at runtime. Today it fully supports Claude Code; more agents are coming.
 
-| Agent | Status | Tokens | Cost | Sessions | Detection |
-|-------|--------|--------|------|----------|-----------|
-| **Claude Code** | Supported | Per-message | Per-model | Via hooks | `~/.claude/` |
-| **Cursor** | In progress | — | — | Transcript count | `~/.cursor/` |
-| **GitHub Copilot CLI** | Planned | | | | `~/.copilot/` |
-| **Codex CLI** | Planned | | | | `~/.codex/` |
-| **Cline** | Planned | | | | VS Code globalStorage |
-| **Aider** | Planned | | | | `.aider.chat.history.md` |
-| **Gemini CLI** | Planned | | | | `~/.gemini/` |
+| Agent | Status | Tokens | Cost | Sessions | Lines | Detection |
+|-------|--------|--------|------|----------|-------|-----------|
+| **Claude Code** | Supported | Per-message | Per-model pricing | Via hooks | — | `~/.claude/` |
+| **Cursor** | Supported | Per-session (contextTokensUsed) | Per-model pricing | Via state.vscdb | +/- lines | `~/Library/Application Support/Cursor/` |
+| **GitHub Copilot CLI** | Planned | | | | | `~/.copilot/` |
+| **Codex CLI** | Planned | | | | | `~/.codex/` |
+| **Cline** | Planned | | | | | VS Code globalStorage |
+| **Aider** | Planned | | | | | `.aider.chat.history.md` |
+| **Gemini CLI** | Planned | | | | | `~/.gemini/` |
 
 Agents are detected automatically — when a new agent's data directory appears, the next `budi sync` picks it up with zero config.
 
@@ -57,6 +57,22 @@ Budi uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hoo
 
 Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond time, so you never notice them. The ~6 MB binary handles everything: data collection, analytics, web dashboard, and CLI.
 
+### Cursor (full support)
+
+Budi reads Cursor's `state.vscdb` SQLite database — the internal store where Cursor keeps composer session data. This provides ground-truth cost data, per-model usage breakdowns, lines changed, and session metadata. No proxy or API interception needed.
+
+| Data | Source | Quality |
+|------|--------|---------|
+| **Cost** | Estimated from tokens × model pricing | Per-model API rates |
+| **Models** | `composerData.modelConfig.modelName` | Exact model name |
+| **Tokens** | `composerData.contextTokensUsed` (input) + estimated output | Session-level totals |
+| **Lines changed** | `composerData.totalLinesAdded/Removed` | Per-session totals |
+| **Sessions** | `composerData` entries in globalStorage + workspaceStorage | Titles, timestamps, agent vs composer mode |
+
+Note: Cursor's `usageData` field (which previously contained per-model cost breakdowns) is empty in recent Cursor versions. Budi falls back to `contextTokensUsed` for token data and estimates cost using published API rates.
+
+Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Claude Code data in all views.
+
 ## Features
 
 - **Built with Rust** — ~6 MB binary, sub-millisecond hook latency, minimal CPU/memory footprint
@@ -64,8 +80,8 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 - **Automatic** — data collection runs silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Session analytics** — prompt counts, token usage, and cost per session
-- **Multi-agent architecture** — pluggable provider system ready for multiple AI coding agents
-- **Status line** — live session stats in your Claude Code terminal
+- **Multi-agent dashboard** — unified view across Claude Code, Cursor, and more
+- **Status line** — live session stats in your Claude Code terminal (shows all agents)
 - **Web dashboard** — multi-page analytics UI at `http://localhost:7878/dashboard`
 - **Insights** — actionable recommendations based on your usage patterns
 
@@ -74,7 +90,7 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 | | budi | ccusage | Sniffly | Claude `/cost` |
 |---|---|---|---|---|
 | Real-time tracking | **Yes** (Claude Code hooks) | No (parses logs) | No (parses logs) | Live only |
-| Multi-agent support | **Planned** (pluggable architecture ready) | Claude Code only | Claude Code only | Claude Code only |
+| Multi-agent support | **Yes** (Claude Code + Cursor) | Claude Code only | Claude Code only | Claude Code only |
 | Cost history | **Per-session + daily** | Per-session | Per-session | Current session |
 | Web dashboard | **Yes** (5 pages) | No | Yes | No |
 | Status line | **Yes** (Claude Code) | No | No | No |
@@ -143,14 +159,12 @@ Budi adds a live status line to Claude Code that shows key metrics at a glance. 
 
 | Field | Description |
 |-------|-------------|
-| **Model** | Active Claude model (e.g. `Claude 4 Opus`) |
-| **ctx** | Context window usage — green (<60%), yellow (60–79%), red (80%+) |
-| **session** | Cost of the current session (real-time from Claude Code) |
-| **today** | Total cost across all sessions today (from budi daemon) |
-| **5h** | 5-hour rate limit usage (Pro/Max plans only) — yellow at 50%+, red at 80%+ |
+| **today** | Total cost across all agents today |
+| **week** | Total cost this week (Monday–Sunday) |
+| **month** | Total cost this month |
 | **↗ dashboard** | Clickable link to open the web dashboard |
 
-When no session data is available yet, the status line shows `✓ tracking` to confirm budi is active.
+Example: `📊 budi · $12.50 today · $87.30 week · $1.2K month · ↗ dashboard`
 
 ### Manual install / reinstall
 
@@ -168,11 +182,13 @@ Run `budi dashboard` to open the web UI in your browser, or click the dashboard 
 
 | Page | What it shows |
 |------|---------------|
-| **Stats** | Cost, tokens, activity chart, model breakdown, projects, tools, MCP servers, sessions |
-| **Insights** | Recommendations, session patterns, tool diversity, daily cost trend, config health |
-| **Setup** | Config files, memory, plugins, permissions |
-| **Plans** | Searchable plan files with titles extracted from markdown headings |
-| **Prompts** | Searchable prompt history (last 500 entries) |
+| **Stats** | Cost, tokens, activity chart (input/output tokens), model breakdown, projects, tools, MCP, sessions table with search, per-agent breakdown |
+| **Insights** | Recommendations, session patterns, tool diversity, daily cost trend, search/cache efficiency, context window usage, config health |
+| **Setup** | Config files, plugins, permissions — all with search |
+| **Plans** | Plan files with server-side search and pagination |
+| **Prompts** | Prompt history with server-side search and pagination |
+
+All tables support search, sortable columns, and paginated "Show more". Sessions use server-side pagination (handles 20K+ sessions efficiently).
 
 ## CLI commands
 
@@ -182,17 +198,18 @@ budi init --global            # install hooks globally (all repos and worktrees)
 budi doctor                   # check installation health
 budi dashboard                # open the web dashboard in the browser
 budi update                   # check for updates and install the latest version
+budi version                  # print version information
 budi stats                    # token usage summary (--period today|week|month|all)
-budi stats --session <id>     # per-session detail
+budi stats --session <id>     # per-session detail (shows provider, mode, lines, cost)
 budi stats --files            # repositories ranked by usage
-budi stats --provider <name>  # filter by provider (e.g. claude_code)
+budi stats --provider <name>  # filter by provider (e.g. claude_code, cursor)
 budi cost                     # estimated cost breakdown by model
 budi models                   # model usage breakdown
 budi sessions                 # list sessions with stats
 budi plugins                  # installed plugins
 budi projects                 # repositories ranked by usage
 budi insights                 # actionable recommendations
-budi sync                     # sync transcripts into the analytics database
+budi sync                     # sync all providers into the analytics database
 budi statusline               # print the status line (used internally by Claude Code)
 budi statusline --install     # install status line in ~/.claude/settings.json
 ```
@@ -206,10 +223,9 @@ budi sessions --json | jq '.[0]'  # get latest session as JSON
 
 ## Roadmap
 
-- **More agents** — Cursor, Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI (see [agent integrations](#agent-integrations) above)
-- **Cross-agent dashboard** — unified view across all AI coding tools
-- **Token estimation** — approximate token counts for agents that don't log them
+- **More agents** — Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI (see [agent integrations](#agent-integrations) above)
 - **Multi-machine sync** — aggregate stats across devices
+- **AI commit attribution** — per-commit AI contribution % from Cursor's `ai-code-tracking.db`
 
 ## Privacy
 

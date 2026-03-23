@@ -1703,90 +1703,36 @@ pub fn tool_diversity(
 /// Compact stats for the status line display.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatuslineStats {
-    pub total_tokens: u64,
-    pub estimated_cost: f64,
-    pub cache_hit_rate: f64,
-    pub session_count: u64,
-    pub active_minutes: u64,
-    pub cost_cents: f64,
-    pub provider_count: u64,
-    pub lines_added: u64,
-    pub lines_removed: u64,
+    pub today_cost: f64,
+    pub week_cost: f64,
+    pub month_cost: f64,
 }
 
-/// Compute compact stats for today, suitable for the CLI status line.
-pub fn statusline_stats(conn: &Connection, today: &str) -> Result<StatuslineStats> {
-    // Token totals and cost_cents for today
-    let (input, output, cache_create, cache_read, sum_cost_cents): (u64, u64, u64, u64, f64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
-                    COALESCE(SUM(cost_cents), 0.0)
-             FROM messages WHERE timestamp >= ?1",
-            [today],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )?;
-
-    let total_tokens = input + output + cache_create + cache_read;
-
-    // Cost estimate for today
-    let cost = crate::cost::estimate_cost(conn, Some(today), None)?;
-
-    // Cache hit rate
-    let cache_hit_rate = if input + cache_read > 0 {
-        cache_read as f64 / (input + cache_read) as f64
-    } else {
-        0.0
-    };
-
-    // Session count and active time for today
-    let session_count: u64 = conn.query_row(
-        "SELECT COUNT(DISTINCT session_id) FROM messages WHERE timestamp >= ?1",
-        [today],
-        |r| r.get(0),
-    )?;
-
-    // Active minutes
-    let active_minutes: u64 = conn.query_row(
-        "SELECT COALESCE(SUM(span_mins), 0) FROM (
-             SELECT (JULIANDAY(MAX(timestamp)) - JULIANDAY(MIN(timestamp))) * 24 * 60 AS span_mins
-             FROM messages WHERE timestamp >= ?1
-             GROUP BY session_id
-         )",
-        [today],
-        |r| {
-            let mins: f64 = r.get(0)?;
-            Ok(mins.round() as u64)
-        },
-    )?;
-
-    // Provider count for today
-    let provider_count: u64 = conn.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(provider, 'claude_code')) FROM messages WHERE timestamp >= ?1",
-        [today],
-        |r| r.get(0),
-    )?;
-
-    // Lines from sessions active today
-    let (lines_added, lines_removed): (u64, u64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(lines_added), 0), COALESCE(SUM(lines_removed), 0)
-             FROM sessions WHERE last_seen >= ?1",
-            [today],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+/// Compute cost stats for today/week/month, suitable for the CLI status line.
+pub fn statusline_stats(
+    conn: &Connection,
+    today: &str,
+    week_start: &str,
+    month_start: &str,
+) -> Result<StatuslineStats> {
+    fn cost_since(conn: &Connection, since: &str) -> f64 {
+        conn.query_row(
+            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE timestamp >= ?1",
+            [since],
+            |r| r.get::<_, f64>(0),
         )
-        .unwrap_or((0, 0));
+        .unwrap_or(0.0)
+            / 100.0
+    }
+
+    let today_cost = cost_since(conn, today);
+    let week_cost = cost_since(conn, week_start);
+    let month_cost = cost_since(conn, month_start);
 
     Ok(StatuslineStats {
-        total_tokens,
-        estimated_cost: cost.total_cost,
-        cache_hit_rate: (cache_hit_rate * 1000.0).round() / 10.0,
-        session_count,
-        active_minutes,
-        cost_cents: (sum_cost_cents * 100.0).round() / 100.0,
-        provider_count,
-        lines_added,
-        lines_removed,
+        today_cost,
+        week_cost,
+        month_cost,
     })
 }
 
@@ -2571,12 +2517,10 @@ mod tests {
     #[test]
     fn statusline_stats_empty_db() {
         let conn = test_db();
-        let stats = statusline_stats(&conn, "2026-03-21").unwrap();
-        assert_eq!(stats.total_tokens, 0);
-        assert_eq!(stats.estimated_cost, 0.0);
-        assert_eq!(stats.cache_hit_rate, 0.0);
-        assert_eq!(stats.session_count, 0);
-        assert_eq!(stats.active_minutes, 0);
+        let stats = statusline_stats(&conn, "2026-03-21", "2026-03-17", "2026-03-01").unwrap();
+        assert_eq!(stats.today_cost, 0.0);
+        assert_eq!(stats.week_cost, 0.0);
+        assert_eq!(stats.month_cost, 0.0);
     }
 
     #[test]
@@ -2584,9 +2528,8 @@ mod tests {
         let mut conn = test_db();
         ingest_messages(&mut conn, &sample_messages()).unwrap();
         // sample_messages have timestamps on 2026-03-14
-        let stats = statusline_stats(&conn, "2026-03-14").unwrap();
-        assert!(stats.total_tokens > 0);
-        assert!(stats.session_count > 0);
+        let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01").unwrap();
+        assert!(stats.month_cost > 0.0);
     }
 
     #[test]
