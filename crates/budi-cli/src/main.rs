@@ -827,11 +827,11 @@ fn cmd_stats(
     }
 
     if sessions {
-        return cmd_sessions(&conn, period, json_output);
+        return cmd_stats_sessions(&conn, period, json_output);
     }
 
     if models {
-        return cmd_models(&conn, period, json_output);
+        return cmd_stats_models(&conn, period, json_output);
     }
 
     if projects {
@@ -1292,7 +1292,7 @@ fn cmd_insights(period: StatsPeriod, json_output: bool) -> Result<()> {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
-fn cmd_models(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_models(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
     let (since, until) = period_date_range(period);
     let models = analytics::model_usage(conn, since.as_deref(), until.as_deref())?;
 
@@ -1336,7 +1336,7 @@ fn cmd_models(conn: &rusqlite::Connection, period: StatsPeriod, json_output: boo
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
-fn cmd_sessions(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_sessions(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
     let (since, until) = period_date_range(period);
     let result = analytics::session_list(
         conn,

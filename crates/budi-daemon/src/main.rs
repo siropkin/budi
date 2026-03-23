@@ -52,11 +52,11 @@ fn build_router(app_state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/status", post(status_repo))
-        .route("/stats", get(stats))
-        .route("/session-stats", post(session_stats))
+        .route("/stats", get(hook_stats))
+        .route("/session-stats", post(hook_session_stats))
         .route("/hook/prompt-submit", post(hook_prompt_submit))
         .route("/hook/tool-use", post(hook_tool_use))
-        .route("/sync", post(sync_analytics))
+        .route("/sync", post(analytics_sync))
         .route("/analytics/summary", get(analytics_summary))
         .route("/analytics/sessions", get(analytics_sessions))
         .route("/analytics/session/{id}", get(analytics_session_detail))
@@ -214,7 +214,7 @@ struct StatsParams {
     repo_root: Option<String>,
 }
 
-async fn stats(
+async fn hook_stats(
     State(state): State<AppState>,
     Query(params): Query<StatsParams>,
 ) -> Json<serde_json::Value> {
@@ -232,7 +232,7 @@ async fn stats(
     }))
 }
 
-async fn session_stats(
+async fn hook_session_stats(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
@@ -279,7 +279,7 @@ async fn hook_prompt_submit(
     Json(budi_core::hooks::UserPromptSubmitOutput::allow_with_context(String::new()))
 }
 
-async fn sync_analytics(
+async fn analytics_sync(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if state
