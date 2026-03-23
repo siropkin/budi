@@ -149,18 +149,18 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 
     // Build query params for the daemon
     let mut query_params: Vec<(&str, String)> = Vec::new();
-    if let Some(ref sid) = session_id {
-        if needed.contains(&"session".to_string()) {
-            query_params.push(("session_id", sid.clone()));
-        }
+    if let Some(ref sid) = session_id
+        && needed.contains(&"session".to_string())
+    {
+        query_params.push(("session_id", sid.clone()));
     }
     if let Some(ref b) = branch {
         query_params.push(("branch", b.clone()));
     }
-    if let Some(ref root) = repo_root {
-        if needed.contains(&"project".to_string()) {
-            query_params.push(("project_dir", root.display().to_string()));
-        }
+    if let Some(ref root) = repo_root
+        && needed.contains(&"project".to_string())
+    {
+        query_params.push(("project_dir", root.display().to_string()));
     }
 
     // Shorter timeout for shell prompts to avoid blocking the prompt
@@ -323,6 +323,6 @@ mod tests {
         assert_eq!(vals.get("month").unwrap(), "$0");
         assert_eq!(vals.get("branch").unwrap(), "$12.50");
         assert_eq!(vals.get("provider").unwrap(), "claude_code");
-        assert!(vals.get("session").is_none()); // not in response
+        assert!(!vals.contains_key("session")); // not in response
     }
 }
