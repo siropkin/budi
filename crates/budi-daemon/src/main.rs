@@ -17,8 +17,8 @@ use budi_core::hooks::UserPromptSubmitInput;
 use budi_core::insights;
 use budi_core::pre_filter;
 use budi_core::rpc::{StatusRequest, StatusResponse};
-use clap::{Parser, Subcommand};
 use chrono::Datelike;
+use clap::{Parser, Subcommand};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
@@ -125,7 +125,15 @@ async fn main() -> Result<()> {
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            if sync_flag.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
+            if sync_flag
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_err()
+            {
                 continue; // Another sync is running, skip this tick
             }
             let flag = sync_flag.clone();
@@ -221,8 +229,19 @@ async fn hook_prompt_submit(
 async fn sync_analytics(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if state.syncing.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
-        return Ok(Json(json!({ "files_synced": 0, "messages_ingested": 0, "skipped": "sync already running" })));
+    if state
+        .syncing
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Ok(Json(
+            json!({ "files_synced": 0, "messages_ingested": 0, "skipped": "sync already running" }),
+        ));
     }
     let flag = state.syncing.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -539,14 +558,15 @@ async fn analytics_plans(
         }
         all_plans.sort_by(|a, b| b.modified.cmp(&a.modified));
         if let Some(ref q) = search
-            && !q.is_empty() {
-                let lower = q.to_lowercase();
-                all_plans.retain(|p| {
-                    p.title.to_lowercase().contains(&lower)
-                        || p.name.to_lowercase().contains(&lower)
-                        || p.preview.to_lowercase().contains(&lower)
-                });
-            }
+            && !q.is_empty()
+        {
+            let lower = q.to_lowercase();
+            all_plans.retain(|p| {
+                p.title.to_lowercase().contains(&lower)
+                    || p.name.to_lowercase().contains(&lower)
+                    || p.preview.to_lowercase().contains(&lower)
+            });
+        }
         let total_count = all_plans.len() as u64;
         let page: Vec<_> = all_plans.into_iter().skip(offset).take(limit).collect();
         Ok::<_, anyhow::Error>(PaginatedPlans {
@@ -602,13 +622,18 @@ async fn analytics_history(
         all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         // Apply search filter if provided
         if let Some(ref q) = search
-            && !q.is_empty() {
-                let lower = q.to_lowercase();
-                all_entries.retain(|e| {
-                    e.display.to_lowercase().contains(&lower)
-                        || e.project.as_deref().unwrap_or("").to_lowercase().contains(&lower)
-                });
-            }
+            && !q.is_empty()
+        {
+            let lower = q.to_lowercase();
+            all_entries.retain(|e| {
+                e.display.to_lowercase().contains(&lower)
+                    || e.project
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&lower)
+            });
+        }
         let total_count = all_entries.len() as u64;
         let page = all_entries.into_iter().skip(offset).take(limit).collect();
         Ok::<_, anyhow::Error>(claude_data::PromptHistory {
@@ -760,7 +785,10 @@ async fn dashboard_css() -> impl IntoResponse {
 async fn dashboard_js() -> impl IntoResponse {
     let js = include_str!("../static/dashboard.js");
     (
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         js,
     )
 }

@@ -171,7 +171,13 @@ fn backfill_cost_cents(conn: &Connection) -> Result<()> {
                     row.get(6)?,
                 ))
             })?
-            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
+            .filter_map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("skipping row: {e}");
+                    None
+                }
+            })
             .collect();
 
         let mut update_stmt =
@@ -187,7 +193,9 @@ fn backfill_cost_cents(conn: &Connection) -> Result<()> {
     })();
     match result {
         Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(ref _e) => { let _ = conn.execute_batch("ROLLBACK"); }
+        Err(ref _e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
     }
     result
 }
@@ -503,11 +511,27 @@ pub fn usage_summary(
          FROM messages {}",
         where_clause
     );
-    let (total_sessions, total_messages, total_user_messages, total_assistant_messages,
-         total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64, u64, u64, u64, u64) =
+    let (
+        total_sessions,
+        total_messages,
+        total_user_messages,
+        total_assistant_messages,
+        total_input,
+        total_output,
+        total_cache_create,
+        total_cache_read,
+    ): (u64, u64, u64, u64, u64, u64, u64, u64) =
         conn.query_row(&sql, param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
         })?;
 
     Ok(UsageSummary {
@@ -550,7 +574,10 @@ pub fn top_tools(
         .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -690,7 +717,10 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(PaginatedSessions {
@@ -800,7 +830,16 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
     detail.top_tools = stmt
         .query_map(params![sid], |row| Ok((row.get(0)?, row.get(1)?)))
         .ok()
-        .map(|rows| rows.filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } }).collect())
+        .map(|rows| {
+            rows.filter_map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("skipping row: {e}");
+                    None
+                }
+            })
+            .collect()
+        })
         .unwrap_or_default();
 
     Ok(Some(detail))
@@ -866,7 +905,10 @@ pub fn repo_usage(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -968,7 +1010,10 @@ pub fn mcp_tool_stats(
         .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
 
@@ -1059,7 +1104,10 @@ pub fn token_heavy_sessions(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -1074,7 +1122,10 @@ pub fn repo_ids(conn: &Connection) -> Result<Vec<String>> {
         .query_map([], |row| row.get(0))?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -1089,7 +1140,10 @@ pub fn project_dirs(conn: &Connection) -> Result<Vec<String>> {
         .query_map([], |row| row.get(0))?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -1199,10 +1253,15 @@ pub fn activity_chart(
 
     let mut stmt = conn.prepare(&sql)?;
     let msg_rows: Vec<(String, u64, u64, u64)> = stmt
-        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
 
@@ -1229,7 +1288,10 @@ pub fn activity_chart(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
 
@@ -1303,7 +1365,10 @@ pub fn model_usage(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -1513,7 +1578,13 @@ pub fn daily_cost_trend(
                 row.get::<_, u64>(4)?,
             ))
         })?
-        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     let mut result = Vec::new();
@@ -1561,8 +1632,7 @@ pub fn session_patterns(
          LEFT JOIN messages m ON m.session_id = s.session_id
          {where_clause}
          GROUP BY s.session_id",
-        where_clause =
-            where_clause.replace("timestamp", "m.timestamp"),
+        where_clause = where_clause.replace("timestamp", "m.timestamp"),
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -1578,7 +1648,10 @@ pub fn session_patterns(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
 
@@ -1623,7 +1696,13 @@ pub fn session_patterns(
                 Ok((row.get::<_, u32>(0)?, row.get::<_, u64>(1)?))
             })
             .ok()?
-            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
+            .filter_map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("skipping row: {e}");
+                    None
+                }
+            })
             .collect();
         rows.into_iter().next()
     });
@@ -1675,7 +1754,10 @@ pub fn tool_diversity(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
 
@@ -1806,7 +1888,13 @@ pub fn provider_stats(
                 row.get::<_, f64>(7)?,
             ))
         })?
-        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     let providers = crate::provider::all_providers();
@@ -1894,7 +1982,10 @@ pub fn interaction_mode_breakdown(
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
-            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
         })
         .collect();
     Ok(rows)
@@ -2014,11 +2105,27 @@ pub fn usage_summary_filtered(
          FROM messages {}",
         where_clause
     );
-    let (total_sessions, total_messages, total_user_messages, total_assistant_messages,
-         total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64, u64, u64, u64, u64) =
+    let (
+        total_sessions,
+        total_messages,
+        total_user_messages,
+        total_assistant_messages,
+        total_input,
+        total_output,
+        total_cache_create,
+        total_cache_read,
+    ): (u64, u64, u64, u64, u64, u64, u64, u64) =
         conn.query_row(&sql, param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
         })?;
 
     Ok(UsageSummary {
@@ -2053,7 +2160,13 @@ mod tests {
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
-            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
+            .filter_map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("skipping row: {e}");
+                    None
+                }
+            })
             .collect();
         assert!(tables.contains(&"sessions".to_string()));
         assert!(tables.contains(&"messages".to_string()));
@@ -2180,7 +2293,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!((cost_cents - 750.0).abs() < 1.0, "expected ~750 cents, got {cost_cents}");
+        assert!(
+            (cost_cents - 750.0).abs() < 1.0,
+            "expected ~750 cents, got {cost_cents}"
+        );
     }
 
     #[test]
@@ -2355,10 +2471,19 @@ mod tests {
         let mut conn = test_db();
         ingest_messages(&mut conn, &sample_messages()).unwrap();
 
-        let result = session_list(&conn, &SessionListParams {
-            since: None, until: None, search: None, sort_by: None,
-            sort_asc: false, limit: 50, offset: 0,
-        }).unwrap();
+        let result = session_list(
+            &conn,
+            &SessionListParams {
+                since: None,
+                until: None,
+                search: None,
+                sort_by: None,
+                sort_asc: false,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(result.sessions.len(), 2);
         assert_eq!(result.total_count, 2);
         // Most recent first.

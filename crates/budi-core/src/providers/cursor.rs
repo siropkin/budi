@@ -31,8 +31,7 @@ impl Provider for CursorProvider {
     }
 
     fn is_available(&self) -> bool {
-        !all_state_vscdb_paths().is_empty()
-            || cursor_home().map(|p| p.exists()).unwrap_or(false)
+        !all_state_vscdb_paths().is_empty() || cursor_home().map(|p| p.exists()).unwrap_or(false)
     }
 
     fn discover_files(&self) -> Result<Vec<DiscoveredFile>> {
@@ -106,8 +105,7 @@ fn all_state_vscdb_paths() -> Vec<PathBuf> {
     };
 
     // macOS globalStorage
-    let mac_global =
-        home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    let mac_global = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
     if mac_global.exists() {
         paths.push(mac_global);
     }
@@ -358,9 +356,11 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
     );
     let timestamp = session
         .created_at
-        .or_else(|| session.last_updated_at.map(|ms| {
-            chrono::DateTime::from_timestamp_millis(ms).unwrap_or_else(Utc::now)
-        }))
+        .or_else(|| {
+            session
+                .last_updated_at
+                .map(|ms| chrono::DateTime::from_timestamp_millis(ms).unwrap_or_else(Utc::now))
+        })
         .unwrap_or_else(Utc::now);
     let interaction_mode = if session.is_agentic {
         "agent"

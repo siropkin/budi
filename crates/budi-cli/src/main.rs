@@ -1383,10 +1383,18 @@ fn cmd_sessions(period: StatsPeriod, json_output: bool) -> Result<()> {
     }
     let conn = analytics::open_db(&db_path)?;
     let (since, until) = period_date_range(period);
-    let result = analytics::session_list(&conn, &analytics::SessionListParams {
-        since: since.as_deref(), until: until.as_deref(),
-        search: None, sort_by: None, sort_asc: false, limit: 100, offset: 0,
-    })?;
+    let result = analytics::session_list(
+        &conn,
+        &analytics::SessionListParams {
+            since: since.as_deref(),
+            until: until.as_deref(),
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 100,
+            offset: 0,
+        },
+    )?;
     let sessions = result.sessions;
 
     if json_output {
