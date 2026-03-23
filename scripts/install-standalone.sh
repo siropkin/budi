@@ -89,11 +89,40 @@ main() {
   # Verify.
   "$BIN_DIR/budi" --version || fail "Installed binary failed to run"
 
+  # Auto-add BIN_DIR to PATH in shell profile if missing.
   if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
-    log ""
-    log "NOTE: $BIN_DIR is not in your PATH."
-    log "Add this to your shell profile:"
-    log "  export PATH=\"$BIN_DIR:\$PATH\""
+    local shell_profile=""
+    local current_shell="${SHELL:-}"
+    case "$current_shell" in
+      */zsh)  shell_profile="$HOME/.zshrc" ;;
+      */bash)
+        if [ -f "$HOME/.bashrc" ]; then
+          shell_profile="$HOME/.bashrc"
+        else
+          shell_profile="$HOME/.profile"
+        fi
+        ;;
+      *)
+        if [ -f "$HOME/.profile" ]; then
+          shell_profile="$HOME/.profile"
+        fi
+        ;;
+    esac
+
+    local path_line="export PATH=\"$BIN_DIR:\$PATH\""
+    if [ -n "$shell_profile" ]; then
+      # Only append if the line isn't already there.
+      if ! grep -qF "$BIN_DIR" "$shell_profile" 2>/dev/null; then
+        printf '\n# Added by budi installer\n%s\n' "$path_line" >> "$shell_profile"
+        log "Added $BIN_DIR to PATH in $shell_profile"
+        log "Restart your terminal or run: source $shell_profile"
+      fi
+    else
+      log ""
+      log "NOTE: $BIN_DIR is not in your PATH."
+      log "Add this to your shell profile:"
+      log "  $path_line"
+    fi
   fi
 
   log ""

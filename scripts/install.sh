@@ -266,11 +266,35 @@ main() {
   verify_binaries
 
   if [[ ":$PATH:" != *":$BIN_DIR:"* && "$NO_PATH_WARN" -eq 0 ]]; then
-    cat <<EOF
-[budi-install] NOTE: $BIN_DIR is not in your PATH.
-[budi-install] Add this to your shell profile:
-  export PATH="$BIN_DIR:\$PATH"
-EOF
+    local shell_profile=""
+    local current_shell="${SHELL:-}"
+    case "$current_shell" in
+      */zsh)  shell_profile="$HOME/.zshrc" ;;
+      */bash)
+        if [[ -f "$HOME/.bashrc" ]]; then
+          shell_profile="$HOME/.bashrc"
+        else
+          shell_profile="$HOME/.profile"
+        fi
+        ;;
+      *)
+        [[ -f "$HOME/.profile" ]] && shell_profile="$HOME/.profile"
+        ;;
+    esac
+
+    local path_line="export PATH=\"$BIN_DIR:\$PATH\""
+    if [[ -n "$shell_profile" ]]; then
+      if ! grep -qF "$BIN_DIR" "$shell_profile" 2>/dev/null; then
+        printf '\n# Added by budi installer\n%s\n' "$path_line" >> "$shell_profile"
+        log "Added $BIN_DIR to PATH in $shell_profile"
+        log "Restart your terminal or run: source $shell_profile"
+      fi
+    else
+      log ""
+      log "NOTE: $BIN_DIR is not in your PATH."
+      log "Add this to your shell profile:"
+      log "  $path_line"
+    fi
   fi
 
   local version
