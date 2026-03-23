@@ -1,0 +1,26 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: "🚀 Features"
+      labels:
+        - enhancement
+        - claude-hook
+        - onboarding
+    - title: "⚡ Performance"
+      labels:
+        - performance
+        - benchmark
+    - title: "🐛 Fixes"
+      labels:
+        - bug
+    - title: "📚 Docs"
+      labels:
+        - documentation
+    - title: "📦 Release / Tooling"
+      labels:
+        - release
+    - title: "Other Changes"
+      labels:
+        - "*"

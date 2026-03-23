@@ -1,0 +1,39 @@
+{
+  "name": "budi-plugins",
+  "owner": {
+    "name": "Ivan Seredkin"
+  },
+  "metadata": {
+    "description": "Official budi plugin marketplace for fast local Claude Code context.",
+    "version": "1.0.0",
+    "homepage": "https://github.com/siropkin/budi"
+  },
+  "plugins": [
+    {
+      "name": "budi-hooks",
+      "source": "./plugins/budi-hooks",
+      "description": "Claude Code hooks that inject the right local code context before Claude starts searching.",
+      "version": "3.15.0",
+      "author": {
+        "name": "Ivan Seredkin",
+        "url": "https://github.com/siropkin/budi"
+      },
+      "repository": "https://github.com/siropkin/budi",
+      "homepage": "https://github.com/siropkin/budi",
+      "license": "MIT",
+      "keywords": [
+        "claude-code",
+        "hooks",
+        "context",
+        "retrieval",
+        "budi"
+      ],
+      "category": "development",
+      "tags": [
+        "hooks",
+        "context",
+        "productivity"
+      ]
+    }
+  ]
+}

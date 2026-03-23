@@ -1,0 +1,14 @@
+pub mod chunking;
+pub mod config;
+pub mod daemon;
+pub mod hooks;
+pub mod index;
+mod index_scope;
+pub mod pre_filter;
+pub mod project_map;
+pub mod prompt_controls;
+pub mod reason_codes;
+pub mod repo_plugins;
+pub mod reranker;
+pub mod retrieval;
+pub mod rpc;

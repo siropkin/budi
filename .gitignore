@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+
+# Runtime artifacts
+.budi/
+.fastembed_cache/
+.install-test/
+
+# Bench artifacts
+bench-output/
+tmp/
+temp/
+.tmp/
+ab-bench-*/
+react-eval-out*/
+toolcall-bench-out*/
+
+# Reranker training artifacts
+scripts/dev/reranker-venv/
+scripts/dev/reranker-finetuned/
+scripts/dev/reranker-onnx/
+scripts/dev/reranker_training_data.jsonl
+scripts/dev/reranker_training_data.summary.json
+scripts/dev/channel_scores.jsonl
+
+# Local Claude / scratch artifacts
+.claude/
+*.plan.*
+*.scratch.*
+*.tmp
+*.temp

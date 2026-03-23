@@ -1,0 +1,20 @@
+[
+  "What are the entry points of this React application and how is the component tree structured at startup?",
+  "Describe the module layout and directory structure of this React codebase — which directories own which concerns?",
+  "Where is scheduleUpdateOnFiber defined and what are its first steps when called?",
+  "Where is createRoot defined and what does it initialize before returning?",
+  "Where is performWorkOnRoot defined and what does it do on each invocation?",
+  "What does useState call internally when state is updated — trace the call chain from the hook to the scheduler?",
+  "What functions does reconcileChildFibers call and what does each return?",
+  "What calls performSyncWorkOnRoot and from where is it triggered in the render pipeline?",
+  "Trace the lifecycle hook execution order when a React component mounts, updates, and unmounts.",
+  "What is the cleanup order for effects when a React component is removed from the DOM?",
+  "How does React load runtime configuration and which environment variables or build flags does it read?",
+  "What unit tests would you add to cover the fiber reconciliation algorithm in this codebase — list the cases and where they should live?",
+  "Where is commitHookEffectListUnmount defined and what does it do?",
+  "Where is flushPassiveEffects defined and what is its role in the commit phase?",
+  "What calls scheduleCallback and what priority flags does it pass?",
+  "Who calls beginWork and what does it return to the caller?",
+  "What is the mount order for layout effects versus passive effects when a component first renders?",
+  "How does React decide to bail out of rendering a subtree — trace the path from shouldComponentUpdate to the bail-out check?"
+]

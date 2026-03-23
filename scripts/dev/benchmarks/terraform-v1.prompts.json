@@ -1,0 +1,20 @@
+[
+  "What are the entry points of the Terraform CLI and how is command dispatch structured in main.go and commands.go?",
+  "Describe the module layout of the Terraform codebase — which packages under internal/ own which concerns (config parsing, planning, applying, state)?",
+  "Where is `walk` defined on the Context type and what does it do when called from Apply?",
+  "Where is `NewContext` defined and what does it initialize before returning a terraform.Context?",
+  "Where is `Plan` defined and what steps does it take from a loaded configuration to producing a plan?",
+  "Trace the call chain from a `terraform apply` CLI invocation to the point where resources are actually created — what functions are called in order?",
+  "Trace what happens when a provider returns an error during apply — how does Terraform catch and propagate it?",
+  "What calls `managedResourceExecute` and what arguments does each call site pass?",
+  "What calls `evaluateExpr` and when is it triggered during plan evaluation?",
+  "How does Terraform load provider configuration — trace from the config file to a provider being initialized?",
+  "Which environment variables does Terraform read at startup and how do they affect runtime behavior?",
+  "What tests cover the plan command and where do they live in the repo?",
+  "Where is `ReadStateBytes` defined and what does it do when loading resource state from a provider?",
+  "Where is `managedResourceExecute` defined on NodeApplyableResourceInstance and what does it do step by step?",
+  "What calls `ContextGraphWalker.Execute` and what node types does it dispatch to?",
+  "What calls `planWalk` and what does it do before returning the plan?",
+  "I want to add a new Terraform command. What files and functions would I need to modify or create?",
+  "How does Terraform decide which provider to use for a given resource — trace from the resource block in config to provider selection?"
+]

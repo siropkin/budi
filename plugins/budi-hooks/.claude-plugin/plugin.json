@@ -1,0 +1,19 @@
+{
+  "name": "budi-hooks",
+  "version": "3.15.0",
+  "description": "Claude Code hooks that inject local budi context before Claude starts searching.",
+  "author": {
+    "name": "Ivan Seredkin",
+    "url": "https://github.com/siropkin/budi"
+  },
+  "repository": "https://github.com/siropkin/budi",
+  "homepage": "https://github.com/siropkin/budi",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "context",
+    "retrieval",
+    "rust"
+  ]
+}

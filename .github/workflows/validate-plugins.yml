@@ -1,0 +1,194 @@
+name: Validate Plugins
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".claude-plugin/**"
+      - "plugins/**"
+      - ".github/workflows/validate-plugins.yml"
+  pull_request:
+    paths:
+      - ".claude-plugin/**"
+      - "plugins/**"
+      - ".github/workflows/validate-plugins.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugins-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Claude Code CLI and validation tools
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck ripgrep
+
+      - name: Validate marketplace and plugin schema
+        run: |
+          claude --version
+          claude plugin validate .
+          claude plugin validate plugins/budi-hooks
+
+      - name: Validate JSON syntax
+        run: |
+          jq empty .claude-plugin/marketplace.json
+          jq empty plugins/budi-hooks/.claude-plugin/plugin.json
+          jq empty plugins/budi-hooks/hooks/hooks.json
+
+      - name: Validate marketplace consistency
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          marketplace_path = Path(".claude-plugin/marketplace.json")
+          marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+
+          required_top = ["name", "owner", "plugins"]
+          for key in required_top:
+              if key not in marketplace:
+                  raise SystemExit(f"Missing top-level marketplace field: {key}")
+
+          plugins = marketplace["plugins"]
+          if not isinstance(plugins, list) or len(plugins) == 0:
+              raise SystemExit("Marketplace plugins must be a non-empty array")
+
+          seen_names = set()
+          for idx, plugin in enumerate(plugins):
+              name = plugin.get("name")
+              source = plugin.get("source")
+              if not name or not source:
+                  raise SystemExit(f"Plugin entry #{idx} missing name/source")
+              if name in seen_names:
+                  raise SystemExit(f"Duplicate plugin name in marketplace: {name}")
+              seen_names.add(name)
+
+              if not isinstance(source, str):
+                  raise SystemExit(f"Plugin {name} uses non-string source; expected relative path")
+              if not source.startswith("./"):
+                  raise SystemExit(f"Plugin {name} source must start with './': {source}")
+
+              plugin_dir = Path(source)
+              if not plugin_dir.exists() or not plugin_dir.is_dir():
+                  raise SystemExit(f"Plugin directory does not exist for {name}: {source}")
+
+              plugin_json = plugin_dir / ".claude-plugin" / "plugin.json"
+              if not plugin_json.exists():
+                  raise SystemExit(f"Missing plugin.json for {name}: {plugin_json}")
+
+              plugin_manifest = json.loads(plugin_json.read_text(encoding="utf-8"))
+              if plugin_manifest.get("name") != name:
+                  raise SystemExit(
+                      f"Marketplace/plugin name mismatch: marketplace={name} plugin.json={plugin_manifest.get('name')}"
+                  )
+
+          print(f"Validated {len(plugins)} marketplace entries successfully")
+          PY
+
+      - name: Validate hook rules and command policy
+        run: |
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          hooks_path = Path("plugins/budi-hooks/hooks/hooks.json")
+          hooks_file = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+          if "hooks" not in hooks_file or not isinstance(hooks_file["hooks"], dict):
+              raise SystemExit("hooks/hooks.json must include object field 'hooks'")
+
+          allowed_events = {
+              "PreToolUse", "PostToolUse", "PostToolUseFailure",
+              "PermissionRequest", "UserPromptSubmit", "Notification",
+              "Stop", "SubagentStart", "SubagentStop", "SessionStart",
+              "SessionEnd", "TeammateIdle", "TaskCompleted",
+              "PreCompact", "ConfigChange", "WorktreeCreate", "WorktreeRemove"
+          }
+
+          for event_name, matcher_groups in hooks_file["hooks"].items():
+              if event_name not in allowed_events:
+                  raise SystemExit(f"Unknown hook event: {event_name}")
+              if not isinstance(matcher_groups, list) or len(matcher_groups) == 0:
+                  raise SystemExit(f"Event {event_name} must map to a non-empty array")
+
+              for group in matcher_groups:
+                  if "hooks" not in group or not isinstance(group["hooks"], list) or len(group["hooks"]) == 0:
+                      raise SystemExit(f"Event {event_name} group missing non-empty 'hooks' array")
+
+                  matcher = group.get("matcher")
+                  if matcher is not None and matcher not in ("", "*"):
+                      try:
+                          re.compile(matcher)
+                      except re.error as exc:
+                          raise SystemExit(f"Invalid matcher regex for {event_name}: {matcher} ({exc})")
+
+                  for hook in group["hooks"]:
+                      hook_type = hook.get("type")
+                      if hook_type not in ("command", "http"):
+                          raise SystemExit(f"Only command and http hooks are allowed in budi-hooks plugin, got: {hook_type}")
+
+                      if hook_type == "http":
+                          url = hook.get("url", "")
+                          if not url.startswith("http://127.0.0.1:"):
+                              raise SystemExit(f"HTTP hooks must target localhost, got: {url}")
+                          continue
+
+                      command = hook.get("command", "")
+                      if not command.strip():
+                          raise SystemExit(f"Empty command in event {event_name}")
+                      if "\n" in command:
+                          raise SystemExit(f"Multiline command is not allowed in event {event_name}")
+
+                      first_token = command.strip().split()[0]
+                      if first_token != "budi":
+                          raise SystemExit(f"Command must invoke budi binary, got: {command}")
+
+                      if not command.startswith("budi hook "):
+                          raise SystemExit(f"Command must use 'budi hook ...' format, got: {command}")
+
+          print("Hook event/matcher/command policy checks passed")
+          PY
+
+      - name: Security checks
+        run: |
+          # Fail if files contain likely hardcoded secrets.
+          if rg -n --hidden -S \
+            "(?i)(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\\\"][^'\\\"]{8,}['\\\"]" \
+            ".claude-plugin" "plugins/budi-hooks" ; then
+            echo "Potential hardcoded secret detected"
+            exit 1
+          fi
+
+          # Block common private key material.
+          if rg -n --hidden -S "BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY" \
+            ".claude-plugin" "plugins/budi-hooks" ; then
+            echo "Private key material detected"
+            exit 1
+          fi
+
+      - name: Lint shell scripts (if present)
+        run: |
+          scripts=$(find plugins/budi-hooks -type f -name "*.sh" || true)
+          if [ -z "${scripts}" ]; then
+            echo "No shell scripts in plugin; skipping shellcheck."
+            exit 0
+          fi
+          echo "${scripts}" | xargs shellcheck -x

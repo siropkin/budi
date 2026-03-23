@@ -1,0 +1,20 @@
+[
+  "What are the entry points of this FastAPI application and how is the request handling pipeline structured at startup?",
+  "Describe the module layout and directory structure of this FastAPI codebase — which directories own which functionality?",
+  "Where is the APIRouter class defined and what does it initialize before returning?",
+  "Where is the get_dependant function defined and what are its first steps when called?",
+  "Where is the solve_dependencies function defined and what does it do on each invocation?",
+  "Trace the call chain from an incoming HTTP request to the route handler function — what functions does it pass through?",
+  "What functions does request_validation call and what does each return?",
+  "What calls run_endpoint_function and from where is it triggered in the request pipeline?",
+  "What calls get_typed_signature and what arguments does each call site pass?",
+  "What is the cleanup order for dependencies when a request completes — trace the dependency teardown path?",
+  "How does FastAPI load runtime configuration and which environment variables or settings does it read at startup?",
+  "What unit tests would you add to cover the dependency injection system in this codebase — list the most important coverage gaps?",
+  "Where is the Depends class defined and what does it do?",
+  "Where is create_response_field defined and what is its role in response serialization?",
+  "What calls add_api_route and what does each call site pass as arguments?",
+  "Who calls include_router and what does it return to the caller?",
+  "What is the execution order for middleware versus dependency injection when a request first arrives?",
+  "How does FastAPI decide which error handler to call when a validation error occurs — trace the path from ValidationError to the response?"
+]

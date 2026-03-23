@@ -1,0 +1,219 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (example: v2.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify_tag_version:
+    name: Verify tag matches Cargo version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate tag and workspace version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected_version="${RELEASE_TAG#v}"
+          actual_version="$(awk -F'\"' '/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"$/ {print $2; exit}' Cargo.toml)"
+          if [[ -z "${actual_version}" ]]; then
+            echo "::error::Unable to read workspace version from Cargo.toml"
+            exit 1
+          fi
+          echo "release_tag=${RELEASE_TAG}"
+          echo "workspace_version=${actual_version}"
+          if [[ "${actual_version}" != "${expected_version}" ]]; then
+            echo "::error::Tag ${RELEASE_TAG} does not match Cargo version ${actual_version}. Expected tag v${actual_version}."
+            exit 1
+          fi
+
+      - name: Validate marketplace and plugin manifests
+        run: |
+          claude plugin validate .
+          claude plugin validate plugins/budi-hooks
+
+      - name: Validate plugin versions match release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release_tag = os.environ["RELEASE_TAG"]
+          expected_version = release_tag[1:] if release_tag.startswith("v") else release_tag
+
+          plugin_manifest_path = Path("plugins/budi-hooks/.claude-plugin/plugin.json")
+          marketplace_path = Path(".claude-plugin/marketplace.json")
+
+          plugin_manifest = json.loads(plugin_manifest_path.read_text(encoding="utf-8"))
+          plugin_version = plugin_manifest.get("version")
+          if not plugin_version:
+              raise SystemExit("Missing plugins/budi-hooks/.claude-plugin/plugin.json version")
+
+          marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+          matches = [p for p in marketplace.get("plugins", []) if p.get("name") == "budi-hooks"]
+          if len(matches) != 1:
+              raise SystemExit(f"Expected exactly one budi-hooks entry in marketplace, found {len(matches)}")
+
+          marketplace_version = matches[0].get("version")
+          if not marketplace_version:
+              raise SystemExit("Missing budi-hooks version in .claude-plugin/marketplace.json")
+
+          if plugin_version != marketplace_version:
+              raise SystemExit(
+                  f"Version mismatch: plugin.json={plugin_version} marketplace.json={marketplace_version}"
+              )
+
+          if plugin_version != expected_version:
+              raise SystemExit(
+                  f"Version mismatch: release tag {release_tag} expects {expected_version}, plugin is {plugin_version}"
+              )
+
+          print(
+              f"Release version checks passed: tag={release_tag}, plugin={plugin_version}, marketplace={marketplace_version}"
+          )
+          PY
+
+  build-assets:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    needs: verify_tag_version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binaries
+        run: |
+          cargo build \
+            --manifest-path Cargo.toml \
+            --profile release \
+            --locked \
+            --target "${{ matrix.target }}" \
+            --bin budi \
+            --bin budi-daemon \
+            --bin budi-mcp
+
+      - name: Package tarball
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          target="${{ matrix.target }}"
+          package="budi-${tag}-${target}"
+          stage_dir="${RUNNER_TEMP}/${package}"
+
+          mkdir -p "${stage_dir}"
+          ext=""
+          if [[ "$target" == *windows* ]]; then ext=".exe"; fi
+          cp "target/${target}/release/budi${ext}" "${stage_dir}/"
+          cp "target/${target}/release/budi-daemon${ext}" "${stage_dir}/"
+          cp "target/${target}/release/budi-mcp${ext}" "${stage_dir}/"
+          cp README.md "${stage_dir}/"
+
+          if [[ "$target" == *windows* ]]; then
+            archive="${package}.zip"
+            cd "${RUNNER_TEMP}" && 7z a -tzip "${GITHUB_WORKSPACE}/${archive}" "${package}"
+            cd "${GITHUB_WORKSPACE}"
+          else
+            archive="${package}.tar.gz"
+            tar -C "${RUNNER_TEMP}" -czf "${archive}" "${package}"
+          fi
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+          fi
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+            *.zip
+            *.zip.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build-assets
+    steps:
+      - name: Download all packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Build combined checksum file
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz *.zip 2>/dev/null > SHA256SUMS || true
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
