@@ -1330,7 +1330,6 @@ pub fn model_usage(
     Ok(rows)
 }
 
-
 /// Compact stats for the status line display.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatuslineStats {
