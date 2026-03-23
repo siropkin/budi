@@ -705,12 +705,11 @@ function renderConfigRow(f) {
   const sizeStr = f.size_bytes >= 1024 ? (f.size_bytes / 1024).toFixed(1) + ' KB' : f.size_bytes + ' B';
   const tokStr = f.est_tokens >= 1000 ? (f.est_tokens / 1000).toFixed(1) + 'K' : String(f.est_tokens);
   const warn = f.est_tokens > 2000 ? ' style="color:var(--accent4)"' : '';
-  const fileName = f.path.split('/').pop();
-  const fileLink = `<span title="${esc(f.path)}" style="cursor:default">${esc(fileName)}</span>`;
+  const shortPath = shortenDir(f.path);
   return `<tr>
     <td><span class="type-badge ${badgeClass(f.file_type)}">${badgeLabel(f.file_type)}</span></td>
     <td class="dir" title="${esc(f.project)}">${esc(projectName(f.project))}</td>
-    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fileLink}</td>
+    <td class="dir" title="${esc(f.path)}" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(shortPath)}</td>
     <td class="right">${sizeStr}</td>
     <td class="right"${warn}>${tokStr}</td>
   </tr>`;
@@ -1096,12 +1095,14 @@ function renderHistorySection() {
 /* ===== Plans ===== */
 const plansGetters = {
   title: p => p.title || p.name || '',
+  path: p => p.path || '',
   size_bytes: p => p.size_bytes || 0,
   est_tokens: p => p.est_tokens || 0,
   modified: p => p.modified || '',
 };
 const plansCols = [
   { key: 'title', label: 'Title' },
+  { key: 'path', label: 'File' },
   { key: 'size_bytes', label: 'Size', right: true },
   { key: 'est_tokens', label: 'Est. Tokens', right: true },
   { key: 'modified', label: 'Modified', right: true },
@@ -1110,12 +1111,10 @@ const plansCols = [
 function renderPlansRow(p) {
   const sizeStr = p.size_bytes >= 1024 ? (p.size_bytes / 1024).toFixed(1) + ' KB' : (p.size_bytes || 0) + ' B';
   const displayTitle = p.title || p.name || '--';
-  const fileName = (p.name || '--') + '.md';
-  const link = p.path
-    ? `<span title="${esc(p.path)}" style="cursor:default">${esc(displayTitle)}</span>`
-    : esc(displayTitle);
+  const shortPath = p.path ? shortenDir(p.path) : '--';
   return `<tr>
-    <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${link}</td>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(displayTitle)}</td>
+    <td class="dir" title="${esc(p.path || '')}" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(shortPath)}</td>
     <td class="right">${sizeStr}</td>
     <td class="right">${fmtTokensHtml(p.est_tokens || 0)}</td>
     <td class="right">${fmtDate(p.modified)}</td>
