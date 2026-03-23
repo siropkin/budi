@@ -110,7 +110,7 @@ install_binaries_from_dir() {
   local src_dir="$1"
   mkdir -p "$BIN_DIR"
 
-  local bins=(budi budi-daemon budi-mcp)
+  local bins=(budi budi-daemon)
   for bin in "${bins[@]}"; do
     local src="$src_dir/$bin"
     local dst="$BIN_DIR/$bin"
@@ -124,7 +124,6 @@ install_binaries_from_dir() {
 verify_binaries() {
   "$BIN_DIR/budi" --version >/dev/null
   "$BIN_DIR/budi-daemon" --version >/dev/null
-  [[ -x "$BIN_DIR/budi-mcp" ]] || log "Note: budi-mcp not found (optional MCP server)"
 }
 
 install_from_release() {
@@ -248,7 +247,6 @@ main() {
       fi
       cargo install --path "$REPO_ROOT/crates/budi-cli" --bin budi --force "${lock_args[@]}"
       cargo install --path "$REPO_ROOT/crates/budi-daemon" --bin budi-daemon --force "${lock_args[@]}"
-      cargo install --path "$REPO_ROOT/crates/budi-mcp" --bin budi-mcp --force "${lock_args[@]}"
       BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
     else
       if [[ "$SKIP_BUILD" -eq 0 ]]; then
@@ -259,7 +257,9 @@ main() {
         fi
         cargo build --manifest-path "$REPO_ROOT/Cargo.toml" --profile "$PROFILE" "${lock_args[@]}"
       fi
-      install_binaries_from_dir "$REPO_ROOT/target/$PROFILE"
+      local target_dir="$PROFILE"
+      [[ "$PROFILE" == "dev" ]] && target_dir="debug"
+      install_binaries_from_dir "$REPO_ROOT/target/$target_dir"
     fi
   fi
 
@@ -273,11 +273,19 @@ main() {
 EOF
   fi
 
+  local version
+  version="$("$BIN_DIR/budi" --version 2>/dev/null || echo 'budi')"
+
   cat <<EOF
-[budi-install] Installation complete.
+
+[budi-install] Installed: $version
 [budi-install] Binary directory: $BIN_DIR
-[budi-install] Next step:
-  cd /path/to/your/repo && budi init --index
+
+[budi-install] Get started:
+  cd /path/to/your/repo
+  budi init --global  # set up hooks globally (all repos and worktrees)
+  budi doctor      # verify everything is working
+  budi stats       # view usage analytics
 EOF
 }
 

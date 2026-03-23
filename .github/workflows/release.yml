@@ -116,6 +116,9 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             asset: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+            asset: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: x86_64-pc-windows-msvc
@@ -135,6 +138,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
+        shell: bash
         run: |
           cargo build \
             --manifest-path Cargo.toml \
@@ -142,8 +146,7 @@ jobs:
             --locked \
             --target "${{ matrix.target }}" \
             --bin budi \
-            --bin budi-daemon \
-            --bin budi-mcp
+            --bin budi-daemon
 
       - name: Package tarball
         shell: bash
@@ -161,7 +164,6 @@ jobs:
           if [[ "$target" == *windows* ]]; then ext=".exe"; fi
           cp "target/${target}/release/budi${ext}" "${stage_dir}/"
           cp "target/${target}/release/budi-daemon${ext}" "${stage_dir}/"
-          cp "target/${target}/release/budi-mcp${ext}" "${stage_dir}/"
           cp README.md "${stage_dir}/"
 
           if [[ "$target" == *windows* ]]; then

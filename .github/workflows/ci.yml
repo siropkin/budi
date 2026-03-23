@@ -48,7 +48,72 @@ jobs:
         run: |
           ./target/release/budi --version
           ./target/release/budi-daemon --version
-          ./target/release/budi-mcp --version
+
+      - name: Integration smoke test (daemon endpoints)
+        run: |
+          ./target/release/budi-daemon serve --port 19876 &
+          DAEMON_PID=$!
+          # Wait for daemon to be ready
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:19876/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+          # Test endpoints
+          curl -sf http://127.0.0.1:19876/health | jq -e '.ok == true'
+          curl -sf http://127.0.0.1:19876/stats | jq -e '.queries != null'
+          curl -sf http://127.0.0.1:19876/dashboard | head -c 100 | grep -q '<!DOCTYPE html\|<html'
+          echo "All daemon endpoints responded correctly"
+          kill "$DAEMON_PID" 2>/dev/null || true
+
+      - name: Test install script (from source build)
+        run: |
+          scripts/install.sh --skip-build --bin-dir "$RUNNER_TEMP/budi-bin" --force --no-path-warn
+          "$RUNNER_TEMP/budi-bin/budi" --version
+          "$RUNNER_TEMP/budi-bin/budi-daemon" --version
+
+      - name: Test uninstall script
+        run: |
+          scripts/uninstall.sh --bin-dir "$RUNNER_TEMP/budi-bin" --keep-daemons
+          ! test -f "$RUNNER_TEMP/budi-bin/budi"
+          ! test -f "$RUNNER_TEMP/budi-bin/budi-daemon"
+          echo "Uninstall verified: binaries removed"
+
+  macos-build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Smoke test binaries
+        run: |
+          ./target/debug/budi --version
+          ./target/debug/budi-daemon --version
+
+      - name: Test install script (from source build)
+        run: |
+          scripts/install.sh --skip-build --profile dev --bin-dir "$RUNNER_TEMP/budi-bin" --force --no-path-warn
+          "$RUNNER_TEMP/budi-bin/budi" --version
+          "$RUNNER_TEMP/budi-bin/budi-daemon" --version
+
+      - name: Test uninstall script
+        run: |
+          scripts/uninstall.sh --bin-dir "$RUNNER_TEMP/budi-bin" --keep-daemons
+          ! test -f "$RUNNER_TEMP/budi-bin/budi"
+          echo "Uninstall verified: binaries removed"
 
   windows-build:
     runs-on: windows-latest
@@ -74,4 +139,3 @@ jobs:
         run: |
           .\target\debug\budi.exe --version
           .\target\debug\budi-daemon.exe --version
-          .\target\debug\budi-mcp.exe --version

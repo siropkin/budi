@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>budi — Claude Code Analytics</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --accent2: #3fb950;
+  --accent3: #d2a8ff;
+  --accent4: #f0883e;
+  --danger: #f85149;
+  --radius: 8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+h1 { font-size: 1.5rem; font-weight: 600; }
+h2 { font-size: 0.8rem; font-weight: normal; margin-bottom: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border);
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-left .logo { font-size: 1.8rem; }
+.header-right { display: flex; gap: 12px; align-items: center; }
+.last-synced { font-size: 0.75rem; color: var(--text-muted); }
+.period-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.period-tabs { display: flex; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 3px; }
+.period-tabs button {
+  background: none; border: none; color: var(--text-muted); padding: 6px 14px;
+  border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 500;
+}
+.period-tabs button.active { background: var(--accent); color: #fff; }
+.period-tabs button:hover:not(.active) { color: var(--text); }
+
+.nav-tabs {
+  display: flex; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 3px;
+  margin-bottom: 24px;
+}
+.nav-tabs a {
+  background: none; border: none; color: var(--text-muted); padding: 6px 14px;
+  border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 500;
+  text-decoration: none; display: inline-block;
+}
+.nav-tabs a.active { background: var(--accent); color: #fff; }
+.nav-tabs a:hover:not(.active) { color: var(--text); text-decoration: none; }
+
+.active-sessions {
+  margin-bottom: 16px; padding: 8px 14px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border);
+  font-size: 0.85rem; display: flex; align-items: center; gap: 8px;
+}
+.active-sessions .active-dot {
+  width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+}
+.active-sessions .active-dot.green { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+.active-sessions .active-dot.gray { background: var(--text-muted); }
+.active-sessions .active-label { color: var(--text-muted); }
+.active-sessions .active-projects { color: var(--text); margin-left: 4px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.card .label { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.card .value { font-size: 1.6rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.card .value.cost-value { color: var(--accent2); }
+.card .sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
+.card .explainer { font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; font-style: italic; }
+.card .explainer a { font-style: italic; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+@media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
+@media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+
+.bar-chart .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.85rem; }
+.bar-chart .bar-label {
+  width: 180px; min-width: 180px; max-width: 180px; text-align: right; flex-shrink: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
+}
+.bar-chart .bar-track { flex: 1; height: 20px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.bar-chart .bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
+.bar-chart .bar-count { width: 60px; font-variant-numeric: tabular-nums; color: var(--text-muted); text-align: right; }
+
+.sortable-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.sortable-table th {
+  text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+  color: var(--text-muted); font-weight: 500; font-size: 0.78rem;
+  text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; user-select: none; white-space: nowrap;
+}
+.sortable-table th:hover { color: var(--text); }
+.sortable-table th .sort-arrow { margin-left: 4px; font-size: 0.7rem; }
+.sortable-table td {
+  padding: 8px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--text-muted);
+}
+.sortable-table tr:hover td { background: rgba(88,166,255,0.05); }
+.sortable-table .mono { font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+.sortable-table .dir {
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
+}
+.sortable-table .right { text-align: right; }
+.sortable-table .prompt-cell {
+  max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
+}
+
+.type-badge { display: inline-block; font-size: 0.7rem; padding: 1px 8px; border-radius: 10px; font-weight: 500; }
+.type-badge.claude-md { background: rgba(88,166,255,0.15); color: var(--accent); }
+.type-badge.rule { background: rgba(210,168,255,0.15); color: var(--accent3); }
+.type-badge.skill { background: rgba(63,185,80,0.15); color: var(--accent2); }
+.type-badge.settings { background: rgba(240,136,62,0.15); color: var(--accent4); }
+.type-badge.memory { background: rgba(248,81,73,0.15); color: var(--danger); }
+
+.mode-badge {
+  display: inline-block; font-size: 0.7rem; padding: 1px 8px; border-radius: 10px; font-weight: 500;
+}
+.mode-badge.mode-default { background: rgba(88,166,255,0.15); color: var(--accent); }
+.mode-badge.mode-allowlist { background: rgba(63,185,80,0.15); color: var(--accent2); }
+.mode-badge.mode-denylist { background: rgba(248,81,73,0.15); color: var(--danger); }
+
+.action-badge { display: inline-block; font-size: 0.7rem; padding: 1px 8px; border-radius: 10px; font-weight: 500; }
+.action-badge.allow { background: rgba(63,185,80,0.15); color: var(--accent2); }
+.action-badge.deny { background: rgba(248,81,73,0.15); color: var(--danger); }
+
+.scope-badge { display: inline-block; font-size: 0.7rem; padding: 1px 8px; border-radius: 10px; font-weight: 500; }
+.scope-badge.scope-global { background: rgba(63,185,80,0.15); color: var(--accent2); }
+.scope-badge.scope-local { background: rgba(88,166,255,0.15); color: var(--accent); }
+.scope-badge.scope-project { background: rgba(210,168,255,0.15); color: var(--accent3); }
+
+.empty { text-align: center; color: var(--text-muted); padding: 32px; display: flex; align-items: center; justify-content: center; min-height: 120px; }
+.loading { text-align: center; color: var(--text-muted); padding: 48px; }
+.loading::after {
+  content: ''; display: inline-block; width: 18px; height: 18px;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 8px; vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.sync-btn {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 14px; border-radius: var(--radius); cursor: pointer; font-size: 0.85rem;
+  display: flex; align-items: center; gap: 6px;
+}
+.sync-btn:hover { border-color: var(--accent); }
+.sync-btn.syncing { opacity: 0.6; pointer-events: none; }
+
+.cache-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 6px; }
+.cache-bar .segment { transition: width 0.4s ease; }
+
+.insight-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.insight-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.insight-card .insight-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-weight: 600; }
+.insight-card .insight-header .icon { font-size: 1.1rem; }
+.insight-card .insight-metric { font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
+.insight-card .insight-desc { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px; line-height: 1.4; }
+.insight-card .insight-rec { font-size: 0.82rem; line-height: 1.4; padding: 8px 10px; border-radius: 6px; margin-top: 8px; }
+.insight-rec.warn { background: rgba(240,136,62,0.12); color: #f0883e; }
+.insight-rec.good { background: rgba(63,185,80,0.12); color: #3fb950; }
+.insight-list { font-size: 0.85rem; margin-top: 6px; }
+.insight-list .insight-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.insight-list .insight-row:last-child { border-bottom: none; }
+
+.show-more-btn {
+  display: block; width: 100%; padding: 8px; margin-top: 8px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted);
+  cursor: pointer; font-size: 0.82rem; text-align: center;
+}
+.show-more-btn:hover { color: var(--text); border-color: var(--accent); }
+
+.section-mb { margin-bottom: 24px; }
+
+/* Daily activity chart */
+.daily-chart { display: flex; align-items: flex-end; gap: 3px; height: 140px; padding-top: 8px; }
+.daily-chart .day-bar { flex: 1; min-width: 0; border-radius: 3px 3px 0 0; position: relative; cursor: default; display: flex; flex-direction: column; justify-content: flex-end; }
+.daily-chart .day-bar .bar-msg { background: var(--accent); border-radius: 3px 3px 0 0; min-height: 0; }
+.daily-chart .day-bar .bar-tool { background: var(--accent4); min-height: 0; }
+.daily-chart .day-bar:hover .bar-msg { opacity: 0.8; }
+.daily-chart-labels { display: flex; gap: 3px; margin-top: 4px; }
+.daily-chart-labels .day-label {
+  flex: 1; min-width: 0; text-align: center; font-size: 0.6rem; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.daily-chart-tooltip {
+  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 0.75rem; white-space: nowrap; pointer-events: none;
+  display: none; z-index: 10;
+}
+.daily-chart .day-bar:hover .daily-chart-tooltip { display: block; }
+
+.search-input {
+  width: 100%; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); font-size: 0.85rem; outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <span class="logo">&#x1f4ca;</span>
+    <h1>budi</h1>
+  </div>
+  <div class="header-right">
+    <nav class="nav-tabs">
+      <a href="/dashboard" data-view="stats" class="active">Stats</a>
+      <a href="/dashboard/insights" data-view="insights">Insights</a>
+      <a href="/dashboard/setup" data-view="setup">Setup</a>
+      <a href="/dashboard/plans" data-view="plans">Plans</a>
+      <a href="/dashboard/prompts" data-view="prompts">Prompts</a>
+    </nav>
+  </div>
+</div>
+
+<div class="period-bar" id="periodBar">
+  <div class="period-tabs">
+    <button data-period="today" class="active">Today</button>
+    <button data-period="week">Week</button>
+    <button data-period="month">Month</button>
+    <button data-period="all">All</button>
+  </div>
+  <button class="sync-btn" id="syncBtn" title="Sync JSONL transcripts">&#x21bb; Sync</button>
+  <span class="last-synced" id="lastSynced"></span>
+</div>
+
+<div id="content"><div class="loading">Loading analytics</div></div>
+
+<script>
+const $ = (s, el) => (el || document).querySelector(s);
+const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
+function esc(s) { if (s == null) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+
+function getCurrentView() {
+  const path = window.location.pathname;
+  if (path.includes('/insights')) return 'insights';
+  if (path.includes('/plans')) return 'plans';
+  if (path.includes('/prompts')) return 'prompts';
+  if (path.includes('/setup')) return 'setup';
+  return 'stats';
+}
+
+let currentPeriod = 'today';
+let currentView = getCurrentView();
+let lastSyncTime = null;
+const DEFAULT_TABLE_ROWS = 15;
+const DEFAULT_CHART_ROWS = 15;
+
+// Session table state
+let lastSessionData = [];
+let sessionSortCol = 'last_seen';
+let sessionSortAsc = false;
+let sessionShowCount = DEFAULT_TABLE_ROWS;
+
+// Config table state
+let lastConfigData = [];
+let configSortCol = 'est_tokens';
+let configSortAsc = false;
+let configShowCount = DEFAULT_TABLE_ROWS;
+
+// Project config table state
+let lastProjectConfigData = [];
+let projectConfigSortCol = 'tokens';
+let projectConfigSortAsc = false;
+let projectConfigShowCount = DEFAULT_TABLE_ROWS;
+
+// History table state
+let lastHistoryData = [];
+let historySortCol = 'timestamp';
+let historySortAsc = false;
+let historyShowCount = DEFAULT_TABLE_ROWS;
+
+// Plans table state
+let lastPlansData = [];
+let plansSortCol = 'modified';
+let plansSortAsc = false;
+let plansShowCount = DEFAULT_TABLE_ROWS;
+
+// Plugins table state
+let lastPluginsData = [];
+let pluginsSortCol = 'name';
+let pluginsSortAsc = true;
+let pluginsShowCount = DEFAULT_TABLE_ROWS;
+
+// Permissions table state
+let lastPermissionsData = [];
+let permissionsSortCol = 'scope';
+let permissionsSortAsc = true;
+let permissionsShowCount = DEFAULT_TABLE_ROWS;
+
+// Search state
+let plansSearchTerm = '';
+let promptsSearchTerm = '';
+
+// Cached data
+let dataLoaded = false;
+let statsData = null;
+let setupData = null;
+let plansData = null;
+let promptsData = null;
+let activityData = null;
+let activeSessionsData = null;
+
+// Cached render intermediates for stats view
+let cachedSortedModels = [];
+let cachedActivityChartTitle = '';
+let cachedMergedConfigFiles = [];
+
+function dateRange(period) {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+  const toISO = dt => dt.toISOString();
+  switch (period) {
+    case 'today': return { since: toISO(new Date(y, m, d)) };
+    case 'week': {
+      const dow = now.getDay();
+      const mondayOffset = dow === 0 ? 6 : dow - 1;
+      return { since: toISO(new Date(y, m, d - mondayOffset)) };
+    }
+    case 'month': return { since: toISO(new Date(y, m, 1)) };
+    case 'all': return {};
+  }
+}
+
+function granularityForPeriod(period) {
+  switch (period) {
+    case 'today': return 'hour';
+    case 'week': return 'day';
+    case 'month': return 'day';
+    case 'all': return 'month';
+  }
+}
+
+function qs(params) {
+  const p = new URLSearchParams();
+  for (const [k,v] of Object.entries(params)) if (v != null) p.set(k, v);
+  const s = p.toString();
+  return s ? '?' + s : '';
+}
+
+function fmtNum(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+function fmtTokensHtml(tokens) {
+  const str = tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'K' : String(tokens);
+  return tokens > 2000 ? `<span style="color:var(--accent4)">${str}</span>` : str;
+}
+function fmtCost(n) {
+  if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'K';
+  if (n >= 100) return '$' + n.toFixed(0);
+  if (n >= 1) return '$' + n.toFixed(2);
+  if (n > 0) return '$' + n.toFixed(3);
+  return '$0.00';
+}
+function fmtDuration(firstSeen, lastSeen) {
+  if (!firstSeen || !lastSeen) return '--';
+  const ms = new Date(lastSeen) - new Date(firstSeen);
+  if (ms < 0) return '--';
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return '<1m';
+  if (mins < 60) return mins + 'm';
+  return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+}
+function durationMs(a, b) { if (!a || !b) return 0; return Math.max(0, new Date(b) - new Date(a)); }
+function fmtDate(iso) {
+  if (!iso) return '--';
+  const d = new Date(iso), now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.floor((today - target) / 86400000);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (diff === 0) return `Today ${time}`;
+  if (diff === 1) return `Yesterday ${time}`;
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+}
+function fmtDateFromMs(ms) {
+  if (!ms) return '--';
+  return fmtDate(new Date(ms).toISOString());
+}
+function shortenDir(dir) { if (!dir) return '--'; return dir.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'); }
+function projectName(dir) { if (!dir) return '--'; const s = shortenDir(dir); return s.split('/').pop() || s; }
+function repoName(id) { if (!id) return '--'; return id.split('/').pop() || id; }
+
+function formatModelName(raw) {
+  if (!raw || raw === 'unknown') return 'Unknown';
+  const m = raw.replace('claude-', '').replace(/-\d{8}$/, '');
+  const parts = m.split('-');
+  if (parts.length >= 3) {
+    const family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+    const ver = parts[1] + '.' + parts[2];
+    const tier = family === 'Opus' ? '(high)' : family === 'Sonnet' ? '(medium)' : family === 'Haiku' ? '(fast)' : '';
+    return `Claude ${ver} ${family} ${tier}`.trim();
+  }
+  return raw;
+}
+
+function estimateSessionCost(s) {
+  const ic = s.input_tokens * 3.0 / 1_000_000;
+  const oc = s.output_tokens * 15.0 / 1_000_000;
+  const cwc = (s.cache_creation_tokens || 0) * 3.75 / 1_000_000;
+  const crc = (s.cache_read_tokens || 0) * 0.30 / 1_000_000;
+  return ic + oc + cwc + crc;
+}
+
+const TOOL_COLORS = {
+  Read: '#58a6ff', Edit: '#3fb950', Write: '#d2a8ff', Bash: '#f0883e',
+  Grep: '#f778ba', Glob: '#79c0ff', Agent: '#ffd33d', default: '#8b949e'
+};
+function toolColor(name) { return TOOL_COLORS[name] || TOOL_COLORS.default; }
+
+function modelColor(name) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('opus')) return '#d2a8ff';
+  if (n.includes('sonnet')) return '#58a6ff';
+  if (n.includes('haiku')) return '#3fb950';
+  return '#8b949e';
+}
+
+function updateSyncTime() {
+  const el = $('#lastSynced');
+  if (lastSyncTime) el.textContent = 'Synced ' + fmtDate(lastSyncTime.toISOString());
+}
+
+async function loadAllData() {
+  const range = dateRange(currentPeriod);
+  const q = qs(range);
+  const gran = granularityForPeriod(currentPeriod);
+  const tzOffset = -new Date().getTimezoneOffset();
+
+  const [statsResult, setupResult, plansResult, promptsResult, activityResult, activeSessionsResult] = await Promise.all([
+    Promise.all([
+      fetch('/analytics/summary' + q).then(r => r.json()),
+      fetch('/analytics/sessions' + q).then(r => r.json()),
+      fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS).then(r => r.json()),
+      fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset).then(r => r.json()),
+      fetch('/analytics/cost' + q).then(r => r.json()),
+      fetch('/analytics/models' + q).then(r => r.json()),
+      fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset).then(r => r.json()),
+    ]),
+    Promise.all([
+      fetch('/analytics/config-files').then(r => r.json()).catch(() => []),
+      fetch('/analytics/memory').then(r => r.json()).catch(() => []),
+      fetch('/analytics/plugins').then(r => r.json()).catch(() => []),
+      fetch('/analytics/permissions').then(r => r.json()).catch(() => ({default_mode:'default',rules:[]})),
+    ]),
+    fetch('/analytics/plans').then(r => r.json()).catch(() => []),
+    fetch('/analytics/history?limit=500').then(r => r.json()).catch(() => ({total_count:0,entries:[]})),
+    fetch('/analytics/activity').then(r => r.json()).catch(() => ({daily_activity:[],hour_counts:{},total_sessions:0,total_messages:0})),
+    fetch('/analytics/active-sessions').then(r => r.json()).catch(() => []),
+  ]);
+
+  statsData = {
+    summary: statsResult[0],
+    sessions: statsResult[1],
+    cwds: statsResult[2],
+    insights: statsResult[3],
+    cost: statsResult[4],
+    models: statsResult[5],
+    activityChart: statsResult[6],
+  };
+  setupData = {
+    configFiles: setupResult[0],
+    memory: setupResult[1],
+    plugins: setupResult[2],
+    permissions: setupResult[3],
+  };
+  plansData = plansResult;
+  promptsData = promptsResult;
+  activityData = activityResult;
+  activeSessionsData = activeSessionsResult;
+
+  // Process stats intermediates
+  lastSessionData = statsData.sessions;
+  let sortedModels = [...statsData.models];
+  sortedModels.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
+  cachedSortedModels = sortedModels.slice(0, DEFAULT_CHART_ROWS);
+  cachedActivityChartTitle = currentPeriod === 'today' ? 'Activity (Hourly)'
+    : currentPeriod === 'week' ? 'Activity (Daily)'
+    : currentPeriod === 'month' ? 'Activity (Daily)'
+    : 'Activity (Monthly)';
+
+  // Merge memory into config
+  const memoryAsConfig = setupData.memory.map(m => ({
+    path: m.path || '',
+    project: m.project || '',
+    file_type: 'memory',
+    size_bytes: m.size_bytes || 0,
+    est_tokens: m.est_tokens || 0,
+  }));
+  cachedMergedConfigFiles = [...setupData.configFiles, ...memoryAsConfig];
+  lastConfigData = cachedMergedConfigFiles;
+
+  // Process project config data
+  const byProject = {};
+  for (const f of cachedMergedConfigFiles) {
+    const p = projectName(f.project);
+    if (!byProject[p]) byProject[p] = { tokens: 0, count: 0, types: new Set() };
+    byProject[p].tokens += f.est_tokens;
+    byProject[p].count++;
+    byProject[p].types.add(f.file_type);
+  }
+  lastProjectConfigData = Object.entries(byProject).map(([proj, info]) => ({
+    project: proj, tokens: info.tokens, count: info.count, typeList: [...info.types]
+  }));
+
+  // Process other data
+  lastPlansData = plansData;
+  lastHistoryData = promptsData.entries || [];
+  lastPluginsData = setupData.plugins;
+  lastPermissionsData = (setupData.permissions.rules || []);
+
+  // Reset show counts
+  sessionShowCount = DEFAULT_TABLE_ROWS;
+  configShowCount = DEFAULT_TABLE_ROWS;
+  projectConfigShowCount = DEFAULT_TABLE_ROWS;
+  historyShowCount = DEFAULT_TABLE_ROWS;
+  plansShowCount = DEFAULT_TABLE_ROWS;
+  pluginsShowCount = DEFAULT_TABLE_ROWS;
+  permissionsShowCount = DEFAULT_TABLE_ROWS;
+
+  dataLoaded = true;
+}
+
+async function reloadStatsData() {
+  const range = dateRange(currentPeriod);
+  const q = qs(range);
+  const gran = granularityForPeriod(currentPeriod);
+  const tzOffset = -new Date().getTimezoneOffset();
+
+  const [summary, sessions, cwds, insights, cost, models, activityChart, activeSessions] = await Promise.all([
+    fetch('/analytics/summary' + q).then(r => r.json()),
+    fetch('/analytics/sessions' + q).then(r => r.json()),
+    fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS).then(r => r.json()),
+    fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset).then(r => r.json()),
+    fetch('/analytics/cost' + q).then(r => r.json()),
+    fetch('/analytics/models' + q).then(r => r.json()),
+    fetch('/analytics/activity-chart' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset).then(r => r.json()),
+    fetch('/analytics/active-sessions').then(r => r.json()).catch(() => []),
+  ]);
+
+  statsData = { summary, sessions, cwds, insights, cost, models, activityChart };
+  activeSessionsData = activeSessions;
+  lastSessionData = sessions;
+
+  let sortedModels = [...models];
+  sortedModels.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
+  cachedSortedModels = sortedModels.slice(0, DEFAULT_CHART_ROWS);
+  cachedActivityChartTitle = currentPeriod === 'today' ? 'Activity (Hourly)'
+    : currentPeriod === 'week' ? 'Activity (Daily)'
+    : currentPeriod === 'month' ? 'Activity (Daily)'
+    : 'Activity (Monthly)';
+
+  sessionShowCount = DEFAULT_TABLE_ROWS;
+}
+
+/* ===== Render: Active Sessions ===== */
+function renderActiveSessions(activeSessions) {
+  const alive = activeSessions.filter(s => s.is_alive);
+  if (alive.length > 0) {
+    const projects = alive.map(s => projectName(s.cwd)).join(', ');
+    return `<div class="active-sessions">
+      <span class="active-dot green"></span>
+      <span class="active-label">${alive.length} active session${alive.length > 1 ? 's' : ''}</span>
+      <span class="active-projects">${esc(projects)}</span>
+    </div>`;
+  }
+  return `<div class="active-sessions">
+    <span class="active-dot gray"></span>
+    <span class="active-label">No active sessions</span>
+  </div>`;
+}
+
+/* ===== Render: Summary Cards ===== */
+function renderCards(s, cost) {
+  const totalTokens = s.total_input_tokens + s.total_output_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
+  const cacheHitPct = totalTokens > 0 ? (s.total_cache_read_tokens / totalTokens * 100) : 0;
+  return `
+  <div class="cards">
+    <div class="card">
+      <div class="label">Est. Cost</div>
+      <div class="value cost-value">${fmtCost(cost.total_cost)}</div>
+      <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input / ${fmtCost(cost.output_cost)} output</div>
+      <div class="explainer">Based on <a href="https://www.anthropic.com/pricing" target="_blank" rel="noopener">Anthropic API pricing</a></div>
+    </div>
+    <div class="card">
+      <div class="label">Total Tokens</div>
+      <div class="value">${fmtNum(totalTokens)}</div>
+      <div class="sub">${fmtNum(s.total_input_tokens)} in / ${fmtNum(s.total_output_tokens)} out</div>
+    </div>
+    <div class="card">
+      <div class="label">Conversations</div>
+      <div class="value">${fmtNum(s.total_sessions)}</div>
+      <div class="sub">${fmtNum(s.total_user_messages)} your prompts / ${fmtNum(s.total_assistant_messages)} Claude responses</div>
+      <div class="explainer">Each conversation = one Claude Code session in your terminal</div>
+    </div>
+    <div class="card">
+      <div class="label">Cache Savings</div>
+      <div class="value cost-value">${fmtCost(cost.cache_savings)}</div>
+      <div class="cache-bar">
+        <div class="segment" style="width:${cacheHitPct}%;background:var(--accent2)"></div>
+        <div class="segment" style="width:${100-cacheHitPct}%;background:var(--border)"></div>
+      </div>
+      <div class="sub">${cacheHitPct.toFixed(0)}% cache hit rate</div>
+      <div class="explainer">Saved by <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank" rel="noopener">Anthropic's prompt caching</a> vs full-price input</div>
+    </div>
+  </div>`;
+}
+
+/* ===== Render: Bar Chart ===== */
+function renderBarChart(items, labelFn, valueFn, colorFn, emptyMsg) {
+  if (!items.length) return `<div class="empty">${esc(emptyMsg)}</div>`;
+  const max = Math.max(...items.map(valueFn));
+  return `<div class="bar-chart">${items.map(item => `
+    <div class="bar-row">
+      <div class="bar-label" title="${esc(labelFn(item, true))}">${esc(labelFn(item, false))}</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${max > 0 ? (valueFn(item)/max*100) : 0}%;background:${colorFn(item)}"></div>
+      </div>
+      <div class="bar-count">${fmtNum(valueFn(item))}</div>
+    </div>`).join('')}
+  </div>`;
+}
+
+/* ===== Render: Activity Chart (period-aware) ===== */
+function renderActivityChart(chartData) {
+  if (!chartData || !chartData.length) return `<div class="empty">No activity data yet</div>`;
+
+  const maxTotal = Math.max(...chartData.map(d => d.message_count + (d.tool_call_count || 0)), 1);
+
+  let bars = '';
+  let labels = '';
+  for (const bucket of chartData) {
+    const msgH = (bucket.message_count / maxTotal) * 100;
+    const toolH = ((bucket.tool_call_count || 0) / maxTotal) * 100;
+    const displayLabel = bucket.label || '';
+    const shortLabel = displayLabel.length > 6 ? displayLabel.slice(-5) : displayLabel;
+    bars += `<div class="day-bar" style="height:100%">
+      <div class="daily-chart-tooltip">${esc(displayLabel)}: ${bucket.message_count} msgs, ${bucket.tool_call_count || 0} tools</div>
+      <div class="bar-msg" style="height:${msgH}%"></div>
+      <div class="bar-tool" style="height:${toolH}%"></div>
+    </div>`;
+    labels += `<div class="day-label">${esc(shortLabel)}</div>`;
+  }
+
+  return `
+    <div class="daily-chart">${bars}</div>
+    <div class="daily-chart-labels">${labels}</div>
+    <div style="display:flex;gap:16px;margin-top:8px;font-size:0.75rem;color:var(--text-muted)">
+      <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:2px;vertical-align:middle"></span> Messages</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent4);border-radius:2px;vertical-align:middle"></span> Tool calls</span>
+    </div>`;
+}
+
+/* ===== Generic Sort ===== */
+function genericSort(items, col, asc, getters) {
+  return [...items].sort((a, b) => {
+    const g = getters[col];
+    if (!g) return 0;
+    const va = g(a), vb = g(b);
+    if (typeof va === 'string') {
+      const cmp = va.localeCompare(vb, undefined, { sensitivity: 'base' });
+      return asc ? cmp : -cmp;
+    }
+    return asc ? va - vb : vb - va;
+  });
+}
+
+/* ===== Render: Sortable Table ===== */
+function renderSortableTable(id, cols, data, limit, sortCol, sortAsc, rowFn) {
+  if (!data.length) return `<div class="empty">No data for this period</div>`;
+  const arrow = col => col === sortCol ? `<span class="sort-arrow">${sortAsc ? '\u25b2' : '\u25bc'}</span>` : '';
+  const showing = data.slice(0, limit);
+  const hasMore = data.length > limit;
+  return `
+  <table class="sortable-table" id="${id}">
+    <thead><tr>${cols.map(c =>
+      `<th data-col="${c.key}"${c.right ? ' class="right"' : ''}>${c.label}${arrow(c.key)}</th>`
+    ).join('')}</tr></thead>
+    <tbody>${showing.map(rowFn).join('')}</tbody>
+  </table>
+  ${hasMore ? `<button class="show-more-btn" data-table="${id}">Show more (${data.length - limit} remaining)</button>` : ''}`;
+}
+
+/* ===== Sessions ===== */
+const sessionGetters = {
+  session_id: s => s.session_id,
+  repo_id: s => s.repo_id || '',
+  last_seen: s => s.last_seen || '',
+  duration: s => durationMs(s.first_seen, s.last_seen),
+  message_count: s => s.message_count,
+  tokens: s => s.input_tokens + s.output_tokens,
+  tool_calls: s => s.tool_calls,
+  cost: s => estimateSessionCost(s),
+};
+
+function renderSessionsSection(sessions) {
+  const sorted = genericSort(sessions, sessionSortCol, sessionSortAsc, sessionGetters);
+  const cols = [
+    { key: 'session_id', label: 'Session' },
+    { key: 'repo_id', label: 'Repo' },
+    { key: 'last_seen', label: 'Last Active' },
+    { key: 'duration', label: 'Duration', right: true },
+    { key: 'message_count', label: 'Messages', right: true },
+    { key: 'tokens', label: 'Tokens', right: true },
+    { key: 'tool_calls', label: 'Tools', right: true },
+    { key: 'cost', label: 'Est. Cost', right: true },
+  ];
+  return renderSortableTable('sessionsTable', cols, sorted, sessionShowCount, sessionSortCol, sessionSortAsc, s => {
+    const totalTok = s.input_tokens + s.output_tokens;
+    return `<tr>
+      <td>${esc(s.session_id.slice(0, 8))}</td>
+      <td class="dir" title="${esc(s.repo_id || s.project_dir || '')}">${esc(repoName(s.repo_id) || shortenDir(s.project_dir))}</td>
+      <td>${esc(fmtDate(s.last_seen))}</td>
+      <td class="right">${fmtDuration(s.first_seen, s.last_seen)}</td>
+      <td class="right">${fmtNum(s.message_count)}</td>
+      <td class="right">${fmtNum(totalTok)}</td>
+      <td class="right">${fmtNum(s.tool_calls)}</td>
+      <td class="right">${fmtCost(estimateSessionCost(s))}</td>
+    </tr>`;
+  });
+}
+
+/* ===== Config Files ===== */
+const configGetters = {
+  file_type: f => f.file_type,
+  project: f => f.project || '',
+  path: f => f.path,
+  size_bytes: f => f.size_bytes,
+  est_tokens: f => f.est_tokens,
+};
+
+function badgeClass(t) {
+  if (t === 'claude-md') return 'claude-md';
+  if (t === 'rule') return 'rule';
+  if (t === 'skill') return 'skill';
+  if (t === 'memory') return 'memory';
+  return 'settings';
+}
+function badgeLabel(t) {
+  return { 'claude-md': 'CLAUDE.md', 'rule': 'Rule', 'skill': 'Skill', 'settings': 'Settings', 'settings-local': 'Local Settings', 'memory': 'Memory' }[t] || t;
+}
+
+function renderConfigRow(f) {
+  const sizeStr = f.size_bytes >= 1024 ? (f.size_bytes / 1024).toFixed(1) + ' KB' : f.size_bytes + ' B';
+  const tokStr = f.est_tokens >= 1000 ? (f.est_tokens / 1000).toFixed(1) + 'K' : String(f.est_tokens);
+  const warn = f.est_tokens > 2000 ? ' style="color:var(--accent4)"' : '';
+  const fileName = f.path.split('/').pop();
+  const fileLink = `<a href="file://${esc(f.path)}" title="${esc(f.path)}">${esc(fileName)}</a>`;
+  return `<tr>
+    <td><span class="type-badge ${badgeClass(f.file_type)}">${badgeLabel(f.file_type)}</span></td>
+    <td class="dir" title="${esc(f.project)}">${esc(projectName(f.project))}</td>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fileLink}</td>
+    <td class="right">${sizeStr}</td>
+    <td class="right"${warn}>${tokStr}</td>
+  </tr>`;
+}
+
+const configCols = [
+  { key: 'file_type', label: 'Type' },
+  { key: 'project', label: 'Project' },
+  { key: 'path', label: 'File' },
+  { key: 'size_bytes', label: 'Size', right: true },
+  { key: 'est_tokens', label: 'Est. Tokens', right: true },
+];
+
+function renderConfigTable() {
+  const sorted = genericSort(lastConfigData, configSortCol, configSortAsc, configGetters);
+  return renderSortableTable('configTable', configCols, sorted, configShowCount, configSortCol, configSortAsc, renderConfigRow);
+}
+
+const projectConfigGetters = {
+  project: p => p.project,
+  count: p => p.count,
+  tokens: p => p.tokens,
+};
+const projectConfigCols = [
+  { key: 'project', label: 'Project' },
+  { key: 'types', label: 'File Types' },
+  { key: 'count', label: 'Files', right: true },
+  { key: 'tokens', label: 'Est. Tokens', right: true },
+];
+
+function renderProjectConfigRow(p) {
+  const types = p.typeList.map(t => `<span class="type-badge ${badgeClass(t)}">${badgeLabel(t)}</span>`).join(' ');
+  return `<tr>
+    <td title="${esc(p.project)}" class="dir">${esc(projectName(p.project))}</td>
+    <td>${types}</td>
+    <td class="right">${p.count}</td>
+    <td class="right">${fmtTokensHtml(p.tokens)}</td>
+  </tr>`;
+}
+
+function renderProjectConfigTable() {
+  const sorted = genericSort(lastProjectConfigData, projectConfigSortCol, projectConfigSortAsc, projectConfigGetters);
+  return renderSortableTable('projectConfigTable', projectConfigCols, sorted, projectConfigShowCount, projectConfigSortCol, projectConfigSortAsc, renderProjectConfigRow);
+}
+
+function renderConfigSection(configFiles) {
+  const projectCount = lastProjectConfigData.length;
+  return `
+  <div class="panel section-mb">
+    <h2>Config by Project</h2>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+      ${projectCount} project${projectCount !== 1 ? 's' : ''} with configuration files
+    </div>
+    <div id="projectConfigContainer">${renderProjectConfigTable()}</div>
+  </div>
+  <div class="panel section-mb">
+    <h2>Config Files</h2>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+      ${configFiles.length} files across ${projectCount} projects
+    </div>
+    <div id="configContainer">${renderConfigTable()}</div>
+  </div>`;
+}
+
+/* ===== Insights ===== */
+function renderInsights(ins) {
+  let cards = '';
+
+  const se = ins.search_efficiency;
+  const pct = se.total_calls > 0 ? (se.ratio * 100).toFixed(0) : '0';
+  const seCls = se.total_calls > 0 && se.ratio > 0.40 ? 'warn' : 'good';
+  cards += `<div class="insight-card">
+    <div class="insight-header"><span class="icon">&#x1f50d;</span> Search Efficiency</div>
+    <div class="insight-desc">How much time Claude spends searching (Grep/Glob) vs doing actual work. Lower is better -- add file paths to CLAUDE.md to help Claude find code faster.</div>
+    ${se.total_calls > 0 ? `
+      <div class="insight-metric">${pct}% search calls</div>
+      <div style="font-size:0.85rem;color:var(--text-muted)">${fmtNum(se.search_calls)} Grep+Glob / ${fmtNum(se.total_calls)} total tool calls</div>
+      ${se.recommendation ? `<div class="insight-rec ${seCls}">${esc(se.recommendation)}</div>` : ''}
+    ` : '<div style="color:var(--text-muted);font-size:0.85rem">No tool usage data for this period</div>'}
+  </div>`;
+
+  const ce = ins.cache_efficiency;
+  const ceCls = ce.total_input_tokens > 0 && ce.hit_rate < 0.30 ? 'warn' : 'good';
+  cards += `<div class="insight-card">
+    <div class="insight-header"><span class="icon">&#x26a1;</span> Cache Efficiency</div>
+    <div class="insight-desc">How well <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank" rel="noopener">prompt caching</a> is working. Higher = more tokens served from cache = lower cost. Longer focused sessions improve cache reuse.</div>
+    ${ce.total_input_tokens > 0 ? `
+      <div class="insight-metric">${(ce.hit_rate * 100).toFixed(0)}% cache hit rate</div>
+      <div style="font-size:0.85rem;color:var(--text-muted)">${fmtNum(ce.total_cache_read_tokens)} cached / ${fmtNum(ce.total_input_tokens)} total input</div>
+      ${ce.recommendation ? `<div class="insight-rec ${ceCls}">${esc(ce.recommendation)}</div>` : ''}
+    ` : '<div style="color:var(--text-muted);font-size:0.85rem">No token data for this period</div>'}
+  </div>`;
+
+  cards += `<div class="insight-card">
+    <div class="insight-header"><span class="icon">&#x1f4a1;</span> Token-Heavy Sessions</div>
+    <div class="insight-desc">Sessions where input is 5x+ the output -- lots of context sent, little generated back. Consider splitting large tasks into smaller, focused sessions.</div>
+    ${ins.token_heavy_sessions.length > 0 ? `
+      <div class="insight-list">${ins.token_heavy_sessions.slice(0, 5).map(s =>
+        `<div class="insight-row">
+          <span class="mono" style="color:var(--accent)">${esc(s.session_id.slice(0,8))}</span>
+          <span>${fmtNum(s.input_tokens)} in / ${fmtNum(s.output_tokens)} out (${s.ratio.toFixed(0)}x)</span>
+        </div>`
+      ).join('')}</div>
+    ` : '<div style="color:var(--text-muted);font-size:0.85rem">No data for this period</div>'}
+  </div>`;
+
+  return `<div class="panel section-mb">
+    <h2>Insights</h2>
+    <div class="insight-cards">${cards}</div>
+  </div>`;
+}
+
+/* ===== Insights V2 Page ===== */
+function renderInsightsPageView(content) {
+  const ins = statsData ? statsData.insights : null;
+  if (!ins) {
+    content.innerHTML = '<div class="empty">No insights data available. Try syncing first.</div>';
+    return;
+  }
+
+  let html = '';
+
+  // Recommendations banner
+  if (ins.recommendations && ins.recommendations.length > 0) {
+    html += '<div class="panel section-mb"><h2>Recommendations</h2>';
+    html += '<div class="insight-cards">';
+    for (const rec of ins.recommendations) {
+      const icon = rec.severity === 'warn' ? '&#x26a0;' : rec.severity === 'good' ? '&#x2705;' : '&#x1f4a1;';
+      const cls = rec.severity === 'warn' ? 'warn' : 'good';
+      html += `<div class="insight-card">
+        <div class="insight-header"><span class="icon">${icon}</span> ${esc(rec.title)}</div>
+        <div class="insight-rec ${cls}">${esc(rec.detail)}</div>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Session patterns + Tool diversity
+  const sp = ins.session_patterns;
+  const td = ins.tool_diversity;
+  html += '<div class="grid-2 section-mb">';
+  html += '<div class="panel"><h2>Session Patterns</h2>';
+  if (sp.total_sessions > 0) {
+    html += `<div class="insight-cards" style="grid-template-columns:1fr">
+      <div class="insight-card">
+        <div class="insight-metric">${sp.total_sessions}</div>
+        <div class="insight-desc">sessions in this period</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-metric">${sp.avg_duration_mins} min</div>
+        <div class="insight-desc">average session duration</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-metric">${sp.avg_messages_per_session}</div>
+        <div class="insight-desc">average messages per session</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-metric">${fmtCost(sp.avg_cost_per_session)}</div>
+        <div class="insight-desc">average cost per session</div>
+      </div>`;
+    if (sp.busiest_hour != null) {
+      const h = sp.busiest_hour;
+      const label = h === 0 ? '12 AM' : h < 12 ? h + ' AM' : h === 12 ? '12 PM' : (h - 12) + ' PM';
+      html += `<div class="insight-card">
+        <div class="insight-metric">${label}</div>
+        <div class="insight-desc">busiest hour (${sp.busiest_hour_sessions} sessions)</div>
+      </div>`;
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="empty">No session data for this period</div>';
+  }
+  html += '</div>';
+
+  html += '<div class="panel"><h2>Tool Diversity</h2>';
+  if (td.total_calls > 0) {
+    html += `<div class="insight-cards" style="grid-template-columns:1fr">
+      <div class="insight-card">
+        <div class="insight-metric">${td.unique_tools}</div>
+        <div class="insight-desc">unique tools used</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-metric">${fmtNum(td.total_calls)}</div>
+        <div class="insight-desc">total tool calls</div>
+      </div>`;
+    if (td.top_tool) {
+      html += `<div class="insight-card">
+        <div class="insight-metric">${esc(td.top_tool)}</div>
+        <div class="insight-desc">most used tool (${td.top_tool_pct}% of calls)</div>
+      </div>`;
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="empty">No tool usage data for this period</div>';
+  }
+  html += '</div></div>';
+
+  // Search & Cache efficiency (detailed)
+  const se = ins.search_efficiency;
+  const ce = ins.cache_efficiency;
+  html += '<div class="grid-2 section-mb">';
+  html += '<div class="panel"><h2>Search Efficiency</h2>';
+  if (se.total_calls > 0) {
+    const pct = (se.ratio * 100).toFixed(0);
+    const cls = se.ratio > 0.40 ? 'warn' : 'good';
+    html += `<div class="insight-metric">${pct}% search calls</div>
+      <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">${fmtNum(se.search_calls)} Grep+Glob / ${fmtNum(se.total_calls)} total tool calls</div>
+      <div class="cache-bar" style="height:12px;margin-bottom:8px">
+        <div class="segment" style="width:${pct}%;background:${cls === 'warn' ? 'var(--accent4)' : 'var(--accent2)'}"></div>
+        <div class="segment" style="width:${100-pct}%;background:var(--border)"></div>
+      </div>
+      ${se.recommendation ? `<div class="insight-rec ${cls}">${esc(se.recommendation)}</div>` : ''}`;
+  } else {
+    html += '<div class="empty">No tool usage data</div>';
+  }
+  html += '</div>';
+
+  html += '<div class="panel"><h2>Cache Efficiency</h2>';
+  if (ce.total_input_tokens > 0) {
+    const hitPct = (ce.hit_rate * 100).toFixed(0);
+    const cls = ce.hit_rate < 0.30 ? 'warn' : 'good';
+    html += `<div class="insight-metric">${hitPct}% hit rate</div>
+      <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">${fmtNum(ce.total_cache_read_tokens)} cached / ${fmtNum(ce.total_input_tokens)} total input</div>
+      <div class="cache-bar" style="height:12px;margin-bottom:8px">
+        <div class="segment" style="width:${hitPct}%;background:var(--accent2)"></div>
+        <div class="segment" style="width:${100-hitPct}%;background:var(--border)"></div>
+      </div>
+      ${ce.recommendation ? `<div class="insight-rec ${cls}">${esc(ce.recommendation)}</div>` : ''}`;
+  } else {
+    html += '<div class="empty">No token data</div>';
+  }
+  html += '</div></div>';
+
+  // Daily cost trend chart
+  if (ins.daily_cost && ins.daily_cost.length > 0) {
+    const maxCost = Math.max(...ins.daily_cost.map(d => d.cost), 0.01);
+    html += '<div class="panel section-mb"><h2>Daily Cost Trend</h2>';
+    html += '<div class="daily-chart">';
+    for (const d of ins.daily_cost) {
+      const h = (d.cost / maxCost) * 100;
+      html += `<div class="day-bar" style="height:100%">
+        <div class="daily-chart-tooltip">${esc(d.date)}: ${fmtCost(d.cost)} (${d.sessions} sessions)</div>
+        <div class="bar-msg" style="height:${h}%;background:var(--accent2)"></div>
+      </div>`;
+    }
+    html += '</div><div class="daily-chart-labels">';
+    for (const d of ins.daily_cost) {
+      const short = d.date.length > 6 ? d.date.slice(5) : d.date;
+      html += `<div class="day-label">${esc(short)}</div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Config health
+  const ch = ins.config_health;
+  if (ch && ch.total_config_files > 0) {
+    html += '<div class="panel section-mb"><h2>Config Health</h2>';
+    html += '<div class="insight-cards">';
+    html += `<div class="insight-card">
+      <div class="insight-metric">${ch.total_config_files}</div>
+      <div class="insight-desc">config files across all projects</div>
+    </div>
+    <div class="insight-card">
+      <div class="insight-metric">${fmtNum(ch.total_tokens)}</div>
+      <div class="insight-desc">total config tokens loaded per session</div>
+    </div>`;
+    if (ch.heaviest_project) {
+      html += `<div class="insight-card">
+        <div class="insight-metric">${esc(projectName(ch.heaviest_project))}</div>
+        <div class="insight-desc">heaviest project (${fmtNum(ch.heaviest_tokens)} tokens)</div>
+      </div>`;
+    }
+    html += '</div>';
+    // CLAUDE.md warnings
+    if (ins.claude_md_files && ins.claude_md_files.length > 0) {
+      html += '<div style="margin-top:16px"><h2 style="margin-bottom:8px">CLAUDE.md Files</h2>';
+      html += '<div class="insight-list">';
+      for (const f of ins.claude_md_files) {
+        const tokStr = f.est_tokens >= 1000 ? (f.est_tokens / 1000).toFixed(1) + 'K' : String(f.est_tokens);
+        const warn = f.est_tokens > 2000;
+        html += `<div class="insight-row">
+          <span style="color:var(--text-muted);max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(f.path)}">${esc(f.path.split('/').slice(-3).join('/'))}</span>
+          <span${warn ? ' style="color:var(--accent4)"' : ''}>${tokStr} tokens</span>
+        </div>`;
+      }
+      html += '</div>';
+      if (ins.claude_md_files.some(f => f.recommendation)) {
+        const recs = ins.claude_md_files.filter(f => f.recommendation);
+        html += `<div class="insight-rec warn" style="margin-top:8px">${esc(recs[0].recommendation)}</div>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Token-heavy sessions
+  if (ins.token_heavy_sessions && ins.token_heavy_sessions.length > 0) {
+    html += '<div class="panel section-mb"><h2>Token-Heavy Sessions</h2>';
+    html += '<div class="insight-desc" style="margin-bottom:12px">Sessions where input is 5x+ the output -- lots of context sent, little generated back.</div>';
+    html += '<div class="insight-list">';
+    for (const s of ins.token_heavy_sessions.slice(0, 10)) {
+      html += `<div class="insight-row">
+        <span>
+          <span class="mono" style="color:var(--accent)">${esc(s.session_id.slice(0,8))}</span>
+          ${s.repo_id ? `<span style="color:var(--text-muted);margin-left:8px">${esc(repoName(s.repo_id))}</span>` : ''}
+        </span>
+        <span>${fmtNum(s.input_tokens)} in / ${fmtNum(s.output_tokens)} out (${s.ratio.toFixed(1)}x)</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  content.innerHTML = html;
+}
+
+/* ===== Prompts ===== */
+const historyGetters = {
+  display: e => e.display || '',
+  project: e => e.project || '',
+  timestamp: e => e.timestamp || 0,
+};
+const historyCols = [
+  { key: 'display', label: 'Prompt' },
+  { key: 'project', label: 'Project' },
+  { key: 'timestamp', label: 'Time', right: true },
+];
+
+function renderHistoryRow(e) {
+  const display = e.display || '';
+  const truncated = display.length > 80 ? display.slice(0, 80) + '...' : display;
+  return `<tr>
+    <td class="prompt-cell" title="${esc(display)}">${esc(truncated)}</td>
+    <td class="dir" title="${esc(e.project || '')}">${esc(projectName(e.project))}</td>
+    <td class="right">${fmtDateFromMs(e.timestamp)}</td>
+  </tr>`;
+}
+
+function renderHistoryTable(data) {
+  const items = data || lastHistoryData;
+  const sorted = genericSort(items, historySortCol, historySortAsc, historyGetters);
+  return renderSortableTable('historyTable', historyCols, sorted, historyShowCount, historySortCol, historySortAsc, renderHistoryRow);
+}
+
+function renderHistorySection() {
+  const filtered = promptsSearchTerm === ''
+    ? lastHistoryData
+    : lastHistoryData.filter(e =>
+        (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
+        (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
+      );
+  const showingText = lastHistoryData.length < promptsData.total_count
+    ? `${promptsData.total_count} total prompts (showing last ${lastHistoryData.length})`
+    : `${promptsData.total_count} total prompts`;
+  return `<div class="panel section-mb">
+    <h2>Prompts</h2>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+      ${showingText}
+    </div>
+    <div style="margin-bottom:16px">
+      <input type="text" id="promptsSearch" class="search-input" placeholder="Search prompts..." value="${esc(promptsSearchTerm)}">
+    </div>
+    <div id="historyContainer">${renderHistoryTable(filtered)}</div>
+  </div>`;
+}
+
+/* ===== Plans ===== */
+const plansGetters = {
+  title: p => p.title || p.name || '',
+  size_bytes: p => p.size_bytes || 0,
+  est_tokens: p => p.est_tokens || 0,
+  modified: p => p.modified || '',
+};
+const plansCols = [
+  { key: 'title', label: 'Title' },
+  { key: 'size_bytes', label: 'Size', right: true },
+  { key: 'est_tokens', label: 'Est. Tokens', right: true },
+  { key: 'modified', label: 'Modified', right: true },
+];
+
+function renderPlansRow(p) {
+  const sizeStr = p.size_bytes >= 1024 ? (p.size_bytes / 1024).toFixed(1) + ' KB' : (p.size_bytes || 0) + ' B';
+  const displayTitle = p.title || p.name || '--';
+  const fileName = (p.name || '--') + '.md';
+  const link = p.path
+    ? `<a href="file://${esc(p.path)}" title="${esc(fileName)}">${esc(displayTitle)}</a>`
+    : esc(displayTitle);
+  return `<tr>
+    <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${link}</td>
+    <td class="right">${sizeStr}</td>
+    <td class="right">${fmtTokensHtml(p.est_tokens || 0)}</td>
+    <td class="right">${fmtDate(p.modified)}</td>
+  </tr>`;
+}
+
+function renderPlansTable(data) {
+  const items = data || lastPlansData;
+  const sorted = genericSort(items, plansSortCol, plansSortAsc, plansGetters);
+  return renderSortableTable('plansTable', plansCols, sorted, plansShowCount, plansSortCol, plansSortAsc, renderPlansRow);
+}
+
+function renderPlansSection() {
+  const filtered = plansSearchTerm === ''
+    ? lastPlansData
+    : lastPlansData.filter(p =>
+        ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
+      );
+  return `<div class="panel section-mb">
+    <h2>Plans</h2>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+      ${lastPlansData.length} plan file${lastPlansData.length !== 1 ? 's' : ''} found
+    </div>
+    <div style="margin-bottom:16px">
+      <input type="text" id="plansSearch" class="search-input" placeholder="Search plans..." value="${esc(plansSearchTerm)}">
+    </div>
+    <div id="plansContainer">${renderPlansTable(filtered)}</div>
+  </div>`;
+}
+
+/* ===== Plugins ===== */
+const pluginsGetters = {
+  name: p => p.name || '',
+  description: p => p.description || '',
+  version: p => p.version || '',
+  scope: p => p.scope || '',
+  installed_at: p => p.installed_at || '',
+  last_updated: p => p.last_updated || '',
+};
+const pluginsCols = [
+  { key: 'name', label: 'Name' },
+  { key: 'description', label: 'Description' },
+  { key: 'version', label: 'Version' },
+  { key: 'scope', label: 'Scope' },
+  { key: 'installed_at', label: 'Installed', right: true },
+  { key: 'last_updated', label: 'Last Updated', right: true },
+];
+
+function renderPluginsRow(p) {
+  const desc = p.description || '';
+  const truncDesc = desc.length > 60 ? desc.slice(0, 60) + '...' : desc;
+  return `<tr>
+    <td>${esc(p.name || '--')}</td>
+    <td class="dir" title="${esc(desc)}" style="max-width:250px">${esc(truncDesc || '--')}</td>
+    <td>${esc(p.version || '--')}</td>
+    <td>${esc(p.scope || '--')}</td>
+    <td class="right">${fmtDate(p.installed_at)}</td>
+    <td class="right">${fmtDate(p.last_updated)}</td>
+  </tr>`;
+}
+
+function renderPluginsTable() {
+  const sorted = genericSort(lastPluginsData, pluginsSortCol, pluginsSortAsc, pluginsGetters);
+  return renderSortableTable('pluginsTable', pluginsCols, sorted, pluginsShowCount, pluginsSortCol, pluginsSortAsc, renderPluginsRow);
+}
+
+function renderPluginsSection(plugins) {
+  if (!plugins.length) {
+    return `<div class="panel section-mb">
+      <h2>Plugins</h2>
+      <div class="empty">No plugins installed</div>
+    </div>`;
+  }
+  return `<div class="panel section-mb">
+    <h2>Plugins</h2>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+      ${plugins.length} plugin${plugins.length !== 1 ? 's' : ''} installed
+    </div>
+    <div id="pluginsContainer">${renderPluginsTable()}</div>
+  </div>`;
+}
+
+/* ===== Permissions ===== */
+const permissionsGetters = {
+  rule: r => r.rule || '',
+  action: r => r.action || '',
+  scope: r => r.scope || '',
+};
+const permissionsCols = [
+  { key: 'rule', label: 'Rule' },
+  { key: 'action', label: 'Action' },
+  { key: 'scope', label: 'Scope' },
+];
+
+function scopeBadgeClass(scope) {
+  if (scope === 'global') return 'scope-global';
+  if (scope === 'local') return 'scope-local';
+  return 'scope-project';
+}
+
+function renderPermissionsRow(r) {
+  return `<tr>
+    <td class="dir" style="max-width:400px" title="${esc(r.rule)}">${esc(r.rule)}</td>
+    <td><span class="action-badge ${r.action === 'allow' ? 'allow' : 'deny'}">${esc(r.action)}</span></td>
+    <td><span class="scope-badge ${scopeBadgeClass(r.scope)}">${esc(r.scope)}</span></td>
+  </tr>`;
+}
+
+function renderPermissionsTable() {
+  const sorted = genericSort(lastPermissionsData, permissionsSortCol, permissionsSortAsc, permissionsGetters);
+  return renderSortableTable('permissionsTable', permissionsCols, sorted, permissionsShowCount, permissionsSortCol, permissionsSortAsc, renderPermissionsRow);
+}
+
+function renderPermissionsSection(permissions) {
+  const mode = permissions.default_mode || 'default';
+  const rules = permissions.rules || [];
+  return `<div class="panel section-mb">
+    <h2>Permissions</h2>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+      ${rules.length} permission rule${rules.length !== 1 ? 's' : ''} (default mode: <span class="mode-badge mode-${mode === 'allowlist' ? 'allowlist' : mode === 'denylist' ? 'denylist' : 'default'}">${esc(mode)}</span>)
+    </div>
+    <div id="permissionsContainer">${renderPermissionsTable()}</div>
+  </div>`;
+}
+
+/* ===== View Renderers ===== */
+function renderStatsView(content) {
+  const { summary, sessions, cwds, insights, cost, models, activityChart } = statsData;
+  content.innerHTML = `
+    ${renderActiveSessions(activeSessionsData)}
+    ${renderCards(summary, cost)}
+    <div class="panel section-mb">
+      <h2>${cachedActivityChartTitle}</h2>
+      ${renderActivityChart(activityChart)}
+    </div>
+    <div class="grid-2 section-mb">
+      <div class="panel">
+        <h2>Models</h2>
+        ${renderBarChart(cachedSortedModels,
+          (m, full) => full ? m.model : formatModelName(m.model),
+          m => m.input_tokens + m.output_tokens,
+          m => modelColor(m.model),
+          'No model data for this period'
+        )}
+      </div>
+      <div class="panel">
+        <h2>Projects</h2>
+        ${renderBarChart(cwds,
+          (c, full) => full ? (c.repo_id || '--') : repoName(c.repo_id),
+          c => c.input_tokens + c.output_tokens,
+          () => '#d2a8ff',
+          'No project data for this period'
+        )}
+      </div>
+    </div>
+    <div class="grid-2 section-mb">
+      <div class="panel">
+        <h2>Tools</h2>
+        ${renderBarChart(summary.top_tools.filter(t => !t[0].startsWith('mcp__')).slice(0, DEFAULT_CHART_ROWS),
+          (t) => t[0],
+          t => t[1],
+          t => toolColor(t[0]),
+          'No tool usage data for this period'
+        )}
+      </div>
+      <div class="panel">
+        <h2>MCP</h2>
+        ${renderBarChart(insights.mcp_tools.slice(0, DEFAULT_CHART_ROWS),
+          (m, full) => full ? m.tool : m.tool.replace(/^mcp__/, ''),
+          m => m.call_count,
+          () => '#f0883e',
+          'No MCP tools used in this period'
+        )}
+      </div>
+    </div>
+    <div class="panel section-mb">
+      <h2>Sessions</h2>
+      <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
+        ${sessions.length} session${sessions.length !== 1 ? 's' : ''} found
+      </div>
+      <div id="sessionsContainer">${renderSessionsSection(sessions)}</div>
+    </div>
+  `;
+}
+
+function renderSetupView(content) {
+  content.innerHTML = `
+    ${renderConfigSection(cachedMergedConfigFiles)}
+    ${renderPluginsSection(lastPluginsData)}
+    ${renderPermissionsSection(setupData.permissions)}
+  `;
+}
+
+function renderPlansView(content) {
+  content.innerHTML = renderPlansSection();
+}
+
+function renderPromptsView(content) {
+  content.innerHTML = renderHistorySection();
+}
+
+/* ===== renderCurrentView ===== */
+function renderCurrentView() {
+  // Update nav active state
+  $$('.nav-tabs a').forEach(a => a.classList.toggle('active', a.dataset.view === currentView));
+
+  // Show/hide period tabs and sync button
+  const showPeriod = currentView === 'stats' || currentView === 'insights';
+  $('#periodBar').style.display = showPeriod ? 'flex' : 'none';
+  $('#syncBtn').style.display = showPeriod ? 'flex' : 'none';
+
+  const content = $('#content');
+  switch (currentView) {
+    case 'stats': renderStatsView(content); break;
+    case 'insights': renderInsightsPageView(content); break;
+    case 'setup': renderSetupView(content); break;
+    case 'plans': renderPlansView(content); break;
+    case 'prompts': renderPromptsView(content); break;
+  }
+  bindAllHandlers();
+}
+
+/* ===== Main Render ===== */
+async function render() {
+  const content = $('#content');
+  content.innerHTML = '<div class="loading">Loading analytics</div>';
+
+  try {
+    await loadAllData();
+    renderCurrentView();
+  } catch (err) {
+    content.innerHTML = `<div class="empty">
+      Failed to load analytics.<br>
+      <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
+    </div>`;
+  }
+}
+
+function bindSearchHandlers() {
+  const plansSearchEl = $('#plansSearch');
+  if (plansSearchEl) {
+    plansSearchEl.addEventListener('input', (e) => {
+      plansSearchTerm = e.target.value;
+      plansShowCount = DEFAULT_TABLE_ROWS;
+      const filtered = plansSearchTerm === ''
+        ? lastPlansData
+        : lastPlansData.filter(p =>
+            ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
+          );
+      $('#plansContainer').innerHTML = renderPlansTable(filtered);
+      bindTableHandlers();
+    });
+  }
+  const promptsSearchEl = $('#promptsSearch');
+  if (promptsSearchEl) {
+    promptsSearchEl.addEventListener('input', (e) => {
+      promptsSearchTerm = e.target.value;
+      historyShowCount = DEFAULT_TABLE_ROWS;
+      const filtered = promptsSearchTerm === ''
+        ? lastHistoryData
+        : lastHistoryData.filter(e =>
+            (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
+            (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
+          );
+      $('#historyContainer').innerHTML = renderHistoryTable(filtered);
+      bindTableHandlers();
+    });
+  }
+}
+
+function bindAllHandlers() {
+  bindSearchHandlers();
+  bindTableHandlers();
+}
+
+function bindTableHandlers() {
+  // Sessions table sort
+  $$('#sessionsTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (sessionSortCol === col) sessionSortAsc = !sessionSortAsc;
+      else { sessionSortCol = col; sessionSortAsc = col === 'session_id' || col === 'repo_id'; }
+      $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
+      bindTableHandlers();
+    });
+  });
+  $$('#projectConfigTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (projectConfigSortCol === col) projectConfigSortAsc = !projectConfigSortAsc;
+      else { projectConfigSortCol = col; projectConfigSortAsc = col === 'project'; }
+      $('#projectConfigContainer').innerHTML = renderProjectConfigTable();
+      bindTableHandlers();
+    });
+  });
+  $$('#configTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (configSortCol === col) configSortAsc = !configSortAsc;
+      else { configSortCol = col; configSortAsc = col === 'path' || col === 'project' || col === 'file_type'; }
+      $('#configContainer').innerHTML = renderConfigTable();
+      bindTableHandlers();
+    });
+  });
+  $$('#historyTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (historySortCol === col) historySortAsc = !historySortAsc;
+      else { historySortCol = col; historySortAsc = col === 'display' || col === 'project'; }
+      const filtered = promptsSearchTerm === ''
+        ? lastHistoryData
+        : lastHistoryData.filter(e =>
+            (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
+            (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
+          );
+      $('#historyContainer').innerHTML = renderHistoryTable(filtered);
+      bindTableHandlers();
+    });
+  });
+  $$('#plansTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (plansSortCol === col) plansSortAsc = !plansSortAsc;
+      else { plansSortCol = col; plansSortAsc = col === 'name'; }
+      const filtered = plansSearchTerm === ''
+        ? lastPlansData
+        : lastPlansData.filter(p =>
+            ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
+          );
+      $('#plansContainer').innerHTML = renderPlansTable(filtered);
+      bindTableHandlers();
+    });
+  });
+  $$('#pluginsTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (pluginsSortCol === col) pluginsSortAsc = !pluginsSortAsc;
+      else { pluginsSortCol = col; pluginsSortAsc = col === 'name' || col === 'scope'; }
+      $('#pluginsContainer').innerHTML = renderPluginsTable();
+      bindTableHandlers();
+    });
+  });
+  $$('#permissionsTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (permissionsSortCol === col) permissionsSortAsc = !permissionsSortAsc;
+      else { permissionsSortCol = col; permissionsSortAsc = col === 'rule' || col === 'scope'; }
+      $('#permissionsContainer').innerHTML = renderPermissionsTable();
+      bindTableHandlers();
+    });
+  });
+  $$('.show-more-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const table = btn.dataset.table;
+      if (table === 'sessionsTable') {
+        sessionShowCount += DEFAULT_TABLE_ROWS;
+        $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
+      } else if (table === 'configTable') {
+        configShowCount += DEFAULT_TABLE_ROWS;
+        $('#configContainer').innerHTML = renderConfigTable();
+      } else if (table === 'projectConfigTable') {
+        projectConfigShowCount += DEFAULT_TABLE_ROWS;
+        $('#projectConfigContainer').innerHTML = renderProjectConfigTable();
+      } else if (table === 'historyTable') {
+        historyShowCount += DEFAULT_TABLE_ROWS;
+        const filtered = promptsSearchTerm === ''
+          ? lastHistoryData
+          : lastHistoryData.filter(e =>
+              (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
+              (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
+            );
+        $('#historyContainer').innerHTML = renderHistoryTable(filtered);
+      } else if (table === 'plansTable') {
+        plansShowCount += DEFAULT_TABLE_ROWS;
+        const filtered = plansSearchTerm === ''
+          ? lastPlansData
+          : lastPlansData.filter(p =>
+              ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
+            );
+        $('#plansContainer').innerHTML = renderPlansTable(filtered);
+      } else if (table === 'pluginsTable') {
+        pluginsShowCount += DEFAULT_TABLE_ROWS;
+        $('#pluginsContainer').innerHTML = renderPluginsTable();
+      } else if (table === 'permissionsTable') {
+        permissionsShowCount += DEFAULT_TABLE_ROWS;
+        $('#permissionsContainer').innerHTML = renderPermissionsTable();
+      }
+      bindTableHandlers();
+    });
+  });
+}
+
+// Nav tab switching
+$$('.nav-tabs a').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    history.pushState({}, '', a.href);
+    currentView = a.dataset.view;
+    if (dataLoaded) {
+      renderCurrentView();
+    }
+  });
+});
+
+window.addEventListener('popstate', () => {
+  currentView = getCurrentView();
+  if (dataLoaded) {
+    renderCurrentView();
+  }
+});
+
+// Period tab switching
+$$('.period-tabs button').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    $$('.period-tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPeriod = btn.dataset.period;
+    const content = $('#content');
+    content.innerHTML = '<div class="loading">Loading analytics</div>';
+    try {
+      await reloadStatsData();
+      renderCurrentView();
+    } catch (err) {
+      content.innerHTML = `<div class="empty">
+        Failed to load analytics.<br>
+        <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
+      </div>`;
+    }
+  });
+});
+
+// Sync button
+$('#syncBtn').addEventListener('click', async () => {
+  const btn = $('#syncBtn');
+  btn.classList.add('syncing');
+  btn.textContent = 'Syncing...';
+  try {
+    const res = await fetch('/sync', { method: 'POST' });
+    const data = await res.json();
+    lastSyncTime = new Date();
+    updateSyncTime();
+    btn.textContent = `\u2713 ${data.messages_ingested} new`;
+    setTimeout(() => { btn.innerHTML = '&#x21bb; Sync'; btn.classList.remove('syncing'); }, 2000);
+    render();
+  } catch {
+    btn.textContent = '\u2717 Failed';
+    setTimeout(() => { btn.innerHTML = '&#x21bb; Sync'; btn.classList.remove('syncing'); }, 2000);
+  }
+});
+
+// Update nav active state on initial load
+$$('.nav-tabs a').forEach(a => a.classList.toggle('active', a.dataset.view === currentView));
+
+// Show/hide period tabs based on initial view
+$('#periodBar').style.display = (currentView === 'stats' || currentView === 'insights') ? 'flex' : 'none';
+$('#syncBtn').style.display = (currentView === 'stats' || currentView === 'insights') ? 'flex' : 'none';
+
+lastSyncTime = new Date();
+updateSyncTime();
+render();
+</script>
+</body>
+</html>

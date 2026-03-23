@@ -37,7 +37,7 @@ pub fn is_conversational_followup(prompt: &str) -> bool {
         "no",
         "not yet",
     ];
-    let stripped = lower.trim_end_matches(|c: char| matches!(c, '.' | '!' | ',' | '?' | ' '));
+    let stripped = lower.trim_end_matches(['.', '!', ',', '?', ' ']);
     if exact_acks.contains(&stripped) {
         return true;
     }

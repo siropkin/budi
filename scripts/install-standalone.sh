@@ -79,7 +79,7 @@ main() {
   [ -d "$pkg_dir" ] || fail "Unexpected archive layout"
 
   mkdir -p "$BIN_DIR"
-  for bin in budi budi-daemon budi-mcp; do
+  for bin in budi budi-daemon; do
     if [ -x "$pkg_dir/$bin" ]; then
       install -m 0755 "$pkg_dir/$bin" "$BIN_DIR/$bin"
       log "Installed $bin -> $BIN_DIR/$bin"
@@ -90,13 +90,19 @@ main() {
   "$BIN_DIR/budi" --version || fail "Installed binary failed to run"
 
   if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
+    log ""
     log "NOTE: $BIN_DIR is not in your PATH."
     log "Add this to your shell profile:"
     log "  export PATH=\"$BIN_DIR:\$PATH\""
   fi
 
-  log "Done! Next step:"
-  log "  cd /path/to/your/repo && budi init --index"
+  log ""
+  log "Installed budi $tag ($target)"
+  log ""
+  log "Get started:"
+  log "  budi init --global  # set up hooks globally (all repos and worktrees)"
+  log "  budi doctor      # verify everything is working"
+  log "  budi stats       # view usage analytics"
 }
 
 main

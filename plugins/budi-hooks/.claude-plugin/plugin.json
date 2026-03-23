@@ -1,7 +1,7 @@
 {
   "name": "budi-hooks",
-  "version": "3.15.0",
-  "description": "Claude Code hooks that inject local budi context before Claude starts searching.",
+  "version": "4.1.0",
+  "description": "Claude Code hooks that track token usage and prompt analytics for the budi dashboard.",
   "author": {
     "name": "Ivan Seredkin",
     "url": "https://github.com/siropkin/budi"
@@ -12,8 +12,8 @@
   "keywords": [
     "claude-code",
     "hooks",
-    "context",
-    "retrieval",
+    "analytics",
+    "tokens",
     "rust"
   ]
 }

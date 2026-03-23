@@ -5,43 +5,63 @@
 [![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-**Stop paying Claude to rediscover your codebase on every prompt.**
+**WakaTime for Claude Code.** See where your tokens go.
 
-`budi` indexes your repo locally and pre-injects the right code snippets before Claude starts searching. Faster answers, fewer wasted tool calls, 3-32% lower cost.
+`budi` tracks every Claude Code session — tokens, costs, prompts, and context composition — in a local-first analytics dashboard. No cloud. No uploads. Just insight into your AI spend.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="budi demo — init, index, and preview on Flask" width="700">
+  <img src="assets/dashboard-stats.png" alt="budi dashboard — stats page" width="800">
+</p>
+
+<p align="center">
+  <img src="assets/dashboard-insights.png" alt="budi dashboard — insights page" width="800">
+</p>
+
+<p align="center">
+  <img src="assets/cli-demo.gif" alt="budi CLI — stats, cost, sessions" width="800">
 </p>
 
 ## How it works
 
-You ask Claude Code a question. Before Claude starts searching, `budi` detects your intent, searches a local index across five retrieval channels (lexical, semantic, symbol, path, call graph), and injects the best snippets into context. Claude starts reasoning with the right code already in view.
+Budi uses [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) — the official event system that lets external tools observe what Claude Code does in real time. When you run `budi init` in a repo, it registers five hooks in `.claude/settings.local.json`:
 
-No extra tool calls. No round trips. Just the code Claude was about to look for, already there.
+| Hook | What budi captures |
+|------|-------------------|
+| **SessionStart** | New session begins — records session ID, repo, timestamp |
+| **UserPromptSubmit** | Every prompt you send — prompt text, model, token counts |
+| **PostToolUse** | File operations (Read, Write, Edit, Glob) — which files Claude touches |
+| **SubagentStart** | Sub-agent spawns — tracks parallel work |
+| **Stop** | Session ends — finalizes duration, total cost |
+
+Hooks fire as HTTP calls to a lightweight local daemon (port 7878) that aggregates the data into a SQLite database. The daemon and hooks are written in Rust — hook responses return in sub-millisecond time, so you never notice them. The ~6 MB binary handles everything: data collection, analytics, web dashboard, and CLI.
+
+**What budi does NOT collect:** file contents, prompt responses, or anything from Claude's output. Only metadata — timestamps, token counts, tool names, file paths, and costs.
 
 ## Features
 
-- **Fast** — retrieval runs in ~10ms; indexing takes seconds with warm cache
-- **Automatic** — Claude Code hooks run silently in the background
-- **Local** — your code stays on your machine; no cloud, no uploads
-- **Intent-aware** — routes queries through symbol lookup, call tracing, architecture, config, and test discovery
-- **Language-aware** — AST-powered chunking for JS/TS, Python, Rust, Go, Java, C/C++, C#, Ruby, Kotlin, Swift, Scala, PHP
-- **Incremental** — file edits update the index in-place without rebuilding
-- **Controllable** — skip once with `@nobudi`, force once with `@forcebudi`
+- **Built with Rust** — ~6 MB binary, sub-millisecond hook latency, minimal CPU/memory footprint
+- **Local-first** — all data stays on your machine in a SQLite database, no cloud, no uploads
+- **Automatic** — hooks run silently in the background, no workflow changes needed
+- **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
+- **Session analytics** — prompt counts, token usage, and cost per session
+- **Status line** — live session stats right in your Claude Code terminal
+- **Web dashboard** — multi-page analytics UI at `http://localhost:7878/dashboard`
+- **Insights** — actionable recommendations based on your usage patterns
 
-## A/B results
+## How budi compares
 
-Tested on 8 open-source repos (144 judged prompts) with an independent LLM judge:
-
-| Metric | Result |
-|--------|--------|
-| Non-regression rate | **~85%** single-run (Flask & Fastify 100%) |
-| Injection regression rate | **~8-10%** (when budi injects context) |
-| Cost savings | **3-25%** lower on most repos |
-
-budi's goal: same answer quality at lower cost. Ties (same quality, less cost) are the primary success metric. Many single-run "regressions" are LLM variance on queries where budi correctly skipped injection.
-
-Full methodology, prompts, and per-prompt evidence: [docs/benchmark.md](docs/benchmark.md)
+| | budi | ccusage | Sniffly | Claude `/cost` |
+|---|---|---|---|---|
+| Real-time tracking | **Yes** (hooks) | No (parses logs) | No (parses logs) | Live only |
+| Cost history | **Per-session + daily** | Per-session | Per-session | Current session |
+| Web dashboard | **Yes** (5 pages) | No | Yes | No |
+| Status line | **Yes** | No | No | No |
+| Insights & recs | **Yes** | No | No | No |
+| Per-repo breakdown | **Yes** | No | No | No |
+| File activity tracking | **Yes** (PostToolUse) | No | No | No |
+| Privacy | 100% local | Local | Local | Built-in |
+| Setup | `budi init` | `npx ccusage` | `sniffly init` | Built-in |
+| Built with | Rust | TypeScript | Python | — |
 
 ## Install
 
@@ -71,53 +91,103 @@ Or build from source (requires Rust toolchain):
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
 ```
 
-**Step 2 — Set up your repo**
+**Step 2 — Set up hooks**
 
+Global (recommended — works for all repos and worktrees):
+```bash
+budi init --global
+```
+
+Or per-repo:
 ```bash
 cd /path/to/your/repo
-budi init --index
+budi init
 ```
 
-This creates the index and installs Claude Code hooks automatically. Restart Claude Code so hook settings take effect.
+This installs Claude Code hooks, starts the daemon, and adds the status line to your Claude Code settings. Restart Claude Code so hook settings take effect.
 
-**Step 3 — Use Claude Code normally.** Budi injects relevant context before each prompt.
+**Step 3 — Use Claude Code normally.** Budi tracks your sessions in the background.
 
-## Useful commands
+## Status line
+
+Budi adds a live status line to Claude Code that shows key metrics at a glance. It is installed automatically when you run `budi init`.
+
+<p align="center">
+  <img src="assets/statusline.png" alt="budi status line in Claude Code" width="800">
+</p>
+
+### Fields
+
+| Field | Description |
+|-------|-------------|
+| **Model** | Active Claude model (e.g. `Claude 4 Opus`) |
+| **ctx** | Context window usage — green (<60%), yellow (60–79%), red (80%+) |
+| **session** | Cost of the current session (real-time from Claude Code) |
+| **today** | Total cost across all sessions today (from budi daemon) |
+| **5h** | 5-hour rate limit usage (Pro/Max plans only) — yellow at 50%+, red at 80%+ |
+| **↗ dashboard** | Clickable link to open the web dashboard |
+
+When no session data is available yet, the status line shows `✓ tracking` to confirm budi is active.
+
+### Manual install / reinstall
+
+If you skipped `budi init` or need to reinstall the status line:
 
 ```bash
-budi doctor              # check installation health
-budi repo status         # see index state and stats
-budi repo search "X"     # search the index directly
-budi repo preview "..."  # preview what budi would inject
-budi index --hard        # full re-index
+budi statusline --install
 ```
 
-## MCP server
+This writes the status line config to `~/.claude/settings.json`. Restart Claude Code to activate.
 
-`budi` also works in Cursor, Zed, Windsurf, and any editor supporting [MCP](https://modelcontextprotocol.io/). See [configuration docs](docs/configuration.md#mcp-server) for setup.
+## Web dashboard
 
-## Compared to alternatives
+Run `budi dashboard` to open the web UI in your browser, or click the dashboard link in the status line.
 
-| | budi | context-mode | Augment Context Engine | GitNexus |
-|---|---|---|---|---|
-| **Strategy** | Pre-inject before search | Compress output after search | MCP search on demand | Knowledge graph + MCP |
-| **Latency** | Zero (hooks, no round trip) | Zero (intercept) | +1 tool call | +1 tool call |
-| **Retrieval** | 5-channel with intent routing | BM25 with fallback | Proprietary | BM25 + semantic |
-| **A/B validated** | 8 repos, 144 prompts | No | No | No |
-| **Privacy** | 100% local | 100% local | Cloud | 100% local |
+| Page | What it shows |
+|------|---------------|
+| **Stats** | Cost, tokens, activity chart, model breakdown, projects, tools, MCP servers, sessions |
+| **Insights** | Recommendations, session patterns, tool diversity, daily cost trend, config health |
+| **Setup** | Config files, memory, plugins, permissions |
+| **Plans** | Searchable plan files with titles extracted from markdown headings |
+| **Prompts** | Searchable prompt history (last 500 entries) |
 
-budi is complementary with output-compression tools like context-mode.
+## CLI commands
 
-## Docs
+```bash
+budi init                     # set up hooks, daemon, and status line in the current repo
+budi init --global            # install hooks globally (all repos and worktrees)
+budi doctor                   # check installation health
+budi dashboard                # open the web dashboard in the browser
+budi update                   # check for updates and install the latest version
+budi stats                    # token usage summary (--period today|week|month|all)
+budi stats --session <id>     # per-session detail
+budi stats --files            # repositories ranked by usage
+budi cost                     # estimated cost breakdown by model
+budi models                   # model usage breakdown
+budi sessions                 # list sessions with stats
+budi plugins                  # installed Claude Code plugins
+budi projects                 # repositories ranked by usage
+budi insights                 # actionable recommendations
+budi sync                     # sync Claude Code transcripts into the analytics database
+budi statusline               # print the status line (used internally by Claude Code)
+budi statusline --install     # install status line in ~/.claude/settings.json
+```
 
-- [Benchmark methodology](docs/benchmark.md) and [per-prompt evidence](docs/benchmark-details.md)
-- [Configuration](docs/configuration.md)
-- [Architecture](docs/architecture.md)
-- [Installer details](docs/installer.md)
+All data commands support `--period today|week|month|all` and `--json` for scripting:
+
+```bash
+budi cost --period today --json    # pipe to jq, scripts, or dashboards
+budi sessions --json | jq '.[0]'  # get latest session as JSON
+```
+
+## Roadmap
+
+- Parallel agent tracking
+- Cursor IDE integration (unified multi-editor dashboard)
 
 ## Privacy
 
-Everything runs locally. No cloud index. No repo upload. No external retrieval service.
+Everything runs locally. No cloud services. No data leaves your machine. Budi only stores metadata (timestamps, token counts, file paths, costs) — never file contents or prompt responses.
 
 ## License
 

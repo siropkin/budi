@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -8,61 +7,29 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use budi_core::analytics;
+use budi_core::claude_data;
 use budi_core::config::{self, BudiConfig, CLAUDE_LOCAL_SETTINGS};
-use budi_core::hooks::{
-    AsyncSystemMessageOutput, PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput,
-};
-use budi_core::index;
-use budi_core::project_map;
-use budi_core::reason_codes::{
-    HOOK_REASON_DAEMON_UNAVAILABLE, HOOK_REASON_OK, HOOK_REASON_QUERY_ERROR,
-    HOOK_REASON_QUERY_HTTP_ERROR, HOOK_REASON_QUERY_TIMEOUT, HOOK_REASON_QUERY_TRANSPORT_ERROR,
-    HOOK_REASON_RESPONSE_PARSE_ERROR, HOOK_REASON_UPDATE_CONNECT_ERROR, HOOK_REASON_UPDATE_FAILED,
-    HOOK_REASON_UPDATE_HTTP_ERROR, HOOK_REASON_UPDATE_TIMEOUT, SKIP_REASON_FORCED_SKIP,
-    format_skip_hook_reason,
-};
-use budi_core::rpc::{
-    IndexProgressRequest, IndexProgressResponse, IndexRequest, IndexResponse, QueryDiagnostics,
-    QueryRequest, QueryResponse, QueryResultItem, StatusRequest, StatusResponse, UpdateRequest,
-};
+use budi_core::cost;
+use budi_core::hooks::{PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput};
+use budi_core::insights;
+use budi_core::rpc::{StatusRequest, StatusResponse};
+use chrono::{Datelike, Local, NaiveDate};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
-use rusqlite::Connection;
-use serde::Serialize;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
-mod prompt_controls;
-mod retrieval_eval;
-#[cfg(test)]
-use prompt_controls::PromptDirectives;
-use prompt_controls::{
-    build_runtime_guard_context, evaluate_context_skip, excerpt, parse_prompt_directives,
-    sanitize_prompt_for_query,
-};
-use retrieval_eval::{RetrievalEvalReport, load_retrieval_eval_report, run_retrieval_eval};
-
 const HEALTH_TIMEOUT_SECS: u64 = 3;
-const PREVIEW_QUERY_TIMEOUT_SECS: u64 = 180;
-const SEARCH_QUERY_TIMEOUT_SECS: u64 = 30;
-const BENCH_QUERY_TIMEOUT_SECS: u64 = 30;
-const EVAL_QUERY_TIMEOUT_SECS: u64 = 45;
-const DOCTOR_QUERY_TIMEOUT_SECS: u64 = 8;
-const HOOK_QUERY_TIMEOUT_SECS: u64 = 12;
-const HOOK_QUERY_RETRY_TIMEOUT_SECS: u64 = 45;
 const STATUS_TIMEOUT_SECS: u64 = 120;
-const UPDATE_TIMEOUT_SECS: u64 = 180;
-const INDEX_TIMEOUT_SECS: u64 = 21_600;
 const HOOK_LOG_LOCK_TIMEOUT_MS: u64 = 800;
 const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
-#[command(
-    about = "Local RAG context booster for Claude Code — pre-injects relevant code snippets via hooks"
-)]
+#[command(about = "WakaTime for Claude Code — see where your tokens go")]
 #[command(version)]
-#[command(after_help = "Get started:\n  cd /path/to/repo && budi init --index")]
+#[command(after_help = "Get started:\n  budi init --global")]
 struct Cli {
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(long, short = 'v', action = ArgAction::Count, global = true)]
@@ -73,55 +40,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Set up budi in the current repo (config, hooks, daemon)
+    /// Set up budi (use --global for all repos, or run in a repo for local setup)
     Init {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
-        /// Also build the code index after setup (equivalent to running budi index --hard)
+        /// Install hooks globally in ~/.claude/settings.json (works for all repos)
         #[arg(long, default_value_t = false)]
-        index: bool,
+        global: bool,
     },
-    /// Build or refresh the code index for the current repo
-    Index {
-        #[arg(long, hide = true)]
-        repo_root: Option<PathBuf>,
-        /// Force a full re-index (discard cached chunks and embeddings)
-        #[arg(long, default_value_t = false)]
-        hard: bool,
-        /// Show indexing progress in real time
-        #[arg(long, default_value_t = false)]
-        progress: bool,
-        #[arg(long = "ignore-pattern", action = ArgAction::Append, hide = true)]
-        ignore_patterns: Vec<String>,
-        #[arg(long = "include-ext", action = ArgAction::Append, hide = true)]
-        include_extensions: Vec<String>,
-    },
-    /// Check repo health: config, hooks, daemon, index
+    /// Check repo health: config, hooks, daemon
     Doctor {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
-        #[arg(long, default_value_t = false, hide = true)]
-        deep: bool,
     },
-    // Dev-only benchmarking workflow; keep available but out of daily help.
-    #[command(hide = true)]
-    Bench {
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-        #[arg(long)]
-        prompt: String,
-        #[arg(long, default_value_t = 20)]
-        iterations: usize,
-    },
-    // Dev-only retrieval evaluation workflow; keep available but out of daily help.
-    #[command(hide = true)]
-    Eval {
-        #[command(subcommand)]
-        command: EvalCommands,
-    },
-    /// Manage indexed repos: status, search, preview
+    /// Manage repos
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
@@ -131,12 +65,92 @@ enum Commands {
         #[command(subcommand)]
         command: HookCommands,
     },
+    /// Show Claude Code usage analytics
+    Stats {
+        /// Time period to show (default: today)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
+        period: StatsPeriod,
+        /// Show details for a specific session (ID or prefix)
+        #[arg(long)]
+        session: Option<String>,
+        /// Show most-used working directories
+        #[arg(long, default_value_t = false)]
+        files: bool,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show actionable insights and recommendations
+    Insights {
+        /// Time period to analyze (default: all)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
+        period: StatsPeriod,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Sync Claude Code transcripts into the analytics database
+    Sync,
+    /// Show estimated token costs by model
+    Cost {
+        /// Time period (default: all)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
+        period: StatsPeriod,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show model usage breakdown
+    Models {
+        /// Time period (default: all)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
+        period: StatsPeriod,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// List sessions with stats
+    Sessions {
+        /// Time period (default: today)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
+        period: StatsPeriod,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show installed Claude Code plugins
+    Plugins {
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show repositories ranked by usage
+    Projects {
+        /// Time period (default: all)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
+        period: StatsPeriod,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Open the budi dashboard in the browser
+    Dashboard,
+    /// Update budi to the latest version
+    Update,
     /// Print a compact status line for Claude Code (reads stdin, outputs one line)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
         #[arg(long, default_value_t = false)]
         install: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StatsPeriod {
+    Today,
+    Week,
+    Month,
+    All,
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,67 +168,12 @@ enum HookCommands {
 }
 
 #[derive(Debug, Subcommand)]
-enum EvalCommands {
-    Retrieval {
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-        #[arg(long)]
-        fixtures: Option<PathBuf>,
-        #[arg(long, default_value_t = 8)]
-        limit: usize,
-        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid)]
-        mode: RetrievalModeArg,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-        #[arg(long)]
-        out_dir: Option<PathBuf>,
-        #[arg(long)]
-        baseline: Option<PathBuf>,
-        #[arg(long, default_value_t = false)]
-        fail_on_regression: bool,
-        #[arg(long, default_value_t = 0.0)]
-        max_regression: f64,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct EvalRetrievalOptions {
-    json_output: bool,
-    out_dir: Option<PathBuf>,
-    baseline: Option<PathBuf>,
-    fail_on_regression: bool,
-    max_regression: f64,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum RetrievalModeArg {
-    Hybrid,
-    Lexical,
-    Vector,
-    #[value(name = "symbol-graph")]
-    SymbolGraph,
-}
-
-impl RetrievalModeArg {
-    fn as_rpc_mode(self) -> &'static str {
-        match self {
-            RetrievalModeArg::Hybrid => "hybrid",
-            RetrievalModeArg::Lexical => "lexical",
-            RetrievalModeArg::Vector => "vector",
-            RetrievalModeArg::SymbolGraph => "symbol-graph",
-        }
-    }
-}
-
-#[derive(Debug, Subcommand)]
 enum RepoCommands {
-    // Maintenance workflow; keep available but out of daily help.
     #[command(hide = true)]
     List {
         #[arg(long, default_value_t = false)]
         stale_only: bool,
     },
-    // Maintenance workflow; keep available but out of daily help.
     #[command(hide = true)]
     Remove {
         #[arg(long)]
@@ -222,7 +181,6 @@ enum RepoCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
-    // Maintenance workflow; keep available but out of daily help.
     #[command(hide = true)]
     Wipe {
         #[arg(long, default_value_t = false)]
@@ -230,54 +188,11 @@ enum RepoCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
-    /// Show daemon and index status for the current repo
+    /// Show daemon status for the current repo
     Status {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    // Maintenance/debug workflow; keep available but out of daily help.
-    #[command(hide = true)]
-    Stats {
-        #[arg(long)]
-        repo_root: Option<PathBuf>,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Search the index for code matching a query
-    Search {
-        /// Natural-language query (e.g., "where is dispatch_request defined")
-        query: String,
-        #[arg(long, hide = true)]
-        repo_root: Option<PathBuf>,
-        /// Maximum number of results to return
-        #[arg(long, default_value_t = 8)]
-        limit: usize,
-        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid, hide = true)]
-        mode: RetrievalModeArg,
-        #[arg(long, default_value_t = false, hide = true)]
-        json: bool,
-    },
-    /// Preview what budi would inject for a given prompt
-    Preview {
-        /// Simulated user prompt to test retrieval against
-        prompt: String,
-        #[arg(long, hide = true)]
-        repo_root: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = RetrievalModeArg::Hybrid, hide = true)]
-        mode: RetrievalModeArg,
-        #[arg(long, default_value_t = false, hide = true)]
-        json: bool,
-    },
-}
-
-#[derive(Debug, Serialize)]
-struct BenchReport {
-    repo_root: String,
-    iterations: usize,
-    latency_ms_p50: f64,
-    latency_ms_p95: f64,
-    avg_context_chars: f64,
-    avg_context_tokens_estimate: f64,
 }
 
 fn main() -> Result<()> {
@@ -299,68 +214,14 @@ fn main() -> Result<()> {
         Commands::Init {
             repo_root,
             no_daemon,
-            index,
-        } => cmd_init(repo_root, no_daemon, index),
-        Commands::Index {
-            repo_root,
-            hard,
-            progress,
-            ignore_patterns,
-            include_extensions,
-        } => cmd_index(
-            repo_root,
-            hard,
-            progress,
-            &ignore_patterns,
-            &include_extensions,
-        ),
-        Commands::Doctor { repo_root, deep } => cmd_doctor(repo_root, deep),
-        Commands::Bench {
-            repo_root,
-            prompt,
-            iterations,
-        } => cmd_bench(repo_root, &prompt, iterations),
-        Commands::Eval { command } => match command {
-            EvalCommands::Retrieval {
-                repo_root,
-                fixtures,
-                limit,
-                mode,
-                json,
-                out_dir,
-                baseline,
-                fail_on_regression,
-                max_regression,
-            } => {
-                let options = EvalRetrievalOptions {
-                    json_output: json,
-                    out_dir,
-                    baseline,
-                    fail_on_regression,
-                    max_regression,
-                };
-                cmd_eval_retrieval(repo_root, fixtures, limit, mode, options)
-            }
-        },
+            global,
+        } => cmd_init(repo_root, no_daemon, global),
+        Commands::Doctor { repo_root } => cmd_doctor(repo_root),
         Commands::Repo { command } => match command {
             RepoCommands::List { stale_only } => cmd_repo_list(stale_only),
             RepoCommands::Remove { repo_root, dry_run } => cmd_repo_remove(repo_root, dry_run),
             RepoCommands::Wipe { confirm, dry_run } => cmd_repo_wipe(confirm, dry_run),
             RepoCommands::Status { repo_root } => cmd_status(repo_root),
-            RepoCommands::Stats { repo_root, json } => cmd_stats(repo_root, json),
-            RepoCommands::Search {
-                query,
-                repo_root,
-                limit,
-                mode,
-                json,
-            } => cmd_search(repo_root, &query, limit, mode, json),
-            RepoCommands::Preview {
-                prompt,
-                repo_root,
-                mode,
-                json,
-            } => cmd_preview(repo_root, &prompt, mode, json),
         },
         Commands::Hook { command } => match command {
             HookCommands::UserPromptSubmit => cmd_hook_user_prompt_submit(),
@@ -369,6 +230,21 @@ fn main() -> Result<()> {
             HookCommands::SessionEnd => cmd_hook_session_end(),
             HookCommands::SubagentStart => cmd_hook_subagent_start(),
         },
+        Commands::Stats {
+            period,
+            session,
+            files,
+            json,
+        } => cmd_stats(period, session, files, json),
+        Commands::Insights { period, json } => cmd_insights(period, json),
+        Commands::Cost { period, json } => cmd_cost(period, json),
+        Commands::Models { period, json } => cmd_models(period, json),
+        Commands::Sessions { period, json } => cmd_sessions(period, json),
+        Commands::Plugins { json } => cmd_plugins(json),
+        Commands::Projects { period, json } => cmd_projects(period, json),
+        Commands::Sync => cmd_sync(),
+        Commands::Dashboard => cmd_dashboard(),
+        Commands::Update => cmd_update(),
         Commands::Statusline { install } => {
             if install {
                 cmd_statusline_install()
@@ -379,111 +255,207 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, auto_index: bool) -> Result<()> {
+// ─── Init ────────────────────────────────────────────────────────────────────
+
+fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, global: bool) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
     config::ensure_repo_layout(&repo_root)?;
     config::save(&repo_root, &config)?;
-    install_hooks(&repo_root)?;
+
+    let hooks_location = if global {
+        install_hooks_global()?
+    } else {
+        install_hooks(&repo_root)?;
+        repo_root.join(CLAUDE_LOCAL_SETTINGS)
+    };
+
     install_statusline_if_missing();
 
     if !no_daemon {
         ensure_daemon_running(&repo_root, &config)?;
     }
 
-    println!("Initialized budi in {}", repo_root.display());
+    // Auto-sync existing transcripts on first run
+    let sync_result = init_auto_sync();
+
+    let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
+
+    println!();
+    if global {
+        println!("\x1b[1;36m  budi\x1b[0m initialized globally");
+    } else {
+        println!(
+            "\x1b[1;36m  budi\x1b[0m initialized in {}",
+            repo_root.display()
+        );
+    }
+    println!();
+    println!("  Hooks:     {}", hooks_location.display());
     println!(
-        "  Hooks:   {}",
-        repo_root.join(CLAUDE_LOCAL_SETTINGS).display()
-    );
-    println!(
-        "  Ignore:  {}",
-        repo_root.join(config::BUDI_IGNORE_FILE_NAME).display()
-    );
-    println!(
-        "  Data:    {}",
+        "  Data:      {}",
         config::repo_paths(&repo_root)?.data_dir.display()
     );
-
-    if auto_index {
-        println!();
-        println!("Building index (this may take a few minutes for large repos)...");
-        let response = run_index_with_progress(&repo_root, &config, true, &[], &[])?;
-        println!(
-            "Index ready: {} files, {} chunks",
-            response.indexed_files, response.indexed_chunks
-        );
-    }
-
+    println!("  Dashboard: {dashboard_url}");
     println!();
-    if !auto_index {
-        println!("Next steps:");
-        println!("  1. Edit .budiignore      Uncomment patterns to exclude noisy paths");
-        println!("  2. budi index --hard     Build the code index");
-        println!("  3. Restart Claude Code    So hook settings take effect");
-    } else {
-        println!("Restart Claude Code so hook settings take effect.");
-        println!(
-            "Edit .budiignore to exclude noisy paths, then re-index with `budi index --hard`."
-        );
+    match sync_result {
+        Ok((files, msgs)) if files > 0 => {
+            println!(
+                "  Synced \x1b[1m{msgs}\x1b[0m messages from \x1b[1m{files}\x1b[0m transcript files."
+            );
+        }
+        Ok(_) => {
+            println!("  No existing transcripts found (will sync as you use Claude Code).");
+        }
+        Err(e) => {
+            tracing::warn!("auto-sync failed: {e}");
+            println!("  Auto-sync skipped (run `budi sync` manually).");
+        }
     }
     println!();
-    println!("Budi will automatically inject relevant code context before each prompt.");
-    println!("Run `budi doctor` to verify everything is working.");
+    println!("  \x1b[1mNext steps:\x1b[0m");
+    println!("    1. Restart Claude Code so hook settings take effect");
+    println!("    2. Open the dashboard: \x1b[4m{dashboard_url}\x1b[0m");
+    println!("    3. Run `budi doctor` to verify everything is working");
+    println!();
+
+    // Auto-open dashboard in browser (best-effort)
+    open_url_in_browser(&dashboard_url);
+
     Ok(())
 }
 
-fn cmd_index(
-    repo_root: Option<PathBuf>,
-    hard: bool,
-    progress: bool,
-    ignore_patterns: &[String],
-    include_extensions: &[String],
-) -> Result<()> {
+fn init_auto_sync() -> Result<(usize, usize)> {
+    let db_path = analytics::db_path()?;
+    let mut conn = analytics::open_db(&db_path)?;
+    analytics::sync_all(&mut conn)
+}
+
+fn open_url_in_browser(url: &str) {
+    let result = if cfg!(target_os = "macos") {
+        Command::new("open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    } else {
+        Command::new("xdg-open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    };
+    if let Err(e) = result {
+        tracing::debug!("Could not open browser: {e}");
+    }
+}
+
+// ─── Doctor ──────────────────────────────────────────────────────────────────
+
+fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
     let config = config::load_or_default(&repo_root)?;
-    ensure_daemon_running(&repo_root, &config)?;
-    let response = if progress {
-        run_index_with_progress(
-            &repo_root,
-            &config,
-            hard,
-            ignore_patterns,
-            include_extensions,
-        )?
-    } else {
-        send_index_request(
-            &config.daemon_base_url(),
-            &repo_root.display().to_string(),
-            hard,
-            ignore_patterns,
-            include_extensions,
-        )?
-    };
-    println!(
-        "Index {}: files={}, chunks={}, embedded={}, missing_embeddings={}, repaired_embeddings={}, invalid_embeddings={}, changed_files={}",
-        response.index_status,
-        response.indexed_files,
-        response.indexed_chunks,
-        response.embedded_chunks,
-        response.missing_embeddings,
-        response.repaired_embeddings,
-        response.invalid_embeddings,
-        response.changed_files
-    );
-    if let Some(job_id) = &response.job_id {
-        let job_state = if response.job_state.trim().is_empty() {
-            "unknown"
-        } else {
-            response.job_state.as_str()
-        };
-        println!("index job: {job_id} ({job_state})");
+    let paths = config::repo_paths(&repo_root)?;
+    let mut issues: Vec<String> = Vec::new();
+
+    println!("budi doctor — {}", repo_root.display());
+    println!();
+
+    let has_git = repo_root.join(".git").exists();
+    doctor_check("git repo", has_git, None);
+    if !has_git {
+        issues.push("Not a git repository. Run `git init` first.".into());
     }
-    if let Some(outcome) = &response.terminal_outcome {
-        println!("index outcome: {outcome}");
+
+    let has_config = paths.config_file.exists();
+    if has_config {
+        doctor_check("config", true, Some(&paths.config_file));
+    } else {
+        println!("  [ok] config: using defaults");
+    }
+
+    let hooks_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
+    let has_hooks = hooks_path.exists();
+    doctor_check("hook settings", has_hooks, Some(&hooks_path));
+    if !has_hooks {
+        issues.push("No hook settings. Run `budi init` to install hooks.".into());
+    }
+
+    let health = daemon_health(&config);
+    doctor_check("daemon", health, None);
+    if !health {
+        println!("  Attempting daemon start...");
+        match ensure_daemon_running(&repo_root, &config) {
+            Ok(()) => {
+                let retry = daemon_health(&config);
+                doctor_check("daemon (retry)", retry, None);
+                if !retry {
+                    let log_hint = config::daemon_log_path(&repo_root).map_or_else(
+                        |_| "Check logs with `budi -vv doctor`.".to_string(),
+                        |p| format!("Logs: {}", p.display()),
+                    );
+                    issues.push(format!("Daemon failed to start. {log_hint}"));
+                }
+            }
+            Err(e) => {
+                println!("  x daemon start failed: {e}");
+                issues.push(format!("Daemon start error: {e}"));
+            }
+        }
+    }
+
+    // Activity summary
+    if daemon_health(&config)
+        && let Some(stats) = fetch_daemon_stats(&config)
+    {
+        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
+        if queries > 0 {
+            let skips = stats.get("skips").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!();
+            println!("  activity: {} queries, {} skipped", queries, skips);
+        }
+    }
+
+    println!();
+    if issues.is_empty() {
+        println!("All checks passed.");
+    } else {
+        println!("Issues found:");
+        for issue in &issues {
+            println!("  - {issue}");
+        }
+    }
+
+    if issues.is_empty()
+        && let Some(stats) = daemon_health(&config)
+            .then(|| fetch_daemon_stats(&config))
+            .flatten()
+    {
+        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
+        if queries == 0 {
+            println!();
+            println!("No queries yet. Start a Claude Code session to see budi in action.");
+        }
     }
     Ok(())
 }
+
+fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
+    let mark = if ok { "ok" } else { "!!" };
+    if let Some(p) = path {
+        println!("  [{mark}] {label}: {}", p.display());
+    } else {
+        println!("  [{mark}] {label}");
+    }
+}
+
+// ─── Status ──────────────────────────────────────────────────────────────────
 
 fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
     let repo_root = resolve_repo_root(repo_root)?;
@@ -495,29 +467,11 @@ fn cmd_status(repo_root: Option<PathBuf>) -> Result<()> {
 
     println!("budi daemon {}", response.daemon_version);
     println!("repo: {}", response.repo_root);
-    println!("tracked files: {}", response.tracked_files);
-    println!("indexed chunks: {}", response.indexed_chunks);
-    println!("embedded chunks: {}", response.embedded_chunks);
-    println!("missing embeddings: {}", response.missing_embeddings);
-    println!("invalid embeddings: {}", response.invalid_embeddings);
-    println!("update retries: {}", response.update_retries);
-    println!("update failures: {}", response.update_failures);
-    println!("updates noop: {}", response.updates_noop);
-    println!("updates applied: {}", response.updates_applied);
-    println!("watch events seen: {}", response.watch_events_seen);
-    println!("watch events accepted: {}", response.watch_events_accepted);
-    println!("watch events dropped: {}", response.watch_events_dropped);
-    println!("index state: {}", response.index_state);
-    println!("index job state: {}", response.index_job_state);
-    if let Some(job_id) = &response.index_job_id {
-        println!("index job id: {job_id}");
-    }
-    if let Some(outcome) = &response.index_terminal_outcome {
-        println!("index terminal outcome: {outcome}");
-    }
     println!("hooks detected: {}", response.hooks_detected);
     Ok(())
 }
+
+// ─── Repo Management ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepoStorageEntryKind {
@@ -576,15 +530,15 @@ fn cmd_repo_list(stale_only: bool) -> Result<()> {
     let scanned = entries.len();
     let active = entries
         .iter()
-        .filter(|entry| entry.kind == RepoStorageEntryKind::Active)
+        .filter(|e| e.kind == RepoStorageEntryKind::Active)
         .count();
     let stale = entries
         .iter()
-        .filter(|entry| entry.kind == RepoStorageEntryKind::Stale)
+        .filter(|e| e.kind == RepoStorageEntryKind::Stale)
         .count();
     let marker_missing = entries
         .iter()
-        .filter(|entry| entry.kind == RepoStorageEntryKind::MarkerMissing)
+        .filter(|e| e.kind == RepoStorageEntryKind::MarkerMissing)
         .count();
 
     println!("repo storage root: {}", repos_root.display());
@@ -592,10 +546,10 @@ fn cmd_repo_list(stale_only: bool) -> Result<()> {
         "scanned={} active={} stale={} unknown_without_marker={}",
         scanned, active, stale, marker_missing
     );
-    let filtered = entries
+    let filtered: Vec<_> = entries
         .iter()
-        .filter(|entry| !stale_only || entry.kind == RepoStorageEntryKind::Stale)
-        .collect::<Vec<_>>();
+        .filter(|e| !stale_only || e.kind == RepoStorageEntryKind::Stale)
+        .collect();
     if filtered.is_empty() {
         if stale_only {
             println!("No stale repo state directories found.");
@@ -699,1309 +653,7 @@ fn cmd_repo_wipe(confirm: bool, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
-    let repo_root = resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    let paths = config::repo_paths(&repo_root)?;
-    let mut issues: Vec<String> = Vec::new();
-
-    println!("budi doctor — {}", repo_root.display());
-    println!();
-
-    // Git repo check
-    let has_git = repo_root.join(".git").exists();
-    doctor_check("git repo", has_git, None);
-    if !has_git {
-        issues.push("Not a git repository. Run `git init` first.".into());
-    }
-
-    // Config check (optional — defaults are fine)
-    let has_config = paths.config_file.exists();
-    if has_config {
-        doctor_check("config", true, Some(&paths.config_file));
-    } else {
-        println!("  [ok] config: using defaults");
-    }
-
-    // Hook settings check
-    let hooks_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
-    let has_hooks = hooks_path.exists();
-    doctor_check("hook settings", has_hooks, Some(&hooks_path));
-    if !has_hooks {
-        issues.push("No hook settings. Run `budi init` to install hooks.".into());
-    }
-
-    // Ignore files (optional)
-    let has_repo_ignore = config::ignore_path(&repo_root)
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    let has_local_ignore = config::local_ignore_path(&repo_root)
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    let has_global_ignore = config::global_ignore_path()
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    if has_repo_ignore {
-        doctor_check("repo .budiignore", true, None);
-    }
-    if has_local_ignore {
-        doctor_check(
-            "local budiignore",
-            true,
-            config::local_ignore_path(&repo_root).ok().as_deref(),
-        );
-    }
-    if has_global_ignore {
-        doctor_check("global .budiignore", true, None);
-    }
-
-    // Daemon health
-    let health = daemon_health(&config);
-    doctor_check("daemon", health, None);
-    if !health {
-        println!("  Attempting daemon start...");
-        match ensure_daemon_running(&repo_root, &config) {
-            Ok(()) => {
-                let retry = daemon_health(&config);
-                doctor_check("daemon (retry)", retry, None);
-                if !retry {
-                    let log_hint = config::daemon_log_path(&repo_root).map_or_else(
-                        |_| "Check logs with `budi -vv doctor`.".to_string(),
-                        |p| format!("Logs: {}", p.display()),
-                    );
-                    issues.push(format!("Daemon failed to start. {log_hint}"));
-                }
-            }
-            Err(e) => {
-                println!("  x daemon start failed: {e}");
-                issues.push(format!("Daemon start error: {e}"));
-            }
-        }
-    }
-
-    // Index state (if daemon is healthy)
-    if daemon_health(&config) {
-        match fetch_status_snapshot(&config.daemon_base_url(), &repo_root.display().to_string()) {
-            Ok(status) => {
-                let indexed = status.indexed_chunks > 0;
-                doctor_check(
-                    &format!(
-                        "index ({} files, {} chunks, {} embedded)",
-                        status.tracked_files, status.indexed_chunks, status.embedded_chunks
-                    ),
-                    indexed,
-                    None,
-                );
-                if !indexed {
-                    issues.push(
-                        "No indexed chunks. Run `budi index --hard` to build the index.".into(),
-                    );
-                }
-                if status.missing_embeddings > 0 {
-                    println!(
-                        "  ! {} missing embeddings — run `budi index` to repair",
-                        status.missing_embeddings
-                    );
-                }
-            }
-            Err(e) => {
-                println!("  x index status unavailable: {e}");
-            }
-        }
-    }
-
-    // Activity summary (if daemon is healthy and has stats)
-    if daemon_health(&config)
-        && let Some(stats) = fetch_daemon_stats(&config)
-    {
-        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
-        if queries > 0 {
-            let injections = stats
-                .get("injections")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let rate = stats
-                .get("injection_rate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("n/a");
-            let confirmed = stats
-                .get("confirmed_reads")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let total_reads = stats
-                .get("total_reads")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            println!();
-            println!(
-                "  activity: {} queries, {} injections ({})",
-                queries, injections, rate
-            );
-            if total_reads > 0 {
-                println!(
-                    "  feedback: {}/{} file reads were pre-injected by budi",
-                    confirmed, total_reads
-                );
-            }
-        }
-    }
-
-    // Summary
-    println!();
-    if issues.is_empty() {
-        println!("All checks passed.");
-    } else {
-        println!("Issues found:");
-        for issue in &issues {
-            println!("  - {issue}");
-        }
-    }
-
-    // First-use hint when daemon is healthy but no queries yet
-    if issues.is_empty()
-        && let Some(stats) = daemon_health(&config)
-            .then(|| fetch_daemon_stats(&config))
-            .flatten()
-    {
-        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
-        if queries == 0 {
-            println!();
-            println!("No queries yet. Start a Claude Code session to see budi in action.");
-        }
-    }
-
-    if deep {
-        run_deep_doctor_checks(&repo_root, &config)?;
-    }
-    Ok(())
-}
-
-fn doctor_check(label: &str, ok: bool, path: Option<&std::path::Path>) {
-    let mark = if ok { "ok" } else { "!!" };
-    if let Some(p) = path {
-        println!("  [{mark}] {label}: {}", p.display());
-    } else {
-        println!("  [{mark}] {label}");
-    }
-}
-
-fn cmd_preview(
-    repo_root: Option<PathBuf>,
-    prompt: &str,
-    mode: RetrievalModeArg,
-    json_output: bool,
-) -> Result<()> {
-    let repo_root = resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    ensure_daemon_running(&repo_root, &config)?;
-    let directives = parse_prompt_directives(prompt);
-    let sanitized_prompt = sanitize_prompt_for_query(prompt);
-    let response = query_daemon_with_timeout_mode(
-        &repo_root,
-        &config,
-        &sanitized_prompt,
-        Some(&repo_root),
-        PREVIEW_QUERY_TIMEOUT_SECS,
-        Some(mode.as_rpc_mode()),
-    )?;
-    let effective_skip_reason = evaluate_context_skip(&config, &directives, &response.diagnostics);
-    let forced_inject = directives.force_inject && !directives.force_skip;
-    let recommended_injection = if forced_inject {
-        true
-    } else {
-        effective_skip_reason.is_none() && response.diagnostics.recommended_injection
-    };
-
-    if json_output {
-        let mut out = serde_json::to_value(&response)?;
-        // Patch recommended_injection and skip_reason to reflect effective (post-directive) values
-        if let Some(diag) = out.get_mut("diagnostics") {
-            diag["recommended_injection"] = serde_json::Value::Bool(recommended_injection);
-            if forced_inject {
-                diag["skip_reason"] = serde_json::Value::String("forced_inject".to_string());
-            } else if let Some(reason) = &effective_skip_reason {
-                diag["skip_reason"] = serde_json::Value::String(reason.clone());
-            }
-        }
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
-    }
-
-    let skip_reason_display = if forced_inject {
-        "forced_inject"
-    } else {
-        effective_skip_reason
-            .as_deref()
-            .or(response.diagnostics.skip_reason.as_deref())
-            .unwrap_or("none")
-    };
-    let context_preview = if effective_skip_reason.is_none() {
-        response.context.as_str()
-    } else {
-        ""
-    };
-
-    println!("retrieval_mode={}", mode.as_rpc_mode());
-    println!("total candidates={}", response.total_candidates);
-    if !response.diagnostics.intent.is_empty() {
-        println!(
-            "intent={} confidence={:.3} recommended_injection={} skip_reason={}",
-            response.diagnostics.intent,
-            response.diagnostics.confidence,
-            recommended_injection,
-            skip_reason_display
-        );
-    }
-    for item in &response.snippets {
-        println!(
-            "- {}:{}-{} score={:.4} reasons={} channels={}",
-            item.path,
-            item.start_line,
-            item.end_line,
-            item.score,
-            format_snippet_reasons(item),
-            format_snippet_channels(item)
-        );
-    }
-    println!("\n--- injected context preview ---\n{}", context_preview);
-    Ok(())
-}
-
-fn cmd_search(
-    repo_root: Option<PathBuf>,
-    query: &str,
-    limit: usize,
-    mode: RetrievalModeArg,
-    json_output: bool,
-) -> Result<()> {
-    if limit == 0 {
-        anyhow::bail!("--limit must be at least 1");
-    }
-    let repo_root = resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    ensure_daemon_running(&repo_root, &config)?;
-    let sanitized_query = sanitize_prompt_for_query(query);
-    let response = query_daemon_with_timeout_mode(
-        &repo_root,
-        &config,
-        &sanitized_query,
-        Some(&repo_root),
-        SEARCH_QUERY_TIMEOUT_SECS,
-        Some(mode.as_rpc_mode()),
-    )?;
-    let limited_snippets = response
-        .snippets
-        .iter()
-        .take(limit)
-        .cloned()
-        .collect::<Vec<_>>();
-    if json_output {
-        let payload = json!({
-            "query": query,
-            "retrieval_mode": mode.as_rpc_mode(),
-            "total_candidates": response.total_candidates,
-            "returned": limited_snippets.len(),
-            "diagnostics": response.diagnostics,
-            "snippets": limited_snippets,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    if !response.diagnostics.intent.is_empty() {
-        println!("intent: {}", response.diagnostics.intent);
-    }
-    println!(
-        "{} results (from {} candidates)\n",
-        limited_snippets.len(),
-        response.total_candidates,
-    );
-    for (i, item) in limited_snippets.iter().enumerate() {
-        println!(
-            "  {}. {}:{}-{}  (score {:.3})",
-            i + 1,
-            item.path,
-            item.start_line,
-            item.end_line,
-            item.score,
-        );
-        if !item.reasons.is_empty() {
-            println!("     {}", item.reasons.join(", "));
-        }
-    }
-    Ok(())
-}
-
-fn cmd_bench(repo_root: Option<PathBuf>, prompt: &str, iterations: usize) -> Result<()> {
-    if iterations == 0 {
-        anyhow::bail!("--iterations must be at least 1");
-    }
-    let repo_root = resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    ensure_daemon_running(&repo_root, &config)?;
-    let query_url = format!("{}/query", config.daemon_base_url());
-    let client = daemon_client_with_timeout(Duration::from_secs(BENCH_QUERY_TIMEOUT_SECS));
-
-    let mut latencies_ms = Vec::with_capacity(iterations);
-    let mut context_chars = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let response = send_query_request(
-            &client,
-            &query_url,
-            &repo_root,
-            prompt,
-            Some(&repo_root),
-            None,
-            None,
-        )
-        .context("Failed benchmark query iteration")?;
-        latencies_ms.push(start.elapsed().as_secs_f64() * 1000.0);
-        context_chars.push(response.context.len() as f64);
-    }
-
-    let avg_context_chars = mean(&context_chars);
-    let report = BenchReport {
-        repo_root: repo_root.display().to_string(),
-        iterations,
-        latency_ms_p50: percentile(&latencies_ms, 0.50),
-        latency_ms_p95: percentile(&latencies_ms, 0.95),
-        avg_context_chars,
-        avg_context_tokens_estimate: avg_context_chars / 4.0,
-    };
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
-}
-
-fn cmd_eval_retrieval(
-    repo_root: Option<PathBuf>,
-    fixtures: Option<PathBuf>,
-    limit: usize,
-    mode: RetrievalModeArg,
-    options: EvalRetrievalOptions,
-) -> Result<()> {
-    let EvalRetrievalOptions {
-        json_output,
-        out_dir,
-        baseline,
-        fail_on_regression,
-        max_regression,
-    } = options;
-    if max_regression < 0.0 {
-        anyhow::bail!("--max-regression must be non-negative");
-    }
-    let repo_root = resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    ensure_daemon_running(&repo_root, &config)?;
-    let fixtures_path =
-        fixtures.unwrap_or_else(|| repo_root.join(".budi").join("eval").join("retrieval.json"));
-    let report = run_retrieval_eval(
-        &repo_root,
-        &fixtures_path,
-        mode.as_rpc_mode(),
-        limit,
-        |sanitized_query| {
-            query_daemon_with_timeout_mode(
-                &repo_root,
-                &config,
-                sanitized_query,
-                Some(&repo_root),
-                EVAL_QUERY_TIMEOUT_SECS,
-                Some(mode.as_rpc_mode()),
-            )
-        },
-    )?;
-    let artifact_path = persist_retrieval_eval_report(&repo_root, out_dir.as_deref(), &report)?;
-    let baseline_path =
-        resolve_retrieval_eval_baseline(baseline.as_deref(), &artifact_path, mode.as_rpc_mode())?;
-    let regression = if let Some(path) = baseline_path.as_deref() {
-        let baseline_report = load_retrieval_eval_report(path)?;
-        Some(build_retrieval_eval_regression(
-            &artifact_path,
-            &report,
-            path,
-            &baseline_report,
-            max_regression,
-        ))
-    } else {
-        None
-    };
-    let regression_failed = if fail_on_regression {
-        match regression.as_ref() {
-            Some(summary) => !summary.passed,
-            None => true,
-        }
-    } else {
-        false
-    };
-
-    if json_output {
-        let payload = json!({
-            "artifact_path": artifact_path.display().to_string(),
-            "baseline_artifact": baseline_path.as_ref().map(|path| path.display().to_string()),
-            "regression": regression,
-            "report": report,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        if regression_failed {
-            anyhow::bail!("retrieval regression gate failed");
-        }
-        return Ok(());
-    }
-
-    println!("repo: {}", report.repo_root);
-    println!("fixtures: {}", report.fixtures_path);
-    println!("retrieval_mode: {}", report.retrieval_mode);
-    println!(
-        "cases: total={} scored={} errors={}",
-        report.total_cases, report.scored_cases, report.cases_with_errors
-    );
-    println!(
-        "metrics: hit@1={:.3} hit@3={:.3} hit@5={:.3} mrr={:.3}",
-        report.metrics.hit_at_1,
-        report.metrics.hit_at_3,
-        report.metrics.hit_at_5,
-        report.metrics.mrr
-    );
-    println!(
-        "metrics: precision@1={:.3} precision@3={:.3} precision@5={:.3}",
-        report.metrics.precision_at_1, report.metrics.precision_at_3, report.metrics.precision_at_5
-    );
-    println!(
-        "metrics: recall@1={:.3} recall@3={:.3} recall@5={:.3}",
-        report.metrics.recall_at_1, report.metrics.recall_at_3, report.metrics.recall_at_5
-    );
-    println!(
-        "metrics: f1@1={:.3} f1@3={:.3} f1@5={:.3}",
-        report.metrics.f1_at_1, report.metrics.f1_at_3, report.metrics.f1_at_5
-    );
-    if !report.per_intent_metrics.is_empty() {
-        let mut intent_rows = report
-            .per_intent_metrics
-            .iter()
-            .map(|(intent, metrics)| (intent.as_str(), metrics))
-            .collect::<Vec<_>>();
-        intent_rows.sort_by(|left, right| left.0.cmp(right.0));
-        println!("per-intent metrics:");
-        for (intent, metrics) in intent_rows {
-            println!(
-                "- {} cases={} hit@1={:.3} hit@3={:.3} hit@5={:.3} mrr={:.3} f1@3={:.3}",
-                intent,
-                metrics.cases,
-                metrics.hit_at_1,
-                metrics.hit_at_3,
-                metrics.hit_at_5,
-                metrics.mrr,
-                metrics.f1_at_3
-            );
-        }
-    }
-    for case in &report.results {
-        let rank_display = case.rank.map_or("-".to_string(), |r| r.to_string());
-        let expected = if case.expected_paths.is_empty() {
-            "-".to_string()
-        } else {
-            case.expected_paths.join(",")
-        };
-        let top = if case.top_paths.is_empty() {
-            "-".to_string()
-        } else {
-            case.top_paths.join(",")
-        };
-        println!(
-            "- rank={} matched@1/3/5={}/{}/{} intent={} confidence={:.3} query=\"{}\" expected={} top={}",
-            rank_display,
-            case.matched_at_1,
-            case.matched_at_3,
-            case.matched_at_5,
-            case.intent,
-            case.confidence,
-            case.query,
-            expected,
-            top
-        );
-        if let Some(err) = &case.error {
-            println!("  error={err}");
-        }
-    }
-    if let Some(summary) = &regression {
-        println!(
-            "regression: baseline={} current={} max_drop={:.3} comparable={} passed={}",
-            summary.baseline_artifact,
-            summary.current_artifact,
-            summary.max_regression,
-            summary.comparable,
-            summary.passed
-        );
-        if !summary.scope_mismatches.is_empty() {
-            println!(
-                "regression scope mismatches: {}",
-                summary.scope_mismatches.join("; ")
-            );
-        } else {
-            for check in &summary.checks {
-                println!(
-                    "- {} baseline={:.3} current={:.3} delta={:+.3} allowed_drop={:.3} passed={}",
-                    check.metric,
-                    check.baseline,
-                    check.current,
-                    check.delta,
-                    check.max_drop,
-                    check.passed
-                );
-            }
-        }
-    } else {
-        println!("regression: baseline=none (no prior artifact found)");
-    }
-    println!("artifact: {}", artifact_path.display());
-    if regression_failed {
-        anyhow::bail!("retrieval regression gate failed");
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RetrievalEvalRegressionCheck {
-    metric: String,
-    baseline: f64,
-    current: f64,
-    delta: f64,
-    max_drop: f64,
-    passed: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RetrievalEvalRegressionSummary {
-    baseline_artifact: String,
-    current_artifact: String,
-    max_regression: f64,
-    comparable: bool,
-    scope_mismatches: Vec<String>,
-    checks: Vec<RetrievalEvalRegressionCheck>,
-    passed: bool,
-}
-
-fn resolve_retrieval_eval_baseline(
-    explicit_baseline: Option<&Path>,
-    current_artifact: &Path,
-    retrieval_mode: &str,
-) -> Result<Option<PathBuf>> {
-    if let Some(path) = explicit_baseline {
-        return Ok(Some(path.to_path_buf()));
-    }
-    let Some(parent) = current_artifact.parent() else {
-        return Ok(None);
-    };
-    find_previous_retrieval_eval_artifact(parent, retrieval_mode, current_artifact)
-}
-
-fn find_previous_retrieval_eval_artifact(
-    output_dir: &Path,
-    retrieval_mode: &str,
-    current_artifact: &Path,
-) -> Result<Option<PathBuf>> {
-    if !output_dir.exists() {
-        return Ok(None);
-    }
-    let mode = retrieval_mode.replace('-', "_");
-    let expected_prefix = format!("retrieval-{mode}-");
-    let mut candidates = Vec::new();
-    for entry in fs::read_dir(output_dir)
-        .with_context(|| format!("Failed reading eval artifact dir {}", output_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path == current_artifact || !path.is_file() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        if file_name.starts_with(&expected_prefix) && file_name.ends_with(".json") {
-            candidates.push(path);
-        }
-    }
-    candidates.sort_by(|left, right| {
-        right
-            .file_name()
-            .and_then(|name| name.to_str())
-            .cmp(&left.file_name().and_then(|name| name.to_str()))
-    });
-    Ok(candidates.into_iter().next())
-}
-
-fn build_retrieval_eval_regression(
-    current_artifact: &Path,
-    current: &RetrievalEvalReport,
-    baseline_artifact: &Path,
-    baseline: &RetrievalEvalReport,
-    max_regression: f64,
-) -> RetrievalEvalRegressionSummary {
-    let mut scope_mismatches = Vec::new();
-    if baseline.fixtures_path != current.fixtures_path {
-        scope_mismatches.push(format!(
-            "fixtures_path differs (baseline={} current={})",
-            baseline.fixtures_path, current.fixtures_path
-        ));
-    }
-    if baseline.retrieval_mode != current.retrieval_mode {
-        scope_mismatches.push(format!(
-            "retrieval_mode differs (baseline={} current={})",
-            baseline.retrieval_mode, current.retrieval_mode
-        ));
-    }
-    if baseline.limit != current.limit {
-        scope_mismatches.push(format!(
-            "limit differs (baseline={} current={})",
-            baseline.limit, current.limit
-        ));
-    }
-    let comparable = scope_mismatches.is_empty();
-    let checks = if comparable {
-        vec![
-            build_regression_check(
-                "hit_at_3",
-                baseline.metrics.hit_at_3,
-                current.metrics.hit_at_3,
-                max_regression,
-            ),
-            build_regression_check(
-                "mrr",
-                baseline.metrics.mrr,
-                current.metrics.mrr,
-                max_regression,
-            ),
-            build_regression_check(
-                "f1_at_3",
-                baseline.metrics.f1_at_3,
-                current.metrics.f1_at_3,
-                max_regression,
-            ),
-        ]
-    } else {
-        Vec::new()
-    };
-    let passed = comparable && checks.iter().all(|check| check.passed);
-    RetrievalEvalRegressionSummary {
-        baseline_artifact: baseline_artifact.display().to_string(),
-        current_artifact: current_artifact.display().to_string(),
-        max_regression,
-        comparable,
-        scope_mismatches,
-        checks,
-        passed,
-    }
-}
-
-fn build_regression_check(
-    metric: &str,
-    baseline: f64,
-    current: f64,
-    max_regression: f64,
-) -> RetrievalEvalRegressionCheck {
-    let delta = current - baseline;
-    RetrievalEvalRegressionCheck {
-        metric: metric.to_string(),
-        baseline,
-        current,
-        delta,
-        max_drop: max_regression,
-        passed: delta >= -max_regression,
-    }
-}
-
-fn format_snippet_reasons(item: &QueryResultItem) -> String {
-    if item.reasons.is_empty() {
-        "semantic+lexical".to_string()
-    } else {
-        item.reasons.join(",")
-    }
-}
-
-fn format_snippet_channels(item: &QueryResultItem) -> String {
-    format!(
-        "lexical={:.3},vector={:.3},symbol={:.3},path={:.3},graph={:.3},rerank={:.3}",
-        item.channel_scores.lexical,
-        item.channel_scores.vector,
-        item.channel_scores.symbol,
-        item.channel_scores.path,
-        item.channel_scores.graph,
-        item.channel_scores.rerank
-    )
-}
-
-fn persist_retrieval_eval_report(
-    repo_root: &Path,
-    out_dir: Option<&Path>,
-    report: &RetrievalEvalReport,
-) -> Result<PathBuf> {
-    let output_dir = out_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo_root.join(".budi").join("eval").join("runs"));
-    fs::create_dir_all(&output_dir)
-        .with_context(|| format!("Failed creating eval artifact dir {}", output_dir.display()))?;
-    let mode = report.retrieval_mode.replace('-', "_");
-    let path = output_dir.join(format!("retrieval-{mode}-{}.json", now_unix_ms()));
-    let payload = serde_json::to_string_pretty(report)?;
-    fs::write(&path, payload)
-        .with_context(|| format!("Failed writing eval artifact {}", path.display()))?;
-    Ok(path)
-}
-
-fn embedding_integrity_counts(chunks: &[index::ChunkRecord]) -> (usize, usize, usize, usize) {
-    let mut dims_to_counts: HashMap<usize, usize> = HashMap::new();
-    for chunk in chunks {
-        if chunk.embedding.is_empty() || chunk.embedding.iter().any(|value| !value.is_finite()) {
-            continue;
-        }
-        *dims_to_counts.entry(chunk.embedding.len()).or_insert(0) += 1;
-    }
-    let expected_dims = dims_to_counts
-        .into_iter()
-        .max_by(|(left_dims, left_count), (right_dims, right_count)| {
-            left_count
-                .cmp(right_count)
-                .then_with(|| left_dims.cmp(right_dims))
-        })
-        .map(|(dims, _)| dims)
-        .unwrap_or(0);
-
-    let mut embedded = 0usize;
-    let mut missing = 0usize;
-    let mut invalid = 0usize;
-    for chunk in chunks {
-        if chunk.embedding.is_empty() {
-            missing = missing.saturating_add(1);
-            continue;
-        }
-        let has_non_finite = chunk.embedding.iter().any(|value| !value.is_finite());
-        let dims_mismatch = expected_dims > 0 && chunk.embedding.len() != expected_dims;
-        if has_non_finite || dims_mismatch {
-            invalid = invalid.saturating_add(1);
-        } else {
-            embedded = embedded.saturating_add(1);
-        }
-    }
-    (embedded, missing, invalid, expected_dims)
-}
-
-fn cmd_stats(repo_root: Option<PathBuf>, json_output: bool) -> Result<()> {
-    let repo_root = resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    let index_db_path = config::index_db_path(&repo_root)?;
-    let tantivy_path = config::tantivy_path(&repo_root)?;
-    let state = index::load_state(&repo_root)?;
-    let daemon_healthy = daemon_health(&config);
-    let hooks_detected = repo_root.join(CLAUDE_LOCAL_SETTINGS).exists();
-
-    let indexed_files = state.as_ref().map_or(0usize, |s| s.files.len());
-    let indexed_chunks = state.as_ref().map_or(0usize, |s| s.chunks.len());
-    let (embedded_chunks, missing_embeddings, invalid_embeddings, expected_embedding_dims) = state
-        .as_ref()
-        .map(|s| embedding_integrity_counts(&s.chunks))
-        .unwrap_or((0, 0, 0, 0));
-    let catalog_updated_at_ts = state.as_ref().map_or(0i64, |s| s.updated_at_ts);
-    let chunks_per_file = if indexed_files == 0 {
-        0.0
-    } else {
-        indexed_chunks as f64 / indexed_files as f64
-    };
-    let index_db_bytes = fs::metadata(&index_db_path).map(|m| m.len()).unwrap_or(0);
-
-    if json_output {
-        let mut payload = json!({
-            "repo_root": repo_root.display().to_string(),
-            "daemon_healthy": daemon_healthy,
-            "hooks_detected": hooks_detected,
-            "indexed_files": indexed_files,
-            "indexed_chunks": indexed_chunks,
-            "embedded_chunks": embedded_chunks,
-            "missing_embeddings": missing_embeddings,
-            "invalid_embeddings": invalid_embeddings,
-            "expected_embedding_dims": expected_embedding_dims,
-            "chunks_per_file": chunks_per_file,
-            "catalog_updated_at_ts": catalog_updated_at_ts,
-            "index_db_file": index_db_path.display().to_string(),
-            "index_db_file_bytes": index_db_bytes,
-            "index_db_exists": index_db_path.exists(),
-            "tantivy_dir": tantivy_path.display().to_string(),
-            "tantivy_exists": tantivy_path.exists(),
-        });
-        if daemon_healthy && let Some(stats) = fetch_daemon_stats(&config) {
-            payload["daemon_stats"] = stats;
-        }
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    println!("repo: {}", repo_root.display());
-    println!("daemon healthy: {}", daemon_healthy);
-    println!("hooks detected: {}", hooks_detected);
-    println!("indexed files: {}", indexed_files);
-    println!("indexed chunks: {}", indexed_chunks);
-    println!("embedded chunks: {}", embedded_chunks);
-    println!("missing embeddings: {}", missing_embeddings);
-    println!("invalid embeddings: {}", invalid_embeddings);
-    println!("expected embedding dims: {}", expected_embedding_dims);
-    println!("chunks/file: {:.2}", chunks_per_file);
-    println!("catalog updated_at_ts: {}", catalog_updated_at_ts);
-    println!(
-        "index db: {} ({} bytes, exists: {})",
-        index_db_path.display(),
-        index_db_bytes,
-        index_db_path.exists()
-    );
-    println!(
-        "tantivy dir: {} (exists: {})",
-        tantivy_path.display(),
-        tantivy_path.exists()
-    );
-
-    // Show daemon query activity stats if available.
-    if daemon_healthy && let Some(stats) = fetch_daemon_stats(&config) {
-        println!("\n-- daemon activity (since last restart) --");
-        println!(
-            "queries: {}",
-            stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0)
-        );
-        println!(
-            "injections: {}",
-            stats
-                .get("injections")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-        );
-        println!(
-            "skips: {}",
-            stats.get("skips").and_then(|v| v.as_u64()).unwrap_or(0)
-        );
-        println!(
-            "chars injected: {}",
-            stats
-                .get("chars_injected")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-        );
-        println!(
-            "prefetches: {}",
-            stats
-                .get("prefetches")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-        );
-        if let Some(rate) = stats.get("injection_rate").and_then(|v| v.as_str()) {
-            println!("injection rate: {}", rate);
-        }
-        let confirmed = stats
-            .get("confirmed_reads")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let total = stats
-            .get("total_reads")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        if total > 0 {
-            println!(
-                "file reads: {} total, {} confirmed by budi",
-                total, confirmed
-            );
-            if let Some(rate) = stats.get("read_hit_rate").and_then(|v| v.as_str()) {
-                println!("read hit rate: {}", rate);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn run_deep_doctor_checks(repo_root: &Path, config: &BudiConfig) -> Result<()> {
-    println!("\n-- deep checks --");
-    let repo_root_str = repo_root.display().to_string();
-    let index_db_path = config::index_db_path(repo_root)?;
-    let tantivy_path = config::tantivy_path(repo_root)?;
-    let embedding_cache_path = config::embedding_cache_path()?;
-    let state = index::load_state(repo_root)?;
-
-    let index_db_bytes = fs::metadata(&index_db_path).map(|m| m.len()).unwrap_or(0);
-    println!(
-        "index db: exists={} bytes={}",
-        index_db_path.exists(),
-        index_db_bytes
-    );
-
-    let mut sqlite_files_count = 0usize;
-    let mut sqlite_chunks_count = 0usize;
-    let mut sqlite_index_progress_rows = 0usize;
-    if index_db_path.exists()
-        && let Ok(conn) = Connection::open(&index_db_path)
-    {
-        if let Ok(count) =
-            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
-        {
-            sqlite_files_count = count.max(0) as usize;
-        }
-        if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| {
-            row.get::<_, i64>(0)
-        }) {
-            sqlite_chunks_count = count.max(0) as usize;
-        }
-        if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM index_progress", [], |row| {
-            row.get::<_, i64>(0)
-        }) {
-            sqlite_index_progress_rows = count.max(0) as usize;
-        }
-    }
-
-    let mut duplicate_file_paths = 0usize;
-    let mut duplicate_chunk_ids = 0usize;
-    let mut orphan_chunks = 0usize;
-    let mut state_embedded_chunks = 0usize;
-    let mut state_missing_embeddings = 0usize;
-    let mut state_invalid_embeddings = 0usize;
-    let mut state_expected_embedding_dims = 0usize;
-    if let Some(index_state) = &state {
-        let mut seen_paths: HashSet<&str> = HashSet::new();
-        for file in &index_state.files {
-            if !seen_paths.insert(file.path.as_str()) {
-                duplicate_file_paths = duplicate_file_paths.saturating_add(1);
-            }
-        }
-        let file_paths: HashSet<&str> = index_state
-            .files
-            .iter()
-            .map(|file| file.path.as_str())
-            .collect();
-        let mut seen_chunk_ids: HashSet<u64> = HashSet::new();
-        for chunk in &index_state.chunks {
-            if !seen_chunk_ids.insert(chunk.id) {
-                duplicate_chunk_ids = duplicate_chunk_ids.saturating_add(1);
-            }
-            if !file_paths.contains(chunk.path.as_str()) {
-                orphan_chunks = orphan_chunks.saturating_add(1);
-            }
-        }
-        (
-            state_embedded_chunks,
-            state_missing_embeddings,
-            state_invalid_embeddings,
-            state_expected_embedding_dims,
-        ) = embedding_integrity_counts(&index_state.chunks);
-    }
-    println!(
-        "catalog consistency: duplicate_file_paths={} duplicate_chunk_ids={} orphan_chunks={}",
-        duplicate_file_paths, duplicate_chunk_ids, orphan_chunks
-    );
-    println!(
-        "embedding coverage: embedded_chunks={} missing_embeddings={} invalid_embeddings={} expected_dims={}",
-        state_embedded_chunks,
-        state_missing_embeddings,
-        state_invalid_embeddings,
-        state_expected_embedding_dims
-    );
-    println!(
-        "embedding integrity: {}",
-        if state_invalid_embeddings == 0 {
-            "ok"
-        } else {
-            "degraded"
-        }
-    );
-
-    let tantivy_entries = fs::read_dir(&tantivy_path)
-        .map(|entries| entries.filter_map(std::result::Result::ok).count())
-        .unwrap_or(0);
-    println!(
-        "tantivy dir: exists={} entries={}",
-        tantivy_path.exists(),
-        tantivy_entries
-    );
-
-    let mut embedding_cache_valid = false;
-    let mut embedding_cache_entries = 0usize;
-    if embedding_cache_path.exists()
-        && let Ok(conn) = Connection::open(&embedding_cache_path)
-        && let Ok(count) = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |row| {
-            row.get::<_, i64>(0)
-        })
-    {
-        embedding_cache_valid = true;
-        embedding_cache_entries = count.max(0) as usize;
-    }
-    println!(
-        "embedding cache: exists={} valid_db={} entries={}",
-        embedding_cache_path.exists(),
-        embedding_cache_valid,
-        embedding_cache_entries
-    );
-
-    let mut semantic_backend_ready = false;
-    let mut semantic_embedding_dims = 0usize;
-    let mut semantic_probe_error = String::new();
-    match index::embed_query(repo_root, "doctor semantic backend probe") {
-        Ok(Some(embedding)) if !embedding.is_empty() => {
-            semantic_backend_ready = true;
-            semantic_embedding_dims = embedding.len();
-        }
-        Ok(_) => {}
-        Err(err) => {
-            semantic_probe_error = err.to_string();
-        }
-    }
-    println!(
-        "semantic backend: ready={} dims={} error={}",
-        semantic_backend_ready,
-        semantic_embedding_dims,
-        if semantic_probe_error.is_empty() {
-            "-"
-        } else {
-            semantic_probe_error.as_str()
-        }
-    );
-
-    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
-    let health_url = format!("{}/health", config.daemon_base_url());
-    let health_route = client.get(health_url).send();
-    let mut watcher_restarts_total = 0u64;
-    match health_route {
-        Ok(resp) => {
-            let status = resp.status();
-            match resp.json::<Value>() {
-                Ok(body) => {
-                    watcher_restarts_total = body
-                        .get("watcher_restarts_total")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    println!(
-                        "route /health: {} (watcher_restarts_total={})",
-                        status, watcher_restarts_total
-                    );
-                }
-                Err(_) => println!("route /health: {}", status),
-            }
-        }
-        Err(err) => println!("route /health: error ({err})"),
-    }
-
-    let mut daemon_status: Option<StatusResponse> = None;
-    match fetch_status_snapshot(&config.daemon_base_url(), &repo_root_str) {
-        Ok(status) => {
-            println!(
-                "route /status: ok (tracked_files={} indexed_chunks={} embedded_chunks={} missing_embeddings={} invalid_embeddings={} update_retries={} update_failures={} updates_noop={} updates_applied={} watch_events_seen={} watch_events_accepted={} watch_events_dropped={} index_state={} index_job_state={} index_terminal_outcome={})",
-                status.tracked_files,
-                status.indexed_chunks,
-                status.embedded_chunks,
-                status.missing_embeddings,
-                status.invalid_embeddings,
-                status.update_retries,
-                status.update_failures,
-                status.updates_noop,
-                status.updates_applied,
-                status.watch_events_seen,
-                status.watch_events_accepted,
-                status.watch_events_dropped,
-                if status.index_state.is_empty() {
-                    "-"
-                } else {
-                    status.index_state.as_str()
-                },
-                if status.index_job_state.is_empty() {
-                    "-"
-                } else {
-                    status.index_job_state.as_str()
-                },
-                status.index_terminal_outcome.as_deref().unwrap_or("-")
-            );
-            daemon_status = Some(status);
-        }
-        Err(err) => println!("route /status: error ({err:#})"),
-    }
-
-    match fetch_index_progress(&config.daemon_base_url(), &repo_root_str) {
-        Ok(progress) => {
-            let mut progress_issues = Vec::new();
-            if progress.processed_files > progress.total_files {
-                progress_issues.push("processed_gt_total");
-            }
-            if progress.active && progress.state == "ready" {
-                progress_issues.push("active_ready_conflict");
-            }
-            if !progress.active && progress.state == "indexing" {
-                progress_issues.push("inactive_indexing_conflict");
-            }
-            if progress.state == "failed" && progress.last_error.is_none() {
-                progress_issues.push("failed_without_error");
-            }
-            if matches!(progress.job_state.as_str(), "queued" | "running") && !progress.active {
-                progress_issues.push("job_active_conflict");
-            }
-            if progress.terminal_outcome.is_some() && progress.active {
-                progress_issues.push("terminal_while_active");
-            }
-            if progress.job_state == "failed" && progress.last_error.is_none() {
-                progress_issues.push("job_failed_without_error");
-            }
-            println!(
-                "route /progress: ok (state={} phase={} active={} job_state={} terminal_outcome={} total={} processed={} sanity={})",
-                if progress.state.is_empty() {
-                    "-"
-                } else {
-                    progress.state.as_str()
-                },
-                if progress.phase.is_empty() {
-                    "-"
-                } else {
-                    progress.phase.as_str()
-                },
-                progress.active,
-                if progress.job_state.is_empty() {
-                    "-"
-                } else {
-                    progress.job_state.as_str()
-                },
-                progress.terminal_outcome.as_deref().unwrap_or("-"),
-                progress.total_files,
-                progress.processed_files,
-                if progress_issues.is_empty() {
-                    HOOK_REASON_OK.to_string()
-                } else {
-                    progress_issues.join(",")
-                }
-            );
-        }
-        Err(err) => println!("route /progress: error ({err:#})"),
-    }
-
-    let mut drift_notes = Vec::new();
-    if let Some(index_state) = &state {
-        if sqlite_files_count != index_state.files.len() {
-            drift_notes.push(format!(
-                "sqlite_files={} state_files={}",
-                sqlite_files_count,
-                index_state.files.len()
-            ));
-        }
-        if sqlite_chunks_count != index_state.chunks.len() {
-            drift_notes.push(format!(
-                "sqlite_chunks={} state_chunks={}",
-                sqlite_chunks_count,
-                index_state.chunks.len()
-            ));
-        }
-    }
-    if let Some(status) = &daemon_status {
-        if status.tracked_files != sqlite_files_count {
-            drift_notes.push(format!(
-                "status_tracked_files={} sqlite_files={}",
-                status.tracked_files, sqlite_files_count
-            ));
-        }
-        if status.embedded_chunks != state_embedded_chunks {
-            drift_notes.push(format!(
-                "status_embedded_chunks={} state_embedded_chunks={}",
-                status.embedded_chunks, state_embedded_chunks
-            ));
-        }
-        if status.invalid_embeddings != state_invalid_embeddings {
-            drift_notes.push(format!(
-                "status_invalid_embeddings={} state_invalid_embeddings={}",
-                status.invalid_embeddings, state_invalid_embeddings
-            ));
-        }
-        if status.update_retries > 0 {
-            drift_notes.push(format!("status_update_retries={}", status.update_retries));
-        }
-        if status.update_failures > 0 {
-            drift_notes.push(format!("status_update_failures={}", status.update_failures));
-        }
-        if status.updates_noop > 0 {
-            drift_notes.push(format!("status_updates_noop={}", status.updates_noop));
-        }
-        if status.updates_applied > 0 {
-            drift_notes.push(format!("status_updates_applied={}", status.updates_applied));
-        }
-        if status
-            .watch_events_accepted
-            .saturating_add(status.watch_events_dropped)
-            > status.watch_events_seen
-        {
-            drift_notes.push(format!(
-                "status_watch_events_conflict=seen:{} accepted:{} dropped:{}",
-                status.watch_events_seen, status.watch_events_accepted, status.watch_events_dropped
-            ));
-        }
-        if status.watch_events_dropped > 0 {
-            drift_notes.push(format!(
-                "status_watch_events_dropped={}",
-                status.watch_events_dropped
-            ));
-        }
-        if matches!(status.index_job_state.as_str(), "failed" | "interrupted") {
-            drift_notes.push(format!(
-                "status_index_job_state={} outcome={}",
-                status.index_job_state,
-                status.index_terminal_outcome.as_deref().unwrap_or("-")
-            ));
-        }
-    }
-    println!(
-        "index drift: sqlite_files={} sqlite_chunks={} index_progress_rows={} watcher_restarts_total={} notes={}",
-        sqlite_files_count,
-        sqlite_chunks_count,
-        sqlite_index_progress_rows,
-        watcher_restarts_total,
-        if drift_notes.is_empty() {
-            "none".to_string()
-        } else {
-            drift_notes.join("; ")
-        }
-    );
-
-    if sqlite_index_progress_rows > 1 {
-        println!("index progress table: unexpected row count (>1)");
-    }
-
-    if state
-        .as_ref()
-        .map_or(0usize, |index_state| index_state.chunks.len())
-        > 0
-    {
-        match query_daemon_with_timeout(
-            repo_root,
-            config,
-            "doctor deep health check retrieval",
-            Some(repo_root),
-            DOCTOR_QUERY_TIMEOUT_SECS,
-        ) {
-            Ok(response) => println!(
-                "query smoke: snippets={} confidence={:.3} intent={}",
-                response.snippets.len(),
-                response.diagnostics.confidence,
-                response.diagnostics.intent
-            ),
-            Err(err) => println!("query smoke: error ({err:#})"),
-        }
-    } else {
-        println!("query smoke: skipped (index has zero chunks)");
-    }
-    Ok(())
-}
-
-fn percentile(values: &[f64], fraction: f64) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    let last_idx = sorted.len().saturating_sub(1);
-    let idx = ((last_idx as f64) * fraction.clamp(0.0, 1.0)).round() as usize;
-    sorted[idx.min(last_idx)]
-}
-
-fn mean(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    values.iter().sum::<f64>() / values.len() as f64
-}
+// ─── Hook Commands ───────────────────────────────────────────────────────────
 
 fn cmd_hook_user_prompt_submit() -> Result<()> {
     let hook_started = Instant::now();
@@ -2025,447 +677,80 @@ fn cmd_hook_user_prompt_submit() -> Result<()> {
         }
     };
     let config = config::load_or_default(&repo_root)?;
-    let directives = parse_prompt_directives(&parsed.prompt);
-    let sanitized_prompt = sanitize_prompt_for_query(&parsed.prompt);
+
     log_hook_event(&repo_root, &config, || {
         json!({
-            "event":"UserPromptSubmit",
-            "phase":"input",
+            "event": "UserPromptSubmit",
+            "phase": "input",
             "ts_unix_ms": now_unix_ms(),
             "session_id": session_id.clone(),
             "cwd": parsed.common.cwd,
-            "permission_mode": parsed.common.permission_mode,
             "prompt_chars": parsed.prompt.len(),
-            "prompt_excerpt": excerpt(&parsed.prompt, &config),
-            "sanitized_prompt_chars": sanitized_prompt.len(),
-            "force_skip": directives.force_skip,
-            "force_inject": directives.force_inject,
         })
     });
 
-    if directives.force_skip {
-        let diagnostics = QueryDiagnostics {
-            intent: "forced".to_string(),
-            confidence: 1.0,
-            top_score: 0.0,
-            margin: 0.0,
-            signals: vec!["@nobudi".to_string()],
-            top_language: None,
-            snippet_languages: Vec::new(),
-            repo_ecosystems: Vec::new(),
-            top_ecosystem: None,
-            snippet_ecosystems: Vec::new(),
-            recommended_injection: false,
-            skip_reason: Some(SKIP_REASON_FORCED_SKIP.to_string()),
-            dedup_count: 0,
-            candidates: Vec::new(),
-        };
-        log_hook_event(&repo_root, &config, || {
-            json!({
-                "event":"UserPromptSubmit",
-                "phase":"output",
-                "ts_unix_ms": now_unix_ms(),
-                "session_id": session_id.clone(),
-                "latency_ms": hook_started.elapsed().as_millis(),
-                "success": true,
-                "reason": SKIP_REASON_FORCED_SKIP,
-                "context_chars": 0,
-                "context_excerpt": "",
-                "retrieval_intent": diagnostics.intent,
-                "retrieval_confidence": diagnostics.confidence,
-                "recommended_injection": diagnostics.recommended_injection,
-                "skip_reason": diagnostics.skip_reason,
-            })
-        });
-        emit_hook_response(UserPromptSubmitOutput::allow_with_context(String::new()))?;
-        return Ok(());
-    }
-
-    if ensure_daemon_running(&repo_root, &config).is_err() {
-        log_hook_event(&repo_root, &config, || {
-            json!({
-                "event":"UserPromptSubmit",
-                "phase":"output",
-                "ts_unix_ms": now_unix_ms(),
-                "session_id": session_id.clone(),
-                "latency_ms": hook_started.elapsed().as_millis(),
-                "success": false,
-                "reason": HOOK_REASON_DAEMON_UNAVAILABLE,
-                "context_chars": 0,
-                "context_excerpt": "",
-            })
-        });
-        emit_hook_response(UserPromptSubmitOutput::allow_with_context(String::new()))?;
-        return Ok(());
-    }
-
-    let mut diagnostics = QueryDiagnostics::default();
-    let mut total_candidates = 0usize;
-    let mut snippets_count = 0usize;
-    let mut query_timing: Option<HashMap<String, u64>> = None;
-    let mut snippet_refs: Vec<budi_core::rpc::SnippetRef> = Vec::new();
-    let (context, success, reason, error_detail) = match query_daemon_for_hook_context(
-        &repo_root,
-        &config,
-        &sanitized_prompt,
-        Some(&cwd),
-        Some(&session_id),
-    ) {
-        Ok(response) => {
-            total_candidates = response.total_candidates;
-            snippets_count = response.snippets.len();
-            query_timing = response.timing_ms;
-            snippet_refs = response.snippet_refs;
-            diagnostics = response.diagnostics;
-            let skip_reason = evaluate_context_skip(&config, &directives, &diagnostics);
-            if let Some(skip_reason) = skip_reason {
-                let runtime_guard_context = if diagnostics.intent == "runtime-config" {
-                    build_runtime_guard_context(&response.snippets)
-                } else {
-                    String::new()
-                };
-                if runtime_guard_context.is_empty() {
-                    (
-                        String::new(),
-                        true,
-                        format_skip_hook_reason(&skip_reason),
-                        String::new(),
-                    )
-                } else {
-                    (
-                        runtime_guard_context,
-                        true,
-                        HOOK_REASON_OK.to_string(),
-                        String::new(),
-                    )
-                }
-            } else {
-                (
-                    response.context,
-                    true,
-                    HOOK_REASON_OK.to_string(),
-                    String::new(),
-                )
-            }
-        }
-        Err(err) => {
-            let reason = classify_query_error(&err).as_str().to_string();
-            (String::new(), false, reason, err.to_string())
-        }
-    };
+    // Record the prompt in daemon stats (via HTTP hook if daemon is running).
+    // In v4 we no longer inject context — just track analytics.
     log_hook_event(&repo_root, &config, || {
-        let mut payload = json!({
-            "event":"UserPromptSubmit",
-            "phase":"output",
+        json!({
+            "event": "UserPromptSubmit",
+            "phase": "output",
             "ts_unix_ms": now_unix_ms(),
             "session_id": session_id.clone(),
             "latency_ms": hook_started.elapsed().as_millis(),
-            "success": success,
-            "reason": reason,
-            "context_chars": context.len(),
-            "context_excerpt": excerpt(&context, &config),
-            "error_detail": excerpt(&error_detail, &config),
-        });
-        if success && let Some(obj) = payload.as_object_mut() {
-            obj.insert("total_candidates".to_string(), json!(total_candidates));
-            obj.insert("snippets_count".to_string(), json!(snippets_count));
-            if diagnostics.dedup_count > 0 {
-                obj.insert("dedup_count".to_string(), json!(diagnostics.dedup_count));
-            }
-            obj.insert(
-                "retrieval_intent".to_string(),
-                json!(diagnostics.intent.clone()),
-            );
-            obj.insert(
-                "retrieval_confidence".to_string(),
-                json!(diagnostics.confidence),
-            );
-            obj.insert(
-                "retrieval_top_score".to_string(),
-                json!(diagnostics.top_score),
-            );
-            obj.insert("retrieval_margin".to_string(), json!(diagnostics.margin));
-            obj.insert(
-                "retrieval_top_language".to_string(),
-                json!(diagnostics.top_language.clone()),
-            );
-            obj.insert(
-                "retrieval_languages".to_string(),
-                json!(diagnostics.snippet_languages.clone()),
-            );
-            obj.insert(
-                "retrieval_top_ecosystem".to_string(),
-                json!(diagnostics.top_ecosystem.clone()),
-            );
-            obj.insert(
-                "retrieval_ecosystems".to_string(),
-                json!(diagnostics.snippet_ecosystems.clone()),
-            );
-            obj.insert(
-                "retrieval_signals_count".to_string(),
-                json!(diagnostics.signals.len()),
-            );
-            obj.insert(
-                "recommended_injection".to_string(),
-                json!(diagnostics.recommended_injection),
-            );
-            obj.insert(
-                "skip_reason".to_string(),
-                json!(diagnostics.skip_reason.clone()),
-            );
-            if let Some(ref timing) = query_timing {
-                obj.insert(
-                    "timing".to_string(),
-                    serde_json::to_value(timing).unwrap_or_default(),
-                );
-            }
-            if !snippet_refs.is_empty() {
-                obj.insert(
-                    "snippet_refs".to_string(),
-                    serde_json::to_value(&snippet_refs).unwrap_or_default(),
-                );
-            }
-        }
-        payload
+            "success": true,
+            "context_chars": 0,
+        })
     });
-    emit_hook_response(UserPromptSubmitOutput::allow_with_context(context))
-}
 
-fn query_daemon_for_hook_context(
-    repo_root: &Path,
-    config: &BudiConfig,
-    prompt: &str,
-    cwd: Option<&Path>,
-    session_id: Option<&str>,
-) -> Result<QueryResponse> {
-    let url = format!("{}/query", config.daemon_base_url());
-    let client = daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_TIMEOUT_SECS));
-    match send_query_request(&client, &url, repo_root, prompt, cwd, None, session_id) {
-        Ok(response) => Ok(response),
-        Err(initial_err) => {
-            let reason = classify_query_error(&initial_err);
-            if !should_retry_hook_query(reason) {
-                return Err(initial_err);
-            }
-            let _ = ensure_daemon_running(repo_root, config);
-            let retry_client =
-                daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_RETRY_TIMEOUT_SECS));
-            send_query_request(
-                &retry_client,
-                &url,
-                repo_root,
-                prompt,
-                cwd,
-                None,
-                session_id,
-            )
-            .with_context(|| format!("hook-retry-after-{}", reason.as_str()))
-        }
-    }
+    emit_hook_response(UserPromptSubmitOutput::allow_with_context(String::new()))
 }
 
 fn cmd_hook_post_tool_use() -> Result<()> {
-    let hook_started = Instant::now();
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let parsed: PostToolUseInput = match serde_json::from_str(&input) {
         Ok(v) => v,
         Err(_) => return Ok(()),
     };
-    let tool_name = parsed.tool_name.clone();
-    let cwd_str = parsed.common.cwd.clone();
-    let session_id = parsed.common.session_id.clone();
 
-    let is_write_edit = tool_name == "Write" || tool_name == "Edit";
-    let is_read = tool_name == "Read" || tool_name == "Glob";
-    if !is_write_edit && !is_read {
-        return Ok(());
-    }
-
-    let file_path = parsed
-        .tool_input
-        .get("file_path")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if file_path.is_empty() {
-        return Ok(());
-    }
-
-    let cwd = PathBuf::from(&cwd_str);
+    let cwd = PathBuf::from(&parsed.common.cwd);
     let Ok(repo_root) = config::find_repo_root(&cwd) else {
         return Ok(());
     };
     let Ok(config) = config::load_or_default(&repo_root) else {
         return Ok(());
     };
+
     log_hook_event(&repo_root, &config, || {
         json!({
-            "event":"PostToolUse",
-            "phase":"input",
+            "event": "PostToolUse",
+            "phase": "input",
             "ts_unix_ms": now_unix_ms(),
-            "session_id": session_id.clone(),
-            "tool_name": tool_name,
-            "file_path": file_path.clone(),
-            "cwd": cwd_str,
-        })
-    });
-    if ensure_daemon_running(&repo_root, &config).is_err() {
-        log_hook_event(&repo_root, &config, || {
-            json!({
-                "event":"PostToolUse",
-                "phase":"output",
-                "ts_unix_ms": now_unix_ms(),
-                "session_id": session_id.clone(),
-                "latency_ms": hook_started.elapsed().as_millis(),
-                "success": false,
-                "reason": HOOK_REASON_DAEMON_UNAVAILABLE,
-            })
-        });
-        return Ok(());
-    }
-
-    if is_read {
-        // PostToolUse/Read: prefetch graph neighbors for the file Claude just read.
-        let client = daemon_client_with_timeout(Duration::from_secs(HOOK_QUERY_TIMEOUT_SECS));
-        let url = format!("{}/prefetch-neighbors", config.daemon_base_url());
-        if let Ok(resp) = client
-            .post(&url)
-            .json(&serde_json::json!({
-                "repo_root": repo_root.display().to_string(),
-                "file_path": file_path,
-                "session_id": session_id,
-                "limit": 5,
-            }))
-            .send()
-            && let Ok(prefetch) = resp.json::<budi_core::rpc::PrefetchResponse>()
-            && !prefetch.context.is_empty()
-        {
-            println!(
-                "{}",
-                serde_json::to_string(&AsyncSystemMessageOutput {
-                    system_message: prefetch.context,
-                })?
-            );
-        }
-        return Ok(());
-    }
-
-    // Write/Edit: trigger incremental index update.
-    let client = daemon_client_with_timeout(Duration::from_secs(UPDATE_TIMEOUT_SECS));
-    let url = format!("{}/update", config.daemon_base_url());
-    let update_result = client
-        .post(url)
-        .json(&UpdateRequest {
-            repo_root: repo_root.display().to_string(),
-            changed_files: vec![file_path.clone()],
-        })
-        .send();
-    let mut update_success = false;
-    let mut indexed_chunks = 0usize;
-    let mut changed_files = 0usize;
-    let (update_reason, update_error_detail) = match update_result {
-        Ok(response) => match response.error_for_status() {
-            Ok(ok_resp) => match ok_resp.json::<IndexResponse>() {
-                Ok(parsed_resp) => {
-                    update_success = true;
-                    indexed_chunks = parsed_resp.indexed_chunks;
-                    changed_files = parsed_resp.changed_files;
-                    let msg = format!(
-                        "budi indexed {} changed file(s), total chunks={}",
-                        parsed_resp.changed_files, parsed_resp.indexed_chunks
-                    );
-                    println!(
-                        "{}",
-                        serde_json::to_string(&AsyncSystemMessageOutput {
-                            system_message: msg
-                        })?
-                    );
-                    (HOOK_REASON_OK.to_string(), String::new())
-                }
-                Err(err) => (
-                    HOOK_REASON_RESPONSE_PARSE_ERROR.to_string(),
-                    err.to_string(),
-                ),
-            },
-            Err(err) => (
-                classify_update_error(&err).as_str().to_string(),
-                err.to_string(),
-            ),
-        },
-        Err(err) => (
-            classify_update_error(&err).as_str().to_string(),
-            err.to_string(),
-        ),
-    };
-    log_hook_event(&repo_root, &config, || {
-        json!({
-            "event":"PostToolUse",
-            "phase":"output",
-            "ts_unix_ms": now_unix_ms(),
-            "session_id": session_id.clone(),
-            "latency_ms": hook_started.elapsed().as_millis(),
-            "success": update_success,
-            "reason": update_reason,
-            "error_detail": excerpt(&update_error_detail, &config),
-            "indexed_chunks": indexed_chunks,
-            "changed_files": changed_files,
+            "session_id": parsed.common.session_id.clone(),
+            "tool_name": parsed.tool_name,
         })
     });
     Ok(())
 }
 
 fn cmd_hook_session_start() -> Result<()> {
-    // Read stdin to detect how the session started (startup/resume/clear/compact).
     let mut input = String::new();
     let _ = io::stdin().read_to_string(&mut input);
-    let source = serde_json::from_str::<Value>(&input)
-        .ok()
-        .and_then(|v| v.get("source")?.as_str().map(String::from))
-        .unwrap_or_default();
 
     let cwd = std::env::current_dir()?;
     let Ok(repo_root) = config::find_repo_root(&cwd) else {
         return Ok(());
     };
-    // Ensure daemon is running so HTTP hooks (UserPromptSubmit, PostToolUse) can reach it.
     let config = config::load_or_default(&repo_root)?;
     let _ = ensure_daemon_running(&repo_root, &config);
-
-    // After compaction or /clear, budi's injected context is lost. Re-inject the
-    // project map so Claude immediately has the codebase overview.
-    if (source == "compact" || source == "clear")
-        && let Some(map) = project_map::read_project_map(&repo_root)
-    {
-        println!("[budi context]\n{}", map);
-    }
     Ok(())
 }
 
 fn cmd_hook_subagent_start() -> Result<()> {
     let mut input = String::new();
     let _ = io::stdin().read_to_string(&mut input);
-    let cwd_str = serde_json::from_str::<Value>(&input)
-        .ok()
-        .and_then(|v| v.get("cwd")?.as_str().map(String::from));
-
-    let cwd = cwd_str
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let Ok(repo_root) = config::find_repo_root(&cwd) else {
-        return Ok(());
-    };
-
-    // Inject the project map so subagents have codebase awareness.
-    if let Some(map) = project_map::read_project_map(&repo_root) {
-        let output = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "SubagentStart",
-                "additionalContext": format!("[budi context]\n{}", map)
-            }
-        });
-        println!("{}", serde_json::to_string(&output)?);
-    }
+    // No project map injection in v4 — analytics only.
     Ok(())
 }
 
@@ -2478,264 +763,18 @@ fn cmd_hook_session_end() -> Result<()> {
         return Ok(());
     };
 
-    // Read session_id from environment (Claude Code sets CLAUDE_SESSION_ID for Stop hooks).
     let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
 
-    // Fetch per-session stats from daemon for the summary.
     if let Some(ref sid) = session_id
         && let Some(stats) = fetch_session_stats(&config, sid)
     {
         let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
-        let injections = stats
-            .get("injections")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let confirmed = stats
-            .get("confirmed_reads")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let total_reads = stats
-            .get("total_reads")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
         if queries > 0 {
-            let rate = injections as f64 / queries as f64 * 100.0;
-            let mut summary = format!(
-                "budi: {}/{} prompts got context ({:.0}%)",
-                injections, queries, rate
-            );
-            if total_reads > 0 {
-                let hit_rate = confirmed as f64 / total_reads as f64 * 100.0;
-                summary.push_str(&format!(
-                    ", {}/{} file reads pre-delivered ({:.0}%)",
-                    confirmed, total_reads, hit_rate
-                ));
-            }
-            eprintln!("{}", summary);
+            let skips = stats.get("skips").and_then(|v| v.as_u64()).unwrap_or(0);
+            eprintln!("budi: {} prompts tracked, {} skipped", queries, skips);
         }
-    }
-
-    // Log detailed session-end event when debug_io is enabled.
-    if config.debug_io {
-        log_session_end_debug(&repo_root, &config, &session_id);
     }
     Ok(())
-}
-
-fn log_session_end_debug(
-    repo_root: &std::path::Path,
-    config: &BudiConfig,
-    session_id: &Option<String>,
-) {
-    let Ok(log_path) = config::hook_log_path(repo_root) else {
-        return;
-    };
-    let Ok(raw) = std::fs::read_to_string(&log_path) else {
-        return;
-    };
-
-    let mut total_injected = 0u32;
-    let mut total_prompts = 0u32;
-    let mut first_ts: Option<u64> = None;
-    let mut last_ts: Option<u64> = None;
-    let mut file_counts: HashMap<String, u32> = HashMap::new();
-
-    for line in raw.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(sid) = session_id
-            && val.get("session_id").and_then(Value::as_str) != Some(sid.as_str())
-        {
-            continue;
-        }
-        if val.get("phase").and_then(Value::as_str) != Some("output") {
-            continue;
-        }
-        if val.get("event").and_then(Value::as_str) != Some("UserPromptSubmit") {
-            continue;
-        }
-        total_prompts += 1;
-        if let Some(ts) = val.get("ts_unix_ms").and_then(Value::as_u64) {
-            if first_ts.is_none() || ts < first_ts.unwrap() {
-                first_ts = Some(ts);
-            }
-            if last_ts.is_none() || ts > last_ts.unwrap() {
-                last_ts = Some(ts);
-            }
-        }
-        if val
-            .get("recommended_injection")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            total_injected += 1;
-        }
-        if let Some(refs) = val.get("snippet_refs").and_then(Value::as_array) {
-            for r in refs {
-                if let Some(path) = r.get("path").and_then(Value::as_str) {
-                    *file_counts.entry(path.to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    if total_prompts == 0 {
-        return;
-    }
-
-    let duration_secs = match (first_ts, last_ts) {
-        (Some(a), Some(b)) => (b.saturating_sub(a) / 1000) as u32,
-        _ => 0,
-    };
-
-    let mut top_files: Vec<(String, u32)> = file_counts.into_iter().collect();
-    top_files.sort_by(|a, b| b.1.cmp(&a.1));
-    top_files.truncate(5);
-
-    log_hook_event(repo_root, config, || {
-        json!({
-            "event": "SessionEnd",
-            "ts_unix_ms": now_unix_ms(),
-            "session_id": session_id,
-            "duration_secs": duration_secs,
-            "total_prompts": total_prompts,
-            "total_injected": total_injected,
-            "injection_rate": if total_prompts > 0 { total_injected as f32 / total_prompts as f32 } else { 0.0 },
-            "top_files": top_files.iter().map(|(p, n)| json!({"path": p, "count": n})).collect::<Vec<_>>(),
-        })
-    });
-}
-
-/// Read session-affinity.json and return the top N entries (path, anchors) sorted by recency.
-/// Supports both new format (AffinityEntry with ts+anchors) and old flat format (ts only).
-#[allow(dead_code)]
-fn read_session_affinity(repo_root: &std::path::Path, top_n: usize) -> Vec<(String, Vec<String>)> {
-    let Ok(paths) = budi_core::config::repo_paths(repo_root) else {
-        return Vec::new();
-    };
-    let affinity_path = paths.data_dir.join("session-affinity.json");
-    let Ok(raw) = std::fs::read_to_string(&affinity_path) else {
-        return Vec::new();
-    };
-    #[derive(serde::Deserialize, Default)]
-    struct Entry {
-        ts: u64,
-        #[serde(default)]
-        anchors: Vec<String>,
-    }
-    // Try new format first; fall back to old flat HashMap<String, u64>.
-    let map: std::collections::HashMap<String, Entry> = serde_json::from_str(&raw)
-        .or_else(|_| {
-            let old: std::collections::HashMap<String, u64> = serde_json::from_str(&raw)?;
-            Ok::<_, serde_json::Error>(
-                old.into_iter()
-                    .map(|(k, ts)| {
-                        (
-                            k,
-                            Entry {
-                                ts,
-                                anchors: vec![],
-                            },
-                        )
-                    })
-                    .collect(),
-            )
-        })
-        .unwrap_or_default();
-    let mut entries: Vec<(String, Entry)> = map.into_iter().collect();
-    entries.sort_by(|a, b| b.1.ts.cmp(&a.1.ts));
-    entries.truncate(top_n);
-    entries
-        .into_iter()
-        .map(|(path, e)| (path, e.anchors))
-        .collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueryErrorReason {
-    Timeout,
-    TransportError,
-    HttpError,
-    Error,
-}
-
-impl QueryErrorReason {
-    const fn as_str(self) -> &'static str {
-        match self {
-            QueryErrorReason::Timeout => HOOK_REASON_QUERY_TIMEOUT,
-            QueryErrorReason::TransportError => HOOK_REASON_QUERY_TRANSPORT_ERROR,
-            QueryErrorReason::HttpError => HOOK_REASON_QUERY_HTTP_ERROR,
-            QueryErrorReason::Error => HOOK_REASON_QUERY_ERROR,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateErrorReason {
-    Timeout,
-    ConnectError,
-    HttpError,
-    Failed,
-}
-
-impl UpdateErrorReason {
-    const fn as_str(self) -> &'static str {
-        match self {
-            UpdateErrorReason::Timeout => HOOK_REASON_UPDATE_TIMEOUT,
-            UpdateErrorReason::ConnectError => HOOK_REASON_UPDATE_CONNECT_ERROR,
-            UpdateErrorReason::HttpError => HOOK_REASON_UPDATE_HTTP_ERROR,
-            UpdateErrorReason::Failed => HOOK_REASON_UPDATE_FAILED,
-        }
-    }
-}
-
-fn classify_query_error(err: &anyhow::Error) -> QueryErrorReason {
-    for cause in err.chain() {
-        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
-            return match classify_update_error(reqwest_err) {
-                UpdateErrorReason::Timeout => QueryErrorReason::Timeout,
-                UpdateErrorReason::ConnectError => QueryErrorReason::TransportError,
-                UpdateErrorReason::HttpError => QueryErrorReason::HttpError,
-                UpdateErrorReason::Failed => QueryErrorReason::Error,
-            };
-        }
-    }
-    let message = err.to_string().to_ascii_lowercase();
-    if message.contains("timed out") || message.contains("timeout") {
-        return QueryErrorReason::Timeout;
-    }
-    if message.contains("failed to send query request")
-        || message.contains("connection")
-        || message.contains("connect")
-    {
-        return QueryErrorReason::TransportError;
-    }
-    if message.contains("query endpoint returned error") {
-        return QueryErrorReason::HttpError;
-    }
-    QueryErrorReason::Error
-}
-
-const fn should_retry_hook_query(reason: QueryErrorReason) -> bool {
-    matches!(
-        reason,
-        QueryErrorReason::Timeout | QueryErrorReason::TransportError
-    )
-}
-
-fn classify_update_error(err: &reqwest::Error) -> UpdateErrorReason {
-    if err.is_timeout() {
-        return UpdateErrorReason::Timeout;
-    }
-    if err.is_connect() {
-        return UpdateErrorReason::ConnectError;
-    }
-    if err.status().is_some() {
-        return UpdateErrorReason::HttpError;
-    }
-    UpdateErrorReason::Failed
 }
 
 fn emit_hook_response(output: UserPromptSubmitOutput) -> Result<()> {
@@ -2743,14 +782,767 @@ fn emit_hook_response(output: UserPromptSubmitOutput) -> Result<()> {
     Ok(())
 }
 
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
+fn period_label(period: StatsPeriod) -> &'static str {
+    match period {
+        StatsPeriod::Today => "Today",
+        StatsPeriod::Week => "This week",
+        StatsPeriod::Month => "This month",
+        StatsPeriod::All => "All time",
+    }
+}
+
+fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
+    let today = Local::now().date_naive();
+    match period {
+        StatsPeriod::Today => {
+            let since = today.format("%Y-%m-%dT00:00:00").to_string();
+            (Some(since), None)
+        }
+        StatsPeriod::Week => {
+            let weekday = today.weekday().num_days_from_monday();
+            let monday = today - chrono::Duration::days(weekday as i64);
+            let since = monday.format("%Y-%m-%dT00:00:00").to_string();
+            (Some(since), None)
+        }
+        StatsPeriod::Month => {
+            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+            let since = first.format("%Y-%m-%dT00:00:00").to_string();
+            (Some(since), None)
+        }
+        StatsPeriod::All => (None, None),
+    }
+}
+
+fn cmd_stats(
+    period: StatsPeriod,
+    session: Option<String>,
+    files: bool,
+    json_output: bool,
+) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+
+    if let Some(ref sid) = session {
+        if json_output {
+            let detail = analytics::session_detail(&conn, sid)?;
+            println!("{}", serde_json::to_string_pretty(&detail)?);
+            return Ok(());
+        }
+        return cmd_stats_session(&conn, sid);
+    }
+
+    if files {
+        if json_output {
+            let (since, until) = period_date_range(period);
+            let data = analytics::repo_usage(&conn, since.as_deref(), until.as_deref(), 50)?;
+            println!("{}", serde_json::to_string_pretty(&data)?);
+            return Ok(());
+        }
+        return cmd_stats_files(&conn, period);
+    }
+
+    if json_output {
+        let (since, until) = period_date_range(period);
+        let summary = analytics::usage_summary(&conn, since.as_deref(), until.as_deref())?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    cmd_stats_summary(&conn, period)
+}
+
+fn cmd_stats_summary(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let summary = analytics::usage_summary(conn, since.as_deref(), until.as_deref())?;
+
+    let period_label = period_label(period);
+
+    println!();
+    println!(
+        "  \x1b[1;36m📊 budi stats\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    if summary.total_messages == 0 {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    println!(
+        "  \x1b[1mMessages\x1b[0m     {} \x1b[90m({} user, {} assistant)\x1b[0m",
+        summary.total_messages, summary.total_user_messages, summary.total_assistant_messages
+    );
+    println!("  \x1b[1mSessions\x1b[0m     {}", summary.total_sessions);
+    println!();
+
+    let total_input = summary.total_input_tokens
+        + summary.total_cache_creation_tokens
+        + summary.total_cache_read_tokens;
+    println!(
+        "  \x1b[1mInput tokens\x1b[0m  {}",
+        format_tokens(total_input)
+    );
+    println!(
+        "    \x1b[90mdirect:       {}\x1b[0m",
+        format_tokens(summary.total_input_tokens)
+    );
+    println!(
+        "    \x1b[90mcache write:  {}\x1b[0m",
+        format_tokens(summary.total_cache_creation_tokens)
+    );
+    println!(
+        "    \x1b[32mcache read:   {}\x1b[0m",
+        format_tokens(summary.total_cache_read_tokens)
+    );
+    println!(
+        "  \x1b[1mOutput tokens\x1b[0m {}",
+        format_tokens(summary.total_output_tokens)
+    );
+
+    if summary.total_cache_read_tokens > 0 || summary.total_cache_creation_tokens > 0 {
+        let cache_hit_pct = if total_input > 0 {
+            (summary.total_cache_read_tokens as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+        let color = if cache_hit_pct > 50.0 {
+            "\x1b[32m"
+        } else if cache_hit_pct > 20.0 {
+            "\x1b[33m"
+        } else {
+            "\x1b[31m"
+        };
+        println!(
+            "  \x1b[1mCache hit\x1b[0m     {}{:.1}%\x1b[0m",
+            color, cache_hit_pct
+        );
+    }
+
+    if !summary.top_tools.is_empty() {
+        println!();
+        println!("  \x1b[1mTop tools\x1b[0m");
+        let max_count = summary.top_tools.first().map(|(_, c)| *c).unwrap_or(1);
+        for (name, count) in &summary.top_tools {
+            let bar_len = ((*count as f64 / max_count as f64) * 20.0) as usize;
+            let bar: String = "█".repeat(bar_len);
+            println!(
+                "    \x1b[36m{:<16}\x1b[0m {:>5}  \x1b[36m{}\x1b[0m",
+                name, count, bar
+            );
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
+    let detail = analytics::session_detail(conn, session_id)?;
+    let Some(d) = detail else {
+        println!("Session not found: {}", session_id);
+        return Ok(());
+    };
+
+    println!();
+    println!(
+        "  \x1b[1;36m📊 Session\x1b[0m \x1b[90m{}\x1b[0m",
+        &d.session_id[..d.session_id.len().min(12)]
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    if let Some(ref repo) = d.repo_id {
+        println!("  \x1b[1mRepo\x1b[0m      {}", repo);
+    } else if let Some(ref dir) = d.project_dir {
+        println!("  \x1b[1mProject\x1b[0m   {}", dir);
+    }
+    if let Some(ref branch) = d.git_branch {
+        println!("  \x1b[1mBranch\x1b[0m    {}", branch);
+    }
+    if let Some(ref ver) = d.version {
+        println!("  \x1b[1mClaude\x1b[0m    v{}", ver);
+    }
+    println!(
+        "  \x1b[1mStarted\x1b[0m   {}",
+        format_timestamp(&d.first_seen)
+    );
+    println!(
+        "  \x1b[1mLast msg\x1b[0m  {}",
+        format_timestamp(&d.last_seen)
+    );
+    println!();
+
+    let total_msgs = d.user_messages + d.assistant_messages;
+    println!(
+        "  \x1b[1mMessages\x1b[0m  {} \x1b[90m({} user, {} assistant)\x1b[0m",
+        total_msgs, d.user_messages, d.assistant_messages
+    );
+
+    let total_input = d.input_tokens + d.cache_creation_tokens + d.cache_read_tokens;
+    println!(
+        "  \x1b[1mInput\x1b[0m     {} \x1b[90m(direct: {}, cache w: {}, cache r: {})\x1b[0m",
+        format_tokens(total_input),
+        format_tokens(d.input_tokens),
+        format_tokens(d.cache_creation_tokens),
+        format_tokens(d.cache_read_tokens),
+    );
+    println!(
+        "  \x1b[1mOutput\x1b[0m    {}",
+        format_tokens(d.output_tokens)
+    );
+
+    if !d.top_tools.is_empty() {
+        println!();
+        println!("  \x1b[1mTools used\x1b[0m");
+        for (name, count) in &d.top_tools {
+            println!("    \x1b[36m{:<16}\x1b[0m {}", name, count);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_files(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let repos = analytics::repo_usage(conn, since.as_deref(), until.as_deref(), 15)?;
+
+    let period_label = period_label(period);
+
+    println!();
+    println!(
+        "  \x1b[1;36m📊 Repositories\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    if repos.is_empty() {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_msgs = repos.first().map(|f| f.message_count).unwrap_or(1);
+    for r in &repos {
+        let bar_len = ((r.message_count as f64 / max_msgs as f64) * 16.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        println!(
+            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            r.repo_id,
+            r.message_count,
+            format_tokens(r.input_tokens + r.output_tokens),
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
+fn format_timestamp(ts: &str) -> String {
+    // Try to parse as RFC 3339, fall back to raw string.
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| ts.to_string())
+}
+
+fn shorten_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() <= 2 {
+        return path.to_string();
+    }
+    format!("…/{}", parts[parts.len() - 2..].join("/"))
+}
+
+// ─── Insights ─────────────────────────────────────────────────────────────────
+
+fn cmd_insights(period: StatsPeriod, json_output: bool) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+    let (since, until) = period_date_range(period);
+    let ins = insights::generate_insights(&conn, since.as_deref(), until.as_deref(), 0)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&ins)?);
+        return Ok(());
+    }
+
+    let period_label = match period {
+        StatsPeriod::Today => "Today",
+        StatsPeriod::Week => "This week",
+        StatsPeriod::Month => "This month",
+        StatsPeriod::All => "All time",
+    };
+
+    println!("\x1b[1m  Insights — {}\x1b[0m", period_label);
+    println!();
+
+    // Search efficiency
+    let se = &ins.search_efficiency;
+    println!(
+        "  \x1b[1mSearch Efficiency\x1b[0m  {} search / {} total tool calls ({:.0}%)",
+        se.search_calls,
+        se.total_calls,
+        se.ratio * 100.0
+    );
+    if let Some(ref rec) = se.recommendation {
+        let color = if se.ratio > 0.40 { "33" } else { "32" }; // yellow or green
+        println!("    \x1b[{}m{}\x1b[0m", color, rec);
+    }
+    println!();
+
+    // MCP tools
+    if !ins.mcp_tools.is_empty() {
+        println!("  \x1b[1mMCP Tool Usage\x1b[0m");
+        for mcp in &ins.mcp_tools {
+            println!("    \x1b[36m{}\x1b[0m  {} calls", mcp.tool, mcp.call_count);
+        }
+        println!();
+    }
+
+    // CLAUDE.md files
+    if !ins.claude_md_files.is_empty() {
+        println!("  \x1b[1mCLAUDE.md Files\x1b[0m");
+        for f in &ins.claude_md_files {
+            let size_label = if f.est_tokens >= 1000 {
+                format!("~{}K tokens", f.est_tokens / 1000)
+            } else {
+                format!("~{} tokens", f.est_tokens)
+            };
+            println!(
+                "    \x1b[36m{}\x1b[0m  {}",
+                shorten_path(&f.path),
+                size_label
+            );
+            if let Some(ref rec) = f.recommendation {
+                println!("    \x1b[33m{}\x1b[0m", rec);
+            }
+        }
+        println!();
+    }
+
+    // Cache efficiency
+    let ce = &ins.cache_efficiency;
+    if ce.total_input_tokens > 0 {
+        println!(
+            "  \x1b[1mCache Efficiency\x1b[0m  {:.0}% hit rate ({} cache reads / {} total input)",
+            ce.hit_rate * 100.0,
+            format_tokens(ce.total_cache_read_tokens),
+            format_tokens(ce.total_input_tokens)
+        );
+        if let Some(ref rec) = ce.recommendation {
+            let color = if ce.hit_rate < 0.30 { "33" } else { "32" };
+            println!("    \x1b[{}m{}\x1b[0m", color, rec);
+        }
+        println!();
+    }
+
+    // Token-heavy sessions
+    if !ins.token_heavy_sessions.is_empty() {
+        println!("  \x1b[1mToken-Heavy Sessions\x1b[0m  (input/output ratio > 5x)");
+        for s in ins.token_heavy_sessions.iter().take(5) {
+            let project = s
+                .repo_id
+                .as_deref()
+                .unwrap_or_else(|| s.project_dir.as_deref().unwrap_or(""));
+            println!(
+                "    \x1b[36m{}…\x1b[0m  {} in / {} out ({:.0}x)  {}",
+                &s.session_id[..s.session_id.len().min(8)],
+                format_tokens(s.input_tokens),
+                format_tokens(s.output_tokens),
+                s.ratio,
+                project
+            );
+        }
+        if !ins.token_heavy_sessions.is_empty() {
+            println!(
+                "    \x1b[33mHigh input/output ratio suggests large context. \
+                 Try splitting tasks into smaller sessions.\x1b[0m"
+            );
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+// ─── Cost ─────────────────────────────────────────────────────────────────────
+
+fn cmd_cost(period: StatsPeriod, json_output: bool) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+    let (since, until) = period_date_range(period);
+    let est = cost::estimate_cost(&conn, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&est)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m💰 Cost estimate\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+    println!(
+        "  \x1b[1mTotal\x1b[0m          \x1b[33m${:.2}\x1b[0m",
+        est.total_cost
+    );
+    println!("  \x1b[90mInput          ${:.2}\x1b[0m", est.input_cost);
+    println!("  \x1b[90mOutput         ${:.2}\x1b[0m", est.output_cost);
+    println!(
+        "  \x1b[90mCache write    ${:.2}\x1b[0m",
+        est.cache_write_cost
+    );
+    println!(
+        "  \x1b[90mCache read     ${:.2}\x1b[0m",
+        est.cache_read_cost
+    );
+    if est.cache_savings > 0.0 {
+        println!("  \x1b[32mCache savings  ${:.2}\x1b[0m", est.cache_savings);
+    }
+    println!();
+    Ok(())
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+fn cmd_models(period: StatsPeriod, json_output: bool) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+    let (since, until) = period_date_range(period);
+    let models = analytics::model_usage(&conn, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&models)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m🤖 Model usage\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
+
+    if models.is_empty() {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_msgs = models.first().map(|m| m.message_count).unwrap_or(1);
+    for m in &models {
+        let bar_len = ((m.message_count as f64 / max_msgs as f64) * 16.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        let total_tok =
+            m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
+        println!(
+            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            m.model,
+            m.message_count,
+            format_tokens(total_tok),
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+// ─── Sessions ─────────────────────────────────────────────────────────────────
+
+fn cmd_sessions(period: StatsPeriod, json_output: bool) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+    let (since, until) = period_date_range(period);
+    let sessions = analytics::session_list(&conn, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m📋 Sessions\x1b[0m — \x1b[1m{}\x1b[0m  ({} total)",
+        period_label,
+        sessions.len()
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(60));
+
+    if sessions.is_empty() {
+        println!("  No sessions for this period.");
+        println!();
+        return Ok(());
+    }
+
+    for s in sessions.iter().take(20) {
+        let short_id = &s.session_id[..s.session_id.len().min(8)];
+        let project = s
+            .repo_id
+            .as_deref()
+            .unwrap_or_else(|| s.project_dir.as_deref().unwrap_or(""));
+        let total_tok = s.input_tokens + s.output_tokens;
+        println!(
+            "    \x1b[36m{}…\x1b[0m  {:>4} msgs  {:>8} tok  {:>4} tools  {}  \x1b[90m{}\x1b[0m",
+            short_id,
+            s.message_count,
+            format_tokens(total_tok),
+            s.tool_calls,
+            format_timestamp(&s.first_seen),
+            project
+        );
+    }
+
+    if sessions.len() > 20 {
+        println!(
+            "    \x1b[90m… and {} more (use --json for full list)\x1b[0m",
+            sessions.len() - 20
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+// ─── Plugins ──────────────────────────────────────────────────────────────────
+
+fn cmd_plugins(json_output: bool) -> Result<()> {
+    let plugins = claude_data::read_installed_plugins()?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&plugins)?);
+        return Ok(());
+    }
+
+    println!();
+    println!(
+        "  \x1b[1;36m🔌 Installed plugins\x1b[0m  ({} total)",
+        plugins.len()
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
+
+    if plugins.is_empty() {
+        println!("  No plugins installed.");
+        println!();
+        return Ok(());
+    }
+
+    for p in &plugins {
+        println!("    \x1b[1m{}\x1b[0m", p.name);
+        if !p.description.is_empty() {
+            println!("      \x1b[90m{}\x1b[0m", p.description);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
+fn cmd_projects(period: StatsPeriod, json_output: bool) -> Result<()> {
+    let db_path = analytics::db_path()?;
+    if !db_path.exists() {
+        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
+        return Ok(());
+    }
+    let conn = analytics::open_db(&db_path)?;
+    let (since, until) = period_date_range(period);
+    let repos = analytics::repo_usage(&conn, since.as_deref(), until.as_deref(), 20)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&repos)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m📁 Projects\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
+
+    if repos.is_empty() {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_msgs = repos.first().map(|f| f.message_count).unwrap_or(1);
+    for r in &repos {
+        let bar_len = ((r.message_count as f64 / max_msgs as f64) * 16.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        println!(
+            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            r.repo_id,
+            r.message_count,
+            format_tokens(r.input_tokens + r.output_tokens),
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+// ─── Sync ─────────────────────────────────────────────────────────────────────
+
+fn cmd_sync() -> Result<()> {
+    let db_path = analytics::db_path()?;
+    let mut conn = analytics::open_db(&db_path)?;
+
+    println!("Syncing Claude Code transcripts...");
+    let (files_synced, messages_ingested) = analytics::sync_all(&mut conn)?;
+
+    if files_synced == 0 && messages_ingested == 0 {
+        println!("Already up to date.");
+    } else {
+        println!(
+            "Synced \x1b[1m{}\x1b[0m new messages from \x1b[1m{}\x1b[0m files.",
+            messages_ingested, files_synced
+        );
+    }
+    println!("Database: {}", db_path.display());
+    Ok(())
+}
+
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+
+fn cmd_dashboard() -> Result<()> {
+    let url = format!(
+        "http://{}:{}/dashboard",
+        config::DEFAULT_DAEMON_HOST,
+        config::DEFAULT_DAEMON_PORT,
+    );
+    println!("{}", url);
+    // Try to open in browser
+    let _ = Command::new("open").arg(&url).spawn();
+    Ok(())
+}
+
+// ─── Update ──────────────────────────────────────────────────────────────────
+
+fn cmd_update() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Current version: v{}", current);
+    println!("Checking for updates...");
+
+    // Fetch latest release tag from GitHub API
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let resp = client
+        .get("https://api.github.com/repos/siropkin/budi/releases/latest")
+        .header("User-Agent", "budi-cli")
+        .send()
+        .context("Failed to check for updates")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub API returned {}", resp.status());
+    }
+
+    let release: Value = resp.json()?;
+    let latest_tag = release
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .context("Could not parse release tag")?;
+    let latest = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
+
+    if latest == current {
+        println!("\x1b[32m✓\x1b[0m Already up to date (v{}).", current);
+        return Ok(());
+    }
+
+    println!(
+        "New version available: \x1b[1mv{}\x1b[0m → \x1b[1;32mv{}\x1b[0m",
+        current, latest
+    );
+    println!("Updating...");
+
+    // Run the standalone installer
+    let status = Command::new("sh")
+        .args([
+            "-c",
+            "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh",
+        ])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to run installer")?;
+
+    if !status.success() {
+        anyhow::bail!("Installer exited with {}", status);
+    }
+
+    // Restart daemon with new version
+    println!("Restarting daemon...");
+    let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
+    thread::sleep(Duration::from_millis(500));
+
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(repo_root) = config::find_repo_root(&cwd)
+    {
+        let config = config::load_or_default(&repo_root)?;
+        let _ = ensure_daemon_running(&repo_root, &config);
+    }
+
+    println!("\x1b[32m✓\x1b[0m Updated to v{}.", latest);
+    Ok(())
+}
+
+// ─── Statusline ──────────────────────────────────────────────────────────────
+
 fn cmd_statusline() -> Result<()> {
-    // Read stdin — Claude Code pipes session JSON with cwd info
     let mut input = String::new();
     let _ = io::stdin().read_to_string(&mut input);
 
-    // Extract cwd from session JSON to check if this repo has budi
-    let cwd = serde_json::from_str::<Value>(&input)
-        .ok()
+    let stdin_json = serde_json::from_str::<Value>(&input).ok();
+
+    let cwd = stdin_json
+        .as_ref()
         .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
         .or_else(|| {
             std::env::current_dir()
@@ -2758,7 +1550,6 @@ fn cmd_statusline() -> Result<()> {
                 .map(|p| p.display().to_string())
         });
 
-    // Find repo root and name for per-repo stats
     let repo_root = cwd
         .as_deref()
         .and_then(|c| config::find_repo_root(Path::new(c)).ok());
@@ -2767,99 +1558,116 @@ fn cmd_statusline() -> Result<()> {
         .as_ref()
         .is_some_and(|root| root.join(".claude/settings.local.json").exists());
 
-    let repo_name = repo_root
-        .as_ref()
-        .and_then(|r| r.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-
-    if !repo_initialized {
-        // budi is not set up for this project
-        println!("\x1b[33m⚡\x1b[36m budi \x1b[90m· not set up\x1b[0m");
-        return Ok(());
-    }
-
-    let client = daemon_client_with_timeout(Duration::from_millis(200));
-    // Pass repo_root as query param for per-repo stats
-    let repo_root_str = repo_root
-        .as_ref()
-        .map(|r| r.display().to_string())
-        .unwrap_or_default();
-    let base_url = format!(
-        "http://{}:{}/stats",
+    // Dashboard link (OSC 8 hyperlink)
+    let base = format!(
+        "http://{}:{}",
         config::DEFAULT_DAEMON_HOST,
         config::DEFAULT_DAEMON_PORT,
     );
-    let resp = client
-        .get(&base_url)
-        .query(&[("repo_root", &repo_root_str)])
-        .send();
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            if let Ok(stats) = r.json::<serde_json::Value>() {
-                let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
-                let injections = stats
-                    .get("injections")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let confirmed = stats
-                    .get("confirmed_reads")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let total_reads = stats
-                    .get("total_reads")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+    let dashboard_url = format!("{}/dashboard", base);
+    let budi_label = "\x1b[36m📊 budi\x1b[0m";
+    let dashboard_link = format!(
+        "\x1b]8;;{}\x1b\\\x1b[36m↗ dashboard\x1b[0m\x1b]8;;\x1b\\",
+        dashboard_url,
+    );
 
-                // Check if indexing is active
-                let indexing = stats.get("indexing");
-                let idx_suffix = if let Some(idx) = indexing {
-                    let phase = idx
-                        .get("phase")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("indexing");
-                    let pct = idx.get("percent").and_then(|v| v.as_str()).unwrap_or("?%");
-                    format!(" \x1b[35m⟳ {} {}\x1b[0m", phase, pct)
-                } else {
-                    String::new()
-                };
-
-                if queries == 0 {
-                    println!(
-                        "\x1b[33m⚡\x1b[36m budi\x1b[0m \x1b[90m{}\x1b[0m \x1b[32m✓\x1b[0m ready{}",
-                        repo_name, idx_suffix
-                    );
-                } else {
-                    let skips = queries.saturating_sub(injections);
-                    let mut parts: Vec<String> = Vec::new();
-                    parts.push(format!(
-                        "{} boosted{}",
-                        injections,
-                        if skips > 0 {
-                            format!(", {} skipped", skips)
-                        } else {
-                            String::new()
-                        }
-                    ));
-                    if total_reads > 0 && confirmed > 0 {
-                        let hit_pct = confirmed as f64 / total_reads as f64 * 100.0;
-                        parts.push(format!("{:.0}% accurate", hit_pct));
-                    }
-                    let line = format!(
-                        "\x1b[33m⚡\x1b[36m budi\x1b[0m \x1b[90m{}\x1b[0m · {}{}",
-                        repo_name,
-                        parts.join(" · "),
-                        idx_suffix
-                    );
-                    println!("{}", line);
-                }
-            }
-        }
-        _ => {
-            // Daemon is not running
-            println!("\x1b[33m⚡\x1b[36m budi \x1b[90m· off\x1b[0m");
-        }
+    if !repo_initialized {
+        println!("{} \x1b[90m· not set up\x1b[0m", budi_label);
+        return Ok(());
     }
+
+    // ── Extract real-time session data from Claude Code stdin ────────────
+    let model = stdin_json
+        .as_ref()
+        .and_then(|v| v.pointer("/model/display_name"))
+        .and_then(|v| v.as_str());
+    let session_cost = stdin_json
+        .as_ref()
+        .and_then(|v| v.pointer("/cost/total_cost_usd"))
+        .and_then(|v| v.as_f64());
+    let ctx_pct = stdin_json
+        .as_ref()
+        .and_then(|v| v.pointer("/context_window/used_percentage"))
+        .and_then(|v| v.as_f64());
+    let rate_5h = stdin_json
+        .as_ref()
+        .and_then(|v| v.pointer("/rate_limits/five_hour/used_percentage"))
+        .and_then(|v| v.as_f64());
+
+    // ── Fetch today's aggregate cost from budi daemon ───────────────────
+    let client = daemon_client_with_timeout(Duration::from_secs(3));
+    let statusline_url = format!("{}/analytics/statusline", base);
+    let today_cost: f64 = client
+        .get(&statusline_url)
+        .send()
+        .ok()
+        .filter(|r| r.status().is_success())
+        .and_then(|r| r.json::<Value>().ok())
+        .and_then(|v| v.get("estimated_cost").and_then(|c| c.as_f64()))
+        .unwrap_or(0.0);
+
+    // ── Build status line segments ──────────────────────────────────────
+    let dim = "\x1b[90m";
+    let reset = "\x1b[0m";
+    let yellow = "\x1b[33m";
+    let green = "\x1b[32m";
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Model name
+    if let Some(m) = model {
+        parts.push(format!("{dim}{m}{reset}"));
+    }
+
+    // Context window % with color coding
+    if let Some(pct) = ctx_pct {
+        let pct_int = pct as u32;
+        let color = if pct_int >= 80 {
+            "\x1b[31m" // red
+        } else if pct_int >= 60 {
+            yellow
+        } else {
+            green
+        };
+        parts.push(format!("{color}{pct_int}% ctx{reset}"));
+    }
+
+    // Session cost (real-time from Claude Code)
+    if let Some(sc) = session_cost
+        && sc > 0.0
+    {
+        parts.push(format!("{yellow}${sc:.2}{reset} session"));
+    }
+
+    // Today's total cost (from budi daemon) — always show to prevent jumping
+    if today_cost > 0.001 {
+        parts.push(format!("{yellow}${today_cost:.2}{reset} today"));
+    } else {
+        parts.push(format!("{dim}$0.00 today{reset}"));
+    }
+
+    // 5h rate limit (Pro/Max only)
+    if let Some(rl) = rate_5h {
+        let color = if rl >= 80.0 {
+            "\x1b[31m"
+        } else if rl >= 50.0 {
+            yellow
+        } else {
+            dim
+        };
+        parts.push(format!("{color}5h: {rl:.0}%{reset}"));
+    }
+
+    if parts.is_empty() {
+        // No data yet — daemon may be off or no session data
+        println!(
+            "{budi_label} \x1b[90m·\x1b[0m {green}✓{reset} tracking \x1b[90m·\x1b[0m {dashboard_link}"
+        );
+    } else {
+        let joined = parts.join(&format!(" {dim}·{reset} "));
+        println!("{budi_label} {dim}·{reset} {joined} {dim}·{reset} {dashboard_link}");
+    }
+
     Ok(())
 }
 
@@ -2905,28 +1713,27 @@ fn install_statusline_if_missing() {
         .flatten()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
 
-    // Don't overwrite an existing statusLine (user may have customized it)
     if let Some(ref s) = existing
         && s.get("statusLine").is_some()
     {
         return;
     }
 
-    // Install budi statusline
     if let Ok(()) = cmd_statusline_install() {
         eprintln!("Status line: installed in {}", settings_path.display());
     }
 }
 
-fn install_hooks(repo_root: &Path) -> Result<()> {
-    let settings_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
+// ─── Hooks Installation ──────────────────────────────────────────────────────
+
+fn write_hooks_to_settings(settings_path: &Path) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed creating {}", parent.display()))?;
     }
 
     let mut settings = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)
+        let raw = fs::read_to_string(settings_path)
             .with_context(|| format!("Failed reading {}", settings_path.display()))?;
         serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}))
     } else {
@@ -2939,71 +1746,56 @@ fn install_hooks(repo_root: &Path) -> Result<()> {
         settings["hooks"] = json!({});
     }
 
-    settings["hooks"]["SessionStart"] = json!([
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "budi hook session-start"
-          }
-        ]
-      }
-    ]);
+    settings["hooks"]["SessionStart"] = json!([{
+        "hooks": [{ "type": "command", "command": "budi hook session-start" }]
+    }]);
 
     let daemon_url = config::BudiConfig::default().daemon_base_url();
 
-    settings["hooks"]["UserPromptSubmit"] = json!([
-      {
-        "hooks": [
-          {
+    settings["hooks"]["UserPromptSubmit"] = json!([{
+        "hooks": [{
             "type": "http",
             "url": format!("{}/hook/prompt-submit", daemon_url),
             "timeout": 30
-          }
-        ]
-      }
-    ]);
+        }]
+    }]);
 
-    settings["hooks"]["PostToolUse"] = json!([
-      {
+    settings["hooks"]["PostToolUse"] = json!([{
         "matcher": "Write|Edit|Read|Glob",
-        "hooks": [
-          {
+        "hooks": [{
             "type": "http",
             "url": format!("{}/hook/tool-use", daemon_url),
             "timeout": 30
-          }
-        ]
-      }
-    ]);
+        }]
+    }]);
 
-    settings["hooks"]["SubagentStart"] = json!([
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "budi hook subagent-start"
-          }
-        ]
-      }
-    ]);
+    settings["hooks"]["SubagentStart"] = json!([{
+        "hooks": [{ "type": "command", "command": "budi hook subagent-start" }]
+    }]);
 
-    settings["hooks"]["Stop"] = json!([
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "budi hook session-end"
-          }
-        ]
-      }
-    ]);
+    settings["hooks"]["Stop"] = json!([{
+        "hooks": [{ "type": "command", "command": "budi hook session-end" }]
+    }]);
 
     let raw = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_path, raw)
+    fs::write(settings_path, raw)
         .with_context(|| format!("Failed writing {}", settings_path.display()))?;
     Ok(())
 }
+
+fn install_hooks(repo_root: &Path) -> Result<()> {
+    let settings_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
+    write_hooks_to_settings(&settings_path)
+}
+
+fn install_hooks_global() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
+    write_hooks_to_settings(&settings_path)?;
+    Ok(settings_path)
+}
+
+// ─── Daemon Management ──────────────────────────────────────────────────────
 
 fn resolve_repo_root(candidate: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = candidate {
@@ -3019,6 +1811,287 @@ fn daemon_client_with_timeout(timeout: Duration) -> Client {
         .build()
         .expect("Failed to construct HTTP client")
 }
+
+fn fetch_daemon_stats(config: &BudiConfig) -> Option<Value> {
+    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
+    let url = format!("{}/stats", config.daemon_base_url());
+    client
+        .get(url)
+        .send()
+        .ok()
+        .and_then(|r| r.json::<Value>().ok())
+}
+
+fn fetch_session_stats(config: &BudiConfig, session_id: &str) -> Option<Value> {
+    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
+    let url = format!("{}/session-stats", config.daemon_base_url());
+    client
+        .post(url)
+        .json(&json!({"session_id": session_id}))
+        .send()
+        .ok()
+        .and_then(|r| r.json::<Value>().ok())
+}
+
+fn fetch_status_snapshot(base_url: &str, repo_root: &str) -> Result<StatusResponse> {
+    let client = daemon_client_with_timeout(Duration::from_secs(STATUS_TIMEOUT_SECS));
+    let url = format!("{base_url}/status");
+    let response: StatusResponse = client
+        .post(url)
+        .json(&StatusRequest {
+            repo_root: repo_root.to_string(),
+        })
+        .send()
+        .context("Failed requesting daemon status")?
+        .error_for_status()
+        .context("Status endpoint returned error")?
+        .json()
+        .context("Invalid status response JSON")?;
+    Ok(response)
+}
+
+fn daemon_health(config: &BudiConfig) -> bool {
+    daemon_health_with_timeout(config, Duration::from_secs(HEALTH_TIMEOUT_SECS))
+}
+
+fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> bool {
+    let client = daemon_client_with_timeout(timeout);
+    let url = format!("{}/health", config.daemon_base_url());
+    client
+        .get(url)
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+fn ensure_daemon_running(repo_root: &Path, config: &BudiConfig) -> Result<()> {
+    if daemon_health(config) {
+        return Ok(());
+    }
+
+    if daemon_port_is_listening(config) {
+        if wait_for_daemon_health(
+            config,
+            24,
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+        ) {
+            return Ok(());
+        }
+        if restart_unhealthy_daemon_listener(repo_root, config)? {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Daemon port is occupied but health endpoint is unavailable at {}.",
+            config.daemon_base_url(),
+        );
+    }
+
+    spawn_daemon_process(repo_root, config)?;
+    if wait_for_daemon_health(
+        config,
+        80,
+        Duration::from_millis(500),
+        Duration::from_millis(150),
+    ) {
+        return Ok(());
+    }
+    let log_hint = config::daemon_log_path(repo_root)
+        .map(|p| format!("\nCheck daemon log: {}", p.display()))
+        .unwrap_or_default();
+    anyhow::bail!(
+        "Daemon failed to become healthy at {}.{log_hint}",
+        config.daemon_base_url()
+    );
+}
+
+fn wait_for_daemon_health(
+    config: &BudiConfig,
+    retries: usize,
+    request_timeout: Duration,
+    sleep_interval: Duration,
+) -> bool {
+    for attempt in 0..retries {
+        if daemon_health_with_timeout(config, request_timeout) {
+            return true;
+        }
+        if attempt + 1 < retries {
+            thread::sleep(sleep_interval);
+        }
+    }
+    false
+}
+
+fn restart_unhealthy_daemon_listener(repo_root: &Path, config: &BudiConfig) -> Result<bool> {
+    let listener_pids = daemon_listener_pids(config.daemon_port)?;
+    if listener_pids.is_empty() {
+        return Ok(false);
+    }
+    let mut killed_any = false;
+    for pid in listener_pids {
+        let Some(command_line) = daemon_process_command(pid) else {
+            continue;
+        };
+        if !is_budi_daemon_command_for_port(&command_line, config.daemon_port) {
+            continue;
+        }
+        if kill_process(pid, "-TERM")? {
+            killed_any = true;
+        }
+    }
+    if !killed_any {
+        return Ok(false);
+    }
+    if !wait_for_port_release(config, 30, Duration::from_millis(120)) {
+        for pid in daemon_listener_pids(config.daemon_port)? {
+            let Some(command_line) = daemon_process_command(pid) else {
+                continue;
+            };
+            if is_budi_daemon_command_for_port(&command_line, config.daemon_port) {
+                let _ = kill_process(pid, "-KILL");
+            }
+        }
+    }
+    if daemon_port_is_listening(config) {
+        return Ok(false);
+    }
+    spawn_daemon_process(repo_root, config)?;
+    Ok(wait_for_daemon_health(
+        config,
+        80,
+        Duration::from_millis(500),
+        Duration::from_millis(150),
+    ))
+}
+
+fn wait_for_port_release(config: &BudiConfig, retries: usize, sleep_interval: Duration) -> bool {
+    for attempt in 0..retries {
+        if !daemon_port_is_listening(config) {
+            return true;
+        }
+        if attempt + 1 < retries {
+            thread::sleep(sleep_interval);
+        }
+    }
+    !daemon_port_is_listening(config)
+}
+
+fn daemon_listener_pids(port: u16) -> Result<Vec<u32>> {
+    let output = match Command::new("lsof")
+        .arg("-nP")
+        .arg(format!("-tiTCP:{port}"))
+        .arg("-sTCP:LISTEN")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).context("Failed to inspect listener pids via lsof"),
+    };
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
+}
+
+fn daemon_process_command(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("command=")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn is_budi_daemon_command_for_port(command: &str, port: u16) -> bool {
+    let spaced = format!("--port {port}");
+    let inline = format!("--port={port}");
+    command.contains("budi-daemon")
+        && command.contains("serve")
+        && (command.contains(&spaced) || command.contains(&inline))
+}
+
+fn kill_process(pid: u32, signal: &str) -> Result<bool> {
+    let status = match Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .status()
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("Failed to send {signal} to pid {pid}"));
+        }
+    };
+    Ok(status.success())
+}
+
+fn daemon_port_is_listening(config: &BudiConfig) -> bool {
+    let endpoint = format!("{}:{}", config.daemon_host, config.daemon_port);
+    let Ok(addrs) = endpoint.to_socket_addrs() else {
+        return false;
+    };
+    for addr in addrs {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn spawn_daemon_process(repo_root: &Path, config: &BudiConfig) -> Result<()> {
+    let daemon_bin = resolve_daemon_binary()?;
+    let log_path = config::daemon_log_path(repo_root)?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed opening {}", log_path.display()))?;
+    let stderr = stdout.try_clone()?;
+    Command::new(daemon_bin)
+        .arg("serve")
+        .arg("--host")
+        .arg(&config.daemon_host)
+        .arg("--port")
+        .arg(config.daemon_port.to_string())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .stdin(Stdio::null())
+        .spawn()
+        .with_context(|| "Failed to spawn budi-daemon process".to_string())?;
+    Ok(())
+}
+
+fn resolve_daemon_binary() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("BUDI_DAEMON_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+    let current = std::env::current_exe().context("Failed to resolve current executable")?;
+    if let Some(parent) = current.parent() {
+        let sibling = parent.join("budi-daemon");
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+    }
+    Ok(PathBuf::from("budi-daemon"))
+}
+
+// ─── Hook Logging ────────────────────────────────────────────────────────────
 
 fn now_unix_ms() -> u128 {
     SystemTime::now()
@@ -3121,866 +2194,16 @@ where
     }
 }
 
-fn fetch_daemon_stats(config: &BudiConfig) -> Option<serde_json::Value> {
-    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
-    let url = format!("{}/stats", config.daemon_base_url());
-    client
-        .get(url)
-        .send()
-        .ok()
-        .and_then(|r| r.json::<serde_json::Value>().ok())
-}
-
-fn fetch_session_stats(config: &BudiConfig, session_id: &str) -> Option<serde_json::Value> {
-    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
-    let url = format!("{}/session-stats", config.daemon_base_url());
-    client
-        .post(url)
-        .json(&serde_json::json!({"session_id": session_id}))
-        .send()
-        .ok()
-        .and_then(|r| r.json::<serde_json::Value>().ok())
-}
-
-fn daemon_health(config: &BudiConfig) -> bool {
-    daemon_health_with_timeout(config, Duration::from_secs(HEALTH_TIMEOUT_SECS))
-}
-
-fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> bool {
-    let client = daemon_client_with_timeout(timeout);
-    let url = format!("{}/health", config.daemon_base_url());
-    client
-        .get(url)
-        .send()
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
-}
-
-fn ensure_daemon_running(repo_root: &Path, config: &BudiConfig) -> Result<()> {
-    if daemon_health(config) {
-        return Ok(());
-    }
-
-    // Avoid duplicate daemon spawns when an existing process is still booting
-    // or temporarily busy and not answering /health yet.
-    if daemon_port_is_listening(config) {
-        if wait_for_daemon_health(
-            config,
-            24,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        ) {
-            return Ok(());
-        }
-        if restart_unhealthy_daemon_listener(repo_root, config)? {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "Daemon port is occupied but health endpoint is unavailable at {}. \
-If another process is restarting budi-daemon, retry in a few seconds. \
-Otherwise run `budi init` to restart the daemon.",
-            config.daemon_base_url(),
-        );
-    }
-
-    spawn_daemon_process(repo_root, config)?;
-    if wait_for_daemon_health(
-        config,
-        80,
-        Duration::from_millis(500),
-        Duration::from_millis(150),
-    ) {
-        return Ok(());
-    }
-    let log_hint = config::daemon_log_path(repo_root)
-        .map(|p| format!("\nCheck daemon log: {}", p.display()))
-        .unwrap_or_default();
-    anyhow::bail!(
-        "Daemon failed to become healthy at {}.{log_hint}",
-        config.daemon_base_url()
-    );
-}
-
-fn wait_for_daemon_health(
-    config: &BudiConfig,
-    retries: usize,
-    request_timeout: Duration,
-    sleep_interval: Duration,
-) -> bool {
-    for attempt in 0..retries {
-        if daemon_health_with_timeout(config, request_timeout) {
-            return true;
-        }
-        if attempt + 1 < retries {
-            thread::sleep(sleep_interval);
-        }
-    }
-    false
-}
-
-fn restart_unhealthy_daemon_listener(repo_root: &Path, config: &BudiConfig) -> Result<bool> {
-    let listener_pids = daemon_listener_pids(config.daemon_port)?;
-    if listener_pids.is_empty() {
-        return Ok(false);
-    }
-
-    let mut killed_any = false;
-    for pid in listener_pids {
-        let Some(command_line) = daemon_process_command(pid) else {
-            continue;
-        };
-        if !is_budi_daemon_command_for_port(&command_line, config.daemon_port) {
-            continue;
-        }
-        if kill_process(pid, "-TERM")? {
-            killed_any = true;
-        }
-    }
-    if !killed_any {
-        return Ok(false);
-    }
-
-    if !wait_for_port_release(config, 30, Duration::from_millis(120)) {
-        for pid in daemon_listener_pids(config.daemon_port)? {
-            let Some(command_line) = daemon_process_command(pid) else {
-                continue;
-            };
-            if is_budi_daemon_command_for_port(&command_line, config.daemon_port) {
-                let _ = kill_process(pid, "-KILL");
-            }
-        }
-    }
-    if daemon_port_is_listening(config) {
-        return Ok(false);
-    }
-
-    spawn_daemon_process(repo_root, config)?;
-    Ok(wait_for_daemon_health(
-        config,
-        80,
-        Duration::from_millis(500),
-        Duration::from_millis(150),
-    ))
-}
-
-fn wait_for_port_release(config: &BudiConfig, retries: usize, sleep_interval: Duration) -> bool {
-    for attempt in 0..retries {
-        if !daemon_port_is_listening(config) {
-            return true;
-        }
-        if attempt + 1 < retries {
-            thread::sleep(sleep_interval);
-        }
-    }
-    !daemon_port_is_listening(config)
-}
-
-fn daemon_listener_pids(port: u16) -> Result<Vec<u32>> {
-    let output = match Command::new("lsof")
-        .arg("-nP")
-        .arg(format!("-tiTCP:{port}"))
-        .arg("-sTCP:LISTEN")
-        .output()
-    {
-        Ok(output) => output,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).context("Failed to inspect listener pids via lsof"),
-    };
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect())
-}
-
-fn daemon_process_command(pid: u32) -> Option<String> {
-    let output = match Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .arg("-o")
-        .arg("command=")
-        .output()
-    {
-        Ok(output) => output,
-        Err(_) => return None,
-    };
-    if !output.status.success() {
-        return None;
-    }
-    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if command.is_empty() {
-        None
-    } else {
-        Some(command)
-    }
-}
-
-fn is_budi_daemon_command_for_port(command: &str, port: u16) -> bool {
-    let spaced_port_flag = format!("--port {port}");
-    let inline_port_flag = format!("--port={port}");
-    command.contains("budi-daemon")
-        && command.contains("serve")
-        && (command.contains(&spaced_port_flag) || command.contains(&inline_port_flag))
-}
-
-fn kill_process(pid: u32, signal: &str) -> Result<bool> {
-    let status = match Command::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .status()
-    {
-        Ok(status) => status,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("Failed to send {signal} to pid {pid} via kill"));
-        }
-    };
-    Ok(status.success())
-}
-
-fn daemon_port_is_listening(config: &BudiConfig) -> bool {
-    let endpoint = format!("{}:{}", config.daemon_host, config.daemon_port);
-    let Ok(addrs) = endpoint.to_socket_addrs() else {
-        return false;
-    };
-    for addr in addrs {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
-            return true;
-        }
-    }
-    false
-}
-
-fn spawn_daemon_process(repo_root: &Path, config: &BudiConfig) -> Result<()> {
-    let daemon_bin = resolve_daemon_binary()?;
-    let log_path = config::daemon_log_path(repo_root)?;
-    let fastembed_cache_dir = config::fastembed_cache_dir()?;
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::create_dir_all(&fastembed_cache_dir)?;
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("Failed opening {}", log_path.display()))?;
-    let stderr = stdout.try_clone()?;
-
-    Command::new(daemon_bin)
-        .arg("serve")
-        .arg("--host")
-        .arg(&config.daemon_host)
-        .arg("--port")
-        .arg(config.daemon_port.to_string())
-        .env("FASTEMBED_CACHE_DIR", &fastembed_cache_dir)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .stdin(Stdio::null())
-        .spawn()
-        .with_context(|| "Failed to spawn budi-daemon process".to_string())?;
-    Ok(())
-}
-
-fn resolve_daemon_binary() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("BUDI_DAEMON_BIN") {
-        return Ok(PathBuf::from(path));
-    }
-    let current = std::env::current_exe().context("Failed to resolve current executable")?;
-    if let Some(parent) = current.parent() {
-        let sibling = parent.join("budi-daemon");
-        if sibling.exists() {
-            return Ok(sibling);
-        }
-    }
-    Ok(PathBuf::from("budi-daemon"))
-}
-
-fn query_daemon_with_timeout(
-    repo_root: &Path,
-    config: &BudiConfig,
-    prompt: &str,
-    cwd: Option<&Path>,
-    timeout_secs: u64,
-) -> Result<QueryResponse> {
-    query_daemon_with_timeout_mode(repo_root, config, prompt, cwd, timeout_secs, None)
-}
-
-fn query_daemon_with_timeout_mode(
-    repo_root: &Path,
-    config: &BudiConfig,
-    prompt: &str,
-    cwd: Option<&Path>,
-    timeout_secs: u64,
-    retrieval_mode: Option<&str>,
-) -> Result<QueryResponse> {
-    let url = format!("{}/query", config.daemon_base_url());
-    let client = daemon_client_with_timeout(Duration::from_secs(timeout_secs));
-    send_query_request(&client, &url, repo_root, prompt, cwd, retrieval_mode, None)
-}
-
-fn send_query_request(
-    client: &Client,
-    url: &str,
-    repo_root: &Path,
-    prompt: &str,
-    cwd: Option<&Path>,
-    retrieval_mode: Option<&str>,
-    session_id: Option<&str>,
-) -> Result<QueryResponse> {
-    let response: QueryResponse = client
-        .post(url)
-        .json(&QueryRequest {
-            repo_root: repo_root.display().to_string(),
-            prompt: prompt.to_string(),
-            cwd: cwd.map(|p| p.display().to_string()),
-            retrieval_mode: retrieval_mode.map(str::to_string),
-            session_id: session_id.map(str::to_string),
-            dump_candidates: false,
-        })
-        .send()
-        .context("Failed to send query request")?
-        .error_for_status()
-        .context("Query endpoint returned error")?
-        .json()
-        .context("Invalid query response JSON")?;
-    Ok(response)
-}
-
-fn run_index_with_progress(
-    repo_root: &Path,
-    config: &BudiConfig,
-    hard: bool,
-    ignore_patterns: &[String],
-    include_extensions: &[String],
-) -> Result<IndexResponse> {
-    let base_url = config.daemon_base_url();
-    let repo_root_str = repo_root.display().to_string();
-    send_index_request(
-        &base_url,
-        &repo_root_str,
-        hard,
-        ignore_patterns,
-        include_extensions,
-    )?;
-
-    let started = Instant::now();
-    let mut had_progress_line = false;
-    let mut warned_missing_progress = false;
-    let mut previous_line_len = 0usize;
-    loop {
-        if started.elapsed() > Duration::from_secs(INDEX_TIMEOUT_SECS) {
-            if had_progress_line {
-                eprintln!();
-            }
-            anyhow::bail!("Timed out while waiting for async index job to finish");
-        }
-        let elapsed = started.elapsed().as_secs_f32();
-        let snapshot = match fetch_index_progress(&base_url, &repo_root_str) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                if !warned_missing_progress {
-                    eprintln!();
-                    eprintln!(
-                        "warning: live progress endpoint unavailable ({err}). \
-restart daemon (`budi init`) to enable per-file progress."
-                    );
-                    warned_missing_progress = true;
-                }
-                let line = format!("Indexing... preparing ({elapsed:.1}s elapsed)");
-                render_progress_to_stderr(&line, &mut previous_line_len);
-                had_progress_line = true;
-                std::thread::sleep(Duration::from_millis(220));
-                continue;
-            }
-        };
-        let line = render_progress_line(&snapshot, elapsed);
-        render_progress_to_stderr(&line, &mut previous_line_len);
-        had_progress_line = true;
-        if is_terminal_job_progress(&snapshot) {
-            if had_progress_line {
-                eprintln!();
-            }
-            return build_index_response_from_progress(&base_url, &repo_root_str, snapshot);
-        }
-        std::thread::sleep(Duration::from_millis(220));
-    }
-}
-
-fn is_terminal_job_progress(progress: &IndexProgressResponse) -> bool {
-    if progress.terminal_outcome.is_some() {
-        return true;
-    }
-    if matches!(
-        progress.job_state.as_str(),
-        "succeeded" | "failed" | "interrupted"
-    ) {
-        return true;
-    }
-    !progress.active && matches!(progress.state.as_str(), "ready" | "failed" | "interrupted")
-}
-
-fn build_index_response_from_progress(
-    base_url: &str,
-    repo_root: &str,
-    progress: IndexProgressResponse,
-) -> Result<IndexResponse> {
-    if matches!(progress.job_state.as_str(), "failed" | "interrupted")
-        || matches!(progress.state.as_str(), "failed" | "interrupted")
-    {
-        let message = progress
-            .last_error
-            .unwrap_or_else(|| "index job failed".to_string());
-        anyhow::bail!("{message}");
-    }
-    let status = fetch_status_snapshot(base_url, repo_root)
-        .context("Failed to fetch final status after index job completion")?;
-    let index_status = progress
-        .terminal_outcome
-        .clone()
-        .unwrap_or_else(|| "completed".to_string());
-    Ok(IndexResponse {
-        indexed_files: status.tracked_files,
-        indexed_chunks: status.indexed_chunks,
-        embedded_chunks: status.embedded_chunks,
-        missing_embeddings: status.missing_embeddings,
-        repaired_embeddings: 0,
-        invalid_embeddings: status.invalid_embeddings,
-        changed_files: progress.changed_files,
-        index_status,
-        job_id: progress.job_id,
-        job_state: progress.job_state,
-        terminal_outcome: progress.terminal_outcome,
-    })
-}
-
-fn render_progress_to_stderr(line: &str, previous_line_len: &mut usize) {
-    let line_len = line.chars().count();
-    if *previous_line_len > line_len {
-        let clear_tail = " ".repeat(*previous_line_len - line_len);
-        eprint!("\r{line}{clear_tail}");
-    } else {
-        eprint!("\r{line}");
-    }
-    let _ = io::stderr().flush();
-    *previous_line_len = line_len;
-}
-
-fn send_index_request(
-    base_url: &str,
-    repo_root: &str,
-    hard: bool,
-    ignore_patterns: &[String],
-    include_extensions: &[String],
-) -> Result<IndexResponse> {
-    let client = daemon_client_with_timeout(Duration::from_secs(INDEX_TIMEOUT_SECS));
-    let url = format!("{base_url}/index");
-    let response: IndexResponse = client
-        .post(url)
-        .json(&IndexRequest {
-            repo_root: repo_root.to_string(),
-            hard,
-            include_extensions: include_extensions.to_vec(),
-            ignore_patterns: ignore_patterns.to_vec(),
-        })
-        .send()
-        .context("Failed sending index request")?
-        .error_for_status()
-        .context("Index request failed")?
-        .json()
-        .context("Invalid index response JSON")?;
-    Ok(response)
-}
-
-fn fetch_status_snapshot(base_url: &str, repo_root: &str) -> Result<StatusResponse> {
-    let client = daemon_client_with_timeout(Duration::from_secs(STATUS_TIMEOUT_SECS));
-    let url = format!("{base_url}/status");
-    let response: StatusResponse = client
-        .post(url)
-        .json(&StatusRequest {
-            repo_root: repo_root.to_string(),
-        })
-        .send()
-        .context("Failed requesting daemon status")?
-        .error_for_status()
-        .context("Status endpoint returned error")?
-        .json()
-        .context("Invalid status response JSON")?;
-    Ok(response)
-}
-
-fn fetch_index_progress(base_url: &str, repo_root: &str) -> Result<IndexProgressResponse> {
-    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
-    let url = format!("{base_url}/progress");
-    let response: IndexProgressResponse = client
-        .post(url)
-        .json(&IndexProgressRequest {
-            repo_root: repo_root.to_string(),
-        })
-        .send()
-        .context("Failed requesting index progress")?
-        .error_for_status()
-        .context("Progress endpoint returned error")?
-        .json()
-        .context("Invalid progress response JSON")?;
-    Ok(response)
-}
-
-fn render_progress_line(progress: &IndexProgressResponse, elapsed_secs: f32) -> String {
-    if let Some(error) = &progress.last_error {
-        return format!("Indexing failed ({elapsed_secs:.1}s): {error}");
-    }
-    if let Some(outcome) = &progress.terminal_outcome {
-        return format!("Index {outcome} ({elapsed_secs:.1}s elapsed)");
-    }
-    let phase = if progress.phase.is_empty() {
-        if progress.state.is_empty() {
-            "working"
-        } else {
-            progress.state.as_str()
-        }
-    } else {
-        progress.phase.as_str()
-    };
-    if progress.job_state == "queued" {
-        return format!("Indexing... queued ({elapsed_secs:.1}s elapsed)");
-    }
-    if progress.total_files == 0 {
-        if progress.active || matches!(progress.job_state.as_str(), "running") {
-            return format!("Indexing... {phase} ({elapsed_secs:.1}s elapsed)");
-        }
-        if progress.state == "ready" {
-            return format!("Index ready ({elapsed_secs:.1}s elapsed)");
-        }
-        return format!("Indexing... waiting to start ({elapsed_secs:.1}s elapsed)");
-    }
-    let current = progress.current_file.as_deref().unwrap_or("-");
-    let processed = progress.processed_files.min(progress.total_files);
-    format!(
-        "Indexing... {processed}/{total} files (changed {changed}) phase: {phase} current: {current} [{elapsed_secs:.1}s]",
-        total = progress.total_files,
-        changed = progress.changed_files
-    )
-}
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
 
-    fn render_subcommand_help(path: &[&str]) -> String {
-        let mut command = Cli::command();
-        let mut current = &mut command;
-        for segment in path {
-            current = current
-                .find_subcommand_mut(segment)
-                .unwrap_or_else(|| panic!("missing subcommand: {segment}"));
-        }
-        current.render_help().to_string()
-    }
-
-    fn make_eval_report(fixtures_path: &str, retrieval_mode: &str) -> RetrievalEvalReport {
-        RetrievalEvalReport {
-            repo_root: "/tmp/repo".to_string(),
-            fixtures_path: fixtures_path.to_string(),
-            retrieval_mode: retrieval_mode.to_string(),
-            limit: 8,
-            total_cases: 1,
-            scored_cases: 1,
-            cases_with_errors: 0,
-            metrics: retrieval_eval::RetrievalEvalMetrics {
-                cases: 1,
-                hit_at_1: 0.0,
-                hit_at_3: 0.0,
-                hit_at_5: 0.0,
-                mrr: 0.0,
-                precision_at_1: 0.0,
-                precision_at_3: 0.0,
-                precision_at_5: 0.0,
-                recall_at_1: 0.0,
-                recall_at_3: 0.0,
-                recall_at_5: 0.0,
-                f1_at_1: 0.0,
-                f1_at_3: 0.0,
-                f1_at_5: 0.0,
-            },
-            per_intent_metrics: HashMap::new(),
-            results: Vec::new(),
-        }
-    }
-
     #[test]
-    fn parses_prompt_directives() {
-        let d = parse_prompt_directives("please @nobudi for this prompt");
-        assert!(d.force_skip);
-        assert!(!d.force_inject);
-
-        let d = parse_prompt_directives("please @forcebudi thanks");
-        assert!(!d.force_skip);
-        assert!(d.force_inject);
-
-        let d = parse_prompt_directives("@nobudi @forcebudi");
-        assert!(!d.force_skip);
-        assert!(d.force_inject);
-    }
-
-    #[test]
-    fn skips_non_code_when_enabled() {
-        let config = BudiConfig {
-            smart_skip_enabled: true,
-            skip_non_code_prompts: true,
-            ..BudiConfig::default()
-        };
-        let diagnostics = QueryDiagnostics {
-            intent: "non-code".to_string(),
-            confidence: 0.92,
-            top_score: 0.7,
-            margin: 0.3,
-            signals: vec!["semantic-hit".to_string()],
-            top_language: None,
-            snippet_languages: Vec::new(),
-            repo_ecosystems: Vec::new(),
-            top_ecosystem: None,
-            snippet_ecosystems: Vec::new(),
-            recommended_injection: true,
-            skip_reason: None,
-            dedup_count: 0,
-            candidates: Vec::new(),
-        };
-        let directives = PromptDirectives::default();
-        let skip = evaluate_context_skip(&config, &directives, &diagnostics);
-        assert_eq!(
-            skip.as_deref(),
-            Some(budi_core::reason_codes::SKIP_REASON_NON_CODE_INTENT)
-        );
-    }
-
-    #[test]
-    fn force_inject_bypasses_skip() {
-        let config = BudiConfig {
-            smart_skip_enabled: true,
-            skip_non_code_prompts: true,
-            ..BudiConfig::default()
-        };
-        let diagnostics = QueryDiagnostics {
-            intent: "non-code".to_string(),
-            confidence: 0.1,
-            top_score: 0.1,
-            margin: 0.0,
-            signals: vec![],
-            top_language: None,
-            snippet_languages: Vec::new(),
-            repo_ecosystems: Vec::new(),
-            top_ecosystem: None,
-            snippet_ecosystems: Vec::new(),
-            recommended_injection: false,
-            skip_reason: Some(budi_core::reason_codes::SKIP_REASON_LOW_CONFIDENCE.to_string()),
-            dedup_count: 0,
-            candidates: Vec::new(),
-        };
-        let directives = PromptDirectives {
-            force_skip: false,
-            force_inject: true,
-        };
-        let skip = evaluate_context_skip(&config, &directives, &diagnostics);
-        assert!(skip.is_none());
-    }
-
-    #[test]
-    fn force_skip_wins_in_evaluate_context_skip() {
-        let config = BudiConfig {
-            smart_skip_enabled: true,
-            skip_non_code_prompts: false,
-            ..BudiConfig::default()
-        };
-        let diagnostics = QueryDiagnostics {
-            intent: "code-navigation".to_string(),
-            confidence: 0.95,
-            top_score: 0.8,
-            margin: 0.2,
-            signals: vec!["path-hit".to_string()],
-            top_language: None,
-            snippet_languages: Vec::new(),
-            repo_ecosystems: Vec::new(),
-            top_ecosystem: None,
-            snippet_ecosystems: Vec::new(),
-            recommended_injection: true,
-            skip_reason: None,
-            dedup_count: 0,
-            candidates: Vec::new(),
-        };
-        let directives = PromptDirectives {
-            force_skip: true,
-            force_inject: false,
-        };
-        let skip = evaluate_context_skip(&config, &directives, &diagnostics);
-        assert_eq!(
-            skip.as_deref(),
-            Some(budi_core::reason_codes::SKIP_REASON_FORCED_SKIP)
-        );
-    }
-
-    #[test]
-    fn sanitize_removes_directive_tokens() {
-        let prompt = "Please @forcebudi map auth flow and @nobudi ignore this token";
-        let sanitized = sanitize_prompt_for_query(prompt);
-        assert!(!sanitized.contains("@forcebudi"));
-        assert!(!sanitized.contains("@nobudi"));
-        assert!(sanitized.contains("map auth flow"));
-    }
-
-    #[test]
-    fn runtime_guard_context_filters_non_prod_and_weak_signals() {
-        let snippets = vec![
-            QueryResultItem {
-                path: "src/flask/config.py".to_string(),
-                start_line: 1,
-                end_line: 20,
-                language: "python".to_string(),
-                score: 1.0,
-                reasons: vec!["runtime-env-api-hit".to_string()],
-                channel_scores: budi_core::rpc::QueryChannelScores::default(),
-                text: "from_envvar".to_string(),
-                context_note: None,
-                callers: Vec::new(),
-                refs: Vec::new(),
-            },
-            QueryResultItem {
-                path: "tests/test_config.py".to_string(),
-                start_line: 1,
-                end_line: 20,
-                language: "python".to_string(),
-                score: 0.9,
-                reasons: vec!["runtime-config-support-hit".to_string()],
-                channel_scores: budi_core::rpc::QueryChannelScores::default(),
-                text: "test".to_string(),
-                context_note: None,
-                callers: Vec::new(),
-                refs: Vec::new(),
-            },
-            QueryResultItem {
-                path: "examples/tutorial/flaskr/__init__.py".to_string(),
-                start_line: 1,
-                end_line: 20,
-                language: "python".to_string(),
-                score: 0.8,
-                reasons: vec!["runtime-config-path-hit".to_string()],
-                channel_scores: budi_core::rpc::QueryChannelScores::default(),
-                text: "example".to_string(),
-                context_note: None,
-                callers: Vec::new(),
-                refs: Vec::new(),
-            },
-            QueryResultItem {
-                path: "src/flask/cli.py".to_string(),
-                start_line: 1,
-                end_line: 20,
-                language: "python".to_string(),
-                score: 0.7,
-                reasons: vec!["runtime-config-support-hit".to_string()],
-                channel_scores: budi_core::rpc::QueryChannelScores::default(),
-                text: "load_dotenv".to_string(),
-                context_note: None,
-                callers: Vec::new(),
-                refs: Vec::new(),
-            },
-            QueryResultItem {
-                path: "src/flask/app.py".to_string(),
-                start_line: 1,
-                end_line: 20,
-                language: "python".to_string(),
-                score: 0.6,
-                reasons: vec!["semantic-hit".to_string()],
-                channel_scores: budi_core::rpc::QueryChannelScores::default(),
-                text: "app".to_string(),
-                context_note: None,
-                callers: Vec::new(),
-                refs: Vec::new(),
-            },
-        ];
-
-        let context = build_runtime_guard_context(&snippets);
-        assert!(context.contains("[budi runtime guard]"));
-        assert!(context.contains("- src/flask/config.py"));
-        assert!(context.contains("- src/flask/cli.py"));
-        assert!(!context.contains("tests/test_config.py"));
-        assert!(!context.contains("examples/tutorial/flaskr/__init__.py"));
-        assert!(!context.contains("- src/flask/app.py"));
-    }
-
-    #[test]
-    fn runtime_guard_context_empty_without_runtime_signals() {
-        let snippets = vec![QueryResultItem {
-            path: "src/flask/app.py".to_string(),
-            start_line: 1,
-            end_line: 20,
-            language: "python".to_string(),
-            score: 1.0,
-            reasons: vec!["semantic-hit".to_string()],
-            channel_scores: budi_core::rpc::QueryChannelScores::default(),
-            text: "app".to_string(),
-            context_note: None,
-            callers: Vec::new(),
-            refs: Vec::new(),
-        }];
-        let context = build_runtime_guard_context(&snippets);
-        assert!(context.is_empty());
-    }
-
-    #[test]
-    fn excerpt_omits_text_when_max_chars_is_zero() {
-        let config = BudiConfig {
-            debug_io: true,
-            debug_io_full_text: false,
-            debug_io_max_chars: 0,
-            ..BudiConfig::default()
-        };
-        assert_eq!(excerpt("sensitive prompt text", &config), "");
-    }
-
-    #[test]
-    fn eval_regression_gate_detects_metric_drop() {
-        let mut baseline = make_eval_report("/tmp/fixtures.json", "hybrid");
-        baseline.metrics.hit_at_3 = 0.80;
-        baseline.metrics.mrr = 0.70;
-        baseline.metrics.f1_at_3 = 0.65;
-
-        let mut current = make_eval_report("/tmp/fixtures.json", "hybrid");
-        current.metrics.hit_at_3 = 0.79;
-        current.metrics.mrr = 0.69;
-        current.metrics.f1_at_3 = 0.50;
-
-        let summary = build_retrieval_eval_regression(
-            Path::new("/tmp/current.json"),
-            &current,
-            Path::new("/tmp/baseline.json"),
-            &baseline,
-            0.02,
-        );
-        assert!(summary.comparable);
-        assert!(!summary.passed);
-        assert_eq!(summary.checks.len(), 3);
-        let failed_checks = summary.checks.iter().filter(|check| !check.passed).count();
-        assert_eq!(failed_checks, 1);
-    }
-
-    #[test]
-    fn eval_regression_requires_matching_scope() {
-        let baseline = make_eval_report("/tmp/fixtures_a.json", "hybrid");
-        let current = make_eval_report("/tmp/fixtures_b.json", "vector");
-        let summary = build_retrieval_eval_regression(
-            Path::new("/tmp/current.json"),
-            &current,
-            Path::new("/tmp/baseline.json"),
-            &baseline,
-            0.01,
-        );
-        assert!(!summary.comparable);
-        assert!(!summary.passed);
-        assert!(!summary.scope_mismatches.is_empty());
-        assert!(summary.checks.is_empty());
+    fn cli_parses_init() {
+        let _ = Cli::command();
     }
 
     #[test]
@@ -3995,86 +2218,14 @@ mod tests {
     }
 
     #[test]
-    fn hook_query_retry_policy_only_retries_transient_failures() {
-        assert!(should_retry_hook_query(QueryErrorReason::Timeout));
-        assert!(should_retry_hook_query(QueryErrorReason::TransportError));
-        assert!(!should_retry_hook_query(QueryErrorReason::HttpError));
-        assert!(!should_retry_hook_query(QueryErrorReason::Error));
-    }
-
-    #[test]
-    fn help_hides_dev_only_commands_from_default_surface() {
+    fn help_shows_expected_commands() {
         let mut command = Cli::command();
         let help = command.render_help().to_string();
         let lower = help.to_ascii_lowercase();
         assert!(lower.contains("init"));
         assert!(lower.contains("doctor"));
         assert!(lower.contains("repo"));
-        assert!(!lower.contains("bench"));
-        assert!(!lower.contains("eval"));
-    }
-
-    #[test]
-    fn repo_help_hides_maintenance_commands_from_default_surface() {
-        let mut command = Cli::command();
-        let repo = command
-            .find_subcommand_mut("repo")
-            .expect("repo subcommand should exist");
-        let help = repo.render_help().to_string();
-        let lower = help.to_ascii_lowercase();
-        assert!(lower.contains("status"));
-        assert!(lower.contains("search"));
-        assert!(lower.contains("preview"));
-        assert!(!lower.contains("list"));
-        assert!(!lower.contains("remove"));
-        assert!(!lower.contains("wipe"));
-        assert!(!lower.contains("stats"));
-    }
-
-    #[test]
-    fn init_help_hides_advanced_setup_flags_from_default_surface() {
-        let help = render_subcommand_help(&["init"]);
-        let lower = help.to_ascii_lowercase();
-        assert!(!lower.contains("--repo-root"));
-        assert!(!lower.contains("--no-daemon"));
-    }
-
-    #[test]
-    fn index_help_hides_support_override_flags_from_default_surface() {
-        let help = render_subcommand_help(&["index"]);
-        let lower = help.to_ascii_lowercase();
-        assert!(lower.contains("--hard"));
-        assert!(lower.contains("--progress"));
-        assert!(!lower.contains("--repo-root"));
-        assert!(!lower.contains("--ignore-pattern"));
-        assert!(!lower.contains("--include-ext"));
-    }
-
-    #[test]
-    fn doctor_help_hides_deep_support_flags_from_default_surface() {
-        let help = render_subcommand_help(&["doctor"]);
-        let lower = help.to_ascii_lowercase();
-        assert!(!lower.contains("--repo-root"));
-        assert!(!lower.contains("--deep"));
-    }
-
-    #[test]
-    fn repo_daily_commands_hide_advanced_flags_from_default_help() {
-        let status_help = render_subcommand_help(&["repo", "status"]);
-        let status_lower = status_help.to_ascii_lowercase();
-        assert!(!status_lower.contains("--repo-root"));
-
-        let search_help = render_subcommand_help(&["repo", "search"]);
-        let search_lower = search_help.to_ascii_lowercase();
-        assert!(search_lower.contains("--limit"));
-        assert!(!search_lower.contains("--repo-root"));
-        assert!(!search_lower.contains("--mode"));
-        assert!(!search_lower.contains("--json"));
-
-        let preview_help = render_subcommand_help(&["repo", "preview"]);
-        let preview_lower = preview_help.to_ascii_lowercase();
-        assert!(!preview_lower.contains("--repo-root"));
-        assert!(!preview_lower.contains("--mode"));
-        assert!(!preview_lower.contains("--json"));
+        assert!(lower.contains("stats"));
+        assert!(lower.contains("sync"));
     }
 }

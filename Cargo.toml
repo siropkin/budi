@@ -3,12 +3,11 @@ members = [
     "crates/budi-cli",
     "crates/budi-core",
     "crates/budi-daemon",
-    "crates/budi-mcp",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "3.15.0"
+version = "4.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Ivan Seredkin"]
@@ -17,22 +16,16 @@ repository = "https://github.com/siropkin/budi"
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8"
-blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-fastembed = "5"
-hnsw_rs = "0.3"
-ignore = "0.4"
 notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tantivy = "0.25"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-walkdir = "2"

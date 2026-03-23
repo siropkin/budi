@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 budi-core = { path = "../budi-core" }
+chrono.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true

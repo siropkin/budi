@@ -51,7 +51,7 @@ try {
     if (-not (Test-Path $pkgDir)) { Fail "Unexpected archive layout" }
 
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-    foreach ($bin in @("budi.exe", "budi-daemon.exe", "budi-mcp.exe")) {
+    foreach ($bin in @("budi.exe", "budi-daemon.exe")) {
         $src = Join-Path $pkgDir $bin
         if (Test-Path $src) {
             Copy-Item $src (Join-Path $BinDir $bin) -Force
@@ -73,8 +73,15 @@ try {
         Log "PATH updated. Restart your terminal for it to take effect."
     }
 
-    Log "Done! Next step:"
-    Log "  cd \path\to\your\repo; budi init --index"
+    $ver = & $budiExe --version 2>$null
+    if (-not $ver) { $ver = "budi" }
+    Log ""
+    Log "Installed: $ver"
+    Log ""
+    Log "Get started:"
+    Log "  budi init --global  # set up hooks globally (all repos and worktrees)"
+    Log "  budi doctor      # verify everything is working"
+    Log "  budi stats       # view usage analytics"
 } finally {
     if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
