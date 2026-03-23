@@ -706,7 +706,7 @@ function renderConfigRow(f) {
   const tokStr = f.est_tokens >= 1000 ? (f.est_tokens / 1000).toFixed(1) + 'K' : String(f.est_tokens);
   const warn = f.est_tokens > 2000 ? ' style="color:var(--accent4)"' : '';
   const fileName = f.path.split('/').pop();
-  const fileLink = `<a href="file://${esc(f.path)}" title="${esc(f.path)}">${esc(fileName)}</a>`;
+  const fileLink = `<span title="${esc(f.path)}" style="cursor:default">${esc(fileName)}</span>`;
   return `<tr>
     <td><span class="type-badge ${badgeClass(f.file_type)}">${badgeLabel(f.file_type)}</span></td>
     <td class="dir" title="${esc(f.project)}">${esc(projectName(f.project))}</td>
@@ -1112,7 +1112,7 @@ function renderPlansRow(p) {
   const displayTitle = p.title || p.name || '--';
   const fileName = (p.name || '--') + '.md';
   const link = p.path
-    ? `<a href="file://${esc(p.path)}" title="${esc(fileName)}">${esc(displayTitle)}</a>`
+    ? `<span title="${esc(p.path)}" style="cursor:default">${esc(displayTitle)}</span>`
     : esc(displayTitle);
   return `<tr>
     <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${link}</td>

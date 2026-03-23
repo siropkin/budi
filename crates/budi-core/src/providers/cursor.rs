@@ -1130,4 +1130,78 @@ mod tests {
         assert_eq!(inp, 0);
         assert_eq!(outp, 0);
     }
+
+    #[test]
+    fn parse_composer_sessions_from_vscdb() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .unwrap();
+
+        // Insert a mock composerData entry with contextTokensUsed
+        let data = serde_json::json!({
+            "allComposers": [{
+                "composerId": "test-id-1",
+                "createdAt": 1742468400000i64,
+                "lastUpdatedAt": 1742472000000i64,
+                "name": "Fix login bug",
+                "totalLinesAdded": 10,
+                "totalLinesRemoved": 3,
+                "isArchived": false,
+                "type": 1
+            }],
+            "selectedComposerIds": [],
+            "lastFocusedComposerIds": []
+        });
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES ('composer.composerData', ?1)",
+            [data.to_string()],
+        )
+        .unwrap();
+
+        // Insert the actual composerData for the session with contextUsagePercent fallback
+        let session_data = serde_json::json!({
+            "_v": 11,
+            "composerId": "test-id-1",
+            "name": "Fix login bug",
+            "modelConfig": { "modelName": "claude-4-sonnet" },
+            "contextUsagePercent": 25.0,
+            "usageData": {},
+            "fullConversationHeadersOnly": [{"type": 1, "bubbleId": "b1"}, {"type": 2, "bubbleId": "b2"}],
+            "conversationState": "",
+            "status": "completed",
+            "createdAt": 1742468400000i64,
+            "lastUpdatedAt": 1742472000000i64,
+            "totalLinesAdded": 10,
+            "totalLinesRemoved": 3,
+            "isArchived": false,
+            "isAgentic": true,
+        });
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES ('composerData:test-id-1', ?1)",
+            [session_data.to_string()],
+        )
+        .unwrap();
+
+        let (sessions, watermark) = parse_composer_sessions(&conn, 0).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(watermark > 0);
+
+        let s = &sessions[0];
+        assert_eq!(s.name.as_deref(), Some("Fix login bug"));
+        assert_eq!(s.model_name.as_deref(), Some("claude-4-sonnet"));
+        assert_eq!(s.lines_added, 10);
+        assert_eq!(s.lines_removed, 3);
+        assert!(s.is_agentic);
+        // contextUsagePercent=25% of default 200K = 50,000 tokens
+        assert_eq!(s.context_tokens_used, Some(50000));
+
+        // Verify messages are generated correctly
+        let msgs = composer_session_to_messages(s);
+        assert_eq!(msgs.len(), 2); // user + assistant
+        assert_eq!(msgs[1].model.as_deref(), Some("claude-4-sonnet"));
+        assert_eq!(msgs[1].input_tokens, 50000);
+        assert!(msgs[1].cost_cents.is_some());
+    }
 }

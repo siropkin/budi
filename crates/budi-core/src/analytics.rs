@@ -5,7 +5,6 @@
 //! tracking (byte offset per file).
 
 use std::collections::HashMap;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -172,7 +171,7 @@ fn backfill_cost_cents(conn: &Connection) -> Result<()> {
                     row.get(6)?,
                 ))
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
             .collect();
 
         let mut update_stmt =
@@ -549,7 +548,10 @@ pub fn top_tools(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -686,7 +688,10 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 cost_cents: row.get(12)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(PaginatedSessions {
         sessions,
@@ -795,7 +800,7 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
     detail.top_tools = stmt
         .query_map(params![sid], |row| Ok((row.get(0)?, row.get(1)?)))
         .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .map(|rows| rows.filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } }).collect())
         .unwrap_or_default();
 
     Ok(Some(detail))
@@ -859,7 +864,10 @@ pub fn repo_usage(
                 output_tokens: row.get(4)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -958,7 +966,10 @@ pub fn mcp_tool_stats(
 
     let rows: Vec<(String, u64)> = stmt
         .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
 
     let results = rows
@@ -1046,7 +1057,10 @@ pub fn token_heavy_sessions(
                 ratio: inp as f64 / outp as f64,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -1058,7 +1072,10 @@ pub fn repo_ids(conn: &Connection) -> Result<Vec<String>> {
     )?;
     let rows = stmt
         .query_map([], |row| row.get(0))?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -1070,7 +1087,10 @@ pub fn project_dirs(conn: &Connection) -> Result<Vec<String>> {
     )?;
     let rows = stmt
         .query_map([], |row| row.get(0))?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -1180,7 +1200,10 @@ pub fn activity_chart(
     let mut stmt = conn.prepare(&sql)?;
     let msg_rows: Vec<(String, u64, u64, u64)> = stmt
         .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
 
     // Tool calls per bucket — use m.timestamp for the join
@@ -1204,7 +1227,10 @@ pub fn activity_chart(
         .query_map(param_refs.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
 
     let results = msg_rows
@@ -1275,7 +1301,10 @@ pub fn model_usage(
                 cache_creation_tokens: row.get(5)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -1484,7 +1513,7 @@ pub fn daily_cost_trend(
                 row.get::<_, u64>(4)?,
             ))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
         .collect::<Vec<_>>();
 
     let mut result = Vec::new();
@@ -1547,7 +1576,10 @@ pub fn session_patterns(
                 row.get::<_, f64>(4)?,
             ))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
 
     let n = rows.len() as f64;
@@ -1591,7 +1623,7 @@ pub fn session_patterns(
                 Ok((row.get::<_, u32>(0)?, row.get::<_, u64>(1)?))
             })
             .ok()?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
             .collect();
         rows.into_iter().next()
     });
@@ -1641,7 +1673,10 @@ pub fn tool_diversity(
         .query_map(param_refs.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
 
     let total: u64 = rows.iter().map(|(_, c)| c).sum();
@@ -1771,7 +1806,7 @@ pub fn provider_stats(
                 row.get::<_, f64>(7)?,
             ))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
         .collect::<Vec<_>>();
 
     let providers = crate::provider::all_providers();
@@ -1857,7 +1892,10 @@ pub fn interaction_mode_breakdown(
         .query_map(param_refs.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => { tracing::warn!("skipping row: {e}"); None }
+        })
         .collect();
     Ok(rows)
 }
@@ -2015,7 +2053,7 @@ mod tests {
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r { Ok(v) => Some(v), Err(e) => { tracing::warn!("skipping row: {e}"); None } })
             .collect();
         assert!(tables.contains(&"sessions".to_string()));
         assert!(tables.contains(&"messages".to_string()));
