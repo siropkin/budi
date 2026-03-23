@@ -1,5 +1,0 @@
-[
-  "Give exactly 5 bullets describing repository architecture. Each bullet must include an exact file path. Keep total answer under 120 words. Do not edit files.",
-  "Name up to 5 exact file paths where runtime configuration or environment variables are loaded/validated. Use only files you can verify. Keep concise. Do not edit files.",
-  "Trace one concrete request/data flow from an entrypoint to output with exact file paths and function names in no more than 8 lines. Stop after one complete path. Do not edit files."
-]
