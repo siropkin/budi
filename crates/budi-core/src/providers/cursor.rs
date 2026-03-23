@@ -281,12 +281,20 @@ fn parse_composer_sessions(
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let context_tokens_used = parsed.get("contextTokensUsed").and_then(|v| v.as_u64());
-
         let context_token_limit = parsed
             .get("contextTokenLimit")
             .or_else(|| parsed.get("maxContextTokens"))
             .and_then(|v| v.as_u64());
+
+        // Try contextTokensUsed first, then estimate from contextUsagePercent
+        let context_tokens_used = parsed
+            .get("contextTokensUsed")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                let pct = parsed.get("contextUsagePercent").and_then(|v| v.as_f64())?;
+                let limit = context_token_limit.unwrap_or(200_000); // default 200K
+                Some((pct / 100.0 * limit as f64) as u64)
+            });
 
         let model_name = parsed
             .get("modelConfig")
@@ -348,7 +356,12 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         "cursor-composer-{}",
         session.key.replace("composerData:", "")
     );
-    let timestamp = session.created_at.unwrap_or_else(Utc::now);
+    let timestamp = session
+        .created_at
+        .or_else(|| session.last_updated_at.map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).unwrap_or_else(Utc::now)
+        }))
+        .unwrap_or_else(Utc::now);
     let interaction_mode = if session.is_agentic {
         "agent"
     } else {

@@ -925,7 +925,7 @@ fn cmd_stats_summary_filtered(
         format_tokens(summary.total_output_tokens)
     );
 
-    let tools = analytics::top_tools(&conn, since.as_deref(), until.as_deref()).unwrap_or_default();
+    let tools = analytics::top_tools(conn, since.as_deref(), until.as_deref()).unwrap_or_default();
     if !tools.is_empty() {
         println!();
         println!("  \x1b[1mTop tools\x1b[0m");
@@ -1708,8 +1708,6 @@ fn cmd_statusline() -> Result<()> {
             format!("${:.1}K", c / 1000.0)
         } else if c >= 100.0 {
             format!("${:.0}", c)
-        } else if c >= 1.0 {
-            format!("${:.2}", c)
         } else if c > 0.0 {
             format!("${:.2}", c)
         } else {

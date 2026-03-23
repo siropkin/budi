@@ -129,6 +129,20 @@ pub struct ParsedMessage {
     pub repo_id: Option<String>,
     /// Which provider produced this message (e.g. "claude_code", "cursor").
     pub provider: String,
+    /// Provider-reported cost in cents (ground truth from Cursor, None for Claude Code).
+    pub cost_cents: Option<f64>,
+    /// Total context tokens used in this request.
+    pub context_tokens_used: Option<u64>,
+    /// Context window token limit for this request.
+    pub context_token_limit: Option<u64>,
+    /// Interaction mode: "agent", "chat", "composer", "tab".
+    pub interaction_mode: Option<String>,
+    /// Human-readable session title.
+    pub session_title: Option<String>,
+    /// Lines of code added in this session.
+    pub lines_added: Option<u64>,
+    /// Lines of code removed in this session.
+    pub lines_removed: Option<u64>,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -158,6 +172,13 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
             git_branch: u.git_branch,
             repo_id: None,
             provider: "claude_code".to_string(),
+            cost_cents: None,
+            context_tokens_used: None,
+            context_token_limit: None,
+            interaction_mode: None,
+            session_title: None,
+            lines_added: None,
+            lines_removed: None,
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
@@ -179,6 +200,8 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                     _ => None,
                 })
                 .sum();
+            // Context tokens used = sum of all input-side tokens
+            let context_tokens_used = usage.map(|u| u.total_input());
             Some(ParsedMessage {
                 uuid: a.uuid,
                 session_id: a.session_id,
@@ -200,6 +223,13 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None, // Calculated during ingest from tokens × pricing
+                context_tokens_used,
+                context_token_limit: None,
+                interaction_mode: Some("agent".to_string()), // Claude Code is always agent mode
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             })
         }
         TranscriptEntry::Other => None,
@@ -212,12 +242,20 @@ pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessag
     let mut messages = Vec::new();
     let mut offset = start_offset;
 
-    for line in content[start_offset..].lines() {
-        let line_end = offset + line.len() + 1; // +1 for newline
+    let remaining = &content[start_offset..];
+    let mut pos = 0;
+    for line in remaining.lines() {
+        let line_start = pos;
+        pos += line.len();
+        // Only count the newline if it actually exists (handles files without trailing newline)
+        if pos < remaining.len() && remaining.as_bytes()[pos] == b'\n' {
+            pos += 1;
+        }
         if let Some(msg) = parse_line(line) {
             messages.push(msg);
         }
-        offset = line_end;
+        let _ = line_start; // suppress unused warning
+        offset = start_offset + pos;
     }
 
     (messages, offset)

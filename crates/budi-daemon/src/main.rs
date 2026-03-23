@@ -44,6 +44,7 @@ enum Commands {
 #[derive(Clone)]
 struct AppState {
     daemon_state: DaemonState,
+    syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -112,20 +113,30 @@ async fn main() -> Result<()> {
 
     let app_state = AppState {
         daemon_state: DaemonState::new(),
+        syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
+    let sync_flag = app_state.syncing.clone();
     let app = build_router(app_state);
 
     // Auto-sync JSONL transcripts every 30 seconds to keep analytics fresh.
-    tokio::spawn(async {
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            let _ = tokio::task::spawn_blocking(|| {
-                let db_path = analytics::db_path().ok()?;
-                let mut conn = analytics::open_db(&db_path).ok()?;
-                analytics::sync_all(&mut conn).ok()
+            if sync_flag.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
+                continue; // Another sync is running, skip this tick
+            }
+            let flag = sync_flag.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let result = (|| {
+                    let db_path = analytics::db_path().ok()?;
+                    let mut conn = analytics::open_db(&db_path).ok()?;
+                    analytics::sync_all(&mut conn).ok()
+                })();
+                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                result
             })
             .await;
         }
@@ -207,12 +218,21 @@ async fn hook_prompt_submit(
     Json(budi_core::hooks::UserPromptSubmitOutput::allow_with_context(String::new()))
 }
 
-async fn sync_analytics() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Run sync in a blocking task since it does file I/O and SQLite writes.
-    let result = tokio::task::spawn_blocking(|| {
-        let db_path = analytics::db_path()?;
-        let mut conn = analytics::open_db(&db_path)?;
-        analytics::sync_all(&mut conn)
+async fn sync_analytics(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.syncing.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
+        return Ok(Json(json!({ "files_synced": 0, "messages_ingested": 0, "skipped": "sync already running" })));
+    }
+    let flag = state.syncing.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let r = (|| -> anyhow::Result<_> {
+            let db_path = analytics::db_path()?;
+            let mut conn = analytics::open_db(&db_path)?;
+            analytics::sync_all(&mut conn)
+        })();
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        r
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -518,8 +538,8 @@ async fn analytics_plans(
             }
         }
         all_plans.sort_by(|a, b| b.modified.cmp(&a.modified));
-        if let Some(ref q) = search {
-            if !q.is_empty() {
+        if let Some(ref q) = search
+            && !q.is_empty() {
                 let lower = q.to_lowercase();
                 all_plans.retain(|p| {
                     p.title.to_lowercase().contains(&lower)
@@ -527,7 +547,6 @@ async fn analytics_plans(
                         || p.preview.to_lowercase().contains(&lower)
                 });
             }
-        }
         let total_count = all_plans.len() as u64;
         let page: Vec<_> = all_plans.into_iter().skip(offset).take(limit).collect();
         Ok::<_, anyhow::Error>(PaginatedPlans {
@@ -582,15 +601,14 @@ async fn analytics_history(
         // Sort by timestamp descending.
         all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         // Apply search filter if provided
-        if let Some(ref q) = search {
-            if !q.is_empty() {
+        if let Some(ref q) = search
+            && !q.is_empty() {
                 let lower = q.to_lowercase();
                 all_entries.retain(|e| {
                     e.display.to_lowercase().contains(&lower)
                         || e.project.as_deref().unwrap_or("").to_lowercase().contains(&lower)
                 });
             }
-        }
         let total_count = all_entries.len() as u64;
         let page = all_entries.into_iter().skip(offset).take(limit).collect();
         Ok::<_, anyhow::Error>(claude_data::PromptHistory {
@@ -762,6 +780,7 @@ mod tests {
     fn test_app() -> Router {
         build_router(AppState {
             daemon_state: DaemonState::new(),
+            syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 

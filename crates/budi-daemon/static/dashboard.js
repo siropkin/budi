@@ -234,13 +234,7 @@ function formatModelName(raw) {
   return raw;
 }
 
-function estimateSessionCost(s) {
-  const ic = s.input_tokens * 3.0 / 1_000_000;
-  const oc = s.output_tokens * 15.0 / 1_000_000;
-  const cwc = (s.cache_creation_tokens || 0) * 3.75 / 1_000_000;
-  const crc = (s.cache_read_tokens || 0) * 0.30 / 1_000_000;
-  return ic + oc + cwc + crc;
-}
+
 
 const TOOL_COLORS = {
   Read: '#58a6ff', Edit: '#3fb950', Write: '#d2a8ff', Bash: '#f0883e',
@@ -640,7 +634,7 @@ const sessionGetters = {
   duration: s => durationMs(s.first_seen, s.last_seen),
   message_count: s => s.message_count,
   tokens: s => s.input_tokens + s.output_tokens,
-  cost: s => s.cost_cents > 0 ? s.cost_cents / 100 : estimateSessionCost(s),
+  cost: s => (s.cost_cents || 0) / 100,
 };
 
 function renderSessionsSection(sessions) {
@@ -663,7 +657,7 @@ function renderSessionsSection(sessions) {
   const rowFn = s => {
     const totalTok = s.input_tokens + s.output_tokens;
     const title = s.session_title || s.session_id.slice(0, 8);
-    const costVal = s.cost_cents > 0 ? s.cost_cents / 100 : estimateSessionCost(s);
+    const costVal = (s.cost_cents || 0) / 100;
     const provDisplay = (registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider;
     const provCol = multiProvider ? `<td>${esc(provDisplay)}</td>` : '';
     return `<tr>

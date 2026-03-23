@@ -153,36 +153,44 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 /// Backfill cost_cents for messages where it's NULL, using provider pricing.
 fn backfill_cost_cents(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT uuid, COALESCE(provider, 'claude_code'), COALESCE(model, 'unknown'),
-                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
-         FROM messages WHERE cost_cents IS NULL AND role = 'assistant'",
-    )?;
-    let rows: Vec<(String, String, String, u64, u64, u64, u64)> = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+    conn.execute_batch("BEGIN")?;
+    let result = (|| -> Result<()> {
+        let mut stmt = conn.prepare(
+            "SELECT uuid, COALESCE(provider, 'claude_code'), COALESCE(model, 'unknown'),
+                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
+             FROM messages WHERE cost_cents IS NULL AND role = 'assistant'",
+        )?;
+        let rows: Vec<(String, String, String, u64, u64, u64, u64)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
-    let mut update_stmt =
-        conn.prepare("UPDATE messages SET cost_cents = ?1 WHERE uuid = ?2")?;
-    for (uuid, provider, model, inp, outp, cw, cr) in &rows {
-        let cost = estimate_cost_for_provider(provider, model, *inp, *outp, *cw, *cr);
-        if cost > 0.0 {
-            let cents = (cost * 100.0 * 100.0).round() / 100.0;
-            update_stmt.execute(params![cents, uuid])?;
+        let mut update_stmt =
+            conn.prepare("UPDATE messages SET cost_cents = ?1 WHERE uuid = ?2")?;
+        for (uuid, provider, model, inp, outp, cw, cr) in &rows {
+            let cost = estimate_cost_for_provider(provider, model, *inp, *outp, *cw, *cr);
+            if cost > 0.0 {
+                let cents = (cost * 100.0 * 100.0).round() / 100.0;
+                update_stmt.execute(params![cents, uuid])?;
+            }
         }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(ref _e) => { let _ = conn.execute_batch("ROLLBACK"); }
     }
-    Ok(())
+    result
 }
 
 /// Returns the stored byte offset for a given JSONL file path, or 0 if unseen.
@@ -360,42 +368,6 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
 
     tx.commit()?;
     Ok(count)
-}
-
-/// Discover all Claude Code JSONL transcript files under `~/.claude/projects/`.
-pub fn discover_jsonl_files() -> Result<Vec<PathBuf>> {
-    let claude_dir = dirs_claude_projects()?;
-    let mut files = Vec::new();
-    collect_jsonl_recursive(&claude_dir, &mut files, 0);
-    files.sort();
-    Ok(files)
-}
-
-fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32) {
-    // Limit recursion depth to avoid runaway traversal.
-    if depth > 4 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip subagents directory — those are sub-conversations
-            if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
-                continue;
-            }
-            collect_jsonl_recursive(&path, files, depth + 1);
-        } else if path.extension().is_some_and(|e| e == "jsonl") {
-            files.push(path);
-        }
-    }
-}
-
-fn dirs_claude_projects() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".claude").join("projects"))
 }
 
 /// Path to the analytics database file.
@@ -664,9 +636,14 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     };
     let order_dir = if p.sort_asc { "ASC" } else { "DESC" };
 
-    // Count query — use sessions.last_seen for date filters (avoids expensive JOIN)
-    let count_where = where_clause.replace("m.timestamp", "s.last_seen");
-    let count_sql = format!("SELECT COUNT(*) FROM sessions s {}", count_where);
+    // Count query — use same JOIN as data query for consistent results
+    let count_sql = format!(
+        "SELECT COUNT(DISTINCT s.session_id)
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.session_id
+         {}",
+        where_clause
+    );
     let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |r| r.get(0))?;
 
     // Data query with pagination
@@ -2123,6 +2100,49 @@ mod tests {
         // top_tools is now a separate function
         let tools = top_tools(&conn, None, None).unwrap();
         assert_eq!(tools.len(), 2);
+    }
+
+    #[test]
+    fn cost_cents_baked_at_ingest() {
+        let mut conn = test_db();
+        let msg = ParsedMessage {
+            uuid: "cost-test-1".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some("claude-opus-4-6".to_string()),
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            tool_names: vec![],
+            has_thinking: false,
+            stop_reason: None,
+            text_length: 0,
+            version: None,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: None, // Should be calculated at ingest
+            context_tokens_used: None,
+            context_token_limit: None,
+            interaction_mode: None,
+            session_title: None,
+            lines_added: None,
+            lines_removed: None,
+        };
+        ingest_messages(&mut conn, &[msg]).unwrap();
+
+        // Verify cost_cents was baked in: 1M input * $5/M + 100K output * $25/M = $5 + $2.50 = $7.50 = 750 cents
+        let cost_cents: f64 = conn
+            .query_row(
+                "SELECT cost_cents FROM messages WHERE uuid = 'cost-test-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((cost_cents - 750.0).abs() < 1.0, "expected ~750 cents, got {cost_cents}");
     }
 
     #[test]
