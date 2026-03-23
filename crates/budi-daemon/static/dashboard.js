@@ -338,7 +338,7 @@ async function loadStatsData(signal) {
     modelMap[key].cost_cents += m.cost_cents || 0;
   }
   let sortedModels = Object.values(modelMap);
-  sortedModels.sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
+  sortedModels.sort((a, b) => (b.cost_cents || 0) - (a.cost_cents || 0));
   cachedSortedModels = sortedModels.slice(0, DEFAULT_CHART_ROWS);
   cachedActivityChartTitle = currentPeriod === 'today' ? 'Activity (Hourly)'
     : currentPeriod === 'week' ? 'Activity (Daily)'
@@ -1296,7 +1296,7 @@ function renderStatsView(content) {
             const label = m.provider_display + ' / ' + m.model;
             return full ? label : label;
           },
-          m => m.input_tokens + m.output_tokens,
+          m => m.cost_cents,
           (m, i) => paletteColor(i),
           'No model data for this period',
           fmtCostTokens
@@ -1308,7 +1308,7 @@ function renderStatsView(content) {
         <h2>Projects</h2>
         ${renderBarChart(cwds,
           (c, full) => full ? (c.repo_id || '--') : repoName(c.repo_id),
-          c => c.input_tokens + c.output_tokens,
+          c => c.cost_cents,
           (c, i) => paletteColor(i),
           'No project data for this period',
           fmtCostTokens
