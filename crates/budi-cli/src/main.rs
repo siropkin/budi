@@ -91,15 +91,6 @@ enum Commands {
     },
     /// Sync transcripts into the analytics database
     Sync,
-    /// Show estimated token costs by model
-    Cost {
-        /// Time period (default: all)
-        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
-        period: StatsPeriod,
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
     /// Show model usage breakdown
     Models {
         /// Time period (default: all)
@@ -234,7 +225,7 @@ fn main() -> Result<()> {
             json,
         } => cmd_stats(period, session, files, provider, json),
         Commands::Insights { period, json } => cmd_insights(period, json),
-        Commands::Cost { period, json } => cmd_cost(period, json),
+        // Cost command removed — merged into `budi stats`
         Commands::Models { period, json } => cmd_models(period, json),
         Commands::Sessions { period, json } => cmd_sessions(period, json),
         Commands::Plugins { json } => cmd_plugins(json),
@@ -925,6 +916,26 @@ fn cmd_stats_summary_filtered(
         format_tokens(summary.total_output_tokens)
     );
 
+    // Cost breakdown
+    let est = cost::estimate_cost_filtered(
+        conn,
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+    )?;
+    println!();
+    println!(
+        "  \x1b[1mEst. cost\x1b[0m     \x1b[33m${:.2}\x1b[0m",
+        est.total_cost
+    );
+    println!(
+        "  \x1b[90m  input ${:.2}  output ${:.2}  cache write ${:.2}  cache read ${:.2}\x1b[0m",
+        est.input_cost, est.output_cost, est.cache_write_cost, est.cache_read_cost
+    );
+    if est.cache_savings > 0.0 {
+        println!("  \x1b[32m  cache savings ${:.2}\x1b[0m", est.cache_savings);
+    }
+
     let tools = analytics::top_tools(conn, since.as_deref(), until.as_deref()).unwrap_or_default();
     if !tools.is_empty() {
         println!();
@@ -1279,49 +1290,6 @@ fn cmd_insights(period: StatsPeriod, json_output: bool) -> Result<()> {
 }
 
 // ─── Cost ─────────────────────────────────────────────────────────────────────
-
-fn cmd_cost(period: StatsPeriod, json_output: bool) -> Result<()> {
-    let db_path = analytics::db_path()?;
-    if !db_path.exists() {
-        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
-        return Ok(());
-    }
-    let conn = analytics::open_db(&db_path)?;
-    let (since, until) = period_date_range(period);
-    let est = cost::estimate_cost(&conn, since.as_deref(), until.as_deref())?;
-
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&est)?);
-        return Ok(());
-    }
-
-    let period_label = period_label(period);
-    println!();
-    println!(
-        "  \x1b[1;36m💰 Cost estimate\x1b[0m — \x1b[1m{}\x1b[0m",
-        period_label
-    );
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
-    println!(
-        "  \x1b[1mTotal\x1b[0m          \x1b[33m${:.2}\x1b[0m",
-        est.total_cost
-    );
-    println!("  \x1b[90mInput          ${:.2}\x1b[0m", est.input_cost);
-    println!("  \x1b[90mOutput         ${:.2}\x1b[0m", est.output_cost);
-    println!(
-        "  \x1b[90mCache write    ${:.2}\x1b[0m",
-        est.cache_write_cost
-    );
-    println!(
-        "  \x1b[90mCache read     ${:.2}\x1b[0m",
-        est.cache_read_cost
-    );
-    if est.cache_savings > 0.0 {
-        println!("  \x1b[32mCache savings  ${:.2}\x1b[0m", est.cache_savings);
-    }
-    println!();
-    Ok(())
-}
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 

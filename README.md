@@ -199,11 +199,10 @@ budi doctor                   # check installation health
 budi dashboard                # open the web dashboard in the browser
 budi update                   # check for updates and install the latest version
 budi version                  # print version information
-budi stats                    # token usage summary (--period today|week|month|all)
-budi stats --session <id>     # per-session detail (shows provider, mode, lines, cost)
+budi stats                    # usage summary with cost breakdown (--period today|week|month|all)
+budi stats --session <id>     # per-session detail
 budi stats --files            # repositories ranked by usage
 budi stats --provider <name>  # filter by provider (e.g. claude_code, cursor)
-budi cost                     # estimated cost breakdown by model
 budi models                   # model usage breakdown
 budi sessions                 # list sessions with stats
 budi plugins                  # installed plugins
@@ -217,7 +216,7 @@ budi statusline --install     # install status line in ~/.claude/settings.json
 All data commands support `--period today|week|month|all` and `--json` for scripting:
 
 ```bash
-budi cost --period today --json    # pipe to jq, scripts, or dashboards
+budi stats --period today --json   # pipe to jq, scripts, or dashboards
 budi sessions --json | jq '.[0]'  # get latest session as JSON
 ```
 
