@@ -9,8 +9,8 @@ use budi_core::pre_filter;
 use budi_core::rpc::{StatusRequest, StatusResponse};
 use serde_json::json;
 
-use super::internal_error;
 use crate::AppState;
+use super::internal_error;
 
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))

@@ -73,6 +73,15 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Show actionable insights and recommendations
+    Insights {
+        /// Time period to analyze (default: all)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::All)]
+        period: StatsPeriod,
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Sync transcripts into the analytics database
     Sync,
     /// Open the budi dashboard in the browser
@@ -193,9 +202,8 @@ fn main() -> Result<()> {
             sessions,
             provider,
             json,
-        } => {
-            commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json)
-        }
+        } => commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json),
+        Commands::Insights { period, json } => commands::insights::cmd_insights(period, json),
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),

@@ -4,6 +4,7 @@ pub mod config;
 pub mod cost;
 pub mod daemon;
 pub mod hooks;
+pub mod insights;
 pub mod jsonl;
 pub mod pre_filter;
 pub mod provider;

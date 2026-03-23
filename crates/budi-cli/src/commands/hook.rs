@@ -9,9 +9,9 @@ use budi_core::config::{self, BudiConfig};
 use budi_core::hooks::{PostToolUseInput, UserPromptSubmitInput, UserPromptSubmitOutput};
 use serde_json::{Value, json};
 
-use crate::HOOK_LOG_LOCK_STALE_SECS;
-use crate::HOOK_LOG_LOCK_TIMEOUT_MS;
 use crate::daemon::{ensure_daemon_running, fetch_session_stats};
+use crate::HOOK_LOG_LOCK_TIMEOUT_MS;
+use crate::HOOK_LOG_LOCK_STALE_SECS;
 
 pub fn cmd_hook_user_prompt_submit() -> Result<()> {
     let hook_started = Instant::now();

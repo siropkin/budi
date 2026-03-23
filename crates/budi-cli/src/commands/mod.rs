@@ -6,6 +6,7 @@ use budi_core::config;
 pub mod doctor;
 pub mod hook;
 pub mod init;
+pub mod insights;
 pub mod open;
 pub mod repo;
 pub mod stats;
