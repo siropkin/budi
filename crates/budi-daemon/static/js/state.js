@@ -23,8 +23,6 @@ let registeredProviders = [];
 // Cached data
 let dataLoaded = false;
 let statsData = null;
-let activeSessionsData = null;
-
 // Cached render intermediates for stats view
 let cachedSortedModels = [];
 let cachedActivityChartTitle = '';

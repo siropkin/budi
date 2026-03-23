@@ -1,5 +1,4 @@
 pub mod analytics;
-pub mod claude_data;
 pub mod config;
 pub mod cost;
 pub mod daemon;
