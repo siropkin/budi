@@ -8,13 +8,14 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 
 Hide
-Type "export BUDI_HOME=/tmp/budi-demo"
-Enter
-Sleep 500ms
 Type "clear"
 Enter
 Sleep 500ms
 Show
+
+Type "budi --version"
+Enter
+Sleep 2s
 
 Type "budi stats --period all"
 Enter
@@ -27,3 +28,7 @@ Sleep 3s
 Type "budi stats --sessions --period week"
 Enter
 Sleep 4s
+
+Type "budi statusline --format=json"
+Enter
+Sleep 3s

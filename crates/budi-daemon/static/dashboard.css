@@ -33,8 +33,6 @@ a:hover { text-decoration: underline; }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .header-left .logo { font-size: 1.8rem; }
 .header-right { display: flex; gap: 12px; align-items: center; }
-.header-right .nav-tabs { margin-bottom: 0; }
-.period-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 .period-tabs { display: flex; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 3px; }
 .period-tabs button {
   background: none; border: none; color: var(--text-muted); padding: 6px 14px;
@@ -42,11 +40,6 @@ a:hover { text-decoration: underline; }
 }
 .period-tabs button.active { background: var(--accent); color: #fff; }
 .period-tabs button:hover:not(.active) { color: var(--text); }
-.provider-filter select {
-  background: var(--surface); color: var(--text); border: 1px solid var(--border);
-  padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; cursor: pointer;
-}
-.provider-filter select:focus { outline: none; border-color: var(--accent); }
 
 .nav-tabs {
   display: flex; gap: 4px; background: var(--surface); border-radius: var(--radius); padding: 3px;

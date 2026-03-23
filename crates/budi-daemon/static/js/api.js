@@ -43,7 +43,6 @@ async function loadStatsData(signal) {
   statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches };
   lastSessionData = sessions;
   providersData = providers;
-  updateProviderFilter();
 
   // Merge models with same normalized display name per provider
   const modelMap = {};

@@ -14,7 +14,7 @@ const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
-#[command(about = "budi — AI code analytics. See where your tokens go.")]
+#[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(after_help = "Get started:\n  budi init --global")]
 struct Cli {
@@ -39,7 +39,7 @@ enum Commands {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    /// Manage repos
+    #[command(hide = true)]
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
@@ -79,14 +79,12 @@ enum Commands {
     Open,
     /// Update budi to the latest version
     Update,
-    /// Print version information
-    Version,
     /// Print a compact status line (reads stdin, outputs one line)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
         #[arg(long, default_value_t = false)]
         install: bool,
-        /// Output format: claude (ANSI+OSC8), starship (plain text), json
+        /// Output format: claude (ANSI+OSC8), starship (plain text), json, custom (uses config template)
         #[arg(long, value_enum, default_value_t = StatuslineFormat::Claude)]
         format: StatuslineFormat,
     },
@@ -108,6 +106,8 @@ pub enum StatuslineFormat {
     Starship,
     /// Raw JSON
     Json,
+    /// Custom format from ~/.config/budi/statusline.toml
+    Custom,
 }
 
 #[derive(Debug, Subcommand)]
@@ -193,14 +193,12 @@ fn main() -> Result<()> {
             sessions,
             provider,
             json,
-        } => commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json),
+        } => {
+            commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json)
+        }
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),
-        Commands::Version => {
-            println!("budi {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
         Commands::Statusline { install, format } => {
             if install {
                 commands::statusline::cmd_statusline_install()

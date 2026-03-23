@@ -1918,14 +1918,32 @@ pub struct StatuslineStats {
     pub today_cost: f64,
     pub week_cost: f64,
     pub month_cost: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_provider: Option<String>,
+}
+
+/// Parameters for requesting extra statusline data.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct StatuslineParams {
+    pub session_id: Option<String>,
+    pub branch: Option<String>,
+    pub project_dir: Option<String>,
 }
 
 /// Compute cost stats for today/week/month, suitable for the CLI status line.
+/// Optionally computes session/branch/project costs when params are provided.
 pub fn statusline_stats(
     conn: &Connection,
     today: &str,
     week_start: &str,
     month_start: &str,
+    params: &StatuslineParams,
 ) -> Result<StatuslineStats> {
     fn cost_since(conn: &Connection, since: &str) -> f64 {
         conn.query_row(
@@ -1941,10 +1959,61 @@ pub fn statusline_stats(
     let week_cost = cost_since(conn, week_start);
     let month_cost = cost_since(conn, month_start);
 
+    // Session cost: total cost for a specific session
+    let session_cost = params.session_id.as_ref().map(|sid| {
+        conn.query_row(
+            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE session_id = ?1",
+            [sid],
+            |r| r.get::<_, f64>(0),
+        )
+        .unwrap_or(0.0)
+            / 100.0
+    });
+
+    // Branch cost: total cost for sessions on a specific git branch
+    let branch_cost = params.branch.as_ref().map(|branch| {
+        conn.query_row(
+            "SELECT COALESCE(SUM(m.cost_cents), 0.0) \
+             FROM messages m JOIN sessions s ON m.session_id = s.session_id \
+             WHERE s.git_branch = ?1",
+            [branch],
+            |r| r.get::<_, f64>(0),
+        )
+        .unwrap_or(0.0)
+            / 100.0
+    });
+
+    // Project cost: total cost for sessions in a specific project directory
+    let project_cost = params.project_dir.as_ref().map(|dir| {
+        conn.query_row(
+            "SELECT COALESCE(SUM(m.cost_cents), 0.0) \
+             FROM messages m JOIN sessions s ON m.session_id = s.session_id \
+             WHERE s.project_dir = ?1",
+            [dir],
+            |r| r.get::<_, f64>(0),
+        )
+        .unwrap_or(0.0)
+            / 100.0
+    });
+
+    // Active provider: most recent provider used today
+    let active_provider: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(provider, 'claude_code') FROM messages \
+             WHERE timestamp >= ?1 ORDER BY timestamp DESC LIMIT 1",
+            [today],
+            |r| r.get(0),
+        )
+        .ok();
+
     Ok(StatuslineStats {
         today_cost,
         week_cost,
         month_cost,
+        session_cost,
+        branch_cost,
+        project_cost,
+        active_provider,
     })
 }
 
@@ -2818,19 +2887,53 @@ mod tests {
     #[test]
     fn statusline_stats_empty_db() {
         let conn = test_db();
-        let stats = statusline_stats(&conn, "2026-03-21", "2026-03-17", "2026-03-01").unwrap();
+        let params = StatuslineParams::default();
+        let stats =
+            statusline_stats(&conn, "2026-03-21", "2026-03-17", "2026-03-01", &params).unwrap();
         assert_eq!(stats.today_cost, 0.0);
         assert_eq!(stats.week_cost, 0.0);
         assert_eq!(stats.month_cost, 0.0);
+        assert!(stats.session_cost.is_none());
+        assert!(stats.branch_cost.is_none());
+        assert!(stats.project_cost.is_none());
     }
 
     #[test]
     fn statusline_stats_with_data() {
         let mut conn = test_db();
         ingest_messages(&mut conn, &sample_messages()).unwrap();
+        let params = StatuslineParams::default();
         // sample_messages have timestamps on 2026-03-14
-        let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01").unwrap();
+        let stats =
+            statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
         assert!(stats.month_cost > 0.0);
+    }
+
+    #[test]
+    fn statusline_stats_with_session_filter() {
+        let mut conn = test_db();
+        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        let params = StatuslineParams {
+            session_id: Some("sess-1".to_string()),
+            ..Default::default()
+        };
+        let stats =
+            statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+        assert!(stats.session_cost.is_some());
+        assert!(stats.session_cost.unwrap() >= 0.0);
+    }
+
+    #[test]
+    fn statusline_stats_with_branch_filter() {
+        let mut conn = test_db();
+        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        let params = StatuslineParams {
+            branch: Some("main".to_string()),
+            ..Default::default()
+        };
+        let stats =
+            statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+        assert!(stats.branch_cost.is_some());
     }
 
     #[test]

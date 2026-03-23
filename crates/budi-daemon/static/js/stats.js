@@ -1,23 +1,3 @@
-function updateProviderFilter() {
-  const filter = $('#providerFilter');
-  const select = $('#providerSelect');
-  if (registeredProviders.length > 1) {
-    filter.style.display = '';
-    const currentVal = select.value;
-    select.innerHTML = '<option value="">All Agents</option>';
-    // Use registered providers for the options, show all even if no data
-    registeredProviders.forEach(rp => {
-      const opt = document.createElement('option');
-      opt.value = rp.name;
-      opt.textContent = rp.display_name;
-      select.appendChild(opt);
-    });
-    select.value = currentVal || '';
-  } else {
-    filter.style.display = 'none';
-  }
-}
-
 function hasProvider(name) {
   return providersData.some(p => p.provider === name);
 }

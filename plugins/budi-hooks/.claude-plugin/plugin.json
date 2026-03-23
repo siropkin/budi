@@ -1,6 +1,6 @@
 {
   "name": "budi-hooks",
-  "version": "5.3.0",
+  "version": "6.0.0",
   "description": "Claude Code hooks that track token usage and prompt analytics for the budi dashboard.",
   "author": {
     "name": "Ivan Seredkin",

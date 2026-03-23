@@ -12,7 +12,7 @@ edition = "2024"
 license = "MIT"
 authors = ["Ivan Seredkin"]
 repository = "https://github.com/siropkin/budi"
-description = "WakaTime for AI coding agents — see where your tokens go"
+description = "AI cost analytics for coding agents — know where your tokens and money go"
 
 [workspace.dependencies]
 anyhow = "1"

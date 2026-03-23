@@ -519,4 +519,3 @@ pub fn format_timestamp(ts: &str) -> String {
         })
         .unwrap_or_else(|_| ts.to_string())
 }
-

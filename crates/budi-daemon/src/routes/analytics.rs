@@ -257,8 +257,9 @@ pub async fn analytics_registered_providers() -> Json<serde_json::Value> {
     Json(json!(list))
 }
 
-pub async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (StatusCode, String)>
-{
+pub async fn analytics_statusline(
+    Query(params): Query<analytics::StatuslineParams>,
+) -> Result<Json<analytics::StatuslineStats>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -283,7 +284,7 @@ pub async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, 
                 .and_hms_opt(0, 0, 0)
                 .unwrap(),
         );
-        analytics::statusline_stats(&conn, &today, &week_start, &month_start)
+        analytics::statusline_stats(&conn, &today, &week_start, &month_start, &params)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

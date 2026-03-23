@@ -16,8 +16,7 @@ let sessionTotalCount = 0;
 // Search state
 let sessionsSearchTerm = '';
 
-// Provider filter state
-let currentProvider = '';
+// Provider data
 let providersData = [];
 let registeredProviders = [];
 

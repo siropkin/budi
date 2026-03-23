@@ -18,6 +18,85 @@ pub const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 
+/// Known statusline slot names.
+pub const STATUSLINE_SLOTS: &[&str] = &[
+    "today", "week", "month", "session", "branch", "project", "provider",
+];
+
+/// User-configurable statusline layout.
+///
+/// Loaded from `~/.config/budi/statusline.toml`.
+/// Example:
+/// ```toml
+/// slots = ["today", "week", "month", "branch"]
+/// # format = "{today} | {week} | {month}"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatuslineConfig {
+    /// Ordered list of data slots to display. Default: ["today", "week", "month"].
+    pub slots: Vec<String>,
+    /// Optional custom format template. Overrides `slots` when set.
+    /// Placeholders: {today}, {week}, {month}, {session}, {branch}, {project}, {provider}
+    pub format: Option<String>,
+}
+
+impl Default for StatuslineConfig {
+    fn default() -> Self {
+        Self {
+            slots: vec!["today".to_string(), "week".to_string(), "month".to_string()],
+            format: None,
+        }
+    }
+}
+
+impl StatuslineConfig {
+    /// Resolve which slots are needed (from format template or explicit slots list).
+    pub fn required_slots(&self) -> Vec<String> {
+        if let Some(ref fmt) = self.format {
+            // Extract {placeholder} names from the format string
+            let mut slots = Vec::new();
+            let mut rest = fmt.as_str();
+            while let Some(start) = rest.find('{') {
+                if let Some(end) = rest[start..].find('}') {
+                    let name = &rest[start + 1..start + end];
+                    if STATUSLINE_SLOTS.contains(&name) && !slots.contains(&name.to_string()) {
+                        slots.push(name.to_string());
+                    }
+                    rest = &rest[start + end + 1..];
+                } else {
+                    break;
+                }
+            }
+            slots
+        } else {
+            self.slots.clone()
+        }
+    }
+}
+
+/// Path to the global statusline config file.
+pub fn statusline_config_path() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home).join(".config/budi/statusline.toml"))
+}
+
+/// Load statusline config, falling back to defaults if the file doesn't exist.
+pub fn load_statusline_config() -> StatuslineConfig {
+    let path = match statusline_config_path() {
+        Ok(p) => p,
+        Err(_) => return StatuslineConfig::default(),
+    };
+    if !path.exists() {
+        return StatuslineConfig::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return StatuslineConfig::default(),
+    };
+    toml::from_str(&raw).unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudiConfig {
@@ -279,5 +358,66 @@ mod tests {
         let data_dir = PathBuf::from("/tmp/budi-marker-test");
         let marker_path = repo_root_marker_path(&data_dir);
         assert!(marker_path.ends_with(BUDI_REPO_ROOT_MARKER_FILE_NAME));
+    }
+
+    #[test]
+    fn statusline_config_default_slots() {
+        let config = StatuslineConfig::default();
+        assert_eq!(config.slots, vec!["today", "week", "month"]);
+        assert!(config.format.is_none());
+    }
+
+    #[test]
+    fn statusline_config_required_slots_from_slots() {
+        let config = StatuslineConfig {
+            slots: vec!["today".to_string(), "branch".to_string()],
+            format: None,
+        };
+        assert_eq!(config.required_slots(), vec!["today", "branch"]);
+    }
+
+    #[test]
+    fn statusline_config_required_slots_from_format() {
+        let config = StatuslineConfig {
+            slots: vec![],
+            format: Some("{today} | {branch} | {provider}".to_string()),
+        };
+        let required = config.required_slots();
+        assert_eq!(required, vec!["today", "branch", "provider"]);
+    }
+
+    #[test]
+    fn statusline_config_required_slots_ignores_unknown() {
+        let config = StatuslineConfig {
+            slots: vec![],
+            format: Some("{today} | {unknown} | {week}".to_string()),
+        };
+        let required = config.required_slots();
+        assert_eq!(required, vec!["today", "week"]);
+    }
+
+    #[test]
+    fn statusline_config_parse_toml() {
+        let toml_str = r#"
+slots = ["today", "week", "branch"]
+format = "{today} | {week} | {branch}"
+"#;
+        let config: StatuslineConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.slots, vec!["today", "week", "branch"]);
+        assert_eq!(config.format.unwrap(), "{today} | {week} | {branch}");
+    }
+
+    #[test]
+    fn statusline_config_parse_minimal_toml() {
+        let toml_str = r#"slots = ["month", "project"]"#;
+        let config: StatuslineConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.slots, vec!["month", "project"]);
+        assert!(config.format.is_none());
+    }
+
+    #[test]
+    fn statusline_config_empty_toml_uses_defaults() {
+        let config: StatuslineConfig = toml::from_str("").unwrap();
+        assert_eq!(config.slots, vec!["today", "week", "month"]);
     }
 }
