@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use rusqlite::Connection;
 
 use crate::claude_data::{PlanFile, PromptEntry};
 use crate::hooks;
@@ -85,16 +86,21 @@ pub trait Provider: Send + Sync {
     fn system_message_patterns(&self) -> Vec<&str> {
         vec![]
     }
+
+    /// Direct sync from a structured data source (e.g. SQLite database).
+    /// Returns Some((files_synced, messages_ingested)) if this provider uses
+    /// direct sync instead of file-based discovery. Returns None to fall back
+    /// to discover_files() + parse_file().
+    fn sync_direct(&self, _conn: &mut Connection) -> Option<Result<(usize, usize)>> {
+        None
+    }
 }
 
 /// Returns all registered providers (whether or not their data is present).
 pub fn all_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(crate::providers::claude_code::ClaudeCodeProvider),
-        // Cursor provider is implemented but not yet registered — Cursor's
-        // JSONL transcripts lack token counts and model names, so the data
-        // isn't useful enough to show alongside Claude Code's detailed stats.
-        // See providers/cursor.rs for the implementation.
+        Box::new(crate::providers::cursor::CursorProvider),
     ]
 }
 

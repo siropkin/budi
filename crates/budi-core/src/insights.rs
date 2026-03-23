@@ -437,6 +437,13 @@ mod tests {
             git_branch: None,
             repo_id: None,
             provider: "claude_code".to_string(),
+            cost_cents: None,
+            context_tokens_used: None,
+            context_token_limit: None,
+            interaction_mode: None,
+            session_title: None,
+            lines_added: None,
+            lines_removed: None,
         }]
     }
 
