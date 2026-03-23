@@ -441,6 +441,39 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
     Ok((total_files, total_messages))
 }
 
+/// Sync a single JSONL transcript file (used for hook-triggered incremental sync).
+/// Returns the number of messages ingested.
+pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
+    use crate::provider::Provider;
+    let provider = crate::providers::claude_code::ClaudeCodeProvider;
+    let mut repo_cache = crate::repo_id::RepoIdCache::new();
+    let path_str = file_path.display().to_string();
+    let offset = get_sync_offset(conn, &path_str)?;
+
+    let content = std::fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read {}", file_path.display()))?;
+
+    if offset >= content.len() {
+        return Ok(0);
+    }
+
+    let (mut messages, new_offset) = provider.parse_file(file_path, &content, offset)?;
+    if messages.is_empty() {
+        set_sync_offset(conn, &path_str, new_offset)?;
+        return Ok(0);
+    }
+
+    for msg in &mut messages {
+        if let Some(ref cwd) = msg.cwd {
+            msg.repo_id = Some(repo_cache.resolve(Path::new(cwd)));
+        }
+    }
+
+    let count = ingest_messages(conn, &messages)?;
+    set_sync_offset(conn, &path_str, new_offset)?;
+    Ok(count)
+}
+
 /// Summary statistics for display.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UsageSummary {

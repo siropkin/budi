@@ -45,6 +45,7 @@ enum Commands {
 struct AppState {
     daemon_state: DaemonState,
     syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hook_sync_tx: tokio::sync::mpsc::Sender<PathBuf>,
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -112,12 +113,73 @@ async fn main() -> Result<()> {
         Commands::Serve { host, port } => (host, port),
     };
 
+    let (hook_sync_tx, mut hook_sync_rx) = tokio::sync::mpsc::channel::<PathBuf>(64);
+
     let app_state = AppState {
         daemon_state: DaemonState::new(),
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        hook_sync_tx,
     };
 
     let sync_flag = app_state.syncing.clone();
+
+    // Debounced hook-triggered sync: when hooks fire, sync just the active transcript
+    // file after a 500ms debounce to collapse rapid hook bursts.
+    let hook_sync_flag = app_state.syncing.clone();
+    tokio::spawn(async move {
+        let mut pending_path: Option<PathBuf> = None;
+        loop {
+            if pending_path.is_some() {
+                // We have a pending path — wait for more or timeout after 500ms
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    hook_sync_rx.recv(),
+                )
+                .await
+                {
+                    Ok(Some(path)) => {
+                        pending_path = Some(path);
+                        continue; // reset debounce timer
+                    }
+                    Ok(None) => break, // channel closed
+                    Err(_) => {
+                        // Timeout — debounce expired, sync the file
+                        let path = pending_path.take().unwrap();
+                        if hook_sync_flag
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            )
+                            .is_ok()
+                        {
+                            let flag = hook_sync_flag.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let result = (|| {
+                                    let db_path = analytics::db_path().ok()?;
+                                    let mut conn = analytics::open_db(&db_path).ok()?;
+                                    analytics::sync_one_file(&mut conn, &path).ok()
+                                })();
+                                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                result
+                            })
+                            .await;
+                        }
+                    }
+                }
+            } else {
+                // No pending path — block until we get one
+                match hook_sync_rx.recv().await {
+                    Some(path) => {
+                        pending_path = Some(path);
+                    }
+                    None => break, // channel closed
+                }
+            }
+        }
+    });
+
     let app = build_router(app_state);
 
     // Auto-sync JSONL transcripts every 30 seconds to keep analytics fresh.
@@ -224,6 +286,11 @@ async fn hook_prompt_submit(
         .daemon_state
         .record_prompt(&repo_root_str, Some(&session_id), skipped);
 
+    // Trigger debounced sync of this transcript file so statusline data stays fresh.
+    let _ = state
+        .hook_sync_tx
+        .try_send(PathBuf::from(&input.common.transcript_path));
+
     Json(budi_core::hooks::UserPromptSubmitOutput::allow_with_context(String::new()))
 }
 
@@ -292,9 +359,13 @@ async fn analytics_summary(
 }
 
 async fn hook_tool_use(
-    Json(_input): Json<budi_core::hooks::PostToolUseInput>,
+    State(state): State<AppState>,
+    Json(input): Json<budi_core::hooks::PostToolUseInput>,
 ) -> Json<serde_json::Value> {
-    // Tool use tracking will be added in the analytics phase.
+    // Trigger debounced sync so cost data from tool usage is picked up quickly.
+    let _ = state
+        .hook_sync_tx
+        .try_send(PathBuf::from(&input.common.transcript_path));
     Json(json!({}))
 }
 
@@ -859,9 +930,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
+        let (hook_sync_tx, _hook_sync_rx) = tokio::sync::mpsc::channel(64);
         build_router(AppState {
             daemon_state: DaemonState::new(),
             syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hook_sync_tx,
         })
     }
 
