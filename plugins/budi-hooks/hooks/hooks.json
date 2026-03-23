@@ -1,5 +1,5 @@
 {
-  "description": "budi hook automation for prompt augmentation, post-edit indexing, and session context.",
+  "description": "budi hook automation for cost and usage analytics tracking.",
   "hooks": {
     "SessionStart": [
       {
