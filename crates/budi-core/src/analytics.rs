@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::jsonl::ParsedMessage;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Open (or create) the analytics database at the given path.
 pub fn open_db(db_path: &Path) -> Result<Connection> {
@@ -111,8 +111,64 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 4 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN session_title TEXT;
+            ALTER TABLE sessions ADD COLUMN interaction_mode TEXT;
+            ALTER TABLE sessions ADD COLUMN lines_added INTEGER DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN lines_removed INTEGER DEFAULT 0;
+
+            ALTER TABLE messages ADD COLUMN cost_cents REAL;
+            ALTER TABLE messages ADD COLUMN context_tokens_used INTEGER;
+            ALTER TABLE messages ADD COLUMN context_token_limit INTEGER;
+            ALTER TABLE messages ADD COLUMN interaction_mode TEXT;
+            ",
+        )?;
+    }
+
+    if version < 5 {
+        // Backfill cost_cents for existing messages that don't have it.
+        // This bakes in the estimated cost at current pricing rates.
+        backfill_cost_cents(conn)?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
+    Ok(())
+}
+
+/// Backfill cost_cents for messages where it's NULL, using provider pricing.
+fn backfill_cost_cents(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT uuid, COALESCE(provider, 'claude_code'), COALESCE(model, 'unknown'),
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
+         FROM messages WHERE cost_cents IS NULL AND role = 'assistant'",
+    )?;
+    let rows: Vec<(String, String, String, u64, u64, u64, u64)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut update_stmt =
+        conn.prepare("UPDATE messages SET cost_cents = ?1 WHERE uuid = ?2")?;
+    for (uuid, provider, model, inp, outp, cw, cr) in &rows {
+        let cost = estimate_cost_for_provider(provider, model, *inp, *outp, *cw, *cr);
+        if cost > 0.0 {
+            let cents = (cost * 100.0 * 100.0).round() / 100.0;
+            update_stmt.execute(params![cents, uuid])?;
+        }
+    }
     Ok(())
 }
 
@@ -153,21 +209,50 @@ fn upsert_session(
     git_branch: Option<&str>,
     repo_id: Option<&str>,
     provider: &str,
+    session_title: Option<&str>,
+    interaction_mode: Option<&str>,
+    lines_added: Option<u64>,
+    lines_removed: Option<u64>,
 ) -> Result<()> {
     let ts = timestamp.to_rfc3339();
+    let la = lines_added.map(|v| v as i64);
+    let lr = lines_removed.map(|v| v as i64);
     conn.execute(
-        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider)
-         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider, session_title, interaction_mode, lines_added, lines_removed)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, 0), COALESCE(?11, 0))
          ON CONFLICT(session_id) DO UPDATE SET
            last_seen = MAX(sessions.last_seen, ?3),
            project_dir = COALESCE(?2, sessions.project_dir),
            version = COALESCE(?4, sessions.version),
            git_branch = COALESCE(?5, sessions.git_branch),
            repo_id = COALESCE(?6, sessions.repo_id),
-           provider = COALESCE(?7, sessions.provider)",
-        params![session_id, cwd, ts, version, git_branch, repo_id, provider],
+           provider = COALESCE(?7, sessions.provider),
+           session_title = COALESCE(?8, sessions.session_title),
+           interaction_mode = COALESCE(?9, sessions.interaction_mode),
+           lines_added = MAX(sessions.lines_added, COALESCE(?10, 0)),
+           lines_removed = MAX(sessions.lines_removed, COALESCE(?11, 0))",
+        params![session_id, cwd, ts, version, git_branch, repo_id, provider, session_title, interaction_mode, la, lr],
     )?;
     Ok(())
+}
+
+/// Estimate cost in dollars for a message using the appropriate provider's pricing.
+fn estimate_cost_for_provider(
+    provider: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
+    let pricing = match provider {
+        "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
+        _ => crate::providers::claude_code::claude_pricing_for_model(model),
+    };
+    input_tokens as f64 * pricing.input / 1_000_000.0
+        + output_tokens as f64 * pricing.output / 1_000_000.0
+        + cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
+        + cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0
 }
 
 /// Ingest a batch of parsed messages into the database.
@@ -187,17 +272,44 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                 msg.git_branch.as_deref(),
                 msg.repo_id.as_deref(),
                 &msg.provider,
+                msg.session_title.as_deref(),
+                msg.interaction_mode.as_deref(),
+                msg.lines_added,
+                msg.lines_removed,
             )?;
         }
 
         // Insert message (skip duplicates).
         let ts = msg.timestamp.to_rfc3339();
+        // Calculate cost_cents at ingest time if not already provided
+        let cost_cents = msg.cost_cents.or_else(|| {
+            if msg.role == "assistant" {
+                let pricing = estimate_cost_for_provider(
+                    &msg.provider,
+                    msg.model.as_deref().unwrap_or("unknown"),
+                    msg.input_tokens,
+                    msg.output_tokens,
+                    msg.cache_creation_tokens,
+                    msg.cache_read_tokens,
+                );
+                if pricing > 0.0 {
+                    Some((pricing * 100.0 * 100.0).round() / 100.0) // cents, 2 decimal places
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        let ctx_used = msg.context_tokens_used.map(|v| v as i64);
+        let ctx_limit = msg.context_token_limit.map(|v| v as i64);
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (uuid, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-              has_thinking, stop_reason, text_length, cwd, repo_id, provider)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+              has_thinking, stop_reason, text_length, cwd, repo_id, provider,
+              cost_cents, context_tokens_used, context_token_limit, interaction_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -214,6 +326,10 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                 msg.cwd,
                 msg.repo_id,
                 msg.provider,
+                cost_cents,
+                ctx_used,
+                ctx_limit,
+                msg.interaction_mode,
             ],
         )?;
 
@@ -285,6 +401,14 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
     let mut repo_cache = crate::repo_id::RepoIdCache::new();
 
     for provider in &providers {
+        // Try direct sync first (e.g. Cursor state.vscdb).
+        if let Some(result) = provider.sync_direct(conn) {
+            let (files, messages) = result?;
+            total_files += files;
+            total_messages += messages;
+            continue;
+        }
+
         let files = provider.discover_files()?;
 
         for discovered in &files {
@@ -470,6 +594,12 @@ pub struct SessionSummary {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub tool_calls: u64,
+    pub provider: String,
+    pub session_title: Option<String>,
+    pub interaction_mode: Option<String>,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+    pub cost_cents: f64,
 }
 
 /// List sessions with aggregated stats, ordered by most recent first.
@@ -510,7 +640,13 @@ pub fn session_list(
                 (SELECT COUNT(*) FROM tool_usage tu
                  JOIN messages mm ON tu.message_uuid = mm.uuid
                  WHERE mm.session_id = s.session_id) as tool_calls,
-                s.repo_id
+                s.repo_id,
+                COALESCE(s.provider, 'claude_code'),
+                s.session_title,
+                s.interaction_mode,
+                COALESCE(s.lines_added, 0),
+                COALESCE(s.lines_removed, 0),
+                COALESCE(SUM(m.cost_cents), 0.0)
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.session_id
          {}
@@ -534,6 +670,12 @@ pub fn session_list(
                 cache_read_tokens: row.get(8)?,
                 tool_calls: row.get(9)?,
                 repo_id: row.get(10)?,
+                provider: row.get(11)?,
+                session_title: row.get(12)?,
+                interaction_mode: row.get(13)?,
+                lines_added: row.get(14)?,
+                lines_removed: row.get(15)?,
+                cost_cents: row.get(16)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -558,6 +700,12 @@ pub struct SessionDetail {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub top_tools: Vec<(String, u64)>,
+    pub provider: String,
+    pub session_title: Option<String>,
+    pub interaction_mode: Option<String>,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+    pub cost_cents: f64,
 }
 
 /// Get detailed stats for a single session by ID (prefix match supported).
@@ -565,7 +713,9 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
     // Find session by exact or prefix match.
     let session_row = conn
         .query_row(
-            "SELECT session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id
+            "SELECT session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id,
+                    COALESCE(provider, 'claude_code'), session_title, interaction_mode,
+                    COALESCE(lines_added, 0), COALESCE(lines_removed, 0)
              FROM sessions WHERE session_id = ?1 OR session_id LIKE ?2
              ORDER BY last_seen DESC LIMIT 1",
             params![session_id_prefix, format!("{}%", session_id_prefix)],
@@ -578,6 +728,11 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
                     version: row.get(4)?,
                     git_branch: row.get(5)?,
                     repo_id: row.get(6)?,
+                    provider: row.get(7)?,
+                    session_title: row.get(8)?,
+                    interaction_mode: row.get(9)?,
+                    lines_added: row.get(10)?,
+                    lines_removed: row.get(11)?,
                     user_messages: 0,
                     assistant_messages: 0,
                     input_tokens: 0,
@@ -585,6 +740,7 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
                     cache_creation_tokens: 0,
                     cache_read_tokens: 0,
                     top_tools: vec![],
+                    cost_cents: 0.0,
                 })
             },
         )
@@ -602,7 +758,8 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
             COALESCE(SUM(input_tokens), 0),
             COALESCE(SUM(output_tokens), 0),
             COALESCE(SUM(cache_creation_tokens), 0),
-            COALESCE(SUM(cache_read_tokens), 0)
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cost_cents), 0.0)
          FROM messages WHERE session_id = ?1",
         params![sid],
         |r| {
@@ -612,6 +769,7 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
             detail.output_tokens = r.get(3)?;
             detail.cache_creation_tokens = r.get(4)?;
             detail.cache_read_tokens = r.get(5)?;
+            detail.cost_cents = r.get(6)?;
             Ok(())
         },
     )?;
@@ -958,6 +1116,8 @@ pub struct ActivityBucket {
     pub label: String,
     pub message_count: u64,
     pub tool_call_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 /// Query activity data with adaptive time granularity.
@@ -998,15 +1158,17 @@ pub fn activity_chart(
     };
 
     let sql = format!(
-        "SELECT {} as bucket, COUNT(*) as cnt
+        "SELECT {} as bucket, COUNT(*) as cnt,
+                COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0),
+                COALESCE(SUM(output_tokens), 0)
          FROM messages {}
          GROUP BY bucket ORDER BY bucket",
         group_expr, where_clause
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let msg_rows: Vec<(String, u64)> = stmt
-        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
+    let msg_rows: Vec<(String, u64, u64, u64)> = stmt
+        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -1036,10 +1198,12 @@ pub fn activity_chart(
 
     let results = msg_rows
         .into_iter()
-        .map(|(label, count)| ActivityBucket {
+        .map(|(label, count, inp, outp)| ActivityBucket {
             tool_call_count: tool_rows.get(&label).copied().unwrap_or(0),
             label,
             message_count: count,
+            input_tokens: inp,
+            output_tokens: outp,
         })
         .collect();
 
@@ -1510,25 +1674,31 @@ pub struct StatuslineStats {
     pub cache_hit_rate: f64,
     pub session_count: u64,
     pub active_minutes: u64,
+    pub cost_cents: f64,
+    pub provider_count: u64,
+    pub lines_added: u64,
+    pub lines_removed: u64,
 }
 
 /// Compute compact stats for today, suitable for the CLI status line.
 pub fn statusline_stats(conn: &Connection, today: &str) -> Result<StatuslineStats> {
-    // Token totals for today
-    let (input, output, cache_create, cache_read): (u64, u64, u64, u64) = conn.query_row(
-        "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0)
+    // Token totals and cost_cents for today
+    let (input, output, cache_create, cache_read, sum_cost_cents): (u64, u64, u64, u64, f64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+                    COALESCE(SUM(cost_cents), 0.0)
              FROM messages WHERE timestamp >= ?1",
-        [today],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    )?;
+            [today],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
 
     let total_tokens = input + output + cache_create + cache_read;
 
     // Cost estimate for today
     let cost = crate::cost::estimate_cost(conn, Some(today), None)?;
 
-    // Cache hit rate: cache_read / (input + cache_read)
+    // Cache hit rate
     let cache_hit_rate = if input + cache_read > 0 {
         cache_read as f64 / (input + cache_read) as f64
     } else {
@@ -1542,7 +1712,7 @@ pub fn statusline_stats(conn: &Connection, today: &str) -> Result<StatuslineStat
         |r| r.get(0),
     )?;
 
-    // Active minutes: sum of (last_message - first_message) per session today
+    // Active minutes
     let active_minutes: u64 = conn.query_row(
         "SELECT COALESCE(SUM(span_mins), 0) FROM (
              SELECT (JULIANDAY(MAX(timestamp)) - JULIANDAY(MIN(timestamp))) * 24 * 60 AS span_mins
@@ -1556,12 +1726,33 @@ pub fn statusline_stats(conn: &Connection, today: &str) -> Result<StatuslineStat
         },
     )?;
 
+    // Provider count for today
+    let provider_count: u64 = conn.query_row(
+        "SELECT COUNT(DISTINCT COALESCE(provider, 'claude_code')) FROM messages WHERE timestamp >= ?1",
+        [today],
+        |r| r.get(0),
+    )?;
+
+    // Lines from sessions active today
+    let (lines_added, lines_removed): (u64, u64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(lines_added), 0), COALESCE(SUM(lines_removed), 0)
+             FROM sessions WHERE last_seen >= ?1",
+            [today],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((0, 0));
+
     Ok(StatuslineStats {
         total_tokens,
         estimated_cost: cost.total_cost,
-        cache_hit_rate: (cache_hit_rate * 1000.0).round() / 10.0, // percentage with 1 decimal
+        cache_hit_rate: (cache_hit_rate * 1000.0).round() / 10.0,
         session_count,
         active_minutes,
+        cost_cents: (sum_cost_cents * 100.0).round() / 100.0,
+        provider_count,
+        lines_added,
+        lines_removed,
     })
 }
 
@@ -1587,6 +1778,9 @@ pub struct ProviderStats {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub estimated_cost: f64,
+    pub total_cost_cents: f64,
+    pub total_lines_added: u64,
+    pub total_lines_removed: u64,
 }
 
 /// Query per-provider aggregate stats.
@@ -1608,7 +1802,8 @@ pub fn provider_stats(
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0)
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
          FROM messages {}
          GROUP BY p ORDER BY msgs DESC",
         where_clause
@@ -1625,73 +1820,48 @@ pub fn provider_stats(
                 row.get::<_, u64>(4)?,
                 row.get::<_, u64>(5)?,
                 row.get::<_, u64>(6)?,
+                row.get::<_, f64>(7)?,
             ))
         })?
         .filter_map(|r| r.ok())
         .collect::<Vec<_>>();
 
     let providers = crate::provider::all_providers();
+    // Build a date filter with param_start=1 for sub-queries where ?1 is the provider
+    let (sub_where, sub_date_params) = date_filter(since, until, "AND", 1);
+    let sub_where_sessions = sub_where.replace("timestamp", "last_seen");
     let mut result = Vec::new();
 
-    for (prov, sessions, messages, input, output, cache_create, cache_read) in rows {
+    for (prov, sessions, messages, input, output, cache_create, cache_read, sum_cost_cents) in rows
+    {
         let display_name = providers
             .iter()
             .find(|p| p.name() == prov)
             .map(|p| p.display_name().to_string())
             .unwrap_or_else(|| prov.clone());
 
-        // Estimate cost using provider's pricing
-        let provider_obj = providers.iter().find(|p| p.name() == prov);
-        let estimated_cost = if let Some(p_obj) = provider_obj {
-            // Query per-model breakdown for this provider to get accurate cost
-            let cost_sql = format!(
-                "SELECT COALESCE(model, 'unknown'),
-                        COALESCE(SUM(input_tokens), 0),
-                        COALESCE(SUM(output_tokens), 0),
-                        COALESCE(SUM(cache_creation_tokens), 0),
-                        COALESCE(SUM(cache_read_tokens), 0)
-                 FROM messages
-                 WHERE COALESCE(provider, 'claude_code') = ?1 {}
-                 GROUP BY COALESCE(model, 'unknown')",
-                if where_clause.is_empty() {
-                    String::new()
-                } else {
-                    where_clause.replace("WHERE", "AND")
-                }
-            );
-            let mut cost_params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(prov.clone())];
-            for p in &date_params {
-                cost_params.push(Box::new(p.clone()));
-            }
-            let cost_refs: Vec<&dyn rusqlite::types::ToSql> =
-                cost_params.iter().map(|b| b.as_ref()).collect();
+        // Cost is baked into cost_cents at ingest time — just use the sum.
+        // sum_cost_cents is in cents; estimated_cost is in dollars.
+        let estimated_cost = (sum_cost_cents / 100.0 * 100.0).round() / 100.0;
 
-            let mut cost_total = 0.0f64;
-            if let Ok(mut cost_stmt) = conn.prepare(&cost_sql)
-                && let Ok(cost_rows) = cost_stmt.query_map(cost_refs.as_slice(), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, u64>(2)?,
-                        row.get::<_, u64>(3)?,
-                        row.get::<_, u64>(4)?,
-                    ))
-                })
-            {
-                for r in cost_rows.flatten() {
-                    let (model, inp, outp, cw, cr) = r;
-                    let pricing = p_obj.pricing_for_model(&model);
-                    cost_total += inp as f64 * pricing.input / 1_000_000.0;
-                    cost_total += outp as f64 * pricing.output / 1_000_000.0;
-                    cost_total += cw as f64 * pricing.cache_write / 1_000_000.0;
-                    cost_total += cr as f64 * pricing.cache_read / 1_000_000.0;
-                }
-            }
-            (cost_total * 100.0).round() / 100.0
-        } else {
-            0.0
-        };
+        // Query lines from sessions for this provider
+        let lines_sql = format!(
+            "SELECT COALESCE(SUM(lines_added), 0), COALESCE(SUM(lines_removed), 0)
+             FROM sessions WHERE COALESCE(provider, 'claude_code') = ?1 {}",
+            sub_where_sessions
+        );
+        let mut lines_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(prov.clone())];
+        for p in &sub_date_params {
+            lines_params.push(Box::new(p.clone()));
+        }
+        let lines_refs: Vec<&dyn rusqlite::types::ToSql> =
+            lines_params.iter().map(|b| b.as_ref()).collect();
+
+        let (lines_added, lines_removed) = conn
+            .query_row(&lines_sql, lines_refs.as_slice(), |row| {
+                Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+            })
+            .unwrap_or((0, 0));
 
         result.push(ProviderStats {
             provider: prov,
@@ -1703,8 +1873,93 @@ pub fn provider_stats(
             cache_creation_tokens: cache_create,
             cache_read_tokens: cache_read,
             estimated_cost,
+            total_cost_cents: (sum_cost_cents * 100.0).round() / 100.0,
+            total_lines_added: lines_added,
+            total_lines_removed: lines_removed,
         });
     }
+
+    Ok(result)
+}
+
+/// Interaction mode breakdown: count of sessions by mode.
+pub fn interaction_mode_breakdown(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<(String, u64)>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    let extra = if where_clause.is_empty() {
+        "WHERE interaction_mode IS NOT NULL".to_string()
+    } else {
+        format!("{} AND interaction_mode IS NOT NULL", where_clause)
+    };
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let sql = format!(
+        "SELECT interaction_mode, COUNT(DISTINCT session_id) FROM sessions {} GROUP BY interaction_mode ORDER BY COUNT(DISTINCT session_id) DESC",
+        extra.replace("timestamp", "last_seen")
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Context window utilization stats.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContextUsageStats {
+    pub avg_usage_pct: f64,
+    pub max_usage_pct: f64,
+    pub sessions_over_80_pct: u64,
+    pub total_sessions_with_data: u64,
+}
+
+pub fn context_usage_stats(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<ContextUsageStats> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    let extra = if where_clause.is_empty() {
+        "WHERE context_tokens_used IS NOT NULL AND context_token_limit IS NOT NULL AND context_token_limit > 0".to_string()
+    } else {
+        format!(
+            "{} AND context_tokens_used IS NOT NULL AND context_token_limit IS NOT NULL AND context_token_limit > 0",
+            where_clause
+        )
+    };
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let sql = format!(
+        "SELECT
+            AVG(CAST(context_tokens_used AS REAL) * 100.0 / CAST(context_token_limit AS REAL)),
+            MAX(CAST(context_tokens_used AS REAL) * 100.0 / CAST(context_token_limit AS REAL)),
+            SUM(CASE WHEN CAST(context_tokens_used AS REAL) * 100.0 / CAST(context_token_limit AS REAL) > 80.0 THEN 1 ELSE 0 END),
+            COUNT(*)
+         FROM messages {}",
+        extra
+    );
+
+    let result = conn.query_row(&sql, param_refs.as_slice(), |r| {
+        Ok(ContextUsageStats {
+            avg_usage_pct: r.get::<_, f64>(0).unwrap_or(0.0),
+            max_usage_pct: r.get::<_, f64>(1).unwrap_or(0.0),
+            sessions_over_80_pct: r.get::<_, u64>(2).unwrap_or(0),
+            total_sessions_with_data: r.get::<_, u64>(3).unwrap_or(0),
+        })
+    })?;
 
     Ok(result)
 }
@@ -1895,6 +2150,13 @@ mod tests {
                 git_branch: Some("main".to_string()),
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1915,6 +2177,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
         ];
 
@@ -1968,6 +2237,13 @@ mod tests {
                 git_branch: Some("main".to_string()),
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -1988,6 +2264,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
         ];
         ingest_messages(&mut conn, &msgs).unwrap();
@@ -2023,6 +2306,13 @@ mod tests {
                 git_branch: Some("main".to_string()),
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -2043,6 +2333,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -2063,6 +2360,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
         ]
     }
@@ -2144,6 +2448,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -2168,6 +2479,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -2189,6 +2507,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
         ]
     }
@@ -2301,6 +2626,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "cc-a1".to_string(),
@@ -2321,6 +2653,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
         ];
 
@@ -2345,6 +2684,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "cursor".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
             ParsedMessage {
                 uuid: "cu-a1".to_string(),
@@ -2365,6 +2711,13 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "cursor".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             },
         ];
 

@@ -1,19 +1,20 @@
 //! Cursor provider — implements the Provider trait for Cursor AI editor.
 //!
-//! Cursor stores agent transcripts as JSONL files under
-//! `~/.cursor/projects/*/agent-transcripts/`. Each line is a minimal JSON
-//! object with `role` ("user" or "assistant") and `message.content` (structured
-//! array of `{type: "text", text: "..."}` blocks). No timestamps, UUIDs,
-//! model names, or token usage are recorded — we synthesize these from file
-//! metadata and path structure.
+//! Primary data source: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+//! — a SQLite database containing composerData sessions with per-model cost, request counts,
+//! context token usage, timestamps, lines changed, model names, and session titles.
+//!
+//! Fallback: JSONL agent transcripts under `~/.cursor/projects/*/agent-transcripts/`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::analytics;
 use crate::jsonl::ParsedMessage;
 use crate::provider::{DiscoveredFile, ModelPricing, Provider};
 
@@ -30,7 +31,8 @@ impl Provider for CursorProvider {
     }
 
     fn is_available(&self) -> bool {
-        cursor_home().map(|p| p.exists()).unwrap_or(false)
+        !all_state_vscdb_paths().is_empty()
+            || cursor_home().map(|p| p.exists()).unwrap_or(false)
     }
 
     fn discover_files(&self) -> Result<Vec<DiscoveredFile>> {
@@ -51,16 +53,8 @@ impl Provider for CursorProvider {
         content: &str,
         offset: usize,
     ) -> Result<(Vec<ParsedMessage>, usize)> {
-        // Derive session ID from the transcript path.
-        // Paths look like: .../agent-transcripts/<uuid>.jsonl
-        //              or: .../agent-transcripts/<uuid>/<uuid>.jsonl
         let session_id = session_id_from_path(path);
-
-        // Derive project dir from the project slug in the path.
-        // e.g. .../projects/Users-ivan-projects-myapp/... → try to recover original path
         let cwd = cwd_from_path(path);
-
-        // Use file mtime as a fallback timestamp for all messages in the file.
         let file_ts = file_mtime(path);
 
         Ok(parse_cursor_transcript(
@@ -75,10 +69,435 @@ impl Provider for CursorProvider {
     fn pricing_for_model(&self, model: &str) -> ModelPricing {
         cursor_pricing_for_model(model)
     }
+
+    fn sync_direct(&self, conn: &mut Connection) -> Option<Result<(usize, usize)>> {
+        let paths = all_state_vscdb_paths();
+        if paths.is_empty() {
+            return None; // Fall back to JSONL
+        }
+        let mut total_sessions = 0;
+        let mut total_messages = 0;
+        for path in &paths {
+            match sync_from_state_vscdb(conn, path) {
+                Ok((s, m)) => {
+                    total_sessions += s;
+                    total_messages += m;
+                }
+                Err(e) => {
+                    tracing::warn!("Cursor sync failed for {}: {}", path.display(), e);
+                }
+            }
+        }
+        Some(Ok((total_sessions, total_messages)))
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// state.vscdb paths (cross-platform) — globalStorage + workspaceStorage
+// ---------------------------------------------------------------------------
+
+/// Returns all state.vscdb paths found on the system: globalStorage and
+/// every workspace under workspaceStorage, for both macOS and Linux.
+fn all_state_vscdb_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return paths,
+    };
+
+    // macOS globalStorage
+    let mac_global =
+        home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    if mac_global.exists() {
+        paths.push(mac_global);
+    }
+
+    // Linux globalStorage
+    let linux_global = home.join(".config/Cursor/User/globalStorage/state.vscdb");
+    if linux_global.exists() {
+        paths.push(linux_global);
+    }
+
+    // macOS workspaceStorage
+    let mac_ws = home.join("Library/Application Support/Cursor/User/workspaceStorage");
+    scan_workspace_dbs(&mac_ws, &mut paths);
+
+    // Linux workspaceStorage
+    let linux_ws = home.join(".config/Cursor/User/workspaceStorage");
+    scan_workspace_dbs(&linux_ws, &mut paths);
+
+    paths
+}
+
+/// Scan a workspaceStorage directory for `*/state.vscdb` files.
+fn scan_workspace_dbs(ws_dir: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(ws_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let db = entry.path().join("state.vscdb");
+        if db.exists() {
+            paths.push(db);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// state.vscdb sync — composerData sessions with rich analytics
+// ---------------------------------------------------------------------------
+
+/// Sync from Cursor's state.vscdb SQLite database.
+/// Reads composerData and bubbleId entries from the cursorDiskKV table.
+fn sync_from_state_vscdb(budi_conn: &mut Connection, vscdb_path: &Path) -> Result<(usize, usize)> {
+    // Open state.vscdb read-only (Cursor may be running with WAL mode)
+    let vscdb = Connection::open_with_flags(
+        vscdb_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Failed to open {}", vscdb_path.display()))?;
+
+    // Get watermark for incremental sync
+    let watermark_key = format!("cursor-vscdb:{}", vscdb_path.display());
+    let last_watermark = analytics::get_sync_offset(budi_conn, &watermark_key).unwrap_or(0) as i64;
+
+    let mut total_messages = 0usize;
+    let mut total_sessions = 0usize;
+
+    // Parse composerData entries (rich session data with cost, model, lines)
+    let (sessions, new_watermark) = parse_composer_sessions(&vscdb, last_watermark)?;
+
+    for session in &sessions {
+        let messages = composer_session_to_messages(session);
+        if !messages.is_empty() {
+            let count = analytics::ingest_messages(budi_conn, &messages)?;
+            if count > 0 {
+                total_sessions += 1;
+                total_messages += count;
+            }
+        }
+    }
+
+    // Note: bubbleId entries have token counts but no timestamps, so they
+    // can't be properly time-bucketed. composerData already provides cost,
+    // model, lines, and context data — which is what matters for analytics.
+
+    // Save the watermark
+    let final_watermark = new_watermark;
+    if final_watermark > last_watermark {
+        analytics::set_sync_offset(budi_conn, &watermark_key, final_watermark as usize)?;
+    }
+
+    Ok((total_sessions, total_messages))
+}
+
+/// A parsed composer session from state.vscdb.
+#[derive(Debug)]
+struct ComposerSession {
+    key: String,
+    name: Option<String>,
+    created_at: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
+    last_updated_at: Option<i64>, // Unix millis, used as watermark
+    is_agentic: bool,
+    lines_added: u64,
+    lines_removed: u64,
+    /// Per-model usage data within this session.
+    usage_entries: Vec<ComposerUsageEntry>,
+    /// Context token counts from the session.
+    context_tokens_used: Option<u64>,
+    context_token_limit: Option<u64>,
+    /// Model name from modelConfig (fallback when usageData is empty).
+    model_name: Option<String>,
+}
+
+#[derive(Debug)]
+struct ComposerUsageEntry {
+    model: String,
+    cost_cents: f64,
+    #[allow(dead_code)]
+    num_requests: u64,
+}
+
+fn parse_composer_sessions(
+    vscdb: &Connection,
+    since_watermark: i64,
+) -> Result<(Vec<ComposerSession>, i64)> {
+    let mut sessions = Vec::new();
+    let mut max_watermark = since_watermark;
+
+    // Query all composerData:* keys from cursorDiskKV
+    let mut stmt =
+        vscdb.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (key, value) = match row {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let parsed: Value = match serde_json::from_str(&value) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Check watermark — skip sessions we've already processed
+        let last_updated = parsed.get("lastUpdatedAt").and_then(|v| v.as_i64());
+        if let Some(ts) = last_updated {
+            if ts <= since_watermark {
+                continue;
+            }
+            max_watermark = max_watermark.max(ts);
+        }
+
+        let name = parsed
+            .get("name")
+            .or_else(|| parsed.get("title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let created_at = parsed
+            .get("createdAt")
+            .and_then(|v| v.as_i64())
+            .and_then(DateTime::from_timestamp_millis);
+
+        let is_agentic = parsed
+            .get("isAgentic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let lines_added = parsed
+            .get("linesAdded")
+            .or_else(|| parsed.get("totalLinesAdded"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let lines_removed = parsed
+            .get("linesRemoved")
+            .or_else(|| parsed.get("totalLinesRemoved"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let context_tokens_used = parsed.get("contextTokensUsed").and_then(|v| v.as_u64());
+
+        let context_token_limit = parsed
+            .get("contextTokenLimit")
+            .or_else(|| parsed.get("maxContextTokens"))
+            .and_then(|v| v.as_u64());
+
+        let model_name = parsed
+            .get("modelConfig")
+            .and_then(|v| v.get("modelName"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Parse usageData — per-model cost breakdown
+        let mut usage_entries = Vec::new();
+        if let Some(usage_data) = parsed.get("usageData")
+            && let Some(obj) = usage_data.as_object()
+        {
+            for (model, model_data) in obj {
+                let cost = model_data
+                    .get("costInCents")
+                    .or_else(|| model_data.get("cost"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+
+                let requests = model_data
+                    .get("numRequests")
+                    .or_else(|| model_data.get("requestCount"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+
+                if cost > 0.0 || requests > 0 {
+                    usage_entries.push(ComposerUsageEntry {
+                        model: model.clone(),
+                        cost_cents: cost,
+                        num_requests: requests,
+                    });
+                }
+            }
+        }
+
+        sessions.push(ComposerSession {
+            key,
+            name,
+            created_at,
+            last_updated_at: last_updated,
+            is_agentic,
+            lines_added,
+            lines_removed,
+            usage_entries,
+            context_tokens_used,
+            context_token_limit,
+            model_name,
+        });
+    }
+
+    Ok((sessions, max_watermark))
+}
+
+/// Convert a ComposerSession into ParsedMessages for ingestion.
+fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage> {
+    let mut messages = Vec::new();
+
+    let session_id = format!(
+        "cursor-composer-{}",
+        session.key.replace("composerData:", "")
+    );
+    let timestamp = session.created_at.unwrap_or_else(Utc::now);
+    let interaction_mode = if session.is_agentic {
+        "agent"
+    } else {
+        "composer"
+    };
+
+    // Create a user message for the session
+    messages.push(ParsedMessage {
+        uuid: format!("{}-user", session_id),
+        session_id: Some(session_id.clone()),
+        timestamp,
+        cwd: None,
+        role: "user".to_string(),
+        model: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        tool_names: vec![],
+        has_thinking: false,
+        stop_reason: None,
+        text_length: 0,
+        version: None,
+        git_branch: None,
+        repo_id: None,
+        provider: "cursor".to_string(),
+        cost_cents: None,
+        context_tokens_used: None,
+        context_token_limit: None,
+        interaction_mode: Some(interaction_mode.to_string()),
+        session_title: session.name.clone(),
+        lines_added: Some(session.lines_added),
+        lines_removed: Some(session.lines_removed),
+    });
+
+    // Create an assistant message per model used in the session
+    for (i, usage) in session.usage_entries.iter().enumerate() {
+        // Reverse-calculate approximate tokens from cost and pricing
+        let pricing = cursor_pricing_for_model(&usage.model);
+        let (input_tokens, output_tokens) = estimate_tokens_from_cost(usage.cost_cents, &pricing);
+
+        messages.push(ParsedMessage {
+            uuid: format!("{}-assistant-{}", session_id, i),
+            session_id: Some(session_id.clone()),
+            timestamp,
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some(usage.model.clone()),
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            tool_names: vec![],
+            has_thinking: false,
+            stop_reason: Some("end_turn".to_string()),
+            text_length: 0,
+            version: None,
+            git_branch: None,
+            repo_id: None,
+            provider: "cursor".to_string(),
+            cost_cents: Some(usage.cost_cents),
+            context_tokens_used: session.context_tokens_used,
+            context_token_limit: session.context_token_limit,
+            interaction_mode: Some(interaction_mode.to_string()),
+            session_title: session.name.clone(),
+            lines_added: Some(session.lines_added),
+            lines_removed: Some(session.lines_removed),
+        });
+    }
+
+    // If no usage entries but session exists, use contextTokensUsed as input_tokens fallback
+    if session.usage_entries.is_empty() {
+        let input_tokens = session.context_tokens_used.unwrap_or(0);
+        // Estimate output as ~25% of input (typical coding ratio)
+        let output_tokens = input_tokens / 4;
+
+        // Estimate cost from tokens using provider pricing
+        let model = session.model_name.as_deref().unwrap_or("unknown");
+        let pricing = cursor_pricing_for_model(model);
+        let cost = input_tokens as f64 * pricing.input / 1_000_000.0
+            + output_tokens as f64 * pricing.output / 1_000_000.0;
+        let cost_cents = (cost * 100.0 * 100.0).round() / 100.0; // cents with 2 decimal places
+
+        messages.push(ParsedMessage {
+            uuid: format!("{}-assistant-0", session_id),
+            session_id: Some(session_id.clone()),
+            timestamp,
+            cwd: None,
+            role: "assistant".to_string(),
+            model: session.model_name.clone(),
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            tool_names: vec![],
+            has_thinking: false,
+            stop_reason: Some("end_turn".to_string()),
+            text_length: 0,
+            version: None,
+            git_branch: None,
+            repo_id: None,
+            provider: "cursor".to_string(),
+            cost_cents: if cost_cents > 0.0 {
+                Some(cost_cents)
+            } else {
+                None
+            },
+            context_tokens_used: session.context_tokens_used,
+            context_token_limit: session.context_token_limit,
+            interaction_mode: Some(interaction_mode.to_string()),
+            session_title: session.name.clone(),
+            lines_added: Some(session.lines_added),
+            lines_removed: Some(session.lines_removed),
+        });
+    }
+
+    messages
+}
+
+/// Rough estimate of tokens from cost in cents using model pricing.
+/// Assumes a 3:1 input:output ratio (typical for coding).
+fn estimate_tokens_from_cost(cost_cents: f64, pricing: &ModelPricing) -> (u64, u64) {
+    if cost_cents <= 0.0 {
+        return (0, 0);
+    }
+    let cost_dollars = cost_cents / 100.0;
+    // Assume 75% input, 25% output by cost
+    let input_cost = cost_dollars * 0.75;
+    let output_cost = cost_dollars * 0.25;
+    let input_tokens = if pricing.input > 0.0 {
+        (input_cost * 1_000_000.0 / pricing.input) as u64
+    } else {
+        0
+    };
+    let output_tokens = if pricing.output > 0.0 {
+        (output_cost * 1_000_000.0 / pricing.output) as u64
+    } else {
+        0
+    };
+    (input_tokens, output_tokens)
+}
+
+// Note: bubbleId entries contain per-message content but lack timestamps and
+// have zero token counts in practice. composerData already provides all the
+// aggregated analytics we need (cost, model, lines, context). Bubble parsing
+// was removed to avoid timestamp issues (all bubbles would get Utc::now()).
+
+// ---------------------------------------------------------------------------
+// JSONL fallback helpers (kept for when state.vscdb is unavailable)
 // ---------------------------------------------------------------------------
 
 fn cursor_home() -> Result<PathBuf> {
@@ -87,7 +506,6 @@ fn cursor_home() -> Result<PathBuf> {
 }
 
 /// Walk `~/.cursor/projects/*/agent-transcripts/` for JSONL files.
-/// Handles both flat (`*.jsonl`) and nested (`*/*.jsonl`) layouts.
 fn collect_cursor_transcripts(projects_dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(projects_dir) else {
         return;
@@ -105,7 +523,6 @@ fn collect_cursor_transcripts(projects_dir: &Path, files: &mut Vec<PathBuf>) {
             if path.extension().is_some_and(|e| e == "jsonl") {
                 files.push(path);
             } else if path.is_dir() {
-                // Nested: agent-transcripts/<uuid>/<uuid>.jsonl
                 let Ok(nested) = std::fs::read_dir(&path) else {
                     continue;
                 };
@@ -122,18 +539,13 @@ fn collect_cursor_transcripts(projects_dir: &Path, files: &mut Vec<PathBuf>) {
 
 /// Extract a session ID from the transcript file path.
 fn session_id_from_path(path: &Path) -> String {
-    // Try the file stem (without .jsonl extension) as the session UUID.
     path.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| format!("cursor-{}", s))
         .unwrap_or_else(|| "cursor-unknown".to_string())
 }
 
-/// Extract the Cursor project slug from the transcript path and use it as cwd.
-/// The slug is a hyphenated encoding of the original path, but the encoding is
-/// lossy (e.g. dots and hyphens in the original path become hyphens too), so we
-/// don't try to reconstruct the original path. We just use the slug directly —
-/// the repo_id resolver will handle it from there.
+/// Extract the Cursor project slug from the transcript path.
 fn cwd_from_path(path: &Path) -> Option<String> {
     let mut current = path;
     while let Some(parent) = current.parent() {
@@ -166,12 +578,11 @@ fn file_mtime(path: &Path) -> DateTime<Utc> {
 // Cursor JSONL parsing
 // ---------------------------------------------------------------------------
 
-/// A Cursor transcript entry — real format has only `role` and `message`.
+/// A Cursor transcript entry.
 #[derive(Debug, Deserialize)]
 struct CursorEntry {
     role: Option<String>,
     message: Option<CursorMessage>,
-    // Some entries may have extra fields in newer versions — accept them leniently.
     #[serde(rename = "type")]
     entry_type: Option<String>,
     model: Option<String>,
@@ -194,7 +605,6 @@ struct CursorMessage {
     content: Option<CursorContent>,
 }
 
-/// Content can be a string or structured array.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum CursorContent {
@@ -250,9 +660,6 @@ struct CursorToolCall {
 }
 
 /// Parse a single Cursor JSONL line into a `ParsedMessage`.
-///
-/// The `line_index` is used to generate a unique UUID when none is present.
-/// `session_id`, `cwd`, and `fallback_ts` come from the file-level context.
 fn parse_cursor_line(
     line: &str,
     line_index: usize,
@@ -266,31 +673,22 @@ fn parse_cursor_line(
     }
     let entry: CursorEntry = serde_json::from_str(line).ok()?;
 
-    // Determine role from `role` field or `type` field.
     let role = entry.role.as_deref().or(entry.entry_type.as_deref())?;
-
-    // Content can be at top level or nested under `message`.
     let content_ref = entry.message.as_ref().and_then(|m| m.content.as_ref());
-
     let text_length = content_ref.map(|c| c.text_length()).unwrap_or(0);
 
-    // Timestamp: try entry-level, then fall back to file mtime.
     let timestamp = entry
         .timestamp
         .as_deref()
         .and_then(parse_timestamp)
         .unwrap_or(fallback_ts);
 
-    // UUID: try entry-level, then synthesize from session + line index.
     let uuid = entry
         .uuid
         .or(entry.request_id)
         .unwrap_or_else(|| format!("{}-{}", session_id, line_index));
 
-    // Session ID: prefer entry-level, fall back to file-derived.
     let msg_session_id = entry.session_id.unwrap_or_else(|| session_id.to_string());
-
-    // CWD: prefer entry-level, fall back to file-derived.
     let msg_cwd = entry.cwd.or_else(|| cwd.map(|s| s.to_string()));
 
     match role {
@@ -313,6 +711,13 @@ fn parse_cursor_line(
             git_branch: None,
             repo_id: None,
             provider: "cursor".to_string(),
+            cost_cents: None,
+            context_tokens_used: None,
+            context_token_limit: None,
+            interaction_mode: None,
+            session_title: None,
+            lines_added: None,
+            lines_removed: None,
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -341,6 +746,13 @@ fn parse_cursor_line(
                 git_branch: None,
                 repo_id: None,
                 provider: "cursor".to_string(),
+                cost_cents: None,
+                context_tokens_used: None,
+                context_token_limit: None,
+                interaction_mode: None,
+                session_title: None,
+                lines_added: None,
+                lines_removed: None,
             })
         }
         _ => None,
@@ -359,13 +771,12 @@ pub fn parse_cursor_transcript(
     let mut offset = start_offset;
     let mut line_index = 0usize;
 
-    // Count lines before start_offset to get correct line_index.
     if start_offset > 0 {
         line_index = content[..start_offset].lines().count();
     }
 
     for line in content[start_offset..].lines() {
-        let line_end = offset + line.len() + 1; // +1 for newline
+        let line_end = offset + line.len() + 1;
         if let Some(msg) = parse_cursor_line(line, line_index, session_id, cwd, fallback_ts) {
             messages.push(msg);
         }
@@ -378,11 +789,9 @@ pub fn parse_cursor_transcript(
 
 /// Try parsing a timestamp string — supports ISO 8601 and Unix millis.
 fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
-    // Try ISO 8601 first
     if let Ok(dt) = ts.parse::<DateTime<Utc>>() {
         return Some(dt);
     }
-    // Try Unix milliseconds
     if let Ok(millis) = ts.parse::<i64>() {
         return DateTime::from_timestamp_millis(millis);
     }
@@ -390,9 +799,27 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 }
 
 /// Cursor model pricing lookup.
+/// Prices are per MTok (million tokens), matching actual API rates that Cursor
+/// bills against credit pools.
 pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("gpt-4o-mini") {
+    // GPT-5.x models
+    if m.contains("gpt-5") {
+        ModelPricing {
+            input: 2.50,
+            output: 15.0,
+            cache_write: 2.50,
+            cache_read: 1.25,
+        }
+    // Cursor "Auto" / "composer" / "default" — uses cheapest routing
+    } else if m == "default" || m == "composer-1" || m.contains("auto") {
+        ModelPricing {
+            input: 1.25,
+            output: 6.0,
+            cache_write: 1.25,
+            cache_read: 0.25,
+        }
+    } else if m.contains("gpt-4o-mini") {
         ModelPricing {
             input: 0.15,
             output: 0.60,
@@ -450,13 +877,20 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
         }
     } else if m.contains("gemini") {
         ModelPricing {
-            input: 1.25,
-            output: 5.0,
-            cache_write: 1.25,
-            cache_read: 0.30,
+            input: 2.0,
+            output: 12.0,
+            cache_write: 2.0,
+            cache_read: 0.50,
+        }
+    } else if m.contains("deepseek") {
+        ModelPricing {
+            input: 0.27,
+            output: 1.10,
+            cache_write: 0.27,
+            cache_read: 0.07,
         }
     } else {
-        // Unknown model — use GPT-4o pricing as reasonable default for Cursor
+        // Unknown model — use GPT-4o pricing as reasonable default
         ModelPricing {
             input: 2.50,
             output: 10.0,
@@ -470,7 +904,7 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
 mod tests {
     use super::*;
 
-    // --- Real Cursor format tests (minimal: role + message.content only) ---
+    // --- JSONL parsing tests ---
 
     #[test]
     fn parse_real_cursor_user_message() {
@@ -494,8 +928,8 @@ mod tests {
         let msg = parse_cursor_line(line, 1, "cursor-abc", Some("/proj"), ts).unwrap();
         assert_eq!(msg.role, "assistant");
         assert_eq!(msg.uuid, "cursor-abc-1");
-        assert_eq!(msg.model, None); // Cursor doesn't log model
-        assert_eq!(msg.input_tokens, 0); // Cursor doesn't log tokens
+        assert_eq!(msg.model, None);
+        assert_eq!(msg.input_tokens, 0);
         assert_eq!(msg.text_length, 27);
     }
 
@@ -515,33 +949,26 @@ mod tests {
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[1].role, "assistant");
         assert_eq!(msgs[2].role, "assistant");
-        // All share the same session
         assert!(
             msgs.iter()
                 .all(|m| m.session_id.as_deref() == Some("cursor-s1"))
         );
-        // All are cursor provider
         assert!(msgs.iter().all(|m| m.provider == "cursor"));
-        // UUIDs are unique
         assert_eq!(msgs[0].uuid, "cursor-s1-0");
         assert_eq!(msgs[1].uuid, "cursor-s1-1");
         assert_eq!(msgs[2].uuid, "cursor-s1-2");
 
-        // Incremental: no new lines
         let (msgs2, _) = parse_cursor_transcript(content, offset, "cursor-s1", Some("/proj"), ts);
         assert!(msgs2.is_empty());
     }
 
-    // --- Extended format tests (if Cursor adds more fields in future) ---
-
     #[test]
     fn parse_cursor_with_optional_fields() {
-        // If Cursor ever adds timestamps, UUIDs, model, usage — we handle them.
         let line = r#"{"role":"assistant","model":"gpt-4o","message":{"content":[{"type":"text","text":"done"}]},"uuid":"ca-456","timestamp":"2026-03-20T10:01:00.000Z","sessionId":"cs-1","usage":{"input_tokens":500,"output_tokens":200},"toolCalls":[{"name":"edit_file"}],"stopReason":"end_turn"}"#;
         let ts = Utc::now();
         let msg = parse_cursor_line(line, 0, "fallback", None, ts).unwrap();
-        assert_eq!(msg.uuid, "ca-456"); // Uses entry-level UUID
-        assert_eq!(msg.session_id.as_deref(), Some("cs-1")); // Uses entry-level session
+        assert_eq!(msg.uuid, "ca-456");
+        assert_eq!(msg.session_id.as_deref(), Some("cs-1"));
         assert_eq!(msg.model.as_deref(), Some("gpt-4o"));
         assert_eq!(msg.input_tokens, 500);
         assert_eq!(msg.output_tokens, 200);
@@ -595,5 +1022,99 @@ mod tests {
     fn cursor_pricing_unknown_defaults_to_gpt4o() {
         let p = cursor_pricing_for_model("some-new-model");
         assert_eq!(p.input, 2.50);
+    }
+
+    #[test]
+    fn cursor_pricing_deepseek() {
+        let p = cursor_pricing_for_model("deepseek-v3");
+        assert_eq!(p.input, 0.27);
+        assert_eq!(p.output, 1.10);
+    }
+
+    // --- state.vscdb parsing tests ---
+
+    #[test]
+    fn composer_session_to_messages_with_usage() {
+        let session = ComposerSession {
+            key: "composerData:test-uuid-123".to_string(),
+            name: Some("Fix login bug".to_string()),
+            created_at: Some("2026-03-20T10:00:00Z".parse().unwrap()),
+            last_updated_at: Some(1742468400000),
+            is_agentic: true,
+            lines_added: 45,
+            lines_removed: 12,
+            usage_entries: vec![ComposerUsageEntry {
+                model: "claude-sonnet-4-6".to_string(),
+                cost_cents: 2.40,
+                num_requests: 3,
+            }],
+            context_tokens_used: Some(50000),
+            context_token_limit: Some(200000),
+            model_name: Some("claude-sonnet-4-6".to_string()),
+        };
+
+        let msgs = composer_session_to_messages(&session);
+        assert_eq!(msgs.len(), 2); // 1 user + 1 assistant (1 model)
+
+        // User message
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].session_title.as_deref(), Some("Fix login bug"));
+        assert_eq!(msgs[0].interaction_mode.as_deref(), Some("agent"));
+        assert_eq!(msgs[0].lines_added, Some(45));
+        assert_eq!(msgs[0].lines_removed, Some(12));
+
+        // Assistant message
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(msgs[1].cost_cents, Some(2.40));
+        assert_eq!(msgs[1].context_tokens_used, Some(50000));
+        assert_eq!(msgs[1].context_token_limit, Some(200000));
+        assert!(msgs[1].input_tokens > 0); // Reverse-calculated from cost
+    }
+
+    #[test]
+    fn composer_session_to_messages_no_usage() {
+        let session = ComposerSession {
+            key: "composerData:empty-session".to_string(),
+            name: None,
+            created_at: None,
+            last_updated_at: None,
+            is_agentic: false,
+            lines_added: 0,
+            lines_removed: 0,
+            usage_entries: vec![],
+            context_tokens_used: None,
+            context_token_limit: None,
+            model_name: None,
+        };
+
+        let msgs = composer_session_to_messages(&session);
+        assert_eq!(msgs.len(), 2); // 1 user + 1 minimal assistant
+        assert_eq!(msgs[1].interaction_mode.as_deref(), Some("composer"));
+        assert_eq!(msgs[1].cost_cents, None);
+    }
+
+    #[test]
+    fn estimate_tokens_from_cost_basic() {
+        let pricing = ModelPricing {
+            input: 3.0,
+            output: 15.0,
+            cache_write: 3.75,
+            cache_read: 0.30,
+        };
+        let (inp, outp) = estimate_tokens_from_cost(100.0, &pricing); // $1.00
+        assert!(inp > 0);
+        assert!(outp > 0);
+        // Verify the cost adds up approximately
+        let recalc = inp as f64 * 3.0 / 1_000_000.0 + outp as f64 * 15.0 / 1_000_000.0;
+        assert!((recalc - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn estimate_tokens_zero_cost() {
+        let pricing = cursor_pricing_for_model("gpt-4o");
+        let (inp, outp) = estimate_tokens_from_cost(0.0, &pricing);
+        assert_eq!(inp, 0);
+        assert_eq!(outp, 0);
     }
 }

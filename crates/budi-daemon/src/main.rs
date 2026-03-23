@@ -71,12 +71,23 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/permissions", get(analytics_permissions))
         .route("/analytics/history", get(analytics_history))
         .route("/analytics/providers", get(analytics_providers))
+        .route(
+            "/analytics/registered-providers",
+            get(analytics_registered_providers),
+        )
         .route("/analytics/statusline", get(analytics_statusline))
+        .route("/analytics/context-usage", get(analytics_context_usage))
+        .route(
+            "/analytics/interaction-modes",
+            get(analytics_interaction_modes),
+        )
         .route("/dashboard", get(dashboard))
         .route("/dashboard/setup", get(dashboard))
         .route("/dashboard/plans", get(dashboard))
         .route("/dashboard/prompts", get(dashboard))
         .route("/dashboard/insights", get(dashboard))
+        .route("/static/dashboard.css", get(dashboard_css))
+        .route("/static/dashboard.js", get(dashboard_js))
         .with_state(app_state)
 }
 
@@ -537,6 +548,20 @@ async fn analytics_providers(
     Ok(Json(result))
 }
 
+async fn analytics_registered_providers() -> Json<serde_json::Value> {
+    let providers = budi_core::provider::all_providers();
+    let list: Vec<serde_json::Value> = providers
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name(),
+                "display_name": p.display_name(),
+            })
+        })
+        .collect();
+    Json(json!(list))
+}
+
 async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -559,9 +584,54 @@ async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (Sta
     Ok(Json(result))
 }
 
+async fn analytics_context_usage(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<analytics::ContextUsageStats>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::context_usage_stats(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+async fn analytics_interaction_modes(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<Vec<(String, u64)>>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::interaction_mode_breakdown(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
 async fn dashboard() -> impl IntoResponse {
     let html = include_str!("../static/dashboard.html");
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
+async fn dashboard_css() -> impl IntoResponse {
+    let css = include_str!("../static/dashboard.css");
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], css)
+}
+
+async fn dashboard_js() -> impl IntoResponse {
+    let js = include_str!("../static/dashboard.js");
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        js,
+    )
 }
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
