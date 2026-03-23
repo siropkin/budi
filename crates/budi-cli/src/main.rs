@@ -925,11 +925,12 @@ fn cmd_stats_summary_filtered(
         format_tokens(summary.total_output_tokens)
     );
 
-    if !summary.top_tools.is_empty() {
+    let tools = analytics::top_tools(&conn, since.as_deref(), until.as_deref()).unwrap_or_default();
+    if !tools.is_empty() {
         println!();
         println!("  \x1b[1mTop tools\x1b[0m");
-        let max_count = summary.top_tools.first().map(|(_, c)| *c).unwrap_or(1);
-        for (name, count) in summary.top_tools.iter().take(10) {
+        let max_count = tools.first().map(|(_, c)| *c).unwrap_or(1);
+        for (name, count) in tools.iter().take(10) {
             let bar_len = ((*count as f64 / max_count as f64) * 20.0) as usize;
             let bar: String = "█".repeat(bar_len);
             println!(
@@ -1415,12 +1416,17 @@ fn cmd_sessions(period: StatsPeriod, json_output: bool) -> Result<()> {
             .as_deref()
             .unwrap_or_else(|| s.project_dir.as_deref().unwrap_or(""));
         let total_tok = s.input_tokens + s.output_tokens;
+        let cost_str = if s.cost_cents > 0.0 {
+            format!("${:.2}", s.cost_cents / 100.0)
+        } else {
+            "--".to_string()
+        };
         println!(
-            "    \x1b[36m{}…\x1b[0m  {:>4} msgs  {:>8} tok  {:>4} tools  {}  \x1b[90m{}\x1b[0m",
+            "    \x1b[36m{}…\x1b[0m  {:>4} msgs  {:>8} tok  {:>6}  {}  \x1b[90m{}\x1b[0m",
             short_id,
             s.message_count,
             format_tokens(total_tok),
-            s.tool_calls,
+            cost_str,
             format_timestamp(&s.first_seen),
             project
         );

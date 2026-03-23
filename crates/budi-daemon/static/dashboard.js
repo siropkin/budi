@@ -298,7 +298,7 @@ async function loadStatsData(signal) {
   const opts = signal ? { signal } : {};
 
   const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
-  const [summary, sessionsResult, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes, mcpTools] = await Promise.all([
+  const [summary, sessionsResult, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes, topTools, mcpTools] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
     fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
@@ -309,12 +309,13 @@ async function loadStatsData(signal) {
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/context-usage' + q, opts).then(r => r.json()).catch(() => ({avg_usage_pct:0,max_usage_pct:0,sessions_over_80_pct:0,total_sessions_with_data:0})),
     fetch('/analytics/interaction-modes' + q, opts).then(r => r.json()).catch(() => []),
+    fetch('/analytics/top-tools' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/mcp-tools' + q, opts).then(r => r.json()).catch(() => []),
   ]);
 
   const sessions = sessionsResult.sessions || [];
   sessionTotalCount = sessionsResult.total_count || 0;
-  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, mcpTools };
+  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools };
   activeSessionsData = activeSessions;
   lastSessionData = sessions;
   providersData = providers;
@@ -378,18 +379,33 @@ async function loadSetupData() {
   permissionsShowCount = DEFAULT_TABLE_ROWS;
 }
 
+let plansTotalCount = 0;
+let promptsTotalCount = 0;
+
+async function fetchPlans(limit, offset) {
+  const params = { limit, offset };
+  if (plansSearchTerm) params.search = plansSearchTerm;
+  return fetch('/analytics/plans' + qs(params)).then(r => r.json()).catch(() => ({plans:[],total_count:0}));
+}
+
+async function fetchPrompts(limit, offset) {
+  const params = { limit, offset };
+  if (promptsSearchTerm) params.search = promptsSearchTerm;
+  return fetch('/analytics/history' + qs(params)).then(r => r.json()).catch(() => ({total_count:0,entries:[]}));
+}
+
 async function loadPlansData() {
-  if (lastPlansData.length > 0) return; // already loaded
-  const plans = await fetch('/analytics/plans').then(r => r.json()).catch(() => []);
-  lastPlansData = plans;
-  plansShowCount = DEFAULT_TABLE_ROWS;
+  const result = await fetchPlans(DEFAULT_TABLE_ROWS, 0);
+  lastPlansData = result.plans || [];
+  plansTotalCount = result.total_count || 0;
+  plansShowCount = lastPlansData.length;
 }
 
 async function loadPromptsData() {
-  if (lastHistoryData.length > 0) return; // already loaded
-  const data = await fetch('/analytics/history?limit=500').then(r => r.json()).catch(() => ({total_count:0,entries:[]}));
-  lastHistoryData = data.entries || [];
-  historyShowCount = DEFAULT_TABLE_ROWS;
+  const result = await fetchPrompts(DEFAULT_TABLE_ROWS, 0);
+  lastHistoryData = result.entries || [];
+  promptsTotalCount = result.total_count || 0;
+  historyShowCount = lastHistoryData.length;
 }
 
 /* ===== Provider Filter ===== */
@@ -624,8 +640,7 @@ const sessionGetters = {
   duration: s => durationMs(s.first_seen, s.last_seen),
   message_count: s => s.message_count,
   tokens: s => s.input_tokens + s.output_tokens,
-  tool_calls: s => s.tool_calls,
-  cost: s => estimateSessionCost(s),
+  cost: s => s.cost_cents > 0 ? s.cost_cents / 100 : estimateSessionCost(s),
 };
 
 function renderSessionsSection(sessions) {
@@ -1069,15 +1084,18 @@ function renderHistoryRow(e) {
 function renderHistoryTable(data) {
   const items = data || lastHistoryData;
   const sorted = genericSort(items, historySortCol, historySortAsc, historyGetters);
-  return renderSortableTable('historyTable', historyCols, sorted, historyShowCount, historySortCol, historySortAsc, renderHistoryRow);
+  let html = renderSortableTable('historyTable', historyCols, sorted, sorted.length, historySortCol, historySortAsc, renderHistoryRow);
+  if (promptsTotalCount > items.length) {
+    html += `<button class="show-more-btn" data-table="historyTable">Show more (${promptsTotalCount - items.length} remaining)</button>`;
+  }
+  return html;
 }
 
 function renderHistorySection() {
-  const filtered = filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project]);
   return `<div class="panel section-mb">
     <h2>Prompts</h2>
     <input type="text" id="promptsSearch" class="search-input" placeholder="Search prompts..." value="${esc(promptsSearchTerm)}" style="margin-bottom:12px">
-    <div id="historyContainer">${renderHistoryTable(filtered)}</div>
+    <div id="historyContainer">${renderHistoryTable(lastHistoryData)}</div>
   </div>`;
 }
 
@@ -1113,15 +1131,18 @@ function renderPlansRow(p) {
 function renderPlansTable(data) {
   const items = data || lastPlansData;
   const sorted = genericSort(items, plansSortCol, plansSortAsc, plansGetters);
-  return renderSortableTable('plansTable', plansCols, sorted, plansShowCount, plansSortCol, plansSortAsc, renderPlansRow);
+  let html = renderSortableTable('plansTable', plansCols, sorted, sorted.length, plansSortCol, plansSortAsc, renderPlansRow);
+  if (plansTotalCount > items.length) {
+    html += `<button class="show-more-btn" data-table="plansTable">Show more (${plansTotalCount - items.length} remaining)</button>`;
+  }
+  return html;
 }
 
 function renderPlansSection() {
-  const filtered = filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview]);
   return `<div class="panel section-mb">
     <h2>Plans</h2>
     <input type="text" id="plansSearch" class="search-input" placeholder="Search plans..." value="${esc(plansSearchTerm)}" style="margin-bottom:12px">
-    <div id="plansContainer">${renderPlansTable(filtered)}</div>
+    <div id="plansContainer">${renderPlansTable(lastPlansData)}</div>
   </div>`;
 }
 
@@ -1220,7 +1241,7 @@ function renderPermissionsSection(permissions) {
 
 /* ===== View Renderers ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, mcpTools } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools } = statsData;
   content.innerHTML = `
     ${renderActiveSessions(activeSessionsData)}
     ${renderCards(summary, cost)}
@@ -1252,7 +1273,7 @@ function renderStatsView(content) {
     <div class="grid-2 section-mb">
       <div class="panel">
         <h2>Tools${ccOnlyLabel()}</h2>
-        ${renderBarChart(summary.top_tools.filter(t => !t[0].startsWith('mcp__')).slice(0, DEFAULT_CHART_ROWS),
+        ${renderBarChart((topTools || []).filter(t => !t[0].startsWith('mcp__')).slice(0, DEFAULT_CHART_ROWS),
           (t) => t[0],
           t => t[1],
           t => toolColor(t[0]),
@@ -1406,16 +1427,40 @@ function bindSearchHandlers() {
     () => { permissionsShowCount = DEFAULT_TABLE_ROWS; },
     () => { $('#permissionsContainer').innerHTML = renderPermissionsTable(); }
   );
-  bindSearchHandler('plansSearch',
-    v => { plansSearchTerm = v; },
-    () => { plansShowCount = DEFAULT_TABLE_ROWS; },
-    () => { $('#plansContainer').innerHTML = renderPlansTable(filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview])); }
-  );
-  bindSearchHandler('promptsSearch',
-    v => { promptsSearchTerm = v; },
-    () => { historyShowCount = DEFAULT_TABLE_ROWS; },
-    () => { $('#historyContainer').innerHTML = renderHistoryTable(filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project])); }
-  );
+  // Plans search — debounced, server-side
+  let plansSearchTimeout = null;
+  const plansSearchEl = $('#plansSearch');
+  if (plansSearchEl) {
+    plansSearchEl.addEventListener('input', (e) => {
+      plansSearchTerm = e.target.value;
+      clearTimeout(plansSearchTimeout);
+      plansSearchTimeout = setTimeout(async () => {
+        const result = await fetchPlans(DEFAULT_TABLE_ROWS, 0);
+        lastPlansData = result.plans || [];
+        plansTotalCount = result.total_count || 0;
+        plansShowCount = lastPlansData.length;
+        $('#plansContainer').innerHTML = renderPlansTable(lastPlansData);
+        bindTableHandlers();
+      }, 300);
+    });
+  }
+  // Prompts search — debounced, server-side
+  let promptsSearchTimeout = null;
+  const promptsSearchEl = $('#promptsSearch');
+  if (promptsSearchEl) {
+    promptsSearchEl.addEventListener('input', (e) => {
+      promptsSearchTerm = e.target.value;
+      clearTimeout(promptsSearchTimeout);
+      promptsSearchTimeout = setTimeout(async () => {
+        const result = await fetchPrompts(DEFAULT_TABLE_ROWS, 0);
+        lastHistoryData = result.entries || [];
+        promptsTotalCount = result.total_count || 0;
+        historyShowCount = lastHistoryData.length;
+        $('#historyContainer').innerHTML = renderHistoryTable(lastHistoryData);
+        bindTableHandlers();
+      }, 300);
+    });
+  }
 }
 
 function bindAllHandlers() {
@@ -1462,7 +1507,8 @@ function bindTableHandlers() {
       const col = th.dataset.col;
       if (historySortCol === col) historySortAsc = !historySortAsc;
       else { historySortCol = col; historySortAsc = col === 'display' || col === 'project'; }
-      $('#historyContainer').innerHTML = renderHistoryTable(filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project]));
+      // Client-side sort on loaded data (prompts sorted client-side for now)
+      $('#historyContainer').innerHTML = renderHistoryTable(lastHistoryData);
       bindTableHandlers();
     });
   });
@@ -1471,7 +1517,8 @@ function bindTableHandlers() {
       const col = th.dataset.col;
       if (plansSortCol === col) plansSortAsc = !plansSortAsc;
       else { plansSortCol = col; plansSortAsc = col === 'name'; }
-      $('#plansContainer').innerHTML = renderPlansTable(filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview]));
+      // Client-side sort on loaded data (plans sorted client-side for now)
+      $('#plansContainer').innerHTML = renderPlansTable(lastPlansData);
       bindTableHandlers();
     });
   });
@@ -1510,11 +1557,17 @@ function bindTableHandlers() {
         projectConfigShowCount += DEFAULT_TABLE_ROWS;
         $('#projectConfigContainer').innerHTML = renderProjectConfigTable();
       } else if (table === 'historyTable') {
-        historyShowCount += DEFAULT_TABLE_ROWS;
-        $('#historyContainer').innerHTML = renderHistoryTable(filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project]));
+        const result = await fetchPrompts(DEFAULT_TABLE_ROWS, lastHistoryData.length);
+        lastHistoryData = lastHistoryData.concat(result.entries || []);
+        promptsTotalCount = result.total_count || promptsTotalCount;
+        historyShowCount = lastHistoryData.length;
+        $('#historyContainer').innerHTML = renderHistoryTable(lastHistoryData);
       } else if (table === 'plansTable') {
-        plansShowCount += DEFAULT_TABLE_ROWS;
-        $('#plansContainer').innerHTML = renderPlansTable(filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview]));
+        const result = await fetchPlans(DEFAULT_TABLE_ROWS, lastPlansData.length);
+        lastPlansData = lastPlansData.concat(result.plans || []);
+        plansTotalCount = result.total_count || plansTotalCount;
+        plansShowCount = lastPlansData.length;
+        $('#plansContainer').innerHTML = renderPlansTable(lastPlansData);
       } else if (table === 'pluginsTable') {
         pluginsShowCount += DEFAULT_TABLE_ROWS;
         $('#pluginsContainer').innerHTML = renderPluginsTable();

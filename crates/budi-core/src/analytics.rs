@@ -23,7 +23,13 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
             .with_context(|| format!("Failed to create dir {}", parent.display()))?;
     }
     let conn = Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA foreign_keys=ON;
+         PRAGMA cache_size=-40000;
+         PRAGMA mmap_size=268435456;
+         PRAGMA synchronous=NORMAL;",
+    )?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -135,7 +141,8 @@ fn migrate(conn: &Connection) -> Result<()> {
 
     if version < 6 {
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);
+             CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, timestamp);",
         )?;
     }
 
@@ -466,7 +473,6 @@ pub struct UsageSummary {
     pub total_output_tokens: u64,
     pub total_cache_creation_tokens: u64,
     pub total_cache_read_tokens: u64,
-    pub top_tools: Vec<(String, u64)>,
 }
 
 /// Build a parameterized date filter clause and its bind values.
@@ -501,6 +507,7 @@ fn date_filter(
 }
 
 /// Query a usage summary, optionally filtered by date range.
+/// Consolidated into a single scan of the messages table.
 pub fn usage_summary(
     conn: &Connection,
     since: Option<&str>,
@@ -512,66 +519,25 @@ pub fn usage_summary(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    let total_sessions: u64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
-
-    let total_messages: u64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM messages {}", where_clause),
-        param_refs.as_slice(),
-        |r| r.get(0),
-    )?;
-
-    let and_clause = if where_clause.is_empty() {
-        "WHERE"
-    } else {
-        "AND"
-    };
-    let total_user_messages: u64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM messages {} {} role = 'user'",
-            where_clause, and_clause
-        ),
-        param_refs.as_slice(),
-        |r| r.get(0),
-    )?;
-
-    let total_assistant_messages: u64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM messages {} {} role = 'assistant'",
-            where_clause, and_clause
-        ),
-        param_refs.as_slice(),
-        |r| r.get(0),
-    )?;
-
-    let (total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64) =
-        conn.query_row(
-            &format!(
-                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                        COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0)
-                 FROM messages {}",
-                where_clause
-            ),
-            param_refs.as_slice(),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?;
-
-    // Top tools by usage count.
-    let tool_clause = if where_clause.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "WHERE message_uuid IN (SELECT uuid FROM messages {})",
-            where_clause
-        )
-    };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage {} GROUP BY tool_name ORDER BY cnt DESC LIMIT 50",
-        tool_clause
-    ))?;
-    let top_tools: Vec<(String, u64)> = stmt
-        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+    // Single scan: all aggregates in one query
+    let sql = format!(
+        "SELECT COUNT(DISTINCT session_id),
+                COUNT(*),
+                SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0)
+         FROM messages {}",
+        where_clause
+    );
+    let (total_sessions, total_messages, total_user_messages, total_assistant_messages,
+         total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64, u64, u64, u64, u64) =
+        conn.query_row(&sql, param_refs.as_slice(), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+        })?;
 
     Ok(UsageSummary {
         total_sessions,
@@ -582,8 +548,38 @@ pub fn usage_summary(
         total_output_tokens: total_output,
         total_cache_creation_tokens: total_cache_create,
         total_cache_read_tokens: total_cache_read,
-        top_tools,
     })
+}
+
+/// Top tools by usage count, optionally filtered by date range.
+pub fn top_tools(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<(String, u64)>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let sql = if where_clause.is_empty() {
+        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage GROUP BY tool_name ORDER BY cnt DESC LIMIT 50".to_string()
+    } else {
+        format!(
+            "SELECT tu.tool_name, COUNT(*) as cnt FROM tool_usage tu
+             JOIN messages m ON tu.message_uuid = m.uuid
+             {}
+             GROUP BY tu.tool_name ORDER BY cnt DESC LIMIT 50",
+            where_clause
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 /// A session row with aggregated stats.
@@ -599,12 +595,8 @@ pub struct SessionSummary {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
-    pub tool_calls: u64,
     pub provider: String,
     pub session_title: Option<String>,
-    pub interaction_mode: Option<String>,
-    pub lines_added: u64,
-    pub lines_removed: u64,
     pub cost_cents: f64,
 }
 
@@ -672,14 +664,9 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     };
     let order_dir = if p.sort_asc { "ASC" } else { "DESC" };
 
-    // Count query
-    let count_sql = format!(
-        "SELECT COUNT(DISTINCT s.session_id)
-         FROM sessions s
-         LEFT JOIN messages m ON m.session_id = s.session_id
-         {}",
-        where_clause
-    );
+    // Count query — use sessions.last_seen for date filters (avoids expensive JOIN)
+    let count_where = where_clause.replace("m.timestamp", "s.last_seen");
+    let count_sql = format!("SELECT COUNT(*) FROM sessions s {}", count_where);
     let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |r| r.get(0))?;
 
     // Data query with pagination
@@ -690,15 +677,9 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 COALESCE(SUM(m.output_tokens), 0) as outp,
                 COALESCE(SUM(m.cache_creation_tokens), 0) as cache_c,
                 COALESCE(SUM(m.cache_read_tokens), 0) as cache_r,
-                (SELECT COUNT(*) FROM tool_usage tu
-                 JOIN messages mm ON tu.message_uuid = mm.uuid
-                 WHERE mm.session_id = s.session_id) as tool_calls,
                 s.repo_id,
                 COALESCE(s.provider, 'claude_code'),
                 s.session_title,
-                s.interaction_mode,
-                COALESCE(s.lines_added, 0),
-                COALESCE(s.lines_removed, 0),
                 COALESCE(SUM(m.cost_cents), 0.0) as cost_sum
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.session_id
@@ -722,14 +703,10 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 output_tokens: row.get(6)?,
                 cache_creation_tokens: row.get(7)?,
                 cache_read_tokens: row.get(8)?,
-                tool_calls: row.get(9)?,
-                repo_id: row.get(10)?,
-                provider: row.get(11)?,
-                session_title: row.get(12)?,
-                interaction_mode: row.get(13)?,
-                lines_added: row.get(14)?,
-                lines_removed: row.get(15)?,
-                cost_cents: row.get(16)?,
+                repo_id: row.get(9)?,
+                provider: row.get(10)?,
+                session_title: row.get(11)?,
+                cost_cents: row.get(12)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -984,23 +961,23 @@ pub fn mcp_tool_stats(
 ) -> Result<Vec<McpToolStat>> {
     let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
 
-    let tool_where = if where_clause.is_empty() {
-        "WHERE tool_name LIKE 'mcp__%'".to_string()
-    } else {
-        format!(
-            "WHERE message_uuid IN (SELECT uuid FROM messages {}) AND tool_name LIKE 'mcp__%%'",
-            where_clause
-        )
-    };
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    let mut stmt = conn.prepare(&format!(
-        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage {} GROUP BY tool_name ORDER BY cnt DESC",
-        tool_where
-    ))?;
+    let sql = if where_clause.is_empty() {
+        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage WHERE tool_name LIKE 'mcp__%' GROUP BY tool_name ORDER BY cnt DESC".to_string()
+    } else {
+        format!(
+            "SELECT tu.tool_name, COUNT(*) as cnt FROM tool_usage tu
+             JOIN messages m ON tu.message_uuid = m.uuid
+             {} AND tu.tool_name LIKE 'mcp__%%'
+             GROUP BY tu.tool_name ORDER BY cnt DESC",
+            where_clause
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
 
     let rows: Vec<(String, u64)> = stmt
         .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -2072,76 +2049,25 @@ pub fn usage_summary_filtered(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    let total_sessions: u64 = if where_clause.is_empty() {
-        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?
-    } else {
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT session_id) FROM messages {}",
-                where_clause
-            ),
-            param_refs.as_slice(),
-            |r| r.get(0),
-        )?
-    };
-
-    let total_messages: u64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM messages {}", where_clause),
-        param_refs.as_slice(),
-        |r| r.get(0),
-    )?;
-
-    let and_clause = if where_clause.is_empty() {
-        "WHERE"
-    } else {
-        "AND"
-    };
-    let total_user_messages: u64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM messages {} {} role = 'user'",
-            where_clause, and_clause
-        ),
-        param_refs.as_slice(),
-        |r| r.get(0),
-    )?;
-
-    let total_assistant_messages: u64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM messages {} {} role = 'assistant'",
-            where_clause, and_clause
-        ),
-        param_refs.as_slice(),
-        |r| r.get(0),
-    )?;
-
-    let (total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64) =
-        conn.query_row(
-            &format!(
-                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                        COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0)
-                 FROM messages {}",
-                where_clause
-            ),
-            param_refs.as_slice(),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?;
-
-    let tool_clause = if where_clause.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "WHERE message_uuid IN (SELECT uuid FROM messages {})",
-            where_clause
-        )
-    };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage {} GROUP BY tool_name ORDER BY cnt DESC LIMIT 50",
-        tool_clause
-    ))?;
-    let top_tools: Vec<(String, u64)> = stmt
-        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+    // Single scan: all aggregates in one query
+    let sql = format!(
+        "SELECT COUNT(DISTINCT session_id),
+                COUNT(*),
+                SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0)
+         FROM messages {}",
+        where_clause
+    );
+    let (total_sessions, total_messages, total_user_messages, total_assistant_messages,
+         total_input, total_output, total_cache_create, total_cache_read): (u64, u64, u64, u64, u64, u64, u64, u64) =
+        conn.query_row(&sql, param_refs.as_slice(), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+        })?;
 
     Ok(UsageSummary {
         total_sessions,
@@ -2152,7 +2078,6 @@ pub fn usage_summary_filtered(
         total_output_tokens: total_output,
         total_cache_creation_tokens: total_cache_create,
         total_cache_read_tokens: total_cache_read,
-        top_tools,
     })
 }
 
@@ -2258,7 +2183,9 @@ mod tests {
         assert_eq!(summary.total_assistant_messages, 1);
         assert_eq!(summary.total_input_tokens, 100);
         assert_eq!(summary.total_output_tokens, 50);
-        assert_eq!(summary.top_tools.len(), 2);
+        // top_tools is now a separate function
+        let tools = top_tools(&conn, None, None).unwrap();
+        assert_eq!(tools.len(), 2);
     }
 
     #[test]

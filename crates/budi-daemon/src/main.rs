@@ -70,6 +70,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/memory", get(analytics_memory))
         .route("/analytics/permissions", get(analytics_permissions))
         .route("/analytics/history", get(analytics_history))
+        .route("/analytics/top-tools", get(analytics_top_tools))
         .route("/analytics/mcp-tools", get(analytics_mcp_tools))
         .route("/analytics/providers", get(analytics_providers))
         .route(
@@ -488,8 +489,26 @@ async fn analytics_active_sessions()
     Ok(Json(result))
 }
 
-async fn analytics_plans() -> Result<Json<Vec<claude_data::PlanFile>>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(|| {
+#[derive(serde::Deserialize)]
+struct PlansParams {
+    limit: Option<usize>,
+    offset: Option<usize>,
+    search: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct PaginatedPlans {
+    plans: Vec<claude_data::PlanFile>,
+    total_count: u64,
+}
+
+async fn analytics_plans(
+    Query(params): Query<PlansParams>,
+) -> Result<Json<PaginatedPlans>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+    let search = params.search;
+    let result = tokio::task::spawn_blocking(move || {
         let providers = budi_core::provider::available_providers();
         let mut all_plans = Vec::new();
         for provider in &providers {
@@ -497,9 +516,23 @@ async fn analytics_plans() -> Result<Json<Vec<claude_data::PlanFile>>, (StatusCo
                 all_plans.extend(plans);
             }
         }
-        // Sort by modified date (newest first), consistent with original behavior.
         all_plans.sort_by(|a, b| b.modified.cmp(&a.modified));
-        Ok::<_, anyhow::Error>(all_plans)
+        if let Some(ref q) = search {
+            if !q.is_empty() {
+                let lower = q.to_lowercase();
+                all_plans.retain(|p| {
+                    p.title.to_lowercase().contains(&lower)
+                        || p.name.to_lowercase().contains(&lower)
+                        || p.preview.to_lowercase().contains(&lower)
+                });
+            }
+        }
+        let total_count = all_plans.len() as u64;
+        let page: Vec<_> = all_plans.into_iter().skip(offset).take(limit).collect();
+        Ok::<_, anyhow::Error>(PaginatedPlans {
+            plans: page,
+            total_count,
+        })
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -527,27 +560,41 @@ async fn analytics_permissions()
 #[derive(serde::Deserialize)]
 struct HistoryParams {
     limit: Option<usize>,
+    offset: Option<usize>,
+    search: Option<String>,
 }
 
 async fn analytics_history(
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<claude_data::PromptHistory>, (StatusCode, String)> {
-    let limit = params.limit.unwrap_or(200);
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+    let search = params.search;
     let result = tokio::task::spawn_blocking(move || {
         let providers = budi_core::provider::available_providers();
         let mut all_entries = Vec::new();
         for provider in &providers {
-            if let Ok(entries) = provider.prompt_history(limit) {
+            if let Ok(entries) = provider.prompt_history(1000) {
                 all_entries.extend(entries);
             }
         }
         // Sort by timestamp descending.
         all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        all_entries.truncate(limit);
+        // Apply search filter if provided
+        if let Some(ref q) = search {
+            if !q.is_empty() {
+                let lower = q.to_lowercase();
+                all_entries.retain(|e| {
+                    e.display.to_lowercase().contains(&lower)
+                        || e.project.as_deref().unwrap_or("").to_lowercase().contains(&lower)
+                });
+            }
+        }
         let total_count = all_entries.len() as u64;
+        let page = all_entries.into_iter().skip(offset).take(limit).collect();
         Ok::<_, anyhow::Error>(claude_data::PromptHistory {
             total_count,
-            entries: all_entries,
+            entries: page,
         })
     })
     .await
@@ -563,6 +610,21 @@ async fn analytics_providers(
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::provider_stats(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+async fn analytics_top_tools(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<Vec<(String, u64)>>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::top_tools(&conn, params.since.as_deref(), params.until.as_deref())
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
