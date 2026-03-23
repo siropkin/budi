@@ -670,7 +670,8 @@ async fn analytics_statusline() -> Result<Json<analytics::StatuslineStats>, (Sta
         let now = chrono::Local::now();
         let to_utc = |d: chrono::NaiveDateTime| -> String {
             d.and_local_timezone(chrono::Local)
-                .unwrap()
+                .latest()
+                .unwrap_or_else(|| chrono::Utc::now().with_timezone(&chrono::Local))
                 .with_timezone(&chrono::Utc)
                 .to_rfc3339()
         };

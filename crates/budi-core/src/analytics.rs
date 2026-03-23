@@ -1486,10 +1486,9 @@ pub fn daily_cost_trend(
 
     let sql = format!(
         "SELECT DATE(timestamp, '{offset}') as d,
-                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0),
                 COUNT(DISTINCT session_id)
          FROM messages {where_clause}
          GROUP BY d ORDER BY d",
@@ -1504,25 +1503,19 @@ pub fn daily_cost_trend(
                 row.get::<_, String>(0)?,
                 row.get::<_, u64>(1)?,
                 row.get::<_, u64>(2)?,
-                row.get::<_, u64>(3)?,
+                row.get::<_, f64>(3)?,
                 row.get::<_, u64>(4)?,
-                row.get::<_, u64>(5)?,
             ))
         })?
         .filter_map(|r| r.ok())
         .collect::<Vec<_>>();
 
     let mut result = Vec::new();
-    for (date, inp, outp, cw, cr, sessions) in rows {
-        // Use rough sonnet pricing for the trend (per-model breakdown isn't needed here)
-        let cost = inp as f64 * 3.0 / 1_000_000.0
-            + outp as f64 * 15.0 / 1_000_000.0
-            + cw as f64 * 3.75 / 1_000_000.0
-            + cr as f64 * 0.30 / 1_000_000.0;
+    for (date, inp, outp, cost_cents, sessions) in rows {
         result.push(DailyCost {
             date,
-            cost: (cost * 100.0).round() / 100.0,
-            tokens: inp + outp + cw + cr,
+            cost: (cost_cents / 100.0 * 100.0).round() / 100.0,
+            tokens: inp + outp,
             sessions,
         });
     }
@@ -1557,8 +1550,7 @@ pub fn session_patterns(
         "SELECT s.session_id,
                 s.first_seen, s.last_seen,
                 COUNT(m.uuid) as msg_count,
-                COALESCE(SUM(m.input_tokens), 0) + COALESCE(SUM(m.output_tokens), 0) +
-                COALESCE(SUM(m.cache_creation_tokens), 0) + COALESCE(SUM(m.cache_read_tokens), 0) as total_tok
+                COALESCE(SUM(m.cost_cents), 0.0)
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.session_id
          {where_clause}
@@ -1568,14 +1560,14 @@ pub fn session_patterns(
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(String, String, String, u64, u64)> = stmt
+    let rows: Vec<(String, String, String, u64, f64)> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, u64>(3)?,
-                row.get::<_, u64>(4)?,
+                row.get::<_, f64>(4)?,
             ))
         })?
         .filter_map(|r| r.ok())
@@ -1595,8 +1587,8 @@ pub fn session_patterns(
 
     let mut total_duration_secs = 0f64;
     let mut total_messages = 0u64;
-    let mut total_tokens = 0u64;
-    for (_, first, last, msgs, toks) in &rows {
+    let mut total_cost_cents = 0f64;
+    for (_, first, last, msgs, cost_cents) in &rows {
         if let (Ok(f), Ok(l)) = (
             chrono::DateTime::parse_from_rfc3339(first),
             chrono::DateTime::parse_from_rfc3339(last),
@@ -1604,11 +1596,10 @@ pub fn session_patterns(
             total_duration_secs += (l - f).num_seconds().max(0) as f64;
         }
         total_messages += msgs;
-        total_tokens += toks;
+        total_cost_cents += cost_cents;
     }
 
-    // Rough cost estimate (sonnet default)
-    let avg_cost = (total_tokens as f64 * 5.0 / 1_000_000.0) / n; // blended ~$5/M
+    let avg_cost = total_cost_cents / 100.0 / n;
 
     // Busiest hour
     let hour_sql = format!(

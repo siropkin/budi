@@ -69,14 +69,16 @@ pub fn estimate_cost_filtered(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
+    // Group by provider + model to apply correct per-provider pricing
     let sql = format!(
-        "SELECT COALESCE(model, 'unknown'),
+        "SELECT COALESCE(provider, 'claude_code'),
+                COALESCE(model, 'unknown'),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0)
          FROM messages {}
-         GROUP BY COALESCE(model, 'unknown')",
+         GROUP BY COALESCE(provider, 'claude_code'), COALESCE(model, 'unknown')",
         where_clause
     );
 
@@ -84,10 +86,11 @@ pub fn estimate_cost_filtered(
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, u64>(1)?,
+            row.get::<_, String>(1)?,
             row.get::<_, u64>(2)?,
             row.get::<_, u64>(3)?,
             row.get::<_, u64>(4)?,
+            row.get::<_, u64>(5)?,
         ))
     })?;
 
@@ -101,8 +104,8 @@ pub fn estimate_cost_filtered(
     };
 
     for row in rows {
-        let (model, input, output, cache_write, cache_read) = row?;
-        let p = pricing_for_model_by_provider(&model, provider);
+        let (prov, model, input, output, cache_write, cache_read) = row?;
+        let p = pricing_for_model_by_provider(&model, Some(&prov));
         let ic = input as f64 * p.input / 1_000_000.0;
         let oc = output as f64 * p.output / 1_000_000.0;
         let cwc = cache_write as f64 * p.cache_write / 1_000_000.0;
@@ -152,7 +155,8 @@ mod tests {
                 has_thinking INTEGER NOT NULL DEFAULT 0,
                 stop_reason TEXT,
                 text_length INTEGER NOT NULL DEFAULT 0,
-                cwd TEXT
+                cwd TEXT,
+                provider TEXT DEFAULT 'claude_code'
             );",
         )
         .unwrap();
