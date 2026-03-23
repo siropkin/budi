@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-**Vantage for AI coding agents.** Know where your AI tokens and money go.
+**AI cost analytics for coding agents.** Know where your AI tokens and money go.
 
 `budi` is a local-first cost analytics tool for AI coding agents. It tracks tokens, costs, and usage across Claude Code, Cursor, and more — so you can answer "how much did this feature cost?" No cloud. No uploads.
 
