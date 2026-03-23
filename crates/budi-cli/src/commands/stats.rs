@@ -377,7 +377,11 @@ fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Resul
     Ok(())
 }
 
-fn cmd_stats_models(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_models(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
     let models = analytics::model_usage(conn, since.as_deref(), until.as_deref())?;
 
@@ -419,7 +423,11 @@ fn cmd_stats_models(conn: &rusqlite::Connection, period: StatsPeriod, json_outpu
     Ok(())
 }
 
-fn cmd_stats_sessions(conn: &rusqlite::Connection, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_sessions(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
     let result = analytics::session_list(
         conn,

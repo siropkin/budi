@@ -1292,7 +1292,13 @@ pub fn activity_chart(
     let mut stmt = conn.prepare(&sql)?;
     let msg_rows: Vec<(String, u64, u64, u64, f64)> = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })?
         .filter_map(|r| match r {
             Ok(v) => Some(v),
