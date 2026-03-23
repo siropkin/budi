@@ -917,12 +917,7 @@ fn cmd_stats_summary_filtered(
     );
 
     // Cost breakdown
-    let est = cost::estimate_cost_filtered(
-        conn,
-        since.as_deref(),
-        until.as_deref(),
-        provider,
-    )?;
+    let est = cost::estimate_cost_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
     println!();
     println!(
         "  \x1b[1mEst. cost\x1b[0m     \x1b[33m${:.2}\x1b[0m",
