@@ -15,7 +15,7 @@ use budi_core::hooks::{PostToolUseInput, UserPromptSubmitInput, UserPromptSubmit
 use budi_core::insights;
 use budi_core::rpc::{StatusRequest, StatusResponse};
 use chrono::{Datelike, Local, NaiveDate};
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
@@ -31,9 +31,6 @@ const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 #[command(version)]
 #[command(after_help = "Get started:\n  budi init --global")]
 struct Cli {
-    /// Increase log verbosity (-v info, -vv debug, -vvv trace)
-    #[arg(long, short = 'v', action = ArgAction::Count, global = true)]
-    verbose: u8,
     #[command(subcommand)]
     command: Commands,
 }
@@ -140,6 +137,8 @@ enum Commands {
     Dashboard,
     /// Update budi to the latest version
     Update,
+    /// Print version information
+    Version,
     /// Print a compact status line (reads stdin, outputs one line)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -200,13 +199,7 @@ enum RepoCommands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let default_level = match cli.verbose {
-        0 => "warn",
-        1 => "info",
-        _ => "debug",
-    };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -249,6 +242,10 @@ fn main() -> Result<()> {
         Commands::Sync => cmd_sync(),
         Commands::Dashboard => cmd_dashboard(),
         Commands::Update => cmd_update(),
+        Commands::Version => {
+            println!("budi {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Commands::Statusline { install } => {
             if install {
                 cmd_statusline_install()
@@ -965,12 +962,27 @@ fn cmd_stats_multi_agent(
     for ps in providers {
         let total_tokens =
             ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
+        // Use ground-truth cost_cents when available, fall back to estimated
+        let cost = if ps.total_cost_cents > 0.0 {
+            ps.total_cost_cents / 100.0
+        } else {
+            ps.estimated_cost
+        };
+        let lines_str = if ps.total_lines_added > 0 || ps.total_lines_removed > 0 {
+            format!(
+                "  +{}/\x1b[31m-{}\x1b[0m",
+                ps.total_lines_added, ps.total_lines_removed
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m${:.2}\x1b[0m",
+            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m${:.2}\x1b[0m{}",
             ps.display_name,
             ps.session_count,
             format_tokens(total_tokens),
-            ps.estimated_cost,
+            cost,
+            lines_str,
         );
     }
     println!();
@@ -1006,11 +1018,19 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
     };
 
     println!();
-    println!(
-        "  \x1b[1;36m📊 Session\x1b[0m \x1b[90m{}\x1b[0m",
-        &d.session_id[..d.session_id.len().min(12)]
-    );
+    let title = d
+        .session_title
+        .as_deref()
+        .unwrap_or(&d.session_id[..d.session_id.len().min(12)]);
+    println!("  \x1b[1;36m Session\x1b[0m \x1b[90m{}\x1b[0m", title);
     println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    // Provider and mode badges
+    let mode_badge = d.interaction_mode.as_deref().unwrap_or("unknown");
+    println!(
+        "  \x1b[1mProvider\x1b[0m  {} \x1b[90m({})\x1b[0m",
+        d.provider, mode_badge
+    );
 
     if let Some(ref repo) = d.repo_id {
         println!("  \x1b[1mRepo\x1b[0m      {}", repo);
@@ -1022,6 +1042,18 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
     }
     if let Some(ref ver) = d.version {
         println!("  \x1b[1mClaude\x1b[0m    v{}", ver);
+    }
+    if d.lines_added > 0 || d.lines_removed > 0 {
+        println!(
+            "  \x1b[1mLines\x1b[0m     \x1b[32m+{}\x1b[0m/\x1b[31m-{}\x1b[0m",
+            d.lines_added, d.lines_removed
+        );
+    }
+    if d.cost_cents > 0.0 {
+        println!(
+            "  \x1b[1mCost\x1b[0m      \x1b[33m${:.2}\x1b[0m",
+            d.cost_cents / 100.0
+        );
     }
     println!(
         "  \x1b[1mStarted\x1b[0m   {}",
@@ -1350,7 +1382,11 @@ fn cmd_sessions(period: StatsPeriod, json_output: bool) -> Result<()> {
     }
     let conn = analytics::open_db(&db_path)?;
     let (since, until) = period_date_range(period);
-    let sessions = analytics::session_list(&conn, since.as_deref(), until.as_deref())?;
+    let result = analytics::session_list(&conn, &analytics::SessionListParams {
+        since: since.as_deref(), until: until.as_deref(),
+        search: None, sort_by: None, sort_asc: false, limit: 100, offset: 0,
+    })?;
+    let sessions = result.sessions;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -1651,14 +1687,40 @@ fn cmd_statusline() -> Result<()> {
     // ── Fetch today's aggregate cost from budi daemon ───────────────────
     let client = daemon_client_with_timeout(Duration::from_secs(3));
     let statusline_url = format!("{}/analytics/statusline", base);
-    let today_cost: f64 = client
+    let statusline_data: Option<Value> = client
         .get(&statusline_url)
         .send()
         .ok()
         .filter(|r| r.status().is_success())
-        .and_then(|r| r.json::<Value>().ok())
-        .and_then(|v| v.get("estimated_cost").and_then(|c| c.as_f64()))
+        .and_then(|r| r.json::<Value>().ok());
+
+    // Use cost_cents (ground truth) when available, fall back to estimated_cost
+    let today_cost: f64 = statusline_data
+        .as_ref()
+        .and_then(|v| {
+            let cost_cents = v.get("cost_cents").and_then(|c| c.as_f64()).unwrap_or(0.0);
+            if cost_cents > 0.0 {
+                Some(cost_cents / 100.0)
+            } else {
+                v.get("estimated_cost").and_then(|c| c.as_f64())
+            }
+        })
         .unwrap_or(0.0);
+
+    let provider_count: u64 = statusline_data
+        .as_ref()
+        .and_then(|v| v.get("provider_count").and_then(|c| c.as_u64()))
+        .unwrap_or(0);
+
+    let lines_added: u64 = statusline_data
+        .as_ref()
+        .and_then(|v| v.get("lines_added").and_then(|c| c.as_u64()))
+        .unwrap_or(0);
+
+    let lines_removed: u64 = statusline_data
+        .as_ref()
+        .and_then(|v| v.get("lines_removed").and_then(|c| c.as_u64()))
+        .unwrap_or(0);
 
     // ── Build status line segments ──────────────────────────────────────
     let dim = "\x1b[90m";
@@ -1697,9 +1759,23 @@ fn cmd_statusline() -> Result<()> {
 
     // Today's total cost (from budi daemon) — always show to prevent jumping
     if today_cost > 0.001 {
-        parts.push(format!("{yellow}${today_cost:.2}{reset} today"));
+        let agent_badge = if provider_count > 1 {
+            format!(" ({provider_count} agents)")
+        } else {
+            String::new()
+        };
+        parts.push(format!(
+            "{yellow}${today_cost:.2}{reset} today{agent_badge}"
+        ));
     } else {
         parts.push(format!("{dim}$0.00 today{reset}"));
+    }
+
+    // Lines changed today
+    if lines_added > 0 || lines_removed > 0 {
+        parts.push(format!(
+            "{green}+{lines_added}{reset}/{dim}-{lines_removed}{reset}"
+        ));
     }
 
     // 5h rate limit (Pro/Max only)

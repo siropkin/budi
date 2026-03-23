@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::jsonl::ParsedMessage;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 /// Open (or create) the analytics database at the given path.
 pub fn open_db(db_path: &Path) -> Result<Connection> {
@@ -131,6 +131,12 @@ fn migrate(conn: &Connection) -> Result<()> {
         // Backfill cost_cents for existing messages that don't have it.
         // This bakes in the estimated cost at current pricing rates.
         backfill_cost_cents(conn)?;
+    }
+
+    if version < 6 {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);",
+        )?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -602,23 +608,46 @@ pub struct SessionSummary {
     pub cost_cents: f64,
 }
 
-/// List sessions with aggregated stats, ordered by most recent first.
-/// Optionally filtered by date range (same format as usage_summary).
-pub fn session_list(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<Vec<SessionSummary>> {
+/// Paginated session list result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PaginatedSessions {
+    pub sessions: Vec<SessionSummary>,
+    pub total_count: u64,
+}
+
+/// Parameters for paginated session queries.
+pub struct SessionListParams<'a> {
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+    pub search: Option<&'a str>,
+    pub sort_by: Option<&'a str>,
+    pub sort_asc: bool,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// List sessions with aggregated stats, with server-side search, sort, and pagination.
+pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<PaginatedSessions> {
     // Build parameterized date filter for m.timestamp columns.
     let mut conditions = Vec::new();
     let mut param_values: Vec<String> = Vec::new();
-    if let Some(s) = since {
+    if let Some(s) = p.since {
         param_values.push(s.to_string());
         conditions.push(format!("m.timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
+    if let Some(u) = p.until {
         param_values.push(u.to_string());
         conditions.push(format!("m.timestamp < ?{}", param_values.len()));
+    }
+    // Search filter on session fields
+    if let Some(q) = p.search
+        && !q.is_empty()
+    {
+        param_values.push(format!("%{q}%"));
+        let idx = param_values.len();
+        conditions.push(format!(
+            "(s.session_title LIKE ?{idx} OR s.session_id LIKE ?{idx} OR s.repo_id LIKE ?{idx} OR s.project_dir LIKE ?{idx})"
+        ));
     }
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -630,6 +659,30 @@ pub fn session_list(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
+    // Whitelist sort columns to prevent SQL injection
+    let order_col = match p.sort_by.unwrap_or("last_seen") {
+        "session_id" => "s.session_id",
+        "repo_id" => "s.repo_id",
+        "last_seen" => "s.last_seen",
+        "duration" => "(julianday(s.last_seen) - julianday(s.first_seen))",
+        "message_count" => "msg_count",
+        "tokens" => "(inp + outp)",
+        "cost" => "cost_sum",
+        _ => "s.last_seen",
+    };
+    let order_dir = if p.sort_asc { "ASC" } else { "DESC" };
+
+    // Count query
+    let count_sql = format!(
+        "SELECT COUNT(DISTINCT s.session_id)
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.session_id
+         {}",
+        where_clause
+    );
+    let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |r| r.get(0))?;
+
+    // Data query with pagination
     let sql = format!(
         "SELECT s.session_id, s.project_dir, s.first_seen, s.last_seen,
                 COUNT(m.uuid) as msg_count,
@@ -646,17 +699,18 @@ pub fn session_list(
                 s.interaction_mode,
                 COALESCE(s.lines_added, 0),
                 COALESCE(s.lines_removed, 0),
-                COALESCE(SUM(m.cost_cents), 0.0)
+                COALESCE(SUM(m.cost_cents), 0.0) as cost_sum
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.session_id
          {}
          GROUP BY s.session_id
-         ORDER BY s.last_seen DESC",
-        where_clause
+         ORDER BY {} {}
+         LIMIT {} OFFSET {}",
+        where_clause, order_col, order_dir, p.limit, p.offset
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
+    let sessions = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(SessionSummary {
                 session_id: row.get(0)?,
@@ -680,7 +734,10 @@ pub fn session_list(
         })?
         .filter_map(|r| r.ok())
         .collect();
-    Ok(rows)
+    Ok(PaginatedSessions {
+        sessions,
+        total_count,
+    })
 }
 
 /// Detailed stats for a single session.
@@ -2376,12 +2433,16 @@ mod tests {
         let mut conn = test_db();
         ingest_messages(&mut conn, &sample_messages()).unwrap();
 
-        let sessions = session_list(&conn, None, None).unwrap();
-        assert_eq!(sessions.len(), 2);
+        let result = session_list(&conn, &SessionListParams {
+            since: None, until: None, search: None, sort_by: None,
+            sort_asc: false, limit: 50, offset: 0,
+        }).unwrap();
+        assert_eq!(result.sessions.len(), 2);
+        assert_eq!(result.total_count, 2);
         // Most recent first.
-        assert_eq!(sessions[0].session_id, "sess-def");
-        assert_eq!(sessions[1].session_id, "sess-abc");
-        assert_eq!(sessions[1].input_tokens, 100);
+        assert_eq!(result.sessions[0].session_id, "sess-def");
+        assert_eq!(result.sessions[1].session_id, "sess-abc");
+        assert_eq!(result.sessions[1].input_tokens, 100);
     }
 
     #[test]

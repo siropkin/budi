@@ -17,11 +17,12 @@ let lastSyncTime = null;
 const DEFAULT_TABLE_ROWS = 15;
 const DEFAULT_CHART_ROWS = 15;
 
-// Session table state
+// Session table state (server-side paginated)
 let lastSessionData = [];
 let sessionSortCol = 'last_seen';
 let sessionSortAsc = false;
 let sessionShowCount = DEFAULT_TABLE_ROWS;
+let sessionTotalCount = 0;
 
 // Config table state
 let lastConfigData = [];
@@ -60,6 +61,11 @@ let permissionsSortAsc = true;
 let permissionsShowCount = DEFAULT_TABLE_ROWS;
 
 // Search state
+let sessionsSearchTerm = '';
+let configSearchTerm = '';
+let projectConfigSearchTerm = '';
+let pluginsSearchTerm = '';
+let permissionsSearchTerm = '';
 let plansSearchTerm = '';
 let promptsSearchTerm = '';
 
@@ -156,6 +162,12 @@ function fmtDateFromMs(ms) {
   if (!ms) return '--';
   return fmtDate(new Date(ms).toISOString());
 }
+function filterBySearch(data, term, fieldsFn) {
+  if (!term) return data;
+  const lower = term.toLowerCase();
+  return data.filter(item => fieldsFn(item).some(f => (f || '').toLowerCase().includes(lower)));
+}
+
 function shortenDir(dir) { if (!dir) return '--'; return dir.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'); }
 function projectName(dir) { if (!dir) return '--'; const s = shortenDir(dir); return s.split('/').pop() || s; }
 function repoName(id) { if (!id) return '--'; return id.split('/').pop() || id; }
@@ -256,6 +268,14 @@ function updateSyncTime() {
   if (lastSyncTime) el.textContent = 'Synced ' + fmtDate(lastSyncTime.toISOString());
 }
 
+async function fetchSessions(limit, offset) {
+  const range = dateRange(currentPeriod);
+  const params = { ...range, sort_by: sessionSortCol, sort_asc: sessionSortAsc, limit, offset };
+  if (sessionsSearchTerm) params.search = sessionsSearchTerm;
+  const result = await fetch('/analytics/sessions' + qs(params)).then(r => r.json()).catch(() => ({sessions:[],total_count:0}));
+  return result;
+}
+
 // Track which page data has been loaded to avoid re-fetching.
 let loadedPages = {};
 
@@ -277,9 +297,10 @@ async function loadStatsData(signal) {
   const tzOffset = -new Date().getTimezoneOffset();
   const opts = signal ? { signal } : {};
 
-  const [summary, sessions, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes] = await Promise.all([
+  const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
+  const [summary, sessionsResult, cwds, cost, models, activityChart, activeSessions, providers, contextUsage, interactionModes, mcpTools] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
-    fetch('/analytics/sessions' + q, opts).then(r => r.json()),
+    fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
     fetch('/analytics/cwd' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
     fetch('/analytics/cost' + q, opts).then(r => r.json()),
     fetch('/analytics/models' + q, opts).then(r => r.json()),
@@ -288,10 +309,12 @@ async function loadStatsData(signal) {
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/context-usage' + q, opts).then(r => r.json()).catch(() => ({avg_usage_pct:0,max_usage_pct:0,sessions_over_80_pct:0,total_sessions_with_data:0})),
     fetch('/analytics/interaction-modes' + q, opts).then(r => r.json()).catch(() => []),
+    fetch('/analytics/mcp-tools' + q, opts).then(r => r.json()).catch(() => []),
   ]);
 
-  const prevInsights = statsData ? statsData.insights : null;
-  statsData = { summary, sessions, cwds, insights: prevInsights, cost, models, activityChart, contextUsage, interactionModes };
+  const sessions = sessionsResult.sessions || [];
+  sessionTotalCount = sessionsResult.total_count || 0;
+  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, mcpTools };
   activeSessionsData = activeSessions;
   lastSessionData = sessions;
   providersData = providers;
@@ -319,15 +342,6 @@ async function loadStatsData(signal) {
     : 'Activity (Monthly)';
   sessionShowCount = DEFAULT_TABLE_ROWS;
 
-  // Fetch insights in background (slow query) — re-render when it arrives.
-  fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset, opts)
-    .then(r => r.json())
-    .then(insights => {
-      if (signal && signal.aborted) return;
-      statsData.insights = insights;
-      if (dataLoaded) renderCurrentView();
-    })
-    .catch(() => {});
 }
 
 async function loadSetupData() {
@@ -615,7 +629,7 @@ const sessionGetters = {
 };
 
 function renderSessionsSection(sessions) {
-  const sorted = genericSort(sessions, sessionSortCol, sessionSortAsc, sessionGetters);
+  // Sessions are already sorted, filtered, and paginated server-side
   const multiProvider = registeredProviders.length > 1;
   const cols = [
     { key: 'session_id', label: 'Session' },
@@ -627,7 +641,11 @@ function renderSessionsSection(sessions) {
     { key: 'tokens', label: 'Tokens', right: true },
     { key: 'cost', label: 'Cost', right: true },
   ];
-  return renderSortableTable('sessionsTable', cols, sorted, sessionShowCount, sessionSortCol, sessionSortAsc, s => {
+  if (!sessions.length) return '<div class="empty">No sessions for this period</div>';
+  const arrow = col => col === sessionSortCol ? `<span class="sort-arrow">${sessionSortAsc ? '\u25b2' : '\u25bc'}</span>` : '';
+  const hasMore = sessionTotalCount > sessions.length;
+  const remaining = sessionTotalCount - sessions.length;
+  const rowFn = s => {
     const totalTok = s.input_tokens + s.output_tokens;
     const title = s.session_title || s.session_id.slice(0, 8);
     const costVal = s.cost_cents > 0 ? s.cost_cents / 100 : estimateSessionCost(s);
@@ -643,7 +661,15 @@ function renderSessionsSection(sessions) {
       <td class="right">${fmtNum(totalTok)}</td>
       <td class="right">${fmtCost(costVal)}</td>
     </tr>`;
-  });
+  };
+  return `
+  <table class="sortable-table" id="sessionsTable">
+    <thead><tr>${cols.map(c =>
+      `<th data-col="${c.key}"${c.right ? ' class="right"' : ''}>${c.label}${arrow(c.key)}</th>`
+    ).join('')}</tr></thead>
+    <tbody>${sessions.map(rowFn).join('')}</tbody>
+  </table>
+  ${hasMore ? `<button class="show-more-btn" data-table="sessionsTable">Show more (${remaining} remaining)</button>` : ''}`;
 }
 
 /* ===== Config Files ===== */
@@ -690,7 +716,8 @@ const configCols = [
 ];
 
 function renderConfigTable() {
-  const sorted = genericSort(lastConfigData, configSortCol, configSortAsc, configGetters);
+  const filtered = filterBySearch(lastConfigData, configSearchTerm, f => [f.file_type, f.project, f.path]);
+  const sorted = genericSort(filtered, configSortCol, configSortAsc, configGetters);
   return renderSortableTable('configTable', configCols, sorted, configShowCount, configSortCol, configSortAsc, renderConfigRow);
 }
 
@@ -717,7 +744,8 @@ function renderProjectConfigRow(p) {
 }
 
 function renderProjectConfigTable() {
-  const sorted = genericSort(lastProjectConfigData, projectConfigSortCol, projectConfigSortAsc, projectConfigGetters);
+  const filtered = filterBySearch(lastProjectConfigData, projectConfigSearchTerm, p => [p.project]);
+  const sorted = genericSort(filtered, projectConfigSortCol, projectConfigSortAsc, projectConfigGetters);
   return renderSortableTable('projectConfigTable', projectConfigCols, sorted, projectConfigShowCount, projectConfigSortCol, projectConfigSortAsc, renderProjectConfigRow);
 }
 
@@ -726,16 +754,12 @@ function renderConfigSection(configFiles) {
   return `
   <div class="panel section-mb">
     <h2>Config by Project</h2>
-    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-      ${projectCount} project${projectCount !== 1 ? 's' : ''} with configuration files
-    </div>
+    <input type="text" id="projectConfigSearch" class="search-input" placeholder="Search projects..." value="${esc(projectConfigSearchTerm)}" style="margin-bottom:12px">
     <div id="projectConfigContainer">${renderProjectConfigTable()}</div>
   </div>
   <div class="panel section-mb">
     <h2>Config Files</h2>
-    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-      ${configFiles.length} files across ${projectCount} projects
-    </div>
+    <input type="text" id="configSearch" class="search-input" placeholder="Search config files..." value="${esc(configSearchTerm)}" style="margin-bottom:12px">
     <div id="configContainer">${renderConfigTable()}</div>
   </div>`;
 }
@@ -789,10 +813,21 @@ function renderInsights(ins) {
 }
 
 /* ===== Insights V2 Page ===== */
+let insightsData = null;
+
+async function loadInsightsData() {
+  if (insightsData) return;
+  const range = dateRange(currentPeriod);
+  const q = qs(range);
+  const tzOffset = -new Date().getTimezoneOffset();
+  insightsData = await fetch('/analytics/insights' + q + (q ? '&' : '?') + 'tz_offset=' + tzOffset).then(r => r.json()).catch(() => null);
+}
+
 function renderInsightsPageView(content) {
-  const ins = statsData ? statsData.insights : null;
+  const ins = insightsData;
   if (!ins) {
     content.innerHTML = '<div class="loading">Loading insights</div>';
+    loadInsightsData().then(() => { if (currentView === 'insights') renderInsightsPageView(content); });
     return;
   }
 
@@ -1038,23 +1073,10 @@ function renderHistoryTable(data) {
 }
 
 function renderHistorySection() {
-  const filtered = promptsSearchTerm === ''
-    ? lastHistoryData
-    : lastHistoryData.filter(e =>
-        (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
-        (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
-      );
-  const showingText = lastHistoryData.length < promptsData.total_count
-    ? `${promptsData.total_count} total prompts (showing last ${lastHistoryData.length})`
-    : `${promptsData.total_count} total prompts`;
+  const filtered = filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project]);
   return `<div class="panel section-mb">
     <h2>Prompts</h2>
-    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-      ${showingText}
-    </div>
-    <div style="margin-bottom:16px">
-      <input type="text" id="promptsSearch" class="search-input" placeholder="Search prompts..." value="${esc(promptsSearchTerm)}">
-    </div>
+    <input type="text" id="promptsSearch" class="search-input" placeholder="Search prompts..." value="${esc(promptsSearchTerm)}" style="margin-bottom:12px">
     <div id="historyContainer">${renderHistoryTable(filtered)}</div>
   </div>`;
 }
@@ -1095,19 +1117,10 @@ function renderPlansTable(data) {
 }
 
 function renderPlansSection() {
-  const filtered = plansSearchTerm === ''
-    ? lastPlansData
-    : lastPlansData.filter(p =>
-        ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
-      );
+  const filtered = filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview]);
   return `<div class="panel section-mb">
     <h2>Plans</h2>
-    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-      ${lastPlansData.length} plan file${lastPlansData.length !== 1 ? 's' : ''} found
-    </div>
-    <div style="margin-bottom:16px">
-      <input type="text" id="plansSearch" class="search-input" placeholder="Search plans..." value="${esc(plansSearchTerm)}">
-    </div>
+    <input type="text" id="plansSearch" class="search-input" placeholder="Search plans..." value="${esc(plansSearchTerm)}" style="margin-bottom:12px">
     <div id="plansContainer">${renderPlansTable(filtered)}</div>
   </div>`;
 }
@@ -1144,7 +1157,8 @@ function renderPluginsRow(p) {
 }
 
 function renderPluginsTable() {
-  const sorted = genericSort(lastPluginsData, pluginsSortCol, pluginsSortAsc, pluginsGetters);
+  const filtered = filterBySearch(lastPluginsData, pluginsSearchTerm, p => [p.name, p.description]);
+  const sorted = genericSort(filtered, pluginsSortCol, pluginsSortAsc, pluginsGetters);
   return renderSortableTable('pluginsTable', pluginsCols, sorted, pluginsShowCount, pluginsSortCol, pluginsSortAsc, renderPluginsRow);
 }
 
@@ -1157,9 +1171,7 @@ function renderPluginsSection(plugins) {
   }
   return `<div class="panel section-mb">
     <h2>Plugins</h2>
-    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-      ${plugins.length} plugin${plugins.length !== 1 ? 's' : ''} installed
-    </div>
+    <input type="text" id="pluginsSearch" class="search-input" placeholder="Search plugins..." value="${esc(pluginsSearchTerm)}" style="margin-bottom:12px">
     <div id="pluginsContainer">${renderPluginsTable()}</div>
   </div>`;
 }
@@ -1191,7 +1203,8 @@ function renderPermissionsRow(r) {
 }
 
 function renderPermissionsTable() {
-  const sorted = genericSort(lastPermissionsData, permissionsSortCol, permissionsSortAsc, permissionsGetters);
+  const filtered = filterBySearch(lastPermissionsData, permissionsSearchTerm, r => [r.rule]);
+  const sorted = genericSort(filtered, permissionsSortCol, permissionsSortAsc, permissionsGetters);
   return renderSortableTable('permissionsTable', permissionsCols, sorted, permissionsShowCount, permissionsSortCol, permissionsSortAsc, renderPermissionsRow);
 }
 
@@ -1200,16 +1213,14 @@ function renderPermissionsSection(permissions) {
   const rules = permissions.rules || [];
   return `<div class="panel section-mb">
     <h2>Permissions</h2>
-    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-      ${rules.length} permission rule${rules.length !== 1 ? 's' : ''} (default mode: <span class="mode-badge mode-${mode === 'allowlist' ? 'allowlist' : mode === 'denylist' ? 'denylist' : 'default'}">${esc(mode)}</span>)
-    </div>
+    <input type="text" id="permissionsSearch" class="search-input" placeholder="Search permissions..." value="${esc(permissionsSearchTerm)}" style="margin-bottom:12px">
     <div id="permissionsContainer">${renderPermissionsTable()}</div>
   </div>`;
 }
 
 /* ===== View Renderers ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, insights, cost, models, activityChart, contextUsage, interactionModes } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, mcpTools } = statsData;
   content.innerHTML = `
     ${renderActiveSessions(activeSessionsData)}
     ${renderCards(summary, cost)}
@@ -1250,7 +1261,7 @@ function renderStatsView(content) {
       </div>
       <div class="panel">
         <h2>MCP${ccOnlyLabel()}</h2>
-        ${renderBarChart((insights && insights.mcp_tools || []).slice(0, DEFAULT_CHART_ROWS),
+        ${renderBarChart((mcpTools || []).slice(0, DEFAULT_CHART_ROWS),
           (m, full) => full ? m.tool : m.tool.replace(/^mcp__/, ''),
           m => m.call_count,
           (m, i) => paletteColor(i),
@@ -1260,9 +1271,7 @@ function renderStatsView(content) {
     </div>
     <div class="panel section-mb">
       <h2>Sessions</h2>
-      <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:12px">
-        ${sessions.length} session${sessions.length !== 1 ? 's' : ''} found
-      </div>
+      <input type="text" id="sessionsSearch" class="search-input" placeholder="Search sessions..." value="${esc(sessionsSearchTerm)}" style="margin-bottom:12px">
       <div id="sessionsContainer">${renderSessionsSection(sessions)}</div>
     </div>
   `;
@@ -1347,36 +1356,66 @@ async function render() {
   }
 }
 
+function bindSearchHandler(inputId, setTerm, resetCount, rerender) {
+  const el = $('#' + inputId);
+  if (el) {
+    el.addEventListener('input', (e) => {
+      setTerm(e.target.value);
+      resetCount();
+      rerender();
+      bindTableHandlers();
+    });
+  }
+}
+
 function bindSearchHandlers() {
-  const plansSearchEl = $('#plansSearch');
-  if (plansSearchEl) {
-    plansSearchEl.addEventListener('input', (e) => {
-      plansSearchTerm = e.target.value;
-      plansShowCount = DEFAULT_TABLE_ROWS;
-      const filtered = plansSearchTerm === ''
-        ? lastPlansData
-        : lastPlansData.filter(p =>
-            ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
-          );
-      $('#plansContainer').innerHTML = renderPlansTable(filtered);
-      bindTableHandlers();
+  // Sessions search — debounced, server-side
+  let sessionsSearchTimeout = null;
+  const sessionsSearchEl = $('#sessionsSearch');
+  if (sessionsSearchEl) {
+    sessionsSearchEl.addEventListener('input', (e) => {
+      sessionsSearchTerm = e.target.value;
+      clearTimeout(sessionsSearchTimeout);
+      sessionsSearchTimeout = setTimeout(async () => {
+        const result = await fetchSessions(DEFAULT_TABLE_ROWS, 0);
+        lastSessionData = result.sessions || [];
+        sessionTotalCount = result.total_count || 0;
+        sessionShowCount = lastSessionData.length;
+        $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
+        bindTableHandlers();
+      }, 300);
     });
   }
-  const promptsSearchEl = $('#promptsSearch');
-  if (promptsSearchEl) {
-    promptsSearchEl.addEventListener('input', (e) => {
-      promptsSearchTerm = e.target.value;
-      historyShowCount = DEFAULT_TABLE_ROWS;
-      const filtered = promptsSearchTerm === ''
-        ? lastHistoryData
-        : lastHistoryData.filter(e =>
-            (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
-            (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
-          );
-      $('#historyContainer').innerHTML = renderHistoryTable(filtered);
-      bindTableHandlers();
-    });
-  }
+  bindSearchHandler('configSearch',
+    v => { configSearchTerm = v; },
+    () => { configShowCount = DEFAULT_TABLE_ROWS; },
+    () => { $('#configContainer').innerHTML = renderConfigTable(); }
+  );
+  bindSearchHandler('projectConfigSearch',
+    v => { projectConfigSearchTerm = v; },
+    () => { projectConfigShowCount = DEFAULT_TABLE_ROWS; },
+    () => { $('#projectConfigContainer').innerHTML = renderProjectConfigTable(); }
+  );
+  bindSearchHandler('pluginsSearch',
+    v => { pluginsSearchTerm = v; },
+    () => { pluginsShowCount = DEFAULT_TABLE_ROWS; },
+    () => { $('#pluginsContainer').innerHTML = renderPluginsTable(); }
+  );
+  bindSearchHandler('permissionsSearch',
+    v => { permissionsSearchTerm = v; },
+    () => { permissionsShowCount = DEFAULT_TABLE_ROWS; },
+    () => { $('#permissionsContainer').innerHTML = renderPermissionsTable(); }
+  );
+  bindSearchHandler('plansSearch',
+    v => { plansSearchTerm = v; },
+    () => { plansShowCount = DEFAULT_TABLE_ROWS; },
+    () => { $('#plansContainer').innerHTML = renderPlansTable(filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview])); }
+  );
+  bindSearchHandler('promptsSearch',
+    v => { promptsSearchTerm = v; },
+    () => { historyShowCount = DEFAULT_TABLE_ROWS; },
+    () => { $('#historyContainer').innerHTML = renderHistoryTable(filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project])); }
+  );
 }
 
 function bindAllHandlers() {
@@ -1386,12 +1425,16 @@ function bindAllHandlers() {
 }
 
 function bindTableHandlers() {
-  // Sessions table sort
+  // Sessions table sort — re-fetch from server
   $$('#sessionsTable th[data-col]').forEach(th => {
-    th.addEventListener('click', () => {
+    th.addEventListener('click', async () => {
       const col = th.dataset.col;
       if (sessionSortCol === col) sessionSortAsc = !sessionSortAsc;
       else { sessionSortCol = col; sessionSortAsc = col === 'session_id' || col === 'repo_id'; }
+      const result = await fetchSessions(DEFAULT_TABLE_ROWS, 0);
+      lastSessionData = result.sessions || [];
+      sessionTotalCount = result.total_count || 0;
+      sessionShowCount = lastSessionData.length;
       $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
       bindTableHandlers();
     });
@@ -1419,13 +1462,7 @@ function bindTableHandlers() {
       const col = th.dataset.col;
       if (historySortCol === col) historySortAsc = !historySortAsc;
       else { historySortCol = col; historySortAsc = col === 'display' || col === 'project'; }
-      const filtered = promptsSearchTerm === ''
-        ? lastHistoryData
-        : lastHistoryData.filter(e =>
-            (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
-            (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
-          );
-      $('#historyContainer').innerHTML = renderHistoryTable(filtered);
+      $('#historyContainer').innerHTML = renderHistoryTable(filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project]));
       bindTableHandlers();
     });
   });
@@ -1434,12 +1471,7 @@ function bindTableHandlers() {
       const col = th.dataset.col;
       if (plansSortCol === col) plansSortAsc = !plansSortAsc;
       else { plansSortCol = col; plansSortAsc = col === 'name'; }
-      const filtered = plansSearchTerm === ''
-        ? lastPlansData
-        : lastPlansData.filter(p =>
-            ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
-          );
-      $('#plansContainer').innerHTML = renderPlansTable(filtered);
+      $('#plansContainer').innerHTML = renderPlansTable(filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview]));
       bindTableHandlers();
     });
   });
@@ -1462,10 +1494,14 @@ function bindTableHandlers() {
     });
   });
   $$('.show-more-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const table = btn.dataset.table;
       if (table === 'sessionsTable') {
-        sessionShowCount += DEFAULT_TABLE_ROWS;
+        // Fetch next page from server and append
+        const result = await fetchSessions(DEFAULT_TABLE_ROWS, lastSessionData.length);
+        lastSessionData = lastSessionData.concat(result.sessions || []);
+        sessionTotalCount = result.total_count || sessionTotalCount;
+        sessionShowCount = lastSessionData.length;
         $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
       } else if (table === 'configTable') {
         configShowCount += DEFAULT_TABLE_ROWS;
@@ -1475,21 +1511,10 @@ function bindTableHandlers() {
         $('#projectConfigContainer').innerHTML = renderProjectConfigTable();
       } else if (table === 'historyTable') {
         historyShowCount += DEFAULT_TABLE_ROWS;
-        const filtered = promptsSearchTerm === ''
-          ? lastHistoryData
-          : lastHistoryData.filter(e =>
-              (e.display || '').toLowerCase().includes(promptsSearchTerm.toLowerCase()) ||
-              (e.project || '').toLowerCase().includes(promptsSearchTerm.toLowerCase())
-            );
-        $('#historyContainer').innerHTML = renderHistoryTable(filtered);
+        $('#historyContainer').innerHTML = renderHistoryTable(filterBySearch(lastHistoryData, promptsSearchTerm, e => [e.display, e.project]));
       } else if (table === 'plansTable') {
         plansShowCount += DEFAULT_TABLE_ROWS;
-        const filtered = plansSearchTerm === ''
-          ? lastPlansData
-          : lastPlansData.filter(p =>
-              ((p.title || '') + ' ' + (p.name || '') + ' ' + (p.preview || '')).toLowerCase().includes(plansSearchTerm.toLowerCase())
-            );
-        $('#plansContainer').innerHTML = renderPlansTable(filtered);
+        $('#plansContainer').innerHTML = renderPlansTable(filterBySearch(lastPlansData, plansSearchTerm, p => [p.title, p.name, p.preview]));
       } else if (table === 'pluginsTable') {
         pluginsShowCount += DEFAULT_TABLE_ROWS;
         $('#pluginsContainer').innerHTML = renderPluginsTable();
@@ -1529,6 +1554,7 @@ async function switchAndReload() {
   if (currentAbort) currentAbort.abort();
   const abort = new AbortController();
   currentAbort = abort;
+  insightsData = null; // Clear insights cache on period/view change
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
   try {

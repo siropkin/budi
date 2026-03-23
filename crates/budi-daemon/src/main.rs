@@ -70,6 +70,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/memory", get(analytics_memory))
         .route("/analytics/permissions", get(analytics_permissions))
         .route("/analytics/history", get(analytics_history))
+        .route("/analytics/mcp-tools", get(analytics_mcp_tools))
         .route("/analytics/providers", get(analytics_providers))
         .route(
             "/analytics/registered-providers",
@@ -272,13 +273,35 @@ fn request_config(repo_root: &str) -> Result<BudiConfig> {
     config::load_or_default(root)
 }
 
+#[derive(serde::Deserialize)]
+struct SessionsParams {
+    since: Option<String>,
+    until: Option<String>,
+    search: Option<String>,
+    sort_by: Option<String>,
+    sort_asc: Option<bool>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
 async fn analytics_sessions(
-    Query(params): Query<SummaryParams>,
-) -> Result<Json<Vec<analytics::SessionSummary>>, (StatusCode, String)> {
+    Query(params): Query<SessionsParams>,
+) -> Result<Json<analytics::PaginatedSessions>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_list(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::session_list(
+            &conn,
+            &analytics::SessionListParams {
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                search: params.search.as_deref(),
+                sort_by: params.sort_by.as_deref(),
+                sort_asc: params.sort_asc.unwrap_or(false),
+                limit: params.limit.unwrap_or(50),
+                offset: params.offset.unwrap_or(0),
+            },
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -540,6 +563,21 @@ async fn analytics_providers(
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::provider_stats(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+async fn analytics_mcp_tools(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<Vec<analytics::McpToolStat>>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::mcp_tool_stats(&conn, params.since.as_deref(), params.until.as_deref())
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
