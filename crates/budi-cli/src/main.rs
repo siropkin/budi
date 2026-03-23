@@ -135,6 +135,9 @@ enum Commands {
         /// Install the status line in ~/.claude/settings.json
         #[arg(long, default_value_t = false)]
         install: bool,
+        /// Output format: claude (ANSI+OSC8), starship (plain text), json
+        #[arg(long, value_enum, default_value_t = StatuslineFormat::Claude)]
+        format: StatuslineFormat,
     },
 }
 
@@ -144,6 +147,16 @@ enum StatsPeriod {
     Week,
     Month,
     All,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+enum StatuslineFormat {
+    /// ANSI colors + OSC 8 hyperlinks (for Claude Code statusline)
+    Claude,
+    /// Plain text, no ANSI (for Starship / shell prompts)
+    Starship,
+    /// Raw JSON
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -237,11 +250,11 @@ fn main() -> Result<()> {
             println!("budi {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Commands::Statusline { install } => {
+        Commands::Statusline { install, format } => {
             if install {
                 cmd_statusline_install()
             } else {
-                cmd_statusline()
+                cmd_statusline(format)
             }
         }
     }
@@ -263,6 +276,7 @@ fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, global: bool) -> Result
     };
 
     install_statusline_if_missing();
+    install_starship_if_detected();
 
     if !no_daemon {
         ensure_daemon_running(&repo_root, &config)?;
@@ -399,6 +413,17 @@ fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 println!("  x daemon start failed: {e}");
                 issues.push(format!("Daemon start error: {e}"));
             }
+        }
+    }
+
+    // Starship integration (only shown if starship is installed)
+    if is_starship_installed() {
+        let configured = is_budi_configured_in_starship();
+        doctor_check("starship", configured, Some(&starship_config_path()));
+        if !configured {
+            issues.push(
+                "Starship detected but budi module not configured. Run `budi init` to fix.".into(),
+            );
         }
     }
 
@@ -1600,9 +1625,84 @@ fn cmd_update() -> Result<()> {
     Ok(())
 }
 
+// ─── Starship ────────────────────────────────────────────────────────────────
+
+fn is_starship_installed() -> bool {
+    Command::new("which")
+        .arg("starship")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn starship_config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("STARSHIP_CONFIG") {
+        return PathBuf::from(p);
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("starship.toml");
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/starship.toml")
+}
+
+fn is_budi_configured_in_starship() -> bool {
+    let path = starship_config_path();
+    fs::read_to_string(&path)
+        .unwrap_or_default()
+        .contains("[custom.budi]")
+}
+
+const STARSHIP_BUDI_MODULE: &str = r#"
+# Budi — AI code analytics (budi statusline --format=starship)
+[custom.budi]
+command = "budi statusline --format=starship"
+when = "command -v budi-daemon"
+format = "[$output]($style) "
+style = "cyan"
+shell = ["sh"]
+"#;
+
+fn install_starship_module() -> Result<()> {
+    let path = starship_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed creating {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Failed opening {}", path.display()))?;
+    file.write_all(STARSHIP_BUDI_MODULE.as_bytes())
+        .with_context(|| format!("Failed writing {}", path.display()))?;
+    Ok(())
+}
+
+fn install_starship_if_detected() {
+    if !is_starship_installed() {
+        return;
+    }
+    if is_budi_configured_in_starship() {
+        return;
+    }
+    match install_starship_module() {
+        Ok(()) => {
+            eprintln!(
+                "Starship: installed budi module in {}",
+                starship_config_path().display()
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to install Starship module: {e}");
+        }
+    }
+}
+
 // ─── Statusline ──────────────────────────────────────────────────────────────
 
-fn cmd_statusline() -> Result<()> {
+fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
     let mut input = String::new();
     let _ = io::stdin().read_to_string(&mut input);
 
@@ -1625,28 +1725,27 @@ fn cmd_statusline() -> Result<()> {
         .as_ref()
         .is_some_and(|root| root.join(".claude/settings.local.json").exists());
 
-    // Dashboard link (OSC 8 hyperlink)
     let base = format!(
         "http://{}:{}",
         config::DEFAULT_DAEMON_HOST,
         config::DEFAULT_DAEMON_PORT,
     );
-    let dashboard_url = format!("{}/dashboard", base);
-    let budi_label = "\x1b[36m📊 budi\x1b[0m";
-    let dashboard_link = format!(
-        "\x1b]8;;{}\x1b\\\x1b[36m↗ dashboard\x1b[0m\x1b]8;;\x1b\\",
-        dashboard_url,
-    );
 
+    // For starship/json: output nothing on error (Starship hides empty modules)
     if !repo_initialized {
-        println!("{} \x1b[90m· not set up\x1b[0m", budi_label);
+        if format == StatuslineFormat::Claude {
+            let budi_label = "\x1b[36m📊 budi\x1b[0m";
+            println!("{} \x1b[90m· not set up\x1b[0m", budi_label);
+        }
         return Ok(());
     }
 
-    // (session cost removed — statusline now shows day/week/month only)
-
-    // ── Fetch today's aggregate cost from budi daemon ───────────────────
-    let client = daemon_client_with_timeout(Duration::from_secs(3));
+    // Shorter timeout for shell prompts to avoid blocking the prompt
+    let timeout = match format {
+        StatuslineFormat::Starship => Duration::from_millis(300),
+        _ => Duration::from_secs(3),
+    };
+    let client = daemon_client_with_timeout(timeout);
     let statusline_url = format!("{}/analytics/statusline", base);
     let statusline_data: Option<Value> = client
         .get(&statusline_url)
@@ -1668,11 +1767,6 @@ fn cmd_statusline() -> Result<()> {
         .and_then(|v| v.get("month_cost").and_then(|c| c.as_f64()))
         .unwrap_or(0.0);
 
-    // ── Build status line segments ──────────────────────────────────────
-    let dim = "\x1b[90m";
-    let reset = "\x1b[0m";
-    let yellow = "\x1b[33m";
-
     // Format cost like the dashboard: $1.2K, $123, $12.50, $0.42, $0
     fn fmt_cost(c: f64) -> String {
         if c >= 1000.0 {
@@ -1686,15 +1780,46 @@ fn cmd_statusline() -> Result<()> {
         }
     }
 
-    let mut parts: Vec<String> = Vec::new();
+    match format {
+        StatuslineFormat::Json => {
+            println!(
+                "{}",
+                json!({
+                    "today_cost": today_cost,
+                    "week_cost": week_cost,
+                    "month_cost": month_cost,
+                })
+            );
+        }
+        StatuslineFormat::Starship => {
+            // Compact plain text — Starship wraps with its own styling
+            println!(
+                "{} · {} · {}",
+                fmt_cost(today_cost),
+                fmt_cost(week_cost),
+                fmt_cost(month_cost),
+            );
+        }
+        StatuslineFormat::Claude => {
+            let dashboard_url = format!("{}/dashboard", base);
+            let budi_label = "\x1b[36m📊 budi\x1b[0m";
+            let dashboard_link = format!(
+                "\x1b]8;;{}\x1b\\\x1b[36m↗ dashboard\x1b[0m\x1b]8;;\x1b\\",
+                dashboard_url,
+            );
+            let dim = "\x1b[90m";
+            let reset = "\x1b[0m";
+            let yellow = "\x1b[33m";
 
-    // Day / Week / Month costs from budi daemon
-    parts.push(format!("{yellow}{}{reset} today", fmt_cost(today_cost)));
-    parts.push(format!("{yellow}{}{reset} week", fmt_cost(week_cost)));
-    parts.push(format!("{yellow}{}{reset} month", fmt_cost(month_cost)));
+            let mut parts: Vec<String> = Vec::new();
+            parts.push(format!("{yellow}{}{reset} today", fmt_cost(today_cost)));
+            parts.push(format!("{yellow}{}{reset} week", fmt_cost(week_cost)));
+            parts.push(format!("{yellow}{}{reset} month", fmt_cost(month_cost)));
 
-    let joined = parts.join(&format!(" {dim}·{reset} "));
-    println!("{budi_label} {dim}·{reset} {joined} {dim}·{reset} {dashboard_link}");
+            let joined = parts.join(&format!(" {dim}·{reset} "));
+            println!("{budi_label} {dim}·{reset} {joined} {dim}·{reset} {dashboard_link}");
+        }
+    }
 
     Ok(())
 }

@@ -93,7 +93,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 | Multi-agent support | **Yes** (Claude Code + Cursor) | Claude Code only | Claude Code only | Claude Code only |
 | Cost history | **Per-session + daily** | Per-session | Per-session | Current session |
 | Web dashboard | **Yes** (5 pages) | No | Yes | No |
-| Status line | **Yes** (Claude Code) | No | No | No |
+| Status line | **Yes** (Claude Code + Starship) | No | No | No |
 | Insights & recs | **Yes** | No | No | No |
 | Per-repo breakdown | **Yes** | No | No | No |
 | File activity tracking | **Yes** (Claude Code PostToolUse) | No | No | No |
@@ -176,6 +176,44 @@ budi statusline --install
 
 This writes the status line config to `~/.claude/settings.json`. Restart Claude Code to activate.
 
+## Starship integration
+
+If you use [Starship](https://starship.rs/), budi automatically adds a shell prompt module so you see your AI spending in every terminal — not just inside Claude Code.
+
+`budi init` detects Starship and appends a `[custom.budi]` module to `~/.config/starship.toml`. The result looks like:
+
+```
+~/projects/myapp on main via 🐍 v3.14.3 via 🦀 v1.93.1  $12.50 · $87.30 · $1.2K
+❯
+```
+
+The three values are today / week / month cost, displayed in cyan to match Starship's style.
+
+### Manual setup
+
+If you installed Starship after `budi init`, run `budi init` again (it's idempotent) or add this to `~/.config/starship.toml`:
+
+```toml
+[custom.budi]
+command = "budi statusline --format=starship"
+when = "command -v budi-daemon"
+format = "[$output]($style) "
+style = "cyan"
+shell = ["sh"]
+```
+
+`budi doctor` will warn if Starship is installed but the budi module is missing.
+
+### Output formats
+
+The `budi statusline` command supports multiple output formats:
+
+```bash
+budi statusline                    # Claude Code format (ANSI + OSC 8 links)
+budi statusline --format=starship  # plain text for shell prompts
+budi statusline --format=json      # JSON for scripting
+```
+
 ## Web dashboard
 
 Run `budi dashboard` to open the web UI in your browser, or click the dashboard link in the status line.
@@ -184,7 +222,7 @@ Run `budi dashboard` to open the web UI in your browser, or click the dashboard 
 |------|---------------|
 | **Stats** | Cost, tokens, activity chart (input/output tokens), model breakdown, projects, tools, MCP, sessions table with search, per-agent breakdown |
 | **Insights** | Recommendations, session patterns, tool diversity, daily cost trend, search/cache efficiency, context window usage, config health |
-| **Setup** | Config files, plugins, permissions — all with search |
+| **Setup** | Integrations (Claude Code statusline, Starship), config files, plugins, permissions — all with search |
 | **Plans** | Plan files with server-side search and pagination |
 | **Prompts** | Prompt history with server-side search and pagination |
 
@@ -211,6 +249,8 @@ budi insights                 # actionable recommendations
 budi sync                     # sync all providers into the analytics database
 budi statusline               # print the status line (used internally by Claude Code)
 budi statusline --install     # install status line in ~/.claude/settings.json
+budi statusline --format=starship  # plain text output for Starship / shell prompts
+budi statusline --format=json      # JSON output for scripting
 ```
 
 All data commands support `--period today|week|month|all` and `--json` for scripting:

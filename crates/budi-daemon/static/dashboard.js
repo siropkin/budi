@@ -341,13 +341,14 @@ async function loadStatsData(signal) {
 
 async function loadSetupData() {
   if (setupData) return; // already loaded
-  const [configFiles, memory, plugins, permissions] = await Promise.all([
+  const [configFiles, memory, plugins, permissions, integrations] = await Promise.all([
     fetch('/analytics/config-files').then(r => r.json()).catch(() => []),
     fetch('/analytics/memory').then(r => r.json()).catch(() => []),
     fetch('/analytics/plugins').then(r => r.json()).catch(() => []),
     fetch('/analytics/permissions').then(r => r.json()).catch(() => ({default_mode:'default',rules:[]})),
+    fetch('/system/integrations').then(r => r.json()).catch(() => ({})),
   ]);
-  setupData = { configFiles, memory, plugins, permissions };
+  setupData = { configFiles, memory, plugins, permissions, integrations };
   const memoryAsConfig = memory.map(m => ({
     path: m.path || '', project: m.project || '', file_type: 'memory',
     size_bytes: m.size_bytes || 0, est_tokens: m.est_tokens || 0,
@@ -1293,10 +1294,50 @@ function renderStatsView(content) {
 
 function renderSetupView(content) {
   content.innerHTML = `
+    ${renderIntegrationsSection(setupData.integrations)}
     ${renderConfigSection(cachedMergedConfigFiles)}
     ${renderPluginsSection(lastPluginsData)}
     ${renderPermissionsSection(setupData.permissions)}
   `;
+}
+
+function renderIntegrationsSection(integrations) {
+  if (!integrations) return '';
+  const starship = integrations.starship || {};
+  const claudeOk = integrations.claude_code_statusline;
+
+  const starshipSnippet = `# Budi — AI code analytics
+[custom.budi]
+command = "budi statusline --format=starship"
+when = "command -v budi-daemon"
+format = "[$output]($style) "
+style = "cyan"
+shell = ["sh"]`;
+
+  let starshipStatus;
+  if (starship.configured) {
+    starshipStatus = '<span style="color:var(--green)">✓ configured</span>';
+  } else if (starship.installed) {
+    starshipStatus = '<span style="color:var(--yellow)">installed but not configured</span>';
+  } else {
+    starshipStatus = '<span style="color:var(--text-dim)">not installed</span>';
+  }
+
+  return `<div class="panel section-mb">
+    <h2>Integrations</h2>
+    <table class="sortable-table">
+      <thead><tr><th>Integration</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Claude Code Statusline</td><td>${claudeOk ? '<span style="color:var(--green)">✓ active</span>' : '<span style="color:var(--yellow)">not configured</span> — run <code>budi statusline --install</code>'}</td></tr>
+        <tr><td>Starship Shell Prompt</td><td>${starshipStatus}</td></tr>
+      </tbody>
+    </table>
+    ${starship.installed && !starship.configured ? `
+    <div style="margin-top:12px">
+      <p style="margin:0 0 8px;color:var(--text-muted)">Run <code>budi init</code> to auto-configure, or add this to <code>~/.config/starship.toml</code>:</p>
+      <pre style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-size:0.8rem;overflow-x:auto">${starshipSnippet}</pre>
+    </div>` : ''}
+  </div>`;
 }
 
 function renderPlansView(content) {
