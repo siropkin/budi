@@ -108,7 +108,7 @@ Your AI agent will clone the repo, run the installer, and set up your project au
 
 **Step 1 — Install binaries**
 
-macOS / Linux:
+macOS / Linux (installs binaries and adds them to your PATH automatically):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh
 ```
