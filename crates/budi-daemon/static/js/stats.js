@@ -31,12 +31,12 @@ function renderCards(s, cost, gitSummary) {
   const git = gitSummary || {};
   const aiCount = git.ai_created_commits || 0;
   const totalCommits = git.total_commits || 0;
-  const aiLabel = aiCount > 0 ? ` <span style="color:var(--accent,#58a6ff);font-size:0.8rem">(${fmtNum(aiCount)} AI-created)</span>` : '';
+  const aiSub = aiCount > 0 ? `${fmtNum(aiCount)} AI-created` : 'no AI-created commits detected';
   const gitCard = `
     <div class="card">
       <div class="label">Git (during sessions)</div>
-      <div class="value">${fmtNum(totalCommits)} commit${totalCommits !== 1 ? 's' : ''}${aiLabel}</div>
-      <div class="sub"><span style="color:var(--green,#3fb950)">+${fmtNum(git.total_lines_added || 0)} lines</span> / <span style="color:var(--red,#f85149)">-${fmtNum(git.total_lines_removed || 0)} lines</span></div>
+      <div class="value">${fmtNum(totalCommits)} commit${totalCommits !== 1 ? 's' : ''}</div>
+      <div class="sub">${aiSub}</div>
     </div>`;
   return `
   <div class="cards">
