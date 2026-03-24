@@ -31,6 +31,8 @@ pub struct GitCommit {
     pub lines_added: i64,
     pub lines_removed: i64,
     pub pr_number: Option<i64>,
+    /// True if this commit was created by the AI agent (extracted from JSONL tool calls).
+    pub ai_created: bool,
 }
 
 /// Result of a batch enrichment run.
@@ -141,10 +143,14 @@ pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrich
             git_branch.as_deref(),
             author_email.as_deref(),
         );
+        // Extract AI-created commit hashes from the session's JSONL file
+        let jsonl_hashes = find_and_extract_jsonl_hashes(&tx, session_id);
+
         for commit in &commits {
+            let ai_created = is_ai_created_commit(&commit.hash, &jsonl_hashes);
             tx.execute(
-                "INSERT INTO commits (session_id, hash, author_name, author_email, timestamp, message, lines_added, lines_removed, pr_number)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO commits (session_id, hash, author_name, author_email, timestamp, message, lines_added, lines_removed, pr_number, ai_created)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     session_id,
                     commit.hash,
@@ -155,6 +161,7 @@ pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrich
                     commit.lines_added,
                     commit.lines_removed,
                     commit.pr_number,
+                    ai_created as i32,
                 ],
             )?;
             total_commits += 1;
@@ -328,6 +335,7 @@ fn parse_git_log_output(output: &str) -> Vec<GitCommit> {
             lines_added,
             lines_removed,
             pr_number,
+            ai_created: false, // Set later by JSONL hash matching
         });
     }
 
@@ -403,11 +411,49 @@ fn git_author(dir: &Path) -> (Option<String>, Option<String>) {
     (name, email)
 }
 
+/// Find the JSONL file for a session and extract git commit hashes from it.
+///
+/// Looks up the file path from sync_state (which tracks all JSONL files),
+/// then reads the file and extracts commit hashes from tool_result entries.
+fn find_and_extract_jsonl_hashes(conn: &Connection, session_id: &str) -> Vec<String> {
+    // The JSONL filename is typically <session_id>.jsonl
+    let pattern = format!("%{}.jsonl", session_id);
+    let file_path: Option<String> = conn
+        .query_row(
+            "SELECT file_path FROM sync_state WHERE file_path LIKE ?1 LIMIT 1",
+            params![pattern],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let path = match file_path {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    crate::jsonl::extract_git_commit_hashes(&content)
+        .into_iter()
+        .map(|c| c.short_hash)
+        .collect()
+}
+
+/// Check if a full commit hash matches any of the JSONL-extracted short hashes.
+fn is_ai_created_commit(full_hash: &str, jsonl_hashes: &[String]) -> bool {
+    jsonl_hashes
+        .iter()
+        .any(|short| full_hash.starts_with(short.as_str()))
+}
+
 /// Query commits for a given session.
 pub fn commits_for_session(conn: &Connection, session_id: &str) -> Result<Vec<GitCommit>> {
     let mut stmt = conn.prepare(
         "SELECT hash, author_name, author_email, timestamp, message,
-                lines_added, lines_removed, pr_number
+                lines_added, lines_removed, pr_number, ai_created
          FROM commits WHERE session_id = ?1
          ORDER BY timestamp ASC",
     )?;
@@ -422,6 +468,7 @@ pub fn commits_for_session(conn: &Connection, session_id: &str) -> Result<Vec<Gi
                 lines_added: row.get(5)?,
                 lines_removed: row.get(6)?,
                 pr_number: row.get(7)?,
+                ai_created: row.get::<_, i32>(8).unwrap_or(0) != 0,
             })
         })?
         .filter_map(|r| r.ok())
@@ -438,6 +485,8 @@ pub struct GitSummary {
     pub unique_prs: u64,
     pub sessions_with_commits: u64,
     pub top_authors: Vec<(String, u64)>,
+    /// Commits definitively created by AI agents (from JSONL tool call extraction).
+    pub ai_created_commits: u64,
 }
 
 pub fn git_summary(
@@ -473,19 +522,21 @@ pub fn git_summary(
                 COALESCE(SUM(lines_added), 0),
                 COALESCE(SUM(lines_removed), 0),
                 COUNT(DISTINCT CASE WHEN pr_number IS NOT NULL THEN pr_number END),
-                COUNT(DISTINCT session_id)
+                COUNT(DISTINCT session_id),
+                COALESCE(SUM(CASE WHEN ai_created = 1 THEN 1 ELSE 0 END), 0)
          FROM commits c {}",
         where_clause
     );
 
-    let (total_commits, total_lines_added, total_lines_removed, unique_prs, sessions_with_commits): (
+    let (total_commits, total_lines_added, total_lines_removed, unique_prs, sessions_with_commits, ai_created_commits): (
         u64,
         i64,
         i64,
+        u64,
         u64,
         u64,
     ) = conn.query_row(&sql, param_refs.as_slice(), |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
     })?;
 
     // Top authors
@@ -510,6 +561,7 @@ pub fn git_summary(
         unique_prs,
         sessions_with_commits,
         top_authors,
+        ai_created_commits,
     })
 }
 
@@ -728,6 +780,62 @@ b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11
             )
             .unwrap();
         assert!(enriched_at.is_some());
+    }
+
+    #[test]
+    fn is_ai_created_match() {
+        let hashes = vec!["abc1234".to_string(), "def5678".to_string()];
+        assert!(is_ai_created_commit(
+            "abc1234567890abcdef1234567890abcdef123456",
+            &hashes
+        ));
+        assert!(is_ai_created_commit(
+            "def5678567890abcdef1234567890abcdef123456",
+            &hashes
+        ));
+        assert!(!is_ai_created_commit(
+            "9999999567890abcdef1234567890abcdef123456",
+            &hashes
+        ));
+    }
+
+    #[test]
+    fn is_ai_created_empty_hashes() {
+        assert!(!is_ai_created_commit(
+            "abc1234567890abcdef1234567890abcdef123456",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn git_summary_ai_created_count() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::analytics::migrate_for_test(&conn);
+
+        // Insert a session
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, provider)
+             VALUES ('s1', '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', 'claude_code')",
+            [],
+        ).unwrap();
+
+        // Insert commits, one AI-created and one not
+        conn.execute(
+            "INSERT INTO commits (session_id, hash, timestamp, lines_added, lines_removed, ai_created)
+             VALUES ('s1', 'abc1234567890abcdef1234567890abcdef123456', '2026-01-01T00:30:00Z', 10, 5, 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO commits (session_id, hash, timestamp, lines_added, lines_removed, ai_created)
+             VALUES ('s1', 'def5678567890abcdef1234567890abcdef123456', '2026-01-01T00:35:00Z', 3, 1, 0)",
+            [],
+        ).unwrap();
+
+        let summary = git_summary(&conn, None, None).unwrap();
+        assert_eq!(summary.total_commits, 2);
+        assert_eq!(summary.ai_created_commits, 1);
+        assert_eq!(summary.total_lines_added, 13);
+        assert_eq!(summary.total_lines_removed, 6);
     }
 
     #[test]

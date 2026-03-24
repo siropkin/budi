@@ -327,17 +327,24 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
         let git_added: i64 = d.commits.iter().map(|c| c.lines_added).sum();
         let git_removed: i64 = d.commits.iter().map(|c| c.lines_removed).sum();
         let pr_count = d.commits.iter().filter(|c| c.pr_number.is_some()).count();
+        let ai_count = d.commits.iter().filter(|c| c.ai_created).count();
         let pr_str = if pr_count > 0 {
             format!(", {} PR{}", pr_count, if pr_count > 1 { "s" } else { "" })
         } else {
             String::new()
         };
+        let ai_str = if ai_count > 0 {
+            format!(", {} AI-created", ai_count)
+        } else {
+            String::new()
+        };
         println!(
-            "  \x1b[1mCommits\x1b[0m   {} \x1b[90m(\x1b[32m+{}\x1b[90m/\x1b[31m-{}\x1b[90m{})\x1b[0m",
+            "  \x1b[1mCommits\x1b[0m   {} \x1b[90m(\x1b[32m+{}\x1b[90m/\x1b[31m-{}\x1b[90m{}{})\x1b[0m",
             d.commits.len(),
             git_added,
             git_removed,
-            pr_str
+            pr_str,
+            ai_str
         );
     }
     if d.cost_cents > 0.0 {
@@ -392,10 +399,11 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
                 .pr_number
                 .map(|n| format!(" \x1b[35m#{}  \x1b[0m", n))
                 .unwrap_or_default();
+            let ai_tag = if c.ai_created { " \x1b[36m[AI]\x1b[0m" } else { "" };
             let msg: String = c.message.chars().take(50).collect();
             println!(
-                "    \x1b[33m{}\x1b[0m {}  \x1b[32m+{}\x1b[0m/\x1b[31m-{}\x1b[0m{}",
-                short_hash, msg, c.lines_added, c.lines_removed, pr_str
+                "    \x1b[33m{}\x1b[0m {}  \x1b[32m+{}\x1b[0m/\x1b[31m-{}\x1b[0m{}{}",
+                short_hash, msg, c.lines_added, c.lines_removed, pr_str, ai_tag
             );
         }
         if d.commits.len() > 10 {

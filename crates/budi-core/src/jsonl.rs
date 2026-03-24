@@ -250,6 +250,126 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
     }
 }
 
+/// A git commit hash extracted from a JSONL tool_result entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonlGitCommit {
+    /// Short hash (7-12 chars) from git commit output.
+    pub short_hash: String,
+}
+
+/// Extract git commit short hashes from JSONL transcript content.
+///
+/// Scans for tool_result entries that contain git commit output in the format:
+/// `[branch shorthash] commit message`
+///
+/// This gives definitive session→commit links: the AI agent created these commits.
+pub fn extract_git_commit_hashes(content: &str) -> Vec<JsonlGitCommit> {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Fast pre-filter: only parse lines that could contain tool results
+        // User messages with structured content have tool_result blocks
+        if !line.contains("tool_result") {
+            continue;
+        }
+
+        let val: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Navigate to message.content array (user messages with structured content)
+        let contents = match val.pointer("/message/content") {
+            Some(c) => c,
+            None => continue,
+        };
+        let arr = match contents.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+
+        for item in arr {
+            if item.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+
+            let text = tool_result_text(item);
+            for hash in extract_commit_hashes_from_text(&text) {
+                if seen.insert(hash.clone()) {
+                    results.push(JsonlGitCommit { short_hash: hash });
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Extract text from a tool_result content block.
+/// Content can be a string or an array of content blocks.
+fn tool_result_text(item: &Value) -> String {
+    if let Some(content) = item.get("content") {
+        if let Some(s) = content.as_str() {
+            return s.to_string();
+        }
+        if let Some(arr) = content.as_array() {
+            let mut text = String::new();
+            for block in arr {
+                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                    text.push_str(t);
+                    text.push('\n');
+                }
+            }
+            return text;
+        }
+    }
+    String::new()
+}
+
+/// Extract git commit short hashes from text that looks like git commit output.
+///
+/// Git commit output format: `[branch shorthash] commit message`
+/// Examples:
+///   `[main abc1234] Fix bug`
+///   `[feature/auth a1b2c3d] Add login flow`
+///   `[main abc1234] Fix bug\n 1 file changed, 2 insertions(+)`
+fn extract_commit_hashes_from_text(text: &str) -> Vec<String> {
+    let mut hashes = Vec::new();
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'[' {
+            // Look for pattern: [<branch> <hex>] where hex is 7-12 chars
+            if let Some(close) = text[i..].find(']') {
+                let inner = &text[i + 1..i + close];
+                if let Some(space_pos) = inner.rfind(' ') {
+                    let candidate = &inner[space_pos + 1..];
+                    if candidate.len() >= 7
+                        && candidate.len() <= 12
+                        && candidate.bytes().all(|b| b.is_ascii_hexdigit())
+                        && space_pos > 0
+                    {
+                        hashes.push(candidate.to_string());
+                    }
+                }
+                i += close + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    hashes
+}
+
 /// Parse all lines from a JSONL string, returning parsed messages and the byte
 /// offset of the end of the last successfully parsed line.
 pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
@@ -323,6 +443,89 @@ mod tests {
     fn skip_empty_lines() {
         assert!(parse_line("").is_none());
         assert!(parse_line("  ").is_none());
+    }
+
+    #[test]
+    fn extract_commit_hash_from_git_output() {
+        let hashes = extract_commit_hashes_from_text(
+            "[main abc1234] Fix bug\n 1 file changed, 2 insertions(+)",
+        );
+        assert_eq!(hashes, vec!["abc1234"]);
+    }
+
+    #[test]
+    fn extract_commit_hash_feature_branch() {
+        let hashes = extract_commit_hashes_from_text(
+            "[feature/auth a1b2c3d] Add login flow",
+        );
+        assert_eq!(hashes, vec!["a1b2c3d"]);
+    }
+
+    #[test]
+    fn extract_commit_hash_no_match() {
+        // Not a git commit output
+        let hashes = extract_commit_hashes_from_text("Hello [world]");
+        assert!(hashes.is_empty());
+
+        // Hash too short
+        let hashes = extract_commit_hashes_from_text("[main abc12] msg");
+        assert!(hashes.is_empty());
+
+        // Hash has non-hex
+        let hashes = extract_commit_hashes_from_text("[main zzzzzzz] msg");
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn extract_commit_hash_amend() {
+        // git commit --amend output
+        let hashes = extract_commit_hashes_from_text(
+            "[main fedcba9] Updated message\n 3 files changed",
+        );
+        assert_eq!(hashes, vec!["fedcba9"]);
+    }
+
+    #[test]
+    fn extract_git_commits_from_jsonl() {
+        // Simulate a JSONL file with a tool_result containing git commit output
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"git commit -m 'Fix bug'"}}],"usage":{"input_tokens":10,"output_tokens":5}},"uuid":"a1","timestamp":"2026-03-14T18:14:00.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"[main abc1234] Fix bug\n 1 file changed, 2 insertions(+), 1 deletion(-)"}]},"uuid":"u2","timestamp":"2026-03-14T18:14:01.000Z","sessionId":"s1"}"#,
+            "\n",
+        );
+        let commits = extract_git_commit_hashes(jsonl);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].short_hash, "abc1234");
+    }
+
+    #[test]
+    fn extract_git_commits_array_content() {
+        // tool_result with array content
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"[feature/foo deadbeef01] Add feature\n 2 files changed"}]}]},"uuid":"u2","timestamp":"2026-03-14T18:14:01.000Z","sessionId":"s1"}"#;
+        let commits = extract_git_commit_hashes(jsonl);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].short_hash, "deadbeef01");
+    }
+
+    #[test]
+    fn extract_git_commits_dedup() {
+        // Same hash appearing twice should be deduplicated
+        let jsonl = concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"[main abc1234] Fix bug"}]},"uuid":"u1","timestamp":"2026-03-14T18:14:01.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"[main abc1234] Fix bug"}]},"uuid":"u2","timestamp":"2026-03-14T18:14:02.000Z","sessionId":"s1"}"#,
+            "\n",
+        );
+        let commits = extract_git_commit_hashes(jsonl);
+        assert_eq!(commits.len(), 1);
+    }
+
+    #[test]
+    fn extract_git_commits_no_tool_results() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1","timestamp":"2026-03-14T18:14:01.000Z","sessionId":"s1"}"#;
+        let commits = extract_git_commit_hashes(jsonl);
+        assert!(commits.is_empty());
     }
 
     #[test]

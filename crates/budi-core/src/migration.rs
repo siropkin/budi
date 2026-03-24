@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -166,6 +166,20 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
              ALTER TABLE sessions ADD COLUMN git_author_name TEXT;
              ALTER TABLE sessions ADD COLUMN git_author_email TEXT;
              ALTER TABLE sessions ADD COLUMN git_enriched_at TEXT;",
+        )?;
+    }
+
+    if version < 9 {
+        // Add ai_created flag to commits: true when the commit was made by an AI agent
+        // (extracted from JSONL tool_result entries containing git commit output).
+        conn.execute_batch(
+            "ALTER TABLE commits ADD COLUMN ai_created INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        // Force re-enrichment of sessions that have commits, so the JSONL-based
+        // ai_created detection runs on existing data.
+        conn.execute_batch(
+            "UPDATE sessions SET git_enriched_at = NULL
+             WHERE session_id IN (SELECT DISTINCT session_id FROM commits);",
         )?;
     }
 
