@@ -398,15 +398,6 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
         }
     }
 
-    // Post-sync: enrich sessions with git commit data
-    if total_messages > 0 {
-        match crate::git::enrich_git_commits(conn) {
-            Ok(n) if n > 0 => tracing::info!("Git enrichment: {} commits found", n),
-            Err(e) => tracing::warn!("Git enrichment failed: {e}"),
-            _ => {}
-        }
-    }
-
     Ok((total_files, total_messages))
 }
 
@@ -436,14 +427,6 @@ pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
     let tags = pipeline.process(&mut messages);
     let count = ingest_messages(conn, &messages, Some(&tags))?;
     set_sync_offset(conn, &path_str, new_offset)?;
-
-    // Post-sync: enrich sessions with git commit data
-    if count > 0 {
-        if let Err(e) = crate::git::enrich_git_commits(conn) {
-            tracing::warn!("Git enrichment failed: {e}");
-        }
-    }
-
     Ok(count)
 }
 

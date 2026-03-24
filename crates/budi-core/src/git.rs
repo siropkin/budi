@@ -1,12 +1,20 @@
 //! Git enrichment: extract commits, PR references, author info, and diff stats
 //! for sessions that have a valid project directory.
+//!
+//! Designed as a session-level post-processing step that runs independently from
+//! the per-message enrichment pipeline. The daemon calls `enrich_git_batch()` after
+//! each sync cycle, processing a bounded number of sessions per call to avoid
+//! blocking the sync loop.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+
+/// Maximum sessions to enrich per batch call.
+const DEFAULT_BATCH_SIZE: usize = 50;
 
 /// A git commit associated with a session.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -21,20 +29,53 @@ pub struct GitCommit {
     pub pr_number: Option<i64>,
 }
 
-/// Enrich sessions with git commit data.
-/// Finds sessions that have a project_dir and haven't been enriched since their last update.
-/// Returns the number of commits inserted.
-pub fn enrich_git_commits(conn: &mut Connection) -> Result<usize> {
-    // Find sessions needing enrichment: have project_dir, and either never enriched
-    // or enriched before last_seen changed.
+/// Result of a batch enrichment run.
+#[derive(Debug, Clone)]
+pub struct GitEnrichResult {
+    pub sessions_processed: usize,
+    pub sessions_remaining: usize,
+    pub commits_found: usize,
+}
+
+/// Enrich a bounded batch of sessions with git commit data.
+///
+/// Processes at most `limit` sessions per call, returning how many remain.
+/// This enables progressive backfill over multiple daemon cycles without
+/// blocking the sync loop.
+///
+/// Uses a directory cache to avoid repeated `is_inside_git_repo` subprocess
+/// spawns for sessions sharing the same project_dir.
+pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrichResult> {
+    let batch_size = if limit == 0 { DEFAULT_BATCH_SIZE } else { limit };
+
+    // Count total remaining before fetching the batch
+    let total_remaining: usize = conn.query_row(
+        "SELECT COUNT(*) FROM sessions
+         WHERE project_dir IS NOT NULL
+           AND (git_enriched_at IS NULL OR git_enriched_at < last_seen)",
+        [],
+        |r| r.get(0),
+    )?;
+
+    if total_remaining == 0 {
+        return Ok(GitEnrichResult {
+            sessions_processed: 0,
+            sessions_remaining: 0,
+            commits_found: 0,
+        });
+    }
+
+    // Fetch a bounded batch of sessions needing enrichment
     let sessions: Vec<(String, String, String, String, Option<String>)> = {
         let mut stmt = conn.prepare(
             "SELECT session_id, project_dir, first_seen, last_seen, git_branch
              FROM sessions
              WHERE project_dir IS NOT NULL
-               AND (git_enriched_at IS NULL OR git_enriched_at < last_seen)",
+               AND (git_enriched_at IS NULL OR git_enriched_at < last_seen)
+             ORDER BY last_seen DESC
+             LIMIT ?1",
         )?;
-        stmt.query_map([], |row| {
+        stmt.query_map(params![batch_size as i64], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -47,25 +88,34 @@ pub fn enrich_git_commits(conn: &mut Connection) -> Result<usize> {
         .collect()
     };
 
-    if sessions.is_empty() {
-        return Ok(0);
-    }
+    let sessions_in_batch = sessions.len();
+
+    // Cache: project_dir -> is_git_repo (avoids repeated subprocess spawns)
+    let mut git_repo_cache: HashMap<String, bool> = HashMap::new();
+    // Cache: project_dir -> (author_name, author_email)
+    let mut author_cache: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
 
     let tx = conn.transaction()?;
     let mut total_commits = 0;
 
     for (session_id, project_dir, first_seen, last_seen, git_branch) in &sessions {
         let dir = Path::new(project_dir);
-        if !dir.is_dir() {
+
+        // Check git repo status with cache
+        let is_git = *git_repo_cache.entry(project_dir.clone()).or_insert_with(|| {
+            dir.is_dir() && (dir.join(".git").exists() || is_inside_git_repo(dir))
+        });
+
+        if !is_git {
+            // Mark as enriched so we don't re-check next cycle
+            tx.execute(
+                "UPDATE sessions SET git_enriched_at = ?1 WHERE session_id = ?2",
+                params![last_seen, session_id],
+            )?;
             continue;
         }
 
-        // Check if it's a git repo
-        if !dir.join(".git").exists() && !is_inside_git_repo(dir) {
-            continue;
-        }
-
-        // Delete existing commits for this session (re-enrich)
+        // Delete existing commits for this session (re-enrich on update)
         tx.execute(
             "DELETE FROM commits WHERE session_id = ?1",
             params![session_id],
@@ -92,8 +142,11 @@ pub fn enrich_git_commits(conn: &mut Connection) -> Result<usize> {
             total_commits += 1;
         }
 
-        // Get git author for the repo
-        let (author_name, author_email) = git_author(dir);
+        // Get git author with cache
+        let (author_name, author_email) = author_cache
+            .entry(project_dir.clone())
+            .or_insert_with(|| git_author(dir))
+            .clone();
 
         // Update session with author info and enrichment timestamp
         tx.execute(
@@ -106,7 +159,12 @@ pub fn enrich_git_commits(conn: &mut Connection) -> Result<usize> {
     }
 
     tx.commit()?;
-    Ok(total_commits)
+
+    Ok(GitEnrichResult {
+        sessions_processed: sessions_in_batch,
+        sessions_remaining: total_remaining.saturating_sub(sessions_in_batch),
+        commits_found: total_commits,
+    })
 }
 
 /// Check if a directory is inside a git repository (for repos where .git is in a parent).
@@ -114,6 +172,7 @@ fn is_inside_git_repo(dir: &Path) -> bool {
     Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(dir)
+        .stderr(std::process::Stdio::null())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -146,6 +205,7 @@ fn git_log_commits(
     let output = match Command::new("git")
         .args(&args)
         .current_dir(dir)
+        .stderr(std::process::Stdio::null())
         .output()
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -195,7 +255,8 @@ fn parse_git_log_output(output: &str) -> Vec<GitCommit> {
             // numstat format: "added\tremoved\tfilename" or "-\t-\tbinary"
             let stat_parts: Vec<&str> = stat_line.split('\t').collect();
             if stat_parts.len() >= 2 {
-                if let (Ok(a), Ok(r)) = (stat_parts[0].parse::<i64>(), stat_parts[1].parse::<i64>())
+                if let (Ok(a), Ok(r)) =
+                    (stat_parts[0].parse::<i64>(), stat_parts[1].parse::<i64>())
                 {
                     lines_added += a;
                     lines_removed += r;
@@ -285,6 +346,7 @@ fn git_author(dir: &Path) -> (Option<String>, Option<String>) {
     let name = Command::new("git")
         .args(["config", "user.name"])
         .current_dir(dir)
+        .stderr(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -294,6 +356,7 @@ fn git_author(dir: &Path) -> (Option<String>, Option<String>) {
     let email = Command::new("git")
         .args(["config", "user.email"])
         .current_dir(dir)
+        .stderr(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -378,10 +441,15 @@ pub fn git_summary(
         where_clause
     );
 
-    let (total_commits, total_lines_added, total_lines_removed, unique_prs, sessions_with_commits): (u64, i64, i64, u64, u64) =
-        conn.query_row(&sql, param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })?;
+    let (total_commits, total_lines_added, total_lines_removed, unique_prs, sessions_with_commits): (
+        u64,
+        i64,
+        i64,
+        u64,
+        u64,
+    ) = conn.query_row(&sql, param_refs.as_slice(), |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?;
 
     // Top authors
     let authors_sql = format!(
@@ -479,7 +547,9 @@ b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11
             "abc123abc123abc123abc123abc123abc123abcd"
         ));
         assert!(!looks_like_hash("short"));
-        assert!(!looks_like_hash("toolongtobeahashxyz123abc123abc123abc123abc123"));
+        assert!(!looks_like_hash(
+            "toolongtobeahashxyz123abc123abc123abc123abc123"
+        ));
     }
 
     #[test]
@@ -497,5 +567,45 @@ b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11
         let summary = git_summary(&conn, None, None).unwrap();
         assert_eq!(summary.total_commits, 0);
         assert_eq!(summary.unique_prs, 0);
+    }
+
+    #[test]
+    fn enrich_batch_empty_db() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::analytics::migrate_for_test(&conn);
+        let mut conn = conn;
+        let result = enrich_git_batch(&mut conn, 50).unwrap();
+        assert_eq!(result.sessions_processed, 0);
+        assert_eq!(result.sessions_remaining, 0);
+        assert_eq!(result.commits_found, 0);
+    }
+
+    #[test]
+    fn enrich_batch_marks_non_git_dirs() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::analytics::migrate_for_test(&conn);
+
+        // Insert a session with a project_dir that doesn't exist
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, provider)
+             VALUES ('test-sess', '/tmp/nonexistent-budi-test-dir', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', 'claude_code')",
+            [],
+        )
+        .unwrap();
+
+        let mut conn = conn;
+        let result = enrich_git_batch(&mut conn, 50).unwrap();
+        assert_eq!(result.sessions_processed, 1);
+        assert_eq!(result.sessions_remaining, 0);
+
+        // Should be marked as enriched so it won't be retried
+        let enriched_at: Option<String> = conn
+            .query_row(
+                "SELECT git_enriched_at FROM sessions WHERE session_id = 'test-sess'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(enriched_at.is_some());
     }
 }

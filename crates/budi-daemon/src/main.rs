@@ -177,7 +177,31 @@ async fn main() -> Result<()> {
                         tracing::warn!("Database needs migration. Skipping auto-sync.");
                         return None;
                     }
-                    analytics::sync_all(&mut conn).ok()
+                    let sync_result = analytics::sync_all(&mut conn).ok();
+
+                    // Post-sync: enrich a batch of sessions with git data.
+                    // Processes up to 50 sessions per cycle for progressive backfill.
+                    match budi_core::git::enrich_git_batch(&mut conn, 50) {
+                        Ok(r) if r.commits_found > 0 => {
+                            tracing::info!(
+                                "Git enrichment: {} commits from {} sessions ({} remaining)",
+                                r.commits_found,
+                                r.sessions_processed,
+                                r.sessions_remaining
+                            );
+                        }
+                        Ok(r) if r.sessions_remaining > 0 => {
+                            tracing::debug!(
+                                "Git enrichment: {} sessions checked, {} remaining",
+                                r.sessions_processed,
+                                r.sessions_remaining
+                            );
+                        }
+                        Err(e) => tracing::warn!("Git enrichment failed: {e}"),
+                        _ => {}
+                    }
+
+                    sync_result
                 })();
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
                 result
