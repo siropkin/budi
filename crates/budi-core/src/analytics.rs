@@ -394,7 +394,7 @@ pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
 }
 
 /// Summary statistics for display.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UsageSummary {
     pub total_sessions: u64,
     pub total_messages: u64,
@@ -536,7 +536,7 @@ pub fn top_tools(
 }
 
 /// A session row with aggregated stats.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
     pub project_dir: Option<String>,
@@ -558,7 +558,7 @@ pub struct SessionSummary {
 }
 
 /// Paginated session list result.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaginatedSessions {
     pub sessions: Vec<SessionSummary>,
     pub total_count: u64,
@@ -729,7 +729,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
 }
 
 /// Detailed stats for a single session.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionDetail {
     pub session_id: String,
     pub project_dir: Option<String>,
@@ -845,7 +845,7 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
 }
 
 /// Repository usage stats, grouped by repo_id.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RepoUsage {
     pub repo_id: String,
     pub display_path: String,
@@ -917,7 +917,7 @@ pub fn repo_usage(
 }
 
 /// MCP tool usage breakdown: tools with `mcp__` prefix, grouped by server.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpToolStat {
     pub server: String,
     pub tool: String,
@@ -981,7 +981,7 @@ pub fn mcp_tool_stats(
 }
 
 /// Cache efficiency stats for a date range.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CacheStats {
     pub total_input_tokens: u64,
     pub total_cache_read_tokens: u64,
@@ -1027,7 +1027,7 @@ pub fn cache_stats(
 }
 
 /// Activity data bucketed by time granularity.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActivityBucket {
     pub label: String,
     pub message_count: u64,
@@ -1150,7 +1150,7 @@ pub fn activity_chart(
 }
 
 /// Feature cost breakdown: tokens and cost grouped by git branch.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BranchCost {
     pub git_branch: String,
     pub repo_id: String,
@@ -1290,7 +1290,7 @@ pub fn branch_cost_single(
 }
 
 /// Tag-based cost breakdown: cost grouped by tag key+value.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TagCost {
     pub key: String,
     pub value: String,
@@ -1387,7 +1387,7 @@ pub fn tag_stats(
 }
 
 /// Model usage breakdown: tokens grouped by model name.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelUsage {
     pub model: String,
     pub provider: String,
@@ -1458,7 +1458,7 @@ pub fn model_usage(
 }
 
 /// Compact stats for the status line display.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StatuslineStats {
     pub today_cost: f64,
     pub week_cost: f64,
@@ -1573,7 +1573,7 @@ pub fn provider_count(conn: &Connection) -> Result<usize> {
 }
 
 /// Per-provider aggregate stats for the /analytics/providers endpoint.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderStats {
     pub provider: String,
     pub display_name: String,
@@ -1733,7 +1733,7 @@ pub fn interaction_mode_breakdown(
 }
 
 /// Context window utilization stats.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextUsageStats {
     pub avg_usage_pct: f64,
     pub max_usage_pct: f64,
@@ -1928,7 +1928,7 @@ pub fn ingest_scored_commits(conn: &Connection, commits: &[ScoredCommit]) -> Res
 }
 
 /// Summary of AI contribution across scored commits.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AiContributionSummary {
     pub total_commits: u64,
     pub avg_ai_percentage: f64,

@@ -114,9 +114,19 @@ fn request_config(repo_root: &str) -> anyhow::Result<budi_core::config::BudiConf
     config::load_or_default(root)
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct SyncParams {
+    #[serde(default)]
+    pub backfill_tags: bool,
+    #[serde(default)]
+    pub migrate: bool,
+}
+
 pub async fn analytics_sync(
     State(state): State<AppState>,
+    params: Option<Json<SyncParams>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let params = params.map(|p| p.0).unwrap_or_default();
     if state
         .syncing
         .compare_exchange(
@@ -135,11 +145,26 @@ pub async fn analytics_sync(
     let result = tokio::task::spawn_blocking(move || {
         let r = (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
-            let mut conn = budi_core::analytics::open_db(&db_path)?;
-            if budi_core::migration::needs_migration(&conn) {
-                anyhow::bail!("Database needs migration. Run `budi sync` or `budi update`.");
-            }
-            budi_core::analytics::sync_all(&mut conn)
+            let mut conn = if params.migrate {
+                budi_core::analytics::open_db_with_migration(&db_path)?
+            } else {
+                let c = budi_core::analytics::open_db(&db_path)?;
+                if budi_core::migration::needs_migration(&c) {
+                    anyhow::bail!("Database needs migration. Use migrate=true or run `budi migrate`.");
+                }
+                c
+            };
+            let (files_synced, messages_ingested) = budi_core::analytics::sync_all(&mut conn)?;
+            let tags_generated = if params.backfill_tags {
+                budi_core::analytics::backfill_tags(&mut conn)?
+            } else {
+                0
+            };
+            Ok(json!({
+                "files_synced": files_synced,
+                "messages_ingested": messages_ingested,
+                "tags_generated": tags_generated,
+            }))
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
         r
@@ -148,8 +173,5 @@ pub async fn analytics_sync(
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(json!({
-        "files_synced": result.0,
-        "messages_ingested": result.1,
-    })))
+    Ok(Json(result))
 }

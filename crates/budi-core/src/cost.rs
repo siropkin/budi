@@ -14,7 +14,7 @@ fn pricing_for_model_by_provider(model: &str, provider: Option<&str>) -> ModelPr
 }
 
 /// Estimated cost breakdown.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CostEstimate {
     pub total_cost: f64,
     pub input_cost: f64,

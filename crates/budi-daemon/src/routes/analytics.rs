@@ -367,3 +367,77 @@ pub async fn analytics_ai_contribution(
     .map_err(internal_error)?;
     Ok(Json(result))
 }
+
+#[derive(serde::Deserialize)]
+pub struct BranchDetailParams {
+    since: Option<String>,
+    until: Option<String>,
+}
+
+pub async fn analytics_branch_detail(
+    Path(branch): Path<String>,
+    Query(params): Query<BranchDetailParams>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::branch_cost_single(&conn, &branch, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    match result {
+        Some(detail) => Ok(Json(detail).into_response()),
+        None => Ok(Json(serde_json::Value::Null).into_response()),
+    }
+}
+
+pub async fn analytics_provider_count() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::provider_count(&conn)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(json!({ "count": result })))
+}
+
+pub async fn analytics_schema_version() -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path().ok()?;
+        if !db_path.exists() {
+            return Some(json!({ "current": 0, "target": budi_core::migration::SCHEMA_VERSION, "exists": false }));
+        }
+        let conn = analytics::open_db(&db_path).ok()?;
+        let current = budi_core::migration::current_version(&conn);
+        let target = budi_core::migration::SCHEMA_VERSION;
+        Some(json!({ "current": current, "target": target, "exists": true }))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| json!({ "current": 0, "target": budi_core::migration::SCHEMA_VERSION, "exists": false }));
+    Json(result)
+}
+
+pub async fn analytics_migrate() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        let current = budi_core::migration::current_version(&conn);
+        let target = budi_core::migration::SCHEMA_VERSION;
+        if current >= target {
+            return Ok(json!({ "current": current, "target": target, "migrated": false }));
+        }
+        drop(conn);
+        analytics::open_db_with_migration(&db_path)?;
+        Ok(json!({ "current": target, "target": target, "migrated": true, "from": current }))
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}

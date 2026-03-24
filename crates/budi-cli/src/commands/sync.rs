@@ -1,18 +1,35 @@
 use anyhow::Result;
-use budi_core::analytics;
+
+use crate::client::DaemonClient;
 
 pub fn init_auto_sync() -> Result<(usize, usize)> {
-    let db_path = analytics::db_path()?;
-    let mut conn = analytics::open_db_with_migration(&db_path)?;
-    analytics::sync_all(&mut conn)
+    let client = DaemonClient::connect()?;
+    let result = client.sync(true, false)?;
+    let files = result
+        .get("files_synced")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let msgs = result
+        .get("messages_ingested")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    Ok((files, msgs))
 }
 
 pub fn cmd_sync_with_options(backfill_tags: bool) -> Result<()> {
-    let db_path = analytics::db_path()?;
-    let mut conn = analytics::open_db_with_migration(&db_path)?;
+    let client = DaemonClient::connect()?;
 
     println!("Syncing transcripts...");
-    let (files_synced, messages_ingested) = analytics::sync_all(&mut conn)?;
+    let result = client.sync(true, backfill_tags)?;
+
+    let files_synced = result
+        .get("files_synced")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let messages_ingested = result
+        .get("messages_ingested")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     if files_synced == 0 && messages_ingested == 0 {
         println!("Already up to date.");
@@ -24,11 +41,12 @@ pub fn cmd_sync_with_options(backfill_tags: bool) -> Result<()> {
     }
 
     if backfill_tags {
-        println!("Regenerating tags...");
-        let tag_count = analytics::backfill_tags(&mut conn)?;
-        println!("Generated \x1b[1m{}\x1b[0m tags.", tag_count);
+        let tags_generated = result
+            .get("tags_generated")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("Generated \x1b[1m{}\x1b[0m tags.", tags_generated);
     }
 
-    println!("Database: {}", db_path.display());
     Ok(())
 }

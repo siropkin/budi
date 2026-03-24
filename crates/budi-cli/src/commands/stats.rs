@@ -1,8 +1,9 @@
 use anyhow::Result;
-use budi_core::{analytics, cost};
+use budi_core::analytics;
 use chrono::{Datelike, Local, NaiveDate};
 
 use crate::StatsPeriod;
+use crate::client::DaemonClient;
 
 pub fn period_label(period: StatsPeriod) -> &'static str {
     match period {
@@ -47,85 +48,74 @@ pub fn cmd_stats(
     tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    let db_path = analytics::db_path()?;
-    if !db_path.exists() {
-        println!("No analytics data yet. Run \x1b[1mbudi sync\x1b[0m to import transcripts.");
-        return Ok(());
-    }
-    let conn = analytics::open_db(&db_path)?;
+    let client = DaemonClient::connect()?;
 
     if let Some(ref tag_filter) = tag {
-        return cmd_stats_tags(&conn, period, tag_filter, json_output);
+        return cmd_stats_tags(&client, period, tag_filter, json_output);
     }
 
     if let Some(ref sid) = session {
         if json_output {
-            let detail = analytics::session_detail(&conn, sid)?;
+            let detail = client.session_detail(sid)?;
             println!("{}", serde_json::to_string_pretty(&detail)?);
             return Ok(());
         }
-        return cmd_stats_session(&conn, sid);
+        return cmd_stats_session(&client, sid);
     }
 
     if let Some(ref br) = branch {
-        return cmd_stats_branch_detail(&conn, period, br, json_output);
+        return cmd_stats_branch_detail(&client, period, br, json_output);
     }
 
     if branches {
-        return cmd_stats_branches(&conn, period, json_output);
+        return cmd_stats_branches(&client, period, json_output);
     }
 
     if sessions {
-        return cmd_stats_sessions(&conn, period, json_output);
+        return cmd_stats_sessions(&client, period, json_output);
     }
 
     if models {
-        return cmd_stats_models(&conn, period, json_output);
+        return cmd_stats_models(&client, period, json_output);
     }
 
     if projects {
         if json_output {
             let (since, until) = period_date_range(period);
-            let data = analytics::repo_usage(&conn, since.as_deref(), until.as_deref(), 50)?;
+            let data = client.projects(since.as_deref(), until.as_deref(), 50)?;
             println!("{}", serde_json::to_string_pretty(&data)?);
             return Ok(());
         }
-        return cmd_stats_projects(&conn, period);
+        return cmd_stats_projects(&client, period);
     }
 
     if json_output {
         let (since, until) = period_date_range(period);
-        let summary = analytics::usage_summary_filtered(
-            &conn,
-            since.as_deref(),
-            until.as_deref(),
-            provider.as_deref(),
-        )?;
+        let summary = client.summary(since.as_deref(), until.as_deref(), provider.as_deref())?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
 
     // When no provider filter and multiple agents detected, show breakdown
-    if provider.is_none() && analytics::provider_count(&conn)? > 1 {
+    if provider.is_none() && client.provider_count()? > 1 {
         let (since, until) = period_date_range(period);
-        let providers = analytics::provider_stats(&conn, since.as_deref(), until.as_deref())?;
+        let providers = client.providers(since.as_deref(), until.as_deref())?;
         if providers.len() > 1 {
-            cmd_stats_multi_agent(&conn, period, &providers)?;
+            cmd_stats_multi_agent(&client, period, &providers)?;
             return Ok(());
         }
     }
 
-    cmd_stats_summary_filtered(&conn, period, provider.as_deref())
+    cmd_stats_summary_filtered(&client, period, provider.as_deref())
 }
 
 fn cmd_stats_summary_filtered(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let summary =
-        analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
+    let summary = client.summary(since.as_deref(), until.as_deref(), provider)?;
 
     let period_label = period_label(period);
     let provider_label = provider.unwrap_or("all");
@@ -170,7 +160,7 @@ fn cmd_stats_summary_filtered(
     );
 
     // Cost breakdown
-    let est = cost::estimate_cost_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
+    let est = client.cost(since.as_deref(), until.as_deref(), provider)?;
     println!();
     println!(
         "  \x1b[1mEst. cost\x1b[0m     \x1b[33m{}\x1b[0m",
@@ -190,7 +180,9 @@ fn cmd_stats_summary_filtered(
         );
     }
 
-    let tools = analytics::top_tools(conn, since.as_deref(), until.as_deref()).unwrap_or_default();
+    let tools = client
+        .top_tools(since.as_deref(), until.as_deref())
+        .unwrap_or_default();
     if !tools.is_empty() {
         println!();
         println!("  \x1b[1mTop tools\x1b[0m");
@@ -210,7 +202,7 @@ fn cmd_stats_summary_filtered(
 }
 
 fn cmd_stats_multi_agent(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     providers: &[analytics::ProviderStats],
 ) -> Result<()> {
@@ -255,8 +247,7 @@ fn cmd_stats_multi_agent(
 
     // Show combined summary
     let (since, until) = period_date_range(period);
-    let summary =
-        analytics::usage_summary_filtered(conn, since.as_deref(), until.as_deref(), None)?;
+    let summary = client.summary(since.as_deref(), until.as_deref(), None)?;
 
     println!(
         "  \x1b[1mTotal\x1b[0m        {} messages, {} sessions",
@@ -276,8 +267,8 @@ fn cmd_stats_multi_agent(
     Ok(())
 }
 
-fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
-    let detail = analytics::session_detail(conn, session_id)?;
+fn cmd_stats_session(client: &DaemonClient, session_id: &str) -> Result<()> {
+    let detail = client.session_detail(session_id)?;
     let Some(d) = detail else {
         println!("Session not found: {}", session_id);
         return Ok(());
@@ -362,9 +353,9 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
     Ok(())
 }
 
-fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Result<()> {
+fn cmd_stats_projects(client: &DaemonClient, period: StatsPeriod) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let repos = analytics::repo_usage(conn, since.as_deref(), until.as_deref(), 15)?;
+    let repos = client.projects(since.as_deref(), until.as_deref(), 15)?;
 
     let period_label = period_label(period);
 
@@ -402,12 +393,12 @@ fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Resul
 }
 
 fn cmd_stats_branches(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let branches = analytics::branch_cost(conn, since.as_deref(), until.as_deref())?;
+    let branches = client.branches(since.as_deref(), until.as_deref())?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&branches)?);
@@ -463,13 +454,13 @@ fn cmd_stats_branches(
 }
 
 fn cmd_stats_branch_detail(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     branch: &str,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let result = analytics::branch_cost_single(conn, branch, since.as_deref(), until.as_deref())?;
+    let result = client.branch_detail(branch, since.as_deref(), until.as_deref())?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -513,12 +504,12 @@ fn cmd_stats_branch_detail(
 }
 
 fn cmd_stats_models(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let models = analytics::model_usage(conn, since.as_deref(), until.as_deref())?;
+    let models = client.models(since.as_deref(), until.as_deref())?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&models)?);
@@ -559,23 +550,12 @@ fn cmd_stats_models(
 }
 
 fn cmd_stats_sessions(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let result = analytics::session_list(
-        conn,
-        &analytics::SessionListParams {
-            since: since.as_deref(),
-            until: until.as_deref(),
-            search: None,
-            sort_by: None,
-            sort_asc: false,
-            limit: 100,
-            offset: 0,
-        },
-    )?;
+    let result = client.sessions(since.as_deref(), until.as_deref(), 100, 0)?;
     let sessions = result.sessions;
 
     if json_output {
@@ -681,7 +661,7 @@ pub fn format_cost_cents(cents: f64) -> String {
 }
 
 fn cmd_stats_tags(
-    conn: &rusqlite::Connection,
+    client: &DaemonClient,
     period: StatsPeriod,
     tag_filter: &str,
     json_output: bool,
@@ -695,7 +675,7 @@ fn cmd_stats_tags(
         (Some(tag_filter), None)
     };
 
-    let data = analytics::tag_stats(conn, tag_key, since.as_deref(), until.as_deref(), 30)?;
+    let data = client.tags(tag_key, since.as_deref(), until.as_deref(), 30)?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&data)?);

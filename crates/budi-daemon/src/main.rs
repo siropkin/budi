@@ -61,12 +61,19 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/branches", get(a::analytics_branches))
         .route("/analytics/tags", get(a::analytics_tags))
         .route("/analytics/ai-contribution", get(a::analytics_ai_contribution))
+        .route(
+            "/analytics/branches/{branch}",
+            get(a::analytics_branch_detail),
+        )
+        .route("/analytics/provider-count", get(a::analytics_provider_count))
         .route("/analytics/providers", get(a::analytics_providers))
         .route(
             "/analytics/registered-providers",
             get(a::analytics_registered_providers),
         )
         .route("/analytics/statusline", get(a::analytics_statusline))
+        .route("/analytics/schema-version", get(a::analytics_schema_version))
+        .route("/migrate", post(a::analytics_migrate))
         .route("/analytics/context-usage", get(a::analytics_context_usage))
         .route(
             "/analytics/interaction-modes",

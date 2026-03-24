@@ -69,13 +69,17 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    // Database schema check
-    if let Ok(db_path) = budi_core::analytics::db_path() {
-        if db_path.exists() {
-            if let Ok(conn) = budi_core::analytics::open_db(&db_path) {
-                let current = budi_core::migration::current_version(&conn);
-                let target = budi_core::migration::SCHEMA_VERSION;
-                if current >= target {
+    // Database schema check (via daemon if healthy, otherwise skip)
+    if daemon_health(&config) {
+        if let Ok(client) = crate::client::DaemonClient::connect() {
+            if let Ok(sv) = client.schema_version() {
+                let exists = sv.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+                let current = sv.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
+                let target = sv.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
+                if !exists {
+                    println!("  [!!] database: not created yet");
+                    issues.push("No database. Run `budi sync` to create it.".into());
+                } else if current >= target {
                     println!("  [ok] database schema: v{}", current);
                 } else {
                     println!("  [!!] database schema: v{} (needs v{})", current, target);

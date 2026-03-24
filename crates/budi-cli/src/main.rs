@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
+mod client;
 mod commands;
 mod daemon;
 
@@ -219,17 +220,16 @@ fn main() -> Result<()> {
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),
         Commands::Migrate => {
-            let db_path = budi_core::analytics::db_path()?;
-            let conn = budi_core::analytics::open_db(&db_path)?;
-            let current = budi_core::migration::current_version(&conn);
-            let target = budi_core::migration::SCHEMA_VERSION;
-            if current >= target {
-                println!("Database schema is up to date (v{}).", current);
-            } else {
-                println!("Migrating database v{} → v{}...", current, target);
-                drop(conn);
-                budi_core::analytics::open_db_with_migration(&db_path)?;
+            let c = client::DaemonClient::connect()?;
+            let result = c.migrate()?;
+            let migrated = result.get("migrated").and_then(|v| v.as_bool()).unwrap_or(false);
+            let current = result.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
+            if migrated {
+                let from = result.get("from").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("Migrated database v{} → v{}.", from, current);
                 println!("\x1b[32m✓\x1b[0m Migration complete.");
+            } else {
+                println!("Database schema is up to date (v{}).", current);
             }
             Ok(())
         }
