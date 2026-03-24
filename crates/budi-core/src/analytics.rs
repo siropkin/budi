@@ -1881,6 +1881,113 @@ pub fn usage_summary_filtered(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Scored commits — AI attribution data from Cursor's ai-code-tracking.db
+// ---------------------------------------------------------------------------
+
+/// A scored commit with AI contribution percentage.
+pub struct ScoredCommit {
+    pub hash: String,
+    pub branch_name: String,
+    pub message: Option<String>,
+    pub timestamp: String,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+    pub ai_percentage: f64,
+}
+
+/// Ingest scored commits into the commits table. Uses INSERT OR REPLACE
+/// to handle re-scoring of existing commits.
+pub fn ingest_scored_commits(conn: &Connection, commits: &[ScoredCommit]) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let mut count = 0;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR REPLACE INTO commits
+                (hash, branch_name, message, timestamp, lines_added, lines_removed,
+                 ai_percentage, ai_created, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'cursor')",
+        )?;
+        for c in commits {
+            let ai_created = if c.ai_percentage > 50.0 { 1 } else { 0 };
+            stmt.execute(params![
+                c.hash,
+                c.branch_name,
+                c.message,
+                c.timestamp,
+                c.lines_added,
+                c.lines_removed,
+                c.ai_percentage,
+                ai_created,
+            ])?;
+            count += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(count)
+}
+
+/// Summary of AI contribution across scored commits.
+#[derive(Debug, serde::Serialize)]
+pub struct AiContributionSummary {
+    pub total_commits: u64,
+    pub avg_ai_percentage: f64,
+    pub total_lines_added: u64,
+    pub total_lines_removed: u64,
+    pub ai_commits: u64, // commits with ai_percentage > 50%
+}
+
+/// Query AI contribution summary, optionally filtered by date range.
+pub fn ai_contribution_summary(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<AiContributionSummary> {
+    let mut where_parts = Vec::new();
+    let mut param_values: Vec<String> = Vec::new();
+
+    if let Some(s) = since {
+        param_values.push(s.to_string());
+        where_parts.push(format!("timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until {
+        param_values.push(u.to_string());
+        where_parts.push(format!("timestamp <= ?{}", param_values.len()));
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_parts.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT COUNT(*),
+                COALESCE(AVG(ai_percentage), 0),
+                COALESCE(SUM(lines_added), 0),
+                COALESCE(SUM(lines_removed), 0),
+                SUM(CASE WHEN ai_percentage > 50 THEN 1 ELSE 0 END)
+         FROM commits {}",
+        where_clause
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    conn.query_row(&sql, param_refs.as_slice(), |r| {
+        Ok(AiContributionSummary {
+            total_commits: r.get(0)?,
+            avg_ai_percentage: r.get(1)?,
+            total_lines_added: r.get(2)?,
+            total_lines_removed: r.get(3)?,
+            ai_commits: r.get(4)?,
+        })
+    })
+    .context("ai_contribution_summary query failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2652,5 +2759,73 @@ mod tests {
         // Claude Code is registered, so it gets proper display name and cost.
         assert_eq!(cc_stats.display_name, "Claude Code");
         assert!(cc_stats.estimated_cost > 0.0);
+    }
+
+    #[test]
+    fn scored_commits_ingest_and_query() {
+        let conn = test_db();
+
+        let commits = vec![
+            ScoredCommit {
+                hash: "abc123".to_string(),
+                branch_name: "feature/PAVA-42".to_string(),
+                message: Some("Fix login".to_string()),
+                timestamp: "2026-03-20T10:00:00Z".to_string(),
+                lines_added: 100,
+                lines_removed: 20,
+                ai_percentage: 85.5,
+            },
+            ScoredCommit {
+                hash: "def456".to_string(),
+                branch_name: "main".to_string(),
+                message: Some("Update readme".to_string()),
+                timestamp: "2026-03-21T12:00:00Z".to_string(),
+                lines_added: 10,
+                lines_removed: 5,
+                ai_percentage: 30.0,
+            },
+        ];
+
+        let count = ingest_scored_commits(&conn, &commits).unwrap();
+        assert_eq!(count, 2);
+
+        let summary = ai_contribution_summary(&conn, None, None).unwrap();
+        assert_eq!(summary.total_commits, 2);
+        assert!((summary.avg_ai_percentage - 57.75).abs() < 0.01);
+        assert_eq!(summary.total_lines_added, 110);
+        assert_eq!(summary.total_lines_removed, 25);
+        assert_eq!(summary.ai_commits, 1); // only abc123 has > 50%
+    }
+
+    #[test]
+    fn scored_commits_upsert_on_rescore() {
+        let conn = test_db();
+
+        let commits = vec![ScoredCommit {
+            hash: "abc123".to_string(),
+            branch_name: "main".to_string(),
+            message: Some("Initial".to_string()),
+            timestamp: "2026-03-20T10:00:00Z".to_string(),
+            lines_added: 50,
+            lines_removed: 10,
+            ai_percentage: 40.0,
+        }];
+        ingest_scored_commits(&conn, &commits).unwrap();
+
+        // Re-score with updated percentage
+        let updated = vec![ScoredCommit {
+            hash: "abc123".to_string(),
+            branch_name: "main".to_string(),
+            message: Some("Initial".to_string()),
+            timestamp: "2026-03-20T10:00:00Z".to_string(),
+            lines_added: 50,
+            lines_removed: 10,
+            ai_percentage: 75.0,
+        }];
+        ingest_scored_commits(&conn, &updated).unwrap();
+
+        let summary = ai_contribution_summary(&conn, None, None).unwrap();
+        assert_eq!(summary.total_commits, 1); // not duplicated
+        assert!((summary.avg_ai_percentage - 75.0).abs() < 0.01);
     }
 }

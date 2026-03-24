@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -24,6 +24,12 @@ pub fn needs_migration(conn: &Connection) -> bool {
 pub fn migrate(conn: &Connection) -> Result<bool> {
     let version = current_version(conn);
     let mut needs_tag_backfill = false;
+
+    // Disable FK checks during migration (table rebuilds may temporarily
+    // violate constraints before the replacement table is in place).
+    if version < SCHEMA_VERSION {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    }
 
     if version < 1 {
         conn.execute_batch(
@@ -86,7 +92,7 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
 
             CREATE TABLE IF NOT EXISTS commits (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id    TEXT NOT NULL,
+                session_id    TEXT,
                 hash          TEXT NOT NULL,
                 author_name   TEXT,
                 author_email  TEXT,
@@ -96,6 +102,9 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 lines_removed INTEGER NOT NULL DEFAULT 0,
                 pr_number     INTEGER,
                 ai_created    INTEGER NOT NULL DEFAULT 0,
+                ai_percentage REAL,
+                branch_name   TEXT,
+                provider      TEXT DEFAULT 'cursor',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
 
@@ -121,6 +130,8 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             CREATE INDEX IF NOT EXISTS idx_commits_session ON commits(session_id);
             CREATE INDEX IF NOT EXISTS idx_commits_hash ON commits(hash);
             CREATE INDEX IF NOT EXISTS idx_commits_pr ON commits(pr_number);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_hash_branch
+                ON commits(hash, branch_name);
             ",
         )?;
         needs_tag_backfill = true;
@@ -170,7 +181,7 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 user_name        TEXT,
                 machine_name     TEXT
             );
-            INSERT INTO sessions_new
+            INSERT OR REPLACE INTO sessions_new
                 SELECT session_id, project_dir, first_seen, last_seen, version,
                        git_branch, repo_id, provider, session_title, interaction_mode,
                        lines_added, lines_removed, user_name, machine_name
@@ -184,6 +195,44 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
         )?;
     }
 
+    if version < 4 {
+        // Rebuild commits table: make session_id nullable, add AI attribution
+        // columns for scored_commits data. The commits table is empty in all
+        // existing DBs (git enrichment was removed), so this is safe.
+        if version >= 1 {
+            conn.execute_batch(
+                "
+                DROP TABLE IF EXISTS commits;
+                CREATE TABLE commits (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id    TEXT,
+                    hash          TEXT NOT NULL,
+                    author_name   TEXT,
+                    author_email  TEXT,
+                    timestamp     TEXT NOT NULL,
+                    message       TEXT,
+                    lines_added   INTEGER NOT NULL DEFAULT 0,
+                    lines_removed INTEGER NOT NULL DEFAULT 0,
+                    pr_number     INTEGER,
+                    ai_created    INTEGER NOT NULL DEFAULT 0,
+                    ai_percentage REAL,
+                    branch_name   TEXT,
+                    provider      TEXT DEFAULT 'cursor',
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_commits_session ON commits(session_id);
+                CREATE INDEX IF NOT EXISTS idx_commits_hash ON commits(hash);
+                CREATE INDEX IF NOT EXISTS idx_commits_pr ON commits(pr_number);
+                ",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_hash_branch
+                ON commits(hash, branch_name);",
+        )?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(needs_tag_backfill)
 }

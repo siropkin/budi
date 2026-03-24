@@ -354,4 +354,16 @@ pub async fn analytics_tags(
     Ok(Json(result))
 }
 
-
+pub async fn analytics_ai_contribution(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<analytics::AiContributionSummary>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::ai_contribution_summary(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}

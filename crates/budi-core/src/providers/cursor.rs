@@ -99,6 +99,21 @@ impl Provider for CursorProvider {
                 }
             }
         }
+
+        // Sync scored commits from ai-code-tracking.db
+        if let Some(tracking_path) = ai_tracking_db_path() {
+            match sync_scored_commits(conn, &tracking_path) {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!("Synced {} scored commits from Cursor", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Cursor ai-tracking sync failed: {}", e);
+                }
+            }
+        }
+
         Some(Ok((total_sessions, total_messages)))
     }
 }
@@ -203,6 +218,96 @@ fn sync_from_state_vscdb(
     }
 
     Ok((total_sessions, total_messages))
+}
+
+// ---------------------------------------------------------------------------
+// ai-code-tracking.db — scored commits with AI contribution %
+// ---------------------------------------------------------------------------
+
+/// Returns the path to Cursor's ai-code-tracking.db if it exists.
+fn ai_tracking_db_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let path = PathBuf::from(home).join(".cursor/ai-tracking/ai-code-tracking.db");
+    if path.exists() { Some(path) } else { None }
+}
+
+/// Sync scored commits from Cursor's ai-code-tracking.db into budi.
+fn sync_scored_commits(
+    budi_conn: &Connection,
+    tracking_path: &Path,
+) -> Result<usize> {
+    let tracking_db = Connection::open_with_flags(
+        tracking_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Failed to open {}", tracking_path.display()))?;
+
+    // Watermark-based incremental sync using scoredAt
+    let watermark_key = format!("cursor-ai-tracking:{}", tracking_path.display());
+    let last_watermark = analytics::get_sync_offset(budi_conn, &watermark_key).unwrap_or(0) as i64;
+
+    let mut stmt = tracking_db.prepare(
+        "SELECT commitHash, branchName, commitMessage, commitDate,
+                linesAdded, linesDeleted, v2AiPercentage, scoredAt
+         FROM scored_commits
+         WHERE scoredAt > ?1
+         ORDER BY scoredAt ASC",
+    )?;
+
+    let mut commits = Vec::new();
+    let mut max_watermark = last_watermark;
+
+    let rows = stmt.query_map([last_watermark], |row| {
+        Ok((
+            row.get::<_, String>(0)?,           // commitHash
+            row.get::<_, String>(1)?,           // branchName
+            row.get::<_, Option<String>>(2)?,   // commitMessage
+            row.get::<_, Option<String>>(3)?,   // commitDate
+            row.get::<_, Option<i64>>(4)?,      // linesAdded
+            row.get::<_, Option<i64>>(5)?,      // linesDeleted
+            row.get::<_, Option<String>>(6)?,   // v2AiPercentage (stored as TEXT)
+            row.get::<_, i64>(7)?,              // scoredAt
+        ))
+    })?;
+
+    for row in rows {
+        let (hash, branch, message, commit_date, lines_add, lines_del, ai_pct_str, scored_at) =
+            match row {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+        let ai_percentage = ai_pct_str
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        let timestamp = commit_date.unwrap_or_default();
+
+        commits.push(analytics::ScoredCommit {
+            hash,
+            branch_name: branch,
+            message,
+            timestamp,
+            lines_added: lines_add.unwrap_or(0) as u64,
+            lines_removed: lines_del.unwrap_or(0) as u64,
+            ai_percentage,
+        });
+
+        max_watermark = max_watermark.max(scored_at);
+    }
+
+    let count = if !commits.is_empty() {
+        analytics::ingest_scored_commits(budi_conn, &commits)?
+    } else {
+        0
+    };
+
+    if max_watermark > last_watermark {
+        analytics::set_sync_offset(budi_conn, &watermark_key, max_watermark as usize)?;
+    }
+
+    Ok(count)
 }
 
 /// A parsed composer session from state.vscdb.
