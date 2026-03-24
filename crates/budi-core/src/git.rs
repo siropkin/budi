@@ -9,9 +9,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+
+/// Timeout for individual git subprocess calls.
+const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum sessions to enrich per batch call.
 const DEFAULT_BATCH_SIZE: usize = 50;
@@ -167,14 +171,44 @@ pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrich
     })
 }
 
+/// Run a git command with a timeout. Returns None if the command fails or times out.
+fn run_git_with_timeout(dir: &Path, args: &[&str]) -> Option<String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    let output = child.wait_with_output().ok()?;
+                    return Some(String::from_utf8_lossy(&output.stdout).to_string());
+                }
+                return None;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::debug!("Git command timed out in {}", dir.display());
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Check if a directory is inside a git repository (for repos where .git is in a parent).
 fn is_inside_git_repo(dir: &Path) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(dir)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|o| o.status.success())
+    run_git_with_timeout(dir, &["rev-parse", "--is-inside-work-tree"])
+        .map(|s| s.trim() == "true")
         .unwrap_or(false)
 }
 
@@ -187,29 +221,27 @@ fn git_log_commits(
 ) -> Vec<GitCommit> {
     // Format: hash<SEP>author_name<SEP>author_email<SEP>ISO timestamp<SEP>subject
     // Followed by numstat lines (added\tremoved\tfile)
-    let format = "%H\x1f%an\x1f%ae\x1f%aI\x1f%s";
-    let mut args = vec![
-        "log".to_string(),
-        format!("--since={}", since),
-        format!("--until={}", until),
-        format!("--format={}", format),
-        "--numstat".to_string(),
+    let format_str = format!("--format=%H\x1f%an\x1f%ae\x1f%aI\x1f%s");
+    let since_arg = format!("--since={}", since);
+    let until_arg = format!("--until={}", until);
+    let mut args: Vec<&str> = vec![
+        "log",
+        &since_arg,
+        &until_arg,
+        &format_str,
+        "--numstat",
     ];
 
     // If branch is specified, use it to scope commits
+    let branch_name;
     if let Some(br) = branch {
-        let branch_name = br.strip_prefix("refs/heads/").unwrap_or(br);
-        args.push(branch_name.to_string());
+        branch_name = br.strip_prefix("refs/heads/").unwrap_or(br).to_string();
+        args.push(&branch_name);
     }
 
-    let output = match Command::new("git")
-        .args(&args)
-        .current_dir(dir)
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return Vec::new(),
+    let output = match run_git_with_timeout(dir, &args) {
+        Some(s) => s,
+        None => return Vec::new(),
     };
 
     parse_git_log_output(&output)
@@ -343,24 +375,12 @@ fn parse_number_at(s: &str, start: usize) -> Option<i64> {
 
 /// Get the git author name and email configured for a repository.
 fn git_author(dir: &Path) -> (Option<String>, Option<String>) {
-    let name = Command::new("git")
-        .args(["config", "user.name"])
-        .current_dir(dir)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    let name = run_git_with_timeout(dir, &["config", "user.name"])
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let email = Command::new("git")
-        .args(["config", "user.email"])
-        .current_dir(dir)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    let email = run_git_with_timeout(dir, &["config", "user.email"])
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
     (name, email)
