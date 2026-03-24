@@ -223,6 +223,10 @@ struct ComposerSession {
     context_token_limit: Option<u64>,
     /// Model name from modelConfig (fallback when usageData is empty).
     model_name: Option<String>,
+    /// Git branch from `createdOnBranch` or resolved from workspace .git/HEAD.
+    git_branch: Option<String>,
+    /// Workspace folder path, extracted from file URIs in the session.
+    cwd: Option<String>,
 }
 
 #[derive(Debug)]
@@ -345,6 +349,21 @@ fn parse_composer_sessions(
             }
         }
 
+        // Extract git branch — prefer createdOnBranch (stored by Cursor), fall
+        // back to reading .git/HEAD from the workspace folder (pure file read).
+        let created_on_branch = parsed
+            .get("createdOnBranch")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        // Extract workspace folder from file URIs in the session.
+        let cwd = extract_folder_from_file_uris(&parsed);
+
+        let git_branch = created_on_branch.or_else(|| {
+            cwd.as_deref().and_then(resolve_git_branch_from_head)
+        });
+
         sessions.push(ComposerSession {
             key,
             name,
@@ -357,10 +376,72 @@ fn parse_composer_sessions(
             context_tokens_used,
             context_token_limit,
             model_name,
+            git_branch,
+            cwd,
         });
     }
 
     Ok((sessions, max_watermark))
+}
+
+/// Extract a workspace folder path from file URIs in composerData.
+/// Checks `allAttachedFileCodeChunksUris` (string URIs) and
+/// `newlyCreatedFiles` (objects with `uri.fsPath`).
+fn extract_folder_from_file_uris(parsed: &Value) -> Option<String> {
+    // Try allAttachedFileCodeChunksUris first (array of "file:///..." strings)
+    if let Some(uris) = parsed.get("allAttachedFileCodeChunksUris").and_then(|v| v.as_array()) {
+        for uri in uris {
+            if let Some(path) = uri.as_str().and_then(file_uri_to_path) {
+                return find_git_root(&path);
+            }
+        }
+    }
+
+    // Try newlyCreatedFiles (array of objects with uri.fsPath)
+    if let Some(files) = parsed.get("newlyCreatedFiles").and_then(|v| v.as_array()) {
+        for file in files {
+            if let Some(fs_path) = file
+                .get("uri")
+                .and_then(|u| u.get("fsPath"))
+                .and_then(|v| v.as_str())
+            {
+                return find_git_root(&PathBuf::from(fs_path));
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert a `file:///path` URI to a PathBuf.
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    uri.strip_prefix("file://").map(PathBuf::from)
+}
+
+/// Walk up from a file path to find the nearest directory containing `.git`.
+fn find_git_root(path: &Path) -> Option<String> {
+    let mut dir = if path.is_file() || !path.exists() {
+        path.parent()?
+    } else {
+        path
+    };
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_string_lossy().to_string());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.
+/// Returns `None` for detached HEAD or if the file can't be read.
+pub fn resolve_git_branch_from_head(dir: &str) -> Option<String> {
+    let head_path = Path::new(dir).join(".git/HEAD");
+    let contents = std::fs::read_to_string(&head_path).ok()?;
+    let trimmed = contents.trim();
+    trimmed
+        .strip_prefix("ref: refs/heads/")
+        .map(|b| b.to_string())
 }
 
 /// Convert a ComposerSession into ParsedMessages for ingestion.
@@ -390,7 +471,7 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         uuid: format!("{}-user", session_id),
         session_id: Some(session_id.clone()),
         timestamp,
-        cwd: None,
+        cwd: session.cwd.clone(),
         role: "user".to_string(),
         model: None,
         input_tokens: 0,
@@ -402,7 +483,7 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         stop_reason: None,
         text_length: 0,
         version: None,
-        git_branch: None,
+        git_branch: session.git_branch.clone(),
         repo_id: None,
         provider: "cursor".to_string(),
         cost_cents: None,
@@ -427,7 +508,7 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             uuid: format!("{}-assistant-{}", session_id, i),
             session_id: Some(session_id.clone()),
             timestamp,
-            cwd: None,
+            cwd: session.cwd.clone(),
             role: "assistant".to_string(),
             model: Some(usage.model.clone()),
             input_tokens,
@@ -439,7 +520,7 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             stop_reason: Some("end_turn".to_string()),
             text_length: 0,
             version: None,
-            git_branch: None,
+            git_branch: session.git_branch.clone(),
             repo_id: None,
             provider: "cursor".to_string(),
             cost_cents: Some(usage.cost_cents),
@@ -472,7 +553,7 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             uuid: format!("{}-assistant-0", session_id),
             session_id: Some(session_id.clone()),
             timestamp,
-            cwd: None,
+            cwd: session.cwd.clone(),
             role: "assistant".to_string(),
             model: session.model_name.clone(),
             input_tokens,
@@ -484,7 +565,7 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             stop_reason: Some("end_turn".to_string()),
             text_length: 0,
             version: None,
-            git_branch: None,
+            git_branch: session.git_branch.clone(),
             repo_id: None,
             provider: "cursor".to_string(),
             cost_cents: if cost_cents > 0.0 {
@@ -1096,6 +1177,8 @@ mod tests {
             context_tokens_used: Some(50000),
             context_token_limit: Some(200000),
             model_name: Some("claude-sonnet-4-6".to_string()),
+            git_branch: Some("feature/PAVA-123-fix-login".to_string()),
+            cwd: Some("/projects/webapp".to_string()),
         };
 
         let msgs = composer_session_to_messages(&session);
@@ -1115,6 +1198,18 @@ mod tests {
         assert_eq!(msgs[1].context_tokens_used, Some(50000));
         assert_eq!(msgs[1].context_token_limit, Some(200000));
         assert!(msgs[1].input_tokens > 0); // Reverse-calculated from cost
+
+        // Git branch and cwd flow through to all messages
+        assert_eq!(
+            msgs[0].git_branch.as_deref(),
+            Some("feature/PAVA-123-fix-login")
+        );
+        assert_eq!(msgs[0].cwd.as_deref(), Some("/projects/webapp"));
+        assert_eq!(
+            msgs[1].git_branch.as_deref(),
+            Some("feature/PAVA-123-fix-login")
+        );
+        assert_eq!(msgs[1].cwd.as_deref(), Some("/projects/webapp"));
     }
 
     #[test]
@@ -1131,6 +1226,8 @@ mod tests {
             context_tokens_used: None,
             context_token_limit: None,
             model_name: None,
+            git_branch: None,
+            cwd: None,
         };
 
         let msgs = composer_session_to_messages(&session);
@@ -1209,6 +1306,7 @@ mod tests {
             "totalLinesRemoved": 3,
             "isArchived": false,
             "isAgentic": true,
+            "createdOnBranch": "feature/PAVA-42-login-fix",
         });
         conn.execute(
             "INSERT INTO cursorDiskKV (key, value) VALUES ('composerData:test-id-1', ?1)",
@@ -1228,6 +1326,11 @@ mod tests {
         assert!(s.is_agentic);
         // contextUsagePercent=25% of default 200K = 50,000 tokens
         assert_eq!(s.context_tokens_used, Some(50000));
+        // createdOnBranch is extracted
+        assert_eq!(
+            s.git_branch.as_deref(),
+            Some("feature/PAVA-42-login-fix")
+        );
 
         // Verify messages are generated correctly
         let msgs = composer_session_to_messages(s);
@@ -1235,5 +1338,148 @@ mod tests {
         assert_eq!(msgs[1].model.as_deref(), Some("claude-4-sonnet"));
         assert_eq!(msgs[1].input_tokens, 50000);
         assert!(msgs[1].cost_cents.is_some());
+        // Branch flows through to messages
+        assert_eq!(
+            msgs[0].git_branch.as_deref(),
+            Some("feature/PAVA-42-login-fix")
+        );
+        assert_eq!(
+            msgs[1].git_branch.as_deref(),
+            Some("feature/PAVA-42-login-fix")
+        );
+    }
+
+    // --- git branch / folder extraction tests ---
+
+    /// Create a temp dir with a unique name for testing.
+    fn make_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("budi-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_git_branch_reads_head_file() {
+        let dir = make_test_dir("git-head");
+        let git_dir = dir.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/my-branch\n").unwrap();
+
+        let branch = resolve_git_branch_from_head(dir.to_str().unwrap());
+        assert_eq!(branch.as_deref(), Some("feature/my-branch"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_git_branch_detached_head_returns_none() {
+        let dir = make_test_dir("detached");
+        let git_dir = dir.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        std::fs::write(
+            git_dir.join("HEAD"),
+            "abc123def456789012345678901234567890abcd\n",
+        )
+        .unwrap();
+
+        let branch = resolve_git_branch_from_head(dir.to_str().unwrap());
+        assert!(branch.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_git_branch_missing_dir_returns_none() {
+        let branch = resolve_git_branch_from_head("/nonexistent/path");
+        assert!(branch.is_none());
+    }
+
+    #[test]
+    fn file_uri_to_path_strips_prefix() {
+        let p = file_uri_to_path("file:///Users/me/project/src/main.rs");
+        assert_eq!(p.unwrap(), PathBuf::from("/Users/me/project/src/main.rs"));
+    }
+
+    #[test]
+    fn file_uri_to_path_rejects_non_file_uri() {
+        assert!(file_uri_to_path("https://example.com").is_none());
+    }
+
+    #[test]
+    fn find_git_root_walks_up() {
+        let dir = make_test_dir("git-root");
+        let git_dir = dir.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let nested = dir.join("src/components");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let root = find_git_root(&nested.join("App.tsx"));
+        assert_eq!(root.as_deref(), Some(dir.to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_folder_from_attached_uris() {
+        let dir = make_test_dir("attached-uris");
+        let git_dir = dir.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let src = dir.join("src");
+        std::fs::create_dir(&src).unwrap();
+
+        let uri = format!("file://{}/src/main.rs", dir.display());
+        let parsed = serde_json::json!({
+            "allAttachedFileCodeChunksUris": [uri],
+        });
+
+        let folder = extract_folder_from_file_uris(&parsed);
+        assert_eq!(folder.as_deref(), Some(dir.to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_folder_from_newly_created_files() {
+        let dir = make_test_dir("newly-created");
+        let git_dir = dir.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let src = dir.join("src");
+        std::fs::create_dir(&src).unwrap();
+
+        let fs_path = format!("{}/src/new.rs", dir.display());
+        let parsed = serde_json::json!({
+            "newlyCreatedFiles": [{"uri": {"fsPath": fs_path}}],
+        });
+
+        let folder = extract_folder_from_file_uris(&parsed);
+        assert_eq!(folder.as_deref(), Some(dir.to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn created_on_branch_preferred_over_head_fallback() {
+        // When createdOnBranch is present, it should be used even if
+        // we could also read .git/HEAD from the cwd
+        let session = ComposerSession {
+            key: "composerData:branch-test".to_string(),
+            name: None,
+            created_at: None,
+            last_updated_at: None,
+            is_agentic: false,
+            lines_added: 0,
+            lines_removed: 0,
+            usage_entries: vec![],
+            context_tokens_used: None,
+            context_token_limit: None,
+            model_name: None,
+            git_branch: Some("main".to_string()),
+            cwd: Some("/some/project".to_string()),
+        };
+
+        let msgs = composer_session_to_messages(&session);
+        assert_eq!(msgs[0].git_branch.as_deref(), Some("main"));
+        assert_eq!(msgs[0].cwd.as_deref(), Some("/some/project"));
     }
 }
