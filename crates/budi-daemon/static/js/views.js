@@ -2,11 +2,12 @@ function renderSessionsSection(sessions) {
   // Sessions are already sorted, filtered, and paginated server-side
   const multiProvider = registeredProviders.length > 1;
   const cols = [
+    { key: 'last_seen', label: 'Last Active' },
     { key: 'session_id', label: 'Session' },
     ...(multiProvider ? [{ key: 'provider', label: 'Agent' }] : []),
     { key: 'repo_id', label: 'Repo' },
     { key: 'git_branch', label: 'Branch' },
-    { key: 'last_seen', label: 'Last Active' },
+    { key: 'ticket', label: 'Ticket' },
     { key: 'duration', label: 'Duration', right: true },
     { key: 'message_count', label: 'Messages', right: true },
     { key: 'tokens', label: 'Tokens', right: true },
@@ -23,12 +24,15 @@ function renderSessionsSection(sessions) {
     const provDisplay = (registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider;
     const provCol = multiProvider ? `<td>${esc(provDisplay)}</td>` : '';
     const branch = (s.git_branch || '').replace(/^refs\/heads\//, '');
+    const ticketMatch = branch.match(/[a-zA-Z]{2,}-\d+/);
+    const ticket = ticketMatch ? ticketMatch[0].toUpperCase() : '';
     return `<tr>
+      <td>${esc(fmtDate(s.last_seen))}</td>
       <td title="${esc(s.session_id)}">${esc(title)}</td>
       ${provCol}
       <td class="dir" title="${esc(s.repo_id || s.project_dir || '')}">${esc(repoName(s.repo_id) || shortenDir(s.project_dir))}</td>
       <td class="dir" title="${esc(s.git_branch || '')}">${esc(branch)}</td>
-      <td>${esc(fmtDate(s.last_seen))}</td>
+      <td>${esc(ticket)}</td>
       <td class="right">${fmtDuration(s.first_seen, s.last_seen)}</td>
       <td class="right">${fmtNum(s.message_count)}</td>
       <td class="right">${fmtNum(totalTok)}</td>
@@ -111,7 +115,7 @@ function renderStatsView(content) {
           t => t.cost_cents,
           (t, i) => paletteColor(i),
           'No ticket data for this period',
-          fmtCostMsgs
+          fmtCostTokens
         )}
       </div>
     </div>

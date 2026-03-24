@@ -126,6 +126,12 @@ async fn main() -> Result<()> {
                         let _ = tokio::task::spawn_blocking(move || {
                             let db_path = analytics::db_path().ok()?;
                             let mut conn = analytics::open_db(&db_path).ok()?;
+                            if budi_core::migration::needs_migration(&conn) {
+                                tracing::warn!(
+                                    "Database needs migration. Run `budi sync` or `budi update`."
+                                );
+                                return None;
+                            }
                             analytics::sync_one_file(&mut conn, &path).ok()
                         })
                         .await;
@@ -166,6 +172,10 @@ async fn main() -> Result<()> {
                 let result = (|| {
                     let db_path = analytics::db_path().ok()?;
                     let mut conn = analytics::open_db(&db_path).ok()?;
+                    if budi_core::migration::needs_migration(&conn) {
+                        tracing::warn!("Database needs migration. Skipping auto-sync.");
+                        return None;
+                    }
                     analytics::sync_all(&mut conn).ok()
                 })();
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);

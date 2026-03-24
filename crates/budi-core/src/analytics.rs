@@ -13,9 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::jsonl::ParsedMessage;
 
-const SCHEMA_VERSION: u32 = 7;
-
-/// Open (or create) the analytics database at the given path.
+/// Open the analytics database with pragmas only (no migration).
+/// Use `open_db_with_migration` for paths that should auto-migrate.
 pub fn open_db(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -29,194 +28,27 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
          PRAGMA mmap_size=268435456;
          PRAGMA synchronous=NORMAL;",
     )?;
-    migrate(&conn)?;
+    Ok(conn)
+}
+
+/// Open the analytics database and run pending migrations.
+/// Used by `budi sync`, `budi update`, and `budi migrate`.
+/// Automatically backfills tags if the migration created the tags table.
+pub fn open_db_with_migration(db_path: &Path) -> Result<Connection> {
+    let mut conn = open_db(db_path)?;
+    let needs_tag_backfill = crate::migration::migrate(&conn)?;
+    if needs_tag_backfill {
+        tracing::info!("Backfilling tags after migration...");
+        let count = backfill_tags(&mut conn)?;
+        tracing::info!("Backfilled {} tags.", count);
+    }
     Ok(conn)
 }
 
 /// Run schema migration. Exposed for cross-module test helpers.
 #[doc(hidden)]
 pub fn migrate_for_test(conn: &Connection) {
-    migrate(conn).expect("migration failed");
-}
-
-fn migrate(conn: &Connection) -> Result<()> {
-    let version: u32 = conn
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap_or(0);
-
-    if version < 1 {
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id   TEXT PRIMARY KEY,
-                project_dir  TEXT,
-                first_seen   TEXT NOT NULL,
-                last_seen    TEXT NOT NULL,
-                version      TEXT,
-                git_branch   TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                uuid                   TEXT PRIMARY KEY,
-                session_id             TEXT,
-                role                   TEXT NOT NULL,
-                timestamp              TEXT NOT NULL,
-                model                  TEXT,
-                input_tokens           INTEGER NOT NULL DEFAULT 0,
-                output_tokens          INTEGER NOT NULL DEFAULT 0,
-                cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
-                cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
-                has_thinking           INTEGER NOT NULL DEFAULT 0,
-                stop_reason            TEXT,
-                text_length            INTEGER NOT NULL DEFAULT 0,
-                cwd                    TEXT,
-                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS tool_usage (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_uuid TEXT NOT NULL,
-                tool_name    TEXT NOT NULL,
-                FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
-            );
-
-            CREATE TABLE IF NOT EXISTS sync_state (
-                file_path    TEXT PRIMARY KEY,
-                byte_offset  INTEGER NOT NULL DEFAULT 0,
-                last_synced  TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_tool_usage_message ON tool_usage(message_uuid);
-            CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name);
-            ",
-        )?;
-    }
-
-    if version < 2 {
-        conn.execute_batch(
-            "
-            ALTER TABLE sessions ADD COLUMN repo_id TEXT;
-            ALTER TABLE messages ADD COLUMN repo_id TEXT;
-            CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_repo ON messages(repo_id);
-            ",
-        )?;
-    }
-
-    if version < 3 {
-        conn.execute_batch(
-            "
-            ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT 'claude_code';
-            ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT 'claude_code';
-            CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
-            CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider);
-            ",
-        )?;
-    }
-
-    if version < 4 {
-        conn.execute_batch(
-            "
-            ALTER TABLE sessions ADD COLUMN session_title TEXT;
-            ALTER TABLE sessions ADD COLUMN interaction_mode TEXT;
-            ALTER TABLE sessions ADD COLUMN lines_added INTEGER DEFAULT 0;
-            ALTER TABLE sessions ADD COLUMN lines_removed INTEGER DEFAULT 0;
-
-            ALTER TABLE messages ADD COLUMN cost_cents REAL;
-            ALTER TABLE messages ADD COLUMN context_tokens_used INTEGER;
-            ALTER TABLE messages ADD COLUMN context_token_limit INTEGER;
-            ALTER TABLE messages ADD COLUMN interaction_mode TEXT;
-            ",
-        )?;
-    }
-
-    if version < 5 {
-        // Backfill cost_cents for existing messages that don't have it.
-        // This bakes in the estimated cost at current pricing rates.
-        backfill_cost_cents(conn)?;
-    }
-
-    if version < 6 {
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);
-             CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, timestamp);",
-        )?;
-    }
-
-    if version < 7 {
-        conn.execute_batch(
-            "ALTER TABLE sessions ADD COLUMN user_name TEXT;
-             ALTER TABLE sessions ADD COLUMN machine_name TEXT;
-             ALTER TABLE messages ADD COLUMN parent_uuid TEXT;
-
-             CREATE TABLE IF NOT EXISTS tags (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 message_uuid TEXT NOT NULL,
-                 key TEXT NOT NULL,
-                 value TEXT NOT NULL,
-                 FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
-             );
-             CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
-             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
-             CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uuid);",
-        )?;
-    }
-
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-
-    Ok(())
-}
-
-/// Backfill cost_cents for messages where it's NULL, using provider pricing.
-fn backfill_cost_cents(conn: &Connection) -> Result<()> {
-    conn.execute_batch("BEGIN")?;
-    let result = (|| -> Result<()> {
-        let mut stmt = conn.prepare(
-            "SELECT uuid, COALESCE(provider, 'claude_code'), COALESCE(model, 'unknown'),
-                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
-             FROM messages WHERE cost_cents IS NULL AND role = 'assistant'",
-        )?;
-        let rows: Vec<(String, String, String, u64, u64, u64, u64)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            })?
-            .filter_map(|r| match r {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!("skipping row: {e}");
-                    None
-                }
-            })
-            .collect();
-
-        let mut update_stmt =
-            conn.prepare("UPDATE messages SET cost_cents = ?1 WHERE uuid = ?2")?;
-        for (uuid, provider, model, inp, outp, cw, cr) in &rows {
-            let cost = estimate_cost_for_provider(provider, model, *inp, *outp, *cw, *cr);
-            if cost > 0.0 {
-                let cents = (cost * 100.0 * 100.0).round() / 100.0;
-                update_stmt.execute(params![cents, uuid])?;
-            }
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(ref _e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-        }
-    }
-    result
+    let _ = crate::migration::migrate(conn).expect("migration failed");
 }
 
 /// Returns the stored byte offset for a given JSONL file path, or 0 if unseen.
@@ -429,6 +261,91 @@ pub fn ingest_messages(
 pub fn db_path() -> Result<PathBuf> {
     let home_dir = crate::config::budi_home_dir()?;
     Ok(home_dir.join("analytics.db"))
+}
+
+/// Regenerate all tags from existing messages using the current pipeline enrichers.
+/// Clears the tags table and re-populates it.
+pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
+    let tags_config = crate::config::load_tags_config();
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
+
+    // Read all messages with session fields needed for enrichment
+    let messages: Vec<(String, crate::jsonl::ParsedMessage)> = {
+        let mut stmt = conn.prepare(
+            "SELECT m.uuid, m.session_id, m.timestamp, m.cwd, m.role, m.model,
+                    m.input_tokens, m.output_tokens, m.cache_creation_tokens, m.cache_read_tokens,
+                    m.provider, m.cost_cents, m.repo_id, m.parent_uuid,
+                    s.git_branch, s.user_name, s.machine_name
+             FROM messages m
+             LEFT JOIN sessions s ON m.session_id = s.session_id",
+        )?;
+        stmt.query_map([], |row| {
+            let uuid: String = row.get(0)?;
+            Ok((
+                uuid.clone(),
+                crate::jsonl::ParsedMessage {
+                    uuid,
+                    session_id: row.get(1)?,
+                    timestamp: row
+                        .get::<_, String>(2)?
+                        .parse()
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    cwd: row.get(3)?,
+                    role: row.get(4)?,
+                    model: row.get(5)?,
+                    input_tokens: row.get::<_, i64>(6)? as u64,
+                    output_tokens: row.get::<_, i64>(7)? as u64,
+                    cache_creation_tokens: row.get::<_, i64>(8)? as u64,
+                    cache_read_tokens: row.get::<_, i64>(9)? as u64,
+                    tool_names: vec![],
+                    has_thinking: false,
+                    stop_reason: None,
+                    text_length: 0,
+                    version: None,
+                    git_branch: row.get(14)?,
+                    repo_id: row.get(12)?,
+                    provider: row
+                        .get::<_, Option<String>>(10)?
+                        .unwrap_or_else(|| "claude_code".to_string()),
+                    cost_cents: row.get(11)?,
+                    context_tokens_used: None,
+                    context_token_limit: None,
+                    interaction_mode: None,
+                    session_title: None,
+                    lines_added: None,
+                    lines_removed: None,
+                    parent_uuid: row.get(13)?,
+                    user_name: row.get(15)?,
+                    machine_name: row.get(16)?,
+                },
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
+    }; // stmt dropped here
+
+    // Extract ParsedMessages for pipeline processing
+    let mut parsed: Vec<crate::jsonl::ParsedMessage> =
+        messages.into_iter().map(|(_, m)| m).collect();
+    let all_tags = pipeline.process(&mut parsed);
+
+    // Clear and re-insert tags
+    let tx = conn.transaction()?;
+    tx.execute_batch("DELETE FROM tags")?;
+    let mut count = 0usize;
+    for (i, msg) in parsed.iter().enumerate() {
+        if let Some(msg_tags) = all_tags.get(i) {
+            for tag in msg_tags {
+                tx.execute(
+                    "INSERT INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                    params![msg.uuid, tag.key, tag.value],
+                )?;
+                count += 1;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(count)
 }
 
 /// Run a full incremental sync: discover JSONL files, parse new content, ingest.
@@ -714,7 +631,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         param_values.push(format!("%{q}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(s.session_title LIKE ?{idx} OR s.session_id LIKE ?{idx} OR s.repo_id LIKE ?{idx} OR s.project_dir LIKE ?{idx} OR s.git_branch LIKE ?{idx})"
+            "(s.session_title LIKE ?{idx} OR s.session_id LIKE ?{idx} OR s.repo_id LIKE ?{idx} OR s.project_dir LIKE ?{idx} OR s.git_branch LIKE ?{idx} OR s.provider LIKE ?{idx} OR EXISTS (SELECT 1 FROM tags t JOIN messages tm ON t.message_uuid = tm.uuid WHERE tm.session_id = s.session_id AND t.value LIKE ?{idx}))"
         ));
     }
     let where_clause = if conditions.is_empty() {
@@ -1396,13 +1313,15 @@ pub fn tag_stats(
         param_values.push(k.to_string());
         conditions.push(format!("t.key = ?{}", param_values.len()));
     }
+    // Date filter uses session last_seen so that tickets with recent activity show up
+    // even if the tagged (user) message was created earlier
     if let Some(s) = since {
         param_values.push(s.to_string());
-        conditions.push(format!("tm.timestamp >= ?{}", param_values.len()));
+        conditions.push(format!("s.last_seen >= ?{}", param_values.len()));
     }
     if let Some(u) = until {
         param_values.push(u.to_string());
-        conditions.push(format!("tm.timestamp < ?{}", param_values.len()));
+        conditions.push(format!("s.last_seen < ?{}", param_values.len()));
     }
 
     param_values.push(limit.to_string());
@@ -1410,6 +1329,8 @@ pub fn tag_stats(
 
     // Tags like ticket_id/branch are attached to user messages (which have no cost).
     // Join through session to get the full session cost for each tagged session.
+    // Date filter is on session last_seen so tickets active today appear even if
+    // the tagged message was from days ago.
     let extra_conditions = if conditions.is_empty() {
         String::new()
     } else {
@@ -1426,6 +1347,7 @@ pub fn tag_stats(
                      FROM messages sm WHERE sm.session_id = tm.session_id) as session_cost
              FROM tags t
              JOIN messages tm ON t.message_uuid = tm.uuid
+             JOIN sessions s ON s.session_id = tm.session_id
              WHERE tm.session_id IS NOT NULL
              {}
          ) ts
@@ -1958,7 +1880,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .unwrap();
-        migrate(&conn).unwrap();
+        crate::migration::migrate(&conn).unwrap();
         conn
     }
 

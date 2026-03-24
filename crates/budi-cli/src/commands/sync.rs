@@ -3,13 +3,13 @@ use budi_core::analytics;
 
 pub fn init_auto_sync() -> Result<(usize, usize)> {
     let db_path = analytics::db_path()?;
-    let mut conn = analytics::open_db(&db_path)?;
+    let mut conn = analytics::open_db_with_migration(&db_path)?;
     analytics::sync_all(&mut conn)
 }
 
-pub fn cmd_sync() -> Result<()> {
+pub fn cmd_sync_with_options(backfill_tags: bool) -> Result<()> {
     let db_path = analytics::db_path()?;
-    let mut conn = analytics::open_db(&db_path)?;
+    let mut conn = analytics::open_db_with_migration(&db_path)?;
 
     println!("Syncing transcripts...");
     let (files_synced, messages_ingested) = analytics::sync_all(&mut conn)?;
@@ -22,6 +22,13 @@ pub fn cmd_sync() -> Result<()> {
             messages_ingested, files_synced
         );
     }
+
+    if backfill_tags {
+        println!("Regenerating tags...");
+        let tag_count = analytics::backfill_tags(&mut conn)?;
+        println!("Generated \x1b[1m{}\x1b[0m tags.", tag_count);
+    }
+
     println!("Database: {}", db_path.display());
     Ok(())
 }

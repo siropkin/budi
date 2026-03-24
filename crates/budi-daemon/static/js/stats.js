@@ -55,6 +55,7 @@ function barTooltip(item, labelFn, valueFn) {
   const inp = item.input_tokens || 0;
   const outp = item.output_tokens || 0;
   if (inp || outp) return `${label}: ${fmtCost(cost)} — ${fmtNum(inp)} input, ${fmtNum(outp)} output`;
+  if (cost > 0) return `${label}: ${fmtCost(cost)}`;
   if (valueFn) return `${label}: ${fmtNum(valueFn(item))} calls`;
   return label;
 }

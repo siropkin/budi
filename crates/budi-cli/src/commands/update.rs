@@ -72,6 +72,15 @@ pub fn cmd_update() -> Result<()> {
         let _ = ensure_daemon_running(&repo_root, &config);
     }
 
+    // Run database migration after updating binary
+    println!("Running database migration...");
+    if let Ok(db_path) = budi_core::analytics::db_path() {
+        match budi_core::analytics::open_db_with_migration(&db_path) {
+            Ok(_) => println!("\x1b[32m✓\x1b[0m Database migrated."),
+            Err(e) => println!("\x1b[33m!\x1b[0m Migration warning: {}", e),
+        }
+    }
+
     println!("\x1b[32m✓\x1b[0m Updated to v{}.", latest);
     Ok(())
 }

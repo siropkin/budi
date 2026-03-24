@@ -103,24 +103,27 @@ fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
 }
 
 /// Extract a ticket ID (e.g. `PAVA-2057`) from a branch name.
-/// Matches the pattern `[A-Z]+-\d+`.
-pub fn extract_ticket_id(branch: &str) -> Option<&str> {
+/// Matches `[a-zA-Z]{2,}-\d+` and returns it uppercased.
+/// Handles both standard (`PAVA-2057-fix`) and Graphite-style (`03-20-pava-2120_desc`) branches.
+/// Requires 2+ alpha chars in the prefix to avoid matching date fragments like `03-20`.
+pub fn extract_ticket_id(branch: &str) -> Option<String> {
     let bytes = branch.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        // Find start of uppercase sequence
-        if !bytes[i].is_ascii_uppercase() {
+        // Find start of alphabetic sequence
+        if !bytes[i].is_ascii_alphabetic() {
             i += 1;
             continue;
         }
         let start = i;
-        while i < len && bytes[i].is_ascii_uppercase() {
+        while i < len && bytes[i].is_ascii_alphabetic() {
             i += 1;
         }
-        // Need at least one uppercase char followed by '-'
-        if i >= len || bytes[i] != b'-' || i == start {
+        let alpha_len = i - start;
+        // Need at least 2 alpha chars followed by '-'
+        if alpha_len < 2 || i >= len || bytes[i] != b'-' {
             continue;
         }
         i += 1; // skip '-'
@@ -130,7 +133,8 @@ pub fn extract_ticket_id(branch: &str) -> Option<&str> {
             i += 1;
         }
         if i > digit_start {
-            return Some(&branch[start..i]);
+            let ticket = &branch[start..i];
+            return Some(ticket.to_ascii_uppercase());
         }
     }
     None
@@ -171,21 +175,54 @@ mod tests {
 
     #[test]
     fn extract_ticket_basic() {
-        assert_eq!(extract_ticket_id("PAVA-2057-fix-thing"), Some("PAVA-2057"));
-        assert_eq!(extract_ticket_id("feature/ABC-123"), Some("ABC-123"));
+        assert_eq!(
+            extract_ticket_id("PAVA-2057-fix-thing"),
+            Some("PAVA-2057".into())
+        );
+        assert_eq!(extract_ticket_id("feature/ABC-123"), Some("ABC-123".into()));
         assert_eq!(extract_ticket_id("main"), None);
         assert_eq!(extract_ticket_id("fix-bug"), None);
     }
 
     #[test]
     fn extract_ticket_at_end() {
-        assert_eq!(extract_ticket_id("feature/TICKET-99"), Some("TICKET-99"));
+        assert_eq!(
+            extract_ticket_id("feature/TICKET-99"),
+            Some("TICKET-99".into())
+        );
     }
 
     #[test]
     fn extract_ticket_multiple() {
         // Returns first match
-        assert_eq!(extract_ticket_id("ABC-1-DEF-2"), Some("ABC-1"));
+        assert_eq!(extract_ticket_id("ABC-1-DEF-2"), Some("ABC-1".into()));
+    }
+
+    #[test]
+    fn extract_ticket_graphite_lowercase() {
+        assert_eq!(
+            extract_ticket_id("03-20-pava-2120_extract_min_max_volume"),
+            Some("PAVA-2120".into())
+        );
+        assert_eq!(
+            extract_ticket_id("sen-10553-format-relative-time"),
+            Some("SEN-10553".into())
+        );
+        assert_eq!(
+            extract_ticket_id("ivan.seredkin/pava-1908-regression"),
+            Some("PAVA-1908".into())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_skips_date_prefix() {
+        // "03-20" should not match (single-digit alpha count)
+        assert_eq!(
+            extract_ticket_id("03-20-pava-2120_desc"),
+            Some("PAVA-2120".into())
+        );
+        // No ticket at all
+        assert_eq!(extract_ticket_id("kiyoshi/pava-searchbars"), None);
     }
 
     #[test]

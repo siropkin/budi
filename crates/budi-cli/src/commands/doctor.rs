@@ -69,6 +69,25 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    // Database schema check
+    if let Ok(db_path) = budi_core::analytics::db_path() {
+        if db_path.exists() {
+            if let Ok(conn) = budi_core::analytics::open_db(&db_path) {
+                let current = budi_core::migration::current_version(&conn);
+                let target = budi_core::migration::SCHEMA_VERSION;
+                if current >= target {
+                    println!("  [ok] database schema: v{}", current);
+                } else {
+                    println!("  [!!] database schema: v{} (needs v{})", current, target);
+                    issues.push(format!(
+                        "Database needs migration (v{} → v{}). Run `budi sync` or `budi update`.",
+                        current, target
+                    ));
+                }
+            }
+        }
+    }
+
     // Activity summary
     if daemon_health(&config)
         && let Some(stats) = fetch_daemon_stats(&config)

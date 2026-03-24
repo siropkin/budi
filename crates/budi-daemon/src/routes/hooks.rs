@@ -136,6 +136,9 @@ pub async fn analytics_sync(
         let r = (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = budi_core::analytics::open_db(&db_path)?;
+            if budi_core::migration::needs_migration(&conn) {
+                anyhow::bail!("Database needs migration. Run `budi sync` or `budi update`.");
+            }
             budi_core::analytics::sync_all(&mut conn)
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);

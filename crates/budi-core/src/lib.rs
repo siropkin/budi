@@ -4,6 +4,7 @@ pub mod cost;
 pub mod daemon;
 pub mod hooks;
 pub mod jsonl;
+pub mod migration;
 pub mod pipeline;
 pub mod pre_filter;
 pub mod provider;

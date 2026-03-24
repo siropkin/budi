@@ -83,11 +83,18 @@ enum Commands {
         json: bool,
     },
     /// Sync transcripts into the analytics database
-    Sync,
+    Sync {
+        /// Regenerate all tags from existing data (useful after updating tag extraction)
+        #[arg(long, default_value_t = false)]
+        backfill_tags: bool,
+    },
     /// Open the budi dashboard in the browser
     Open,
     /// Update budi to the latest version
     Update,
+    /// Run database migration (usually runs automatically with sync/update)
+    #[command(hide = true)]
+    Migrate,
     /// Print a compact status line (reads stdin, outputs one line)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -208,9 +215,24 @@ fn main() -> Result<()> {
         } => commands::stats::cmd_stats(
             period, session, projects, branches, branch, models, sessions, provider, tag, json,
         ),
-        Commands::Sync => commands::sync::cmd_sync(),
+        Commands::Sync { backfill_tags } => commands::sync::cmd_sync_with_options(backfill_tags),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),
+        Commands::Migrate => {
+            let db_path = budi_core::analytics::db_path()?;
+            let conn = budi_core::analytics::open_db(&db_path)?;
+            let current = budi_core::migration::current_version(&conn);
+            let target = budi_core::migration::SCHEMA_VERSION;
+            if current >= target {
+                println!("Database schema is up to date (v{}).", current);
+            } else {
+                println!("Migrating database v{} → v{}...", current, target);
+                drop(conn);
+                budi_core::analytics::open_db_with_migration(&db_path)?;
+                println!("\x1b[32m✓\x1b[0m Migration complete.");
+            }
+            Ok(())
+        }
         Commands::Statusline { install, format } => {
             if install {
                 commands::statusline::cmd_statusline_install()

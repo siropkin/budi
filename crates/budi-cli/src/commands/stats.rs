@@ -173,15 +173,21 @@ fn cmd_stats_summary_filtered(
     let est = cost::estimate_cost_filtered(conn, since.as_deref(), until.as_deref(), provider)?;
     println!();
     println!(
-        "  \x1b[1mEst. cost\x1b[0m     \x1b[33m${:.2}\x1b[0m",
-        est.total_cost
+        "  \x1b[1mEst. cost\x1b[0m     \x1b[33m{}\x1b[0m",
+        format_cost(est.total_cost)
     );
     println!(
-        "  \x1b[90m  input ${:.2}  output ${:.2}  cache write ${:.2}  cache read ${:.2}\x1b[0m",
-        est.input_cost, est.output_cost, est.cache_write_cost, est.cache_read_cost
+        "  \x1b[90m  input {}  output {}  cache write {}  cache read {}\x1b[0m",
+        format_cost(est.input_cost),
+        format_cost(est.output_cost),
+        format_cost(est.cache_write_cost),
+        format_cost(est.cache_read_cost)
     );
     if est.cache_savings > 0.0 {
-        println!("  \x1b[32m  cache savings ${:.2}\x1b[0m", est.cache_savings);
+        println!(
+            "  \x1b[32m  cache savings {}\x1b[0m",
+            format_cost(est.cache_savings)
+        );
     }
 
     let tools = analytics::top_tools(conn, since.as_deref(), until.as_deref()).unwrap_or_default();
@@ -237,11 +243,11 @@ fn cmd_stats_multi_agent(
             String::new()
         };
         println!(
-            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m${:.2}\x1b[0m{}",
+            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m{}\x1b[0m{}",
             ps.display_name,
             ps.session_count,
             format_tokens(total_tokens),
-            cost,
+            format_cost(cost),
             lines_str,
         );
     }
@@ -311,8 +317,8 @@ fn cmd_stats_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()
     }
     if d.cost_cents > 0.0 {
         println!(
-            "  \x1b[1mCost\x1b[0m      \x1b[33m${:.2}\x1b[0m",
-            d.cost_cents / 100.0
+            "  \x1b[1mCost\x1b[0m      \x1b[33m{}\x1b[0m",
+            format_cost_cents(d.cost_cents)
         );
     }
     println!(
@@ -384,11 +390,9 @@ fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Resul
         let bar_len = ((r.cost_cents / max_cost) * 16.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
         println!(
-            "    \x1b[1m{:<28}\x1b[0m \x1b[33m${:>7.2}\x1b[0m  {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            "    \x1b[1m{:<28}\x1b[0m \x1b[33m{:>8}\x1b[0m  \x1b[36m{}\x1b[0m",
             r.repo_id,
-            r.cost_cents / 100.0,
-            r.message_count,
-            format_tokens(r.input_tokens + r.output_tokens),
+            format_cost_cents(r.cost_cents),
             bar
         );
     }
@@ -446,11 +450,9 @@ fn cmd_stats_branches(
         let bar_len = ((b.cost_cents / max_cost) * 16.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
         println!(
-            "    \x1b[1m{:<28}\x1b[0m \x1b[33m${:>7.2}\x1b[0m  {:>3} sess  {:>8} tok  \x1b[90m{}\x1b[0m  \x1b[36m{}\x1b[0m",
+            "    \x1b[1m{:<28}\x1b[0m \x1b[33m{:>8}\x1b[0m  \x1b[90m{}\x1b[0m  \x1b[36m{}\x1b[0m",
             branch_name,
-            b.cost_cents / 100.0,
-            b.session_count,
-            format_tokens(b.input_tokens + b.output_tokens),
+            format_cost_cents(b.cost_cents),
             repo,
             bar
         );
@@ -497,8 +499,8 @@ fn cmd_stats_branch_detail(
                 format_tokens(b.output_tokens)
             );
             println!(
-                "  \x1b[1mEst. cost\x1b[0m  \x1b[33m${:.2}\x1b[0m",
-                b.cost_cents / 100.0
+                "  \x1b[1mEst. cost\x1b[0m  \x1b[33m{}\x1b[0m",
+                format_cost_cents(b.cost_cents)
             );
         }
         None => {
@@ -597,37 +599,41 @@ fn cmd_stats_sessions(
     }
 
     for s in sessions.iter().take(20) {
-        let short_id = &s.session_id[..s.session_id.len().min(8)];
-        let project = s
+        let title = s
+            .session_title
+            .as_deref()
+            .unwrap_or(&s.session_id[..s.session_id.len().min(8)]);
+        let repo = s
             .repo_id
             .as_deref()
-            .unwrap_or_else(|| s.project_dir.as_deref().unwrap_or(""));
+            .map(|r| r.rsplit('/').next().unwrap_or(r))
+            .unwrap_or("");
         let branch = s
             .git_branch
             .as_deref()
             .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
             .unwrap_or("");
-        let total_tok = s.input_tokens + s.output_tokens;
         let cost_str = if s.cost_cents > 0.0 {
-            format!("${:.2}", s.cost_cents / 100.0)
+            format_cost_cents(s.cost_cents)
         } else {
             "--".to_string()
         };
-        let location = if !branch.is_empty() && !project.is_empty() {
-            format!("{} / {}", project, branch)
-        } else if !project.is_empty() {
-            project.to_string()
+        let location = if !branch.is_empty() && !repo.is_empty() {
+            format!("{} / {}", repo, branch)
+        } else if !repo.is_empty() {
+            repo.to_string()
         } else {
             branch.to_string()
         };
+        // Truncate title and location for compact display
+        let title_trunc: String = title.chars().take(20).collect();
+        let loc_trunc: String = location.chars().take(30).collect();
         println!(
-            "    \x1b[36m{}…\x1b[0m  {:>4} msgs  {:>8} tok  {:>6}  {}  \x1b[90m{}\x1b[0m",
-            short_id,
-            s.message_count,
-            format_tokens(total_tok),
+            "    {}  \x1b[36m{:<20}\x1b[0m  \x1b[33m{:>8}\x1b[0m  \x1b[90m{}\x1b[0m",
+            format_timestamp(&s.last_seen),
+            title_trunc,
             cost_str,
-            format_timestamp(&s.first_seen),
-            location
+            loc_trunc,
         );
     }
 
@@ -645,13 +651,33 @@ fn cmd_stats_sessions(
 // ─── Formatting Utilities ────────────────────────────────────────────────────
 
 pub fn format_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         format!("{}", n)
     }
+}
+
+pub fn format_cost(dollars: f64) -> String {
+    if dollars >= 1000.0 {
+        format!("${:.1}K", dollars / 1000.0)
+    } else if dollars >= 100.0 {
+        format!("${:.0}", dollars)
+    } else if dollars >= 1.0 {
+        format!("${:.2}", dollars)
+    } else if dollars > 0.0 {
+        format!("${:.3}", dollars)
+    } else {
+        "$0.00".to_string()
+    }
+}
+
+pub fn format_cost_cents(cents: f64) -> String {
+    format_cost(cents / 100.0)
 }
 
 fn cmd_stats_tags(
@@ -696,7 +722,6 @@ fn cmd_stats_tags(
     let bar_width: usize = 30;
 
     for tag in &data {
-        let cost_dollars = tag.cost_cents / 100.0;
         let bar_len = if max_cost > 0.0 {
             ((tag.cost_cents / max_cost) * bar_width as f64) as usize
         } else {
@@ -705,12 +730,11 @@ fn cmd_stats_tags(
         let bar = "█".repeat(bar_len);
         let pad_bar = " ".repeat(bar_width.saturating_sub(bar_len));
         println!(
-            "  {:<40} \x1b[33m{}\x1b[0m{} {:>8} ({} msgs)",
+            "  {:<40} \x1b[33m{}\x1b[0m{} {:>8}",
             tag.value,
             bar,
             pad_bar,
-            format!("${:.2}", cost_dollars),
-            format_tokens(tag.message_count),
+            format_cost_cents(tag.cost_cents),
         );
     }
     println!();
