@@ -57,9 +57,15 @@ enum Commands {
         /// Show details for a specific session (ID or prefix)
         #[arg(long)]
         session: Option<String>,
-        /// Show repositories ranked by usage
+        /// Show repositories ranked by cost
         #[arg(long, default_value_t = false)]
         projects: bool,
+        /// Show branches ranked by cost
+        #[arg(long, default_value_t = false)]
+        branches: bool,
+        /// Show cost for a specific branch
+        #[arg(long)]
+        branch: Option<String>,
         /// Show model usage breakdown
         #[arg(long, default_value_t = false)]
         models: bool,
@@ -189,13 +195,15 @@ fn main() -> Result<()> {
             period,
             session,
             projects,
+            branches,
+            branch,
             models,
             sessions,
             provider,
             json,
-        } => {
-            commands::stats::cmd_stats(period, session, projects, models, sessions, provider, json)
-        }
+        } => commands::stats::cmd_stats(
+            period, session, projects, branches, branch, models, sessions, provider, json,
+        ),
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),

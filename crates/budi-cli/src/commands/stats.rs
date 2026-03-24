@@ -39,6 +39,8 @@ pub fn cmd_stats(
     period: StatsPeriod,
     session: Option<String>,
     projects: bool,
+    branches: bool,
+    branch: Option<String>,
     models: bool,
     sessions: bool,
     provider: Option<String>,
@@ -58,6 +60,14 @@ pub fn cmd_stats(
             return Ok(());
         }
         return cmd_stats_session(&conn, sid);
+    }
+
+    if let Some(ref br) = branch {
+        return cmd_stats_branch_detail(&conn, period, br, json_output);
+    }
+
+    if branches {
+        return cmd_stats_branches(&conn, period, json_output);
     }
 
     if sessions {
@@ -349,10 +359,10 @@ fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Resul
 
     println!();
     println!(
-        "  \x1b[1;36m📊 Repositories\x1b[0m — \x1b[1m{}\x1b[0m",
+        "  \x1b[1;36m Repositories\x1b[0m — \x1b[1m{}\x1b[0m",
         period_label
     );
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
 
     if repos.is_empty() {
         println!("  No data for this period.");
@@ -360,17 +370,139 @@ fn cmd_stats_projects(conn: &rusqlite::Connection, period: StatsPeriod) -> Resul
         return Ok(());
     }
 
-    let max_msgs = repos.first().map(|f| f.message_count).unwrap_or(1);
+    let max_cost = repos
+        .iter()
+        .map(|r| r.cost_cents)
+        .fold(0.0_f64, f64::max)
+        .max(0.01);
     for r in &repos {
-        let bar_len = ((r.message_count as f64 / max_msgs as f64) * 16.0) as usize;
-        let bar: String = "█".repeat(bar_len);
+        let bar_len = ((r.cost_cents / max_cost) * 16.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
         println!(
-            "    \x1b[1m{:<30}\x1b[0m {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
+            "    \x1b[1m{:<28}\x1b[0m \x1b[33m${:>7.2}\x1b[0m  {:>5} msgs  {:>8} tok  \x1b[36m{}\x1b[0m",
             r.repo_id,
+            r.cost_cents / 100.0,
             r.message_count,
             format_tokens(r.input_tokens + r.output_tokens),
             bar
         );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_branches(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let branches = analytics::branch_cost(conn, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&branches)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m Branches\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(50));
+
+    if branches.is_empty() {
+        println!("  No branch data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_cost = branches
+        .iter()
+        .map(|b| b.cost_cents)
+        .fold(0.0_f64, f64::max)
+        .max(0.01);
+    for b in &branches {
+        let branch_name = b
+            .git_branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&b.git_branch);
+        let repo = if b.repo_id.is_empty() {
+            "--".to_string()
+        } else {
+            b.repo_id
+                .rsplit('/')
+                .next()
+                .unwrap_or(&b.repo_id)
+                .to_string()
+        };
+        let bar_len = ((b.cost_cents / max_cost) * 16.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
+        println!(
+            "    \x1b[1m{:<28}\x1b[0m \x1b[33m${:>7.2}\x1b[0m  {:>3} sess  {:>8} tok  \x1b[90m{}\x1b[0m  \x1b[36m{}\x1b[0m",
+            branch_name,
+            b.cost_cents / 100.0,
+            b.session_count,
+            format_tokens(b.input_tokens + b.output_tokens),
+            repo,
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_branch_detail(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    branch: &str,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let result =
+        analytics::branch_cost_single(conn, branch, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    println!();
+    println!(
+        "  \x1b[1;36m Branch\x1b[0m \x1b[1m{}\x1b[0m — \x1b[90m{}\x1b[0m",
+        branch, period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
+
+    match result {
+        Some(b) => {
+            if !b.repo_id.is_empty() {
+                println!("  \x1b[1mRepo\x1b[0m       {}", b.repo_id);
+            }
+            println!("  \x1b[1mSessions\x1b[0m   {}", b.session_count);
+            println!("  \x1b[1mMessages\x1b[0m   {}", b.message_count);
+            let total_input = b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens;
+            println!(
+                "  \x1b[1mInput\x1b[0m      {}",
+                format_tokens(total_input)
+            );
+            println!(
+                "  \x1b[1mOutput\x1b[0m     {}",
+                format_tokens(b.output_tokens)
+            );
+            println!(
+                "  \x1b[1mEst. cost\x1b[0m  \x1b[33m${:.2}\x1b[0m",
+                b.cost_cents / 100.0
+            );
+        }
+        None => {
+            println!("  No data found for branch '{}'.", branch);
+        }
     }
 
     println!();

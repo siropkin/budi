@@ -1259,6 +1259,70 @@ pub fn branch_cost(
     Ok(rows)
 }
 
+/// Query cost for a single branch (matched case-insensitively, with or without refs/heads/ prefix).
+pub fn branch_cost_single(
+    conn: &Connection,
+    branch: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Option<BranchCost>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    let branch_stripped = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+
+    let mut param_values: Vec<String> = date_params;
+    let branch_idx = param_values.len() + 1;
+    param_values.push(format!("%{}", branch_stripped));
+
+    let sql = format!(
+        "SELECT s.git_branch,
+                COALESCE(s.repo_id, '') as repo,
+                COUNT(DISTINCT m.session_id) as sess,
+                COUNT(*) as cnt,
+                COALESCE(SUM(m.input_tokens), 0),
+                COALESCE(SUM(m.output_tokens), 0),
+                COALESCE(SUM(m.cache_read_tokens), 0),
+                COALESCE(SUM(m.cache_creation_tokens), 0),
+                COALESCE(SUM(m.cost_cents), 0.0)
+         FROM messages m
+         JOIN sessions s ON m.session_id = s.session_id
+         {} {} (s.git_branch LIKE ?{} OR REPLACE(s.git_branch, 'refs/heads/', '') LIKE ?{})
+         GROUP BY s.git_branch, s.repo_id
+         ORDER BY COALESCE(SUM(m.cost_cents), 0.0) DESC
+         LIMIT 1",
+        where_clause,
+        if where_clause.is_empty() {
+            "WHERE"
+        } else {
+            "AND"
+        },
+        branch_idx,
+        branch_idx,
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let result = stmt
+        .query_row(param_refs.as_slice(), |row| {
+            Ok(BranchCost {
+                git_branch: row.get(0)?,
+                repo_id: row.get(1)?,
+                session_count: row.get(2)?,
+                message_count: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_read_tokens: row.get(6)?,
+                cache_creation_tokens: row.get(7)?,
+                cost_cents: row.get(8)?,
+            })
+        })
+        .optional()?;
+    Ok(result)
+}
+
 /// Model usage breakdown: tokens grouped by model name.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelUsage {
