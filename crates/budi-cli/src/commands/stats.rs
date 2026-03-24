@@ -44,6 +44,7 @@ pub fn cmd_stats(
     models: bool,
     sessions: bool,
     provider: Option<String>,
+    prs: bool,
     tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
@@ -73,6 +74,10 @@ pub fn cmd_stats(
 
     if branches {
         return cmd_stats_branches(&conn, period, json_output);
+    }
+
+    if prs {
+        return cmd_stats_prs(&conn, period, json_output);
     }
 
     if sessions {
@@ -502,6 +507,70 @@ fn cmd_stats_branches(
             branch_name,
             format_cost_cents(b.cost_cents),
             repo,
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_stats_prs(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let prs = budi_core::git::pr_cost(conn, since.as_deref(), until.as_deref(), 20)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&prs)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+    println!();
+    println!(
+        "  \x1b[1;36m PR Cost\x1b[0m — \x1b[1m{}\x1b[0m",
+        period_label
+    );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(60));
+
+    if prs.is_empty() {
+        println!("  No PR data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_cost = prs
+        .iter()
+        .map(|p| p.cost_cents)
+        .fold(0.0_f64, f64::max)
+        .max(0.01);
+    for p in &prs {
+        let repo = if p.repo_id.is_empty() {
+            String::new()
+        } else {
+            p.repo_id
+                .rsplit('/')
+                .next()
+                .unwrap_or(&p.repo_id)
+                .to_string()
+        };
+        let label = if repo.is_empty() {
+            format!("#{}", p.pr_number)
+        } else {
+            format!("#{} ({})", p.pr_number, repo)
+        };
+        let bar_len = ((p.cost_cents / max_cost) * 16.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
+        println!(
+            "    \x1b[1m{:<28}\x1b[0m \x1b[33m{:>8}\x1b[0m  {} commits  \x1b[32m+{}\x1b[0m/\x1b[31m-{}\x1b[0m  \x1b[36m{}\x1b[0m",
+            label,
+            format_cost_cents(p.cost_cents),
+            p.commit_count,
+            p.lines_added,
+            p.lines_removed,
             bar
         );
     }

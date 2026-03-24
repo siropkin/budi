@@ -29,13 +29,12 @@ function renderCards(s, cost, gitSummary) {
   const totalTokens = s.total_input_tokens + s.total_output_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
   const totalIn = s.total_input_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
   const git = gitSummary || {};
-  const hasGit = git.total_commits > 0;
-  const gitCard = hasGit ? `
+  const gitCard = `
     <div class="card">
       <div class="label">Git</div>
-      <div class="value">${fmtNum(git.total_commits)} commit${git.total_commits !== 1 ? 's' : ''}</div>
-      <div class="sub">+${fmtNum(git.total_lines_added)} / -${fmtNum(git.total_lines_removed)}${git.unique_prs > 0 ? ' / ' + git.unique_prs + ' PR' + (git.unique_prs !== 1 ? 's' : '') : ''}</div>
-    </div>` : '';
+      <div class="value">${fmtNum(git.total_commits || 0)} commit${(git.total_commits || 0) !== 1 ? 's' : ''}</div>
+      <div class="sub"><span style="color:var(--green,#3fb950)">+${fmtNum(git.total_lines_added || 0)} lines</span> / <span style="color:var(--red,#f85149)">-${fmtNum(git.total_lines_removed || 0)} lines</span> / ${fmtNum(git.unique_prs || 0)} PRs</div>
+    </div>`;
   return `
   <div class="cards">
     <div class="card">

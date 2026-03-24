@@ -496,6 +496,90 @@ pub fn git_summary(
     })
 }
 
+/// Cost breakdown per PR: aggregates session costs for all sessions that contributed commits to a PR.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrCost {
+    pub pr_number: i64,
+    pub repo_id: String,
+    pub commit_count: u64,
+    pub lines_added: i64,
+    pub lines_removed: i64,
+    pub session_count: u64,
+    pub cost_cents: f64,
+    pub first_commit: String,
+    pub last_commit: String,
+}
+
+/// Query cost per PR, joining commits → sessions → message costs.
+pub fn pr_cost(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PrCost>> {
+    let mut conditions = vec!["c.pr_number IS NOT NULL".to_string()];
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(s) = since {
+        param_values.push(Box::new(s.to_string()));
+        conditions.push(format!("c.timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until {
+        param_values.push(Box::new(u.to_string()));
+        conditions.push(format!("c.timestamp < ?{}", param_values.len()));
+    }
+    param_values.push(Box::new(limit as i64));
+    let limit_idx = param_values.len();
+
+    // For each PR, aggregate: commit count, lines, unique sessions,
+    // and sum cost from all sessions that contributed to this PR.
+    let sql = format!(
+        "SELECT c.pr_number,
+                COALESCE(s.repo_id, '') as repo,
+                COUNT(DISTINCT c.hash) as commit_count,
+                COALESCE(SUM(c.lines_added), 0),
+                COALESCE(SUM(c.lines_removed), 0),
+                COUNT(DISTINCT c.session_id) as sess_count,
+                COALESCE(
+                    (SELECT SUM(m.cost_cents) FROM messages m
+                     WHERE m.session_id IN (SELECT DISTINCT c2.session_id FROM commits c2 WHERE c2.pr_number = c.pr_number)
+                    ), 0.0
+                ) as total_cost,
+                MIN(c.timestamp),
+                MAX(c.timestamp)
+         FROM commits c
+         JOIN sessions s ON c.session_id = s.session_id
+         WHERE {}
+         GROUP BY c.pr_number
+         ORDER BY total_cost DESC
+         LIMIT ?{}",
+        conditions.join(" AND "),
+        limit_idx
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(PrCost {
+                pr_number: row.get(0)?,
+                repo_id: row.get(1)?,
+                commit_count: row.get(2)?,
+                lines_added: row.get(3)?,
+                lines_removed: row.get(4)?,
+                session_count: row.get(5)?,
+                cost_cents: row.get(6)?,
+                first_commit: row.get(7)?,
+                last_commit: row.get(8)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,5 +711,13 @@ b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11
             )
             .unwrap();
         assert!(enriched_at.is_some());
+    }
+
+    #[test]
+    fn pr_cost_empty_db() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::analytics::migrate_for_test(&conn);
+        let prs = pr_cost(&conn, None, None, 20).unwrap();
+        assert!(prs.is_empty());
     }
 }

@@ -367,3 +367,23 @@ pub async fn analytics_git_summary(
     .map_err(internal_error)?;
     Ok(Json(result))
 }
+
+pub async fn analytics_pr_cost(
+    Query(params): Query<CwdParams>,
+) -> Result<Json<Vec<budi_core::git::PrCost>>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(20);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        budi_core::git::pr_cost(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}

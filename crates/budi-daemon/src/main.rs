@@ -61,6 +61,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/branches", get(a::analytics_branches))
         .route("/analytics/tags", get(a::analytics_tags))
         .route("/analytics/git-summary", get(a::analytics_git_summary))
+        .route("/analytics/pr-cost", get(a::analytics_pr_cost))
         .route("/analytics/providers", get(a::analytics_providers))
         .route(
             "/analytics/registered-providers",
