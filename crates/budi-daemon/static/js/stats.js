@@ -43,7 +43,7 @@ function renderCards(s, cost, gitSummary) {
       <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input / ${fmtCost(cost.output_cost)} output</div>
     </div>
     <div class="card">
-      <div class="label">Total Tokens</div>
+      <div class="label">Tokens</div>
       <div class="value">${fmtNum(totalTokens)}</div>
       <div class="sub">${fmtNum(totalIn)} input / ${fmtNum(s.total_output_tokens)} output</div>
     </div>
