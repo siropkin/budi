@@ -202,7 +202,6 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         }
         StatuslineFormat::Claude => {
             let dashboard_url = format!("{}/dashboard", base);
-            // "budi" is the clickable dashboard link
             let budi_link = format!(
                 "\x1b]8;;{}\x1b\\\x1b[36m📊 budi\x1b[0m\x1b]8;;\x1b\\",
                 dashboard_url,
@@ -222,7 +221,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
                 .collect();
 
             let joined = parts.join(&format!(" {dim}·{reset} "));
-            println!("{budi_link} {dim}·{reset} {joined}");
+            println!("{joined} {dim}·{reset} {budi_link}");
         }
     }
 

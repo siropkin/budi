@@ -57,6 +57,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/models", get(a::analytics_models))
         .route("/analytics/activity", get(a::analytics_activity))
         .route("/analytics/tools", get(a::analytics_top_tools))
+        .route("/analytics/mcp-tools", get(a::analytics_mcp_tools))
         .route("/analytics/branches", get(a::analytics_branches))
         .route("/analytics/tags", get(a::analytics_tags))
         .route(
