@@ -31,7 +31,7 @@ function renderCards(s, cost, gitSummary) {
   const git = gitSummary || {};
   const aiCount = git.ai_created_commits || 0;
   const totalCommits = git.total_commits || 0;
-  const aiSub = aiCount > 0 ? `${fmtNum(aiCount)} AI-created` : 'no AI-created commits detected';
+  const aiSub = aiCount > 0 ? `${fmtNum(aiCount)} AI commit${aiCount !== 1 ? 's' : ''}` : 'no AI commits detected';
   const gitCard = `
     <div class="card">
       <div class="label">Git (during sessions)</div>

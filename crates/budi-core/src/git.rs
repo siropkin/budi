@@ -20,6 +20,19 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum sessions to enrich per batch call.
 const DEFAULT_BATCH_SIZE: usize = 50;
 
+/// Known AI tool name patterns found in Co-Authored-By commit trailers.
+/// Matched case-insensitively against the value after "Co-authored-by:".
+const AI_COAUTHOR_PATTERNS: &[&str] = &[
+    "claude",
+    "cursor",
+    "copilot",
+    "cline",
+    "aider",
+    "gemini",
+    "devin",
+    "windsurf",
+];
+
 /// A git commit associated with a session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GitCommit {
@@ -147,7 +160,10 @@ pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrich
         let jsonl_hashes = find_and_extract_jsonl_hashes(&tx, session_id);
 
         for commit in &commits {
-            let ai_created = is_ai_created_commit(&commit.hash, &jsonl_hashes);
+            // OR logic: ai_created if JSONL extraction found this hash OR
+            // if the commit message has a Co-Authored-By trailer from an AI tool.
+            let ai_created =
+                is_ai_created_commit(&commit.hash, &jsonl_hashes) || commit.ai_created;
             tx.execute(
                 "INSERT INTO commits (session_id, hash, author_name, author_email, timestamp, message, lines_added, lines_removed, pr_number, ai_created)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -236,9 +252,10 @@ fn git_log_commits(
     branch: Option<&str>,
     author_email: Option<&str>,
 ) -> Vec<GitCommit> {
-    // Format: hash<SEP>author_name<SEP>author_email<SEP>ISO timestamp<SEP>subject
-    // Followed by numstat lines (added\tremoved\tfile)
-    let format_str = format!("--format=%H\x1f%an\x1f%ae\x1f%aI\x1f%s");
+    // Format: \x1e record separator, then hash<SEP>name<SEP>email<SEP>date<SEP>full message body
+    // Using %x1e as record separator allows %B (full body) to span multiple lines.
+    // Numstat lines follow each record.
+    let format_str = format!("--format=%x1e%H\x1f%an\x1f%ae\x1f%aI\x1f%B");
     let since_arg = format!("--since={}", since);
     let until_arg = format!("--until={}", until);
     let mut args: Vec<&str> = vec![
@@ -271,19 +288,23 @@ fn git_log_commits(
     parse_git_log_output(&output)
 }
 
-/// Parse the output of git log --format=<hash>\x1f<name>\x1f<email>\x1f<date>\x1f<subject> --numstat
+/// Parse the output of git log --format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%B --numstat
+///
+/// Records are separated by \x1e (ASCII record separator). Within each record,
+/// fields are separated by \x1f (ASCII unit separator). The 5th field is the full
+/// commit message body (%B), which may span multiple lines. Numstat lines follow
+/// at the end of each record.
 fn parse_git_log_output(output: &str) -> Vec<GitCommit> {
     let mut commits = Vec::new();
     let mut seen_hashes = HashSet::new();
-    let mut lines = output.lines().peekable();
 
-    while let Some(line) = lines.next() {
-        let line = line.trim();
-        if line.is_empty() {
+    for record in output.split('\x1e') {
+        let record = record.trim();
+        if record.is_empty() {
             continue;
         }
 
-        let parts: Vec<&str> = line.splitn(5, '\x1f').collect();
+        let parts: Vec<&str> = record.splitn(5, '\x1f').collect();
         if parts.len() < 5 {
             continue;
         }
@@ -297,45 +318,71 @@ fn parse_git_log_output(output: &str) -> Vec<GitCommit> {
         let author_name = parts[1].to_string();
         let author_email = parts[2].to_string();
         let timestamp = parts[3].to_string();
-        let message = parts[4].to_string();
+        let rest = parts[4];
 
-        // Parse numstat lines that follow
-        let mut lines_added: i64 = 0;
-        let mut lines_removed: i64 = 0;
-        while let Some(stat_line) = lines.peek() {
-            let stat_line = stat_line.trim();
-            if stat_line.is_empty() {
-                lines.next();
+        // rest contains the full message body (%B) followed by numstat lines.
+        // Walk backwards from the end to find where numstat starts.
+        let lines: Vec<&str> = rest.lines().collect();
+        let mut numstat_start = lines.len();
+
+        for i in (0..lines.len()).rev() {
+            let l = lines[i].trim();
+            if l.is_empty() {
+                // Empty line: if we've found numstat below, this is the separator
+                if numstat_start < lines.len() {
+                    break;
+                }
                 continue;
             }
-            // numstat format: "added\tremoved\tfilename" or "-\t-\tbinary"
-            let stat_parts: Vec<&str> = stat_line.split('\t').collect();
+            let tab_parts: Vec<&str> = l.split('\t').collect();
+            if tab_parts.len() >= 3
+                && ((tab_parts[0].parse::<i64>().is_ok()
+                    && tab_parts[1].parse::<i64>().is_ok())
+                    || (tab_parts[0] == "-" && tab_parts[1] == "-"))
+            {
+                numstat_start = i;
+            } else {
+                break;
+            }
+        }
+
+        // Subject = first non-empty line; full message = everything before numstat
+        let message_lines = &lines[..numstat_start];
+        let subject = message_lines
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
+        let full_message = message_lines.join("\n");
+
+        // Parse numstat
+        let mut lines_added: i64 = 0;
+        let mut lines_removed: i64 = 0;
+        for &line in &lines[numstat_start..] {
+            let stat_parts: Vec<&str> = line.split('\t').collect();
             if stat_parts.len() >= 2 {
                 if let (Ok(a), Ok(r)) =
                     (stat_parts[0].parse::<i64>(), stat_parts[1].parse::<i64>())
                 {
                     lines_added += a;
                     lines_removed += r;
-                    lines.next();
-                    continue;
                 }
             }
-            // If it doesn't look like numstat, it's the next commit
-            break;
         }
 
-        let pr_number = extract_pr_number(&message);
+        let pr_number = extract_pr_number(&subject);
+        let ai_created = has_ai_coauthor(&full_message);
 
         commits.push(GitCommit {
             hash,
             author_name,
             author_email,
             timestamp,
-            message,
+            message: subject,
             lines_added,
             lines_removed,
             pr_number,
-            ai_created: false, // Set later by JSONL hash matching
+            ai_created,
         });
     }
 
@@ -447,6 +494,26 @@ fn is_ai_created_commit(full_hash: &str, jsonl_hashes: &[String]) -> bool {
     jsonl_hashes
         .iter()
         .any(|short| full_hash.starts_with(short.as_str()))
+}
+
+/// Check if a commit message contains a Co-Authored-By trailer from a known AI tool.
+///
+/// Matches case-insensitively against `AI_COAUTHOR_PATTERNS`. This detects commits
+/// where the user ran git commit manually but the AI tool added a Co-Authored-By
+/// trailer (e.g. Claude Code's standard commit format).
+pub fn has_ai_coauthor(message: &str) -> bool {
+    for line in message.lines() {
+        let trimmed = line.trim().to_lowercase();
+        if let Some(value) = trimmed.strip_prefix("co-authored-by:") {
+            let value = value.trim();
+            for &pattern in AI_COAUTHOR_PATTERNS {
+                if value.contains(pattern) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Query commits for a given session.
@@ -682,30 +749,39 @@ mod tests {
 
     #[test]
     fn parse_git_log_basic() {
-        let output = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\x1fJohn\x1fjohn@example.com\x1f2026-03-20T10:00:00-07:00\x1fFix bug (#42)\n5\t3\tsrc/main.rs\n2\t0\tREADME.md\n";
+        // New format: \x1e record separator, %B full body
+        let output = "\x1ea1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\x1fJohn\x1fjohn@example.com\x1f2026-03-20T10:00:00-07:00\x1fFix bug (#42)\n\n5\t3\tsrc/main.rs\n2\t0\tREADME.md\n";
         let commits = parse_git_log_output(output);
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].author_name, "John");
+        assert_eq!(commits[0].message, "Fix bug (#42)");
         assert_eq!(commits[0].lines_added, 7);
         assert_eq!(commits[0].lines_removed, 3);
         assert_eq!(commits[0].pr_number, Some(42));
+        assert!(!commits[0].ai_created);
     }
 
     #[test]
     fn parse_git_log_multiple_commits() {
         let output = "\
-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\x1fAlice\x1falice@test.com\x1f2026-03-20T10:00:00Z\x1fFirst commit
-3\t1\tfile.rs
-
-b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11:00:00Z\x1fSecond commit (#10)
-1\t0\tother.rs
-";
+\x1ea1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\x1fAlice\x1falice@test.com\x1f2026-03-20T10:00:00Z\x1fFirst commit\n\n3\t1\tfile.rs\n\
+\x1eb2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11:00:00Z\x1fSecond commit (#10)\n\n1\t0\tother.rs\n";
         let commits = parse_git_log_output(output);
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].message, "First commit");
         assert_eq!(commits[0].pr_number, None);
         assert_eq!(commits[1].message, "Second commit (#10)");
         assert_eq!(commits[1].pr_number, Some(10));
+    }
+
+    #[test]
+    fn parse_git_log_with_coauthor_trailer() {
+        let output = "\x1ea1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\x1fIvan\x1fivan@test.com\x1f2026-03-20T10:00:00Z\x1fAdd feature\n\nSome body text.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n\n3\t1\tfile.rs\n";
+        let commits = parse_git_log_output(output);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].message, "Add feature");
+        assert!(commits[0].ai_created, "should detect Co-Authored-By: Claude");
+        assert_eq!(commits[0].lines_added, 3);
     }
 
     #[test]
@@ -844,5 +920,99 @@ b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3\x1fBob\x1fbob@test.com\x1f2026-03-20T11
         crate::analytics::migrate_for_test(&conn);
         let prs = pr_cost(&conn, None, None, 20).unwrap();
         assert!(prs.is_empty());
+    }
+
+    // --- Co-Authored-By detection tests ---
+
+    #[test]
+    fn coauthor_claude() {
+        assert!(has_ai_coauthor(
+            "Add feature\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_claude_opus() {
+        assert!(has_ai_coauthor(
+            "Fix bug\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_copilot() {
+        assert!(has_ai_coauthor(
+            "Update readme\n\nCo-authored-by: GitHub Copilot <noreply@github.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_cursor() {
+        assert!(has_ai_coauthor(
+            "Refactor module\n\nCo-Authored-By: Cursor <cursor@anysphere.inc>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_cline() {
+        assert!(has_ai_coauthor(
+            "Add tests\n\nCo-authored-by: Cline <cline@example.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_aider() {
+        assert!(has_ai_coauthor(
+            "Implement feature\n\nCo-authored-by: aider (aider.chat) <aider@example.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_gemini() {
+        assert!(has_ai_coauthor(
+            "Update config\n\nCo-authored-by: Gemini <gemini@google.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_case_insensitive() {
+        assert!(has_ai_coauthor(
+            "Fix\n\nco-authored-by: CLAUDE <noreply@anthropic.com>"
+        ));
+        assert!(has_ai_coauthor(
+            "Fix\n\nCO-AUTHORED-BY: claude <noreply@anthropic.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_not_ai() {
+        assert!(!has_ai_coauthor(
+            "Pair programming\n\nCo-authored-by: Alice <alice@example.com>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_no_trailer() {
+        assert!(!has_ai_coauthor("Just a regular commit message"));
+        assert!(!has_ai_coauthor(""));
+    }
+
+    #[test]
+    fn coauthor_multiple_trailers() {
+        let msg = "Feature\n\nCo-authored-by: Bob <bob@test.com>\nCo-authored-by: Claude <noreply@anthropic.com>";
+        assert!(has_ai_coauthor(msg));
+    }
+
+    #[test]
+    fn coauthor_devin() {
+        assert!(has_ai_coauthor(
+            "Fix\n\nCo-authored-by: Devin <devin@cognition.ai>"
+        ));
+    }
+
+    #[test]
+    fn coauthor_windsurf() {
+        assert!(has_ai_coauthor(
+            "Fix\n\nCo-authored-by: Windsurf <windsurf@codeium.com>"
+        ));
     }
 }
