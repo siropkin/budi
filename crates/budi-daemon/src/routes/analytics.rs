@@ -324,3 +324,32 @@ pub async fn analytics_interaction_modes(
     .map_err(internal_error)?;
     Ok(Json(result))
 }
+
+#[derive(serde::Deserialize)]
+pub struct TagParams {
+    since: Option<String>,
+    until: Option<String>,
+    key: Option<String>,
+    limit: Option<usize>,
+}
+
+pub async fn analytics_tags(
+    Query(params): Query<TagParams>,
+) -> Result<Json<Vec<analytics::TagCost>>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(20);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::tag_stats(
+            &conn,
+            params.key.as_deref(),
+            params.since.as_deref(),
+            params.until.as_deref(),
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}

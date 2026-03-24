@@ -44,6 +44,7 @@ pub fn cmd_stats(
     models: bool,
     sessions: bool,
     provider: Option<String>,
+    tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
     let db_path = analytics::db_path()?;
@@ -52,6 +53,10 @@ pub fn cmd_stats(
         return Ok(());
     }
     let conn = analytics::open_db(&db_path)?;
+
+    if let Some(ref tag_filter) = tag {
+        return cmd_stats_tags(&conn, period, tag_filter, json_output);
+    }
 
     if let Some(ref sid) = session {
         if json_output {
@@ -635,6 +640,69 @@ pub fn format_tokens(n: u64) -> String {
     } else {
         format!("{}", n)
     }
+}
+
+fn cmd_stats_tags(
+    conn: &rusqlite::Connection,
+    period: StatsPeriod,
+    tag_filter: &str,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+
+    // Parse "key=value" or just "key"
+    let (tag_key, _tag_value) = if let Some(eq) = tag_filter.find('=') {
+        (Some(&tag_filter[..eq]), Some(&tag_filter[eq + 1..]))
+    } else {
+        (Some(tag_filter), None)
+    };
+
+    let data = analytics::tag_stats(conn, tag_key, since.as_deref(), until.as_deref(), 30)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&data)?);
+        return Ok(());
+    }
+
+    if data.is_empty() {
+        println!(
+            "No tag data for '{}' ({})",
+            tag_filter,
+            period_label(period)
+        );
+        return Ok(());
+    }
+
+    println!(
+        "\n\x1b[1m  Tag: {} — {}\x1b[0m\n",
+        tag_filter,
+        period_label(period)
+    );
+
+    // Find max cost for bar scaling
+    let max_cost = data.iter().map(|t| t.cost_cents).fold(0.0f64, f64::max);
+    let bar_width: usize = 30;
+
+    for tag in &data {
+        let cost_dollars = tag.cost_cents / 100.0;
+        let bar_len = if max_cost > 0.0 {
+            ((tag.cost_cents / max_cost) * bar_width as f64) as usize
+        } else {
+            0
+        };
+        let bar = "█".repeat(bar_len);
+        let pad_bar = " ".repeat(bar_width.saturating_sub(bar_len));
+        println!(
+            "  {:<40} \x1b[33m{}\x1b[0m{} {:>8} ({} msgs)",
+            tag.value,
+            bar,
+            pad_bar,
+            format!("${:.2}", cost_dollars),
+            format_tokens(tag.message_count),
+        );
+    }
+    println!();
+    Ok(())
 }
 
 pub fn format_timestamp(ts: &str) -> String {

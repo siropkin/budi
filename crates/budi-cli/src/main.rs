@@ -75,6 +75,9 @@ enum Commands {
         /// Filter by provider (e.g. claude_code, cursor)
         #[arg(long)]
         provider: Option<String>,
+        /// Show cost breakdown by tag (e.g. --tag ticket_id or --tag team=platform)
+        #[arg(long)]
+        tag: Option<String>,
         /// Output as JSON
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -200,9 +203,10 @@ fn main() -> Result<()> {
             models,
             sessions,
             provider,
+            tag,
             json,
         } => commands::stats::cmd_stats(
-            period, session, projects, branches, branch, models, sessions, provider, json,
+            period, session, projects, branches, branch, models, sessions, provider, tag, json,
         ),
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),

@@ -44,7 +44,7 @@ function renderSessionsSection(sessions) {
 
 /* ===== View Renderer ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets } = statsData;
   content.innerHTML = `
     ${renderCards(summary, cost)}
     <div class="panel section-mb">
@@ -102,6 +102,16 @@ function renderStatsView(content) {
         )}
       </div>
     </div>
+    ${(tickets || []).length > 0 ? `<div class="panel section-mb">
+      <h2>Tickets${ccOnlyLabel()}</h2>
+      ${renderBarChart((tickets || []).slice(0, DEFAULT_CHART_ROWS),
+        t => t.value,
+        t => t.cost_cents,
+        (t, i) => paletteColor(i),
+        'No ticket data for this period',
+        fmtCostMsgs
+      )}
+    </div>` : ''}
     <div class="grid-2 section-mb">
       <div class="panel">
         <h2>Tools${ccOnlyLabel()}</h2>

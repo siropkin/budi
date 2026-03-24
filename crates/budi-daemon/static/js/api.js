@@ -23,7 +23,7 @@ async function loadStatsData(signal) {
   const opts = signal ? { signal } : {};
 
   const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
-  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, interactionModes, topTools, mcpTools, branches] = await Promise.all([
+  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, interactionModes, topTools, mcpTools, branches, tickets] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
     fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
@@ -36,11 +36,12 @@ async function loadStatsData(signal) {
     fetch('/analytics/top-tools' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/mcp-tools' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/branches' + q, opts).then(r => r.json()).catch(() => []),
+    fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=ticket_id&limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()).catch(() => []),
   ]);
 
   const sessions = sessionsResult.sessions || [];
   sessionTotalCount = sessionsResult.total_count || 0;
-  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches };
+  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets };
   lastSessionData = sessions;
   providersData = providers;
 

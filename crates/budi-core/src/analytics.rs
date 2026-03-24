@@ -1362,6 +1362,89 @@ pub fn branch_cost_single(
     Ok(result)
 }
 
+/// Tag-based cost breakdown: cost grouped by tag key+value.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TagCost {
+    pub key: String,
+    pub value: String,
+    pub message_count: u64,
+    pub cost_cents: f64,
+}
+
+/// Query cost breakdown by tag, optionally filtered by tag key and date range.
+pub fn tag_stats(
+    conn: &Connection,
+    tag_key: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TagCost>> {
+    let mut conditions = Vec::new();
+    let mut param_values: Vec<String> = Vec::new();
+
+    if let Some(k) = tag_key {
+        param_values.push(k.to_string());
+        conditions.push(format!("t.key = ?{}", param_values.len()));
+    }
+    if let Some(s) = since {
+        param_values.push(s.to_string());
+        conditions.push(format!("tm.timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until {
+        param_values.push(u.to_string());
+        conditions.push(format!("tm.timestamp < ?{}", param_values.len()));
+    }
+
+    param_values.push(limit.to_string());
+    let limit_idx = param_values.len();
+
+    // Tags like ticket_id/branch are attached to user messages (which have no cost).
+    // Join through session to get the full session cost for each tagged session.
+    let extra_conditions = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("AND {}", conditions.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT ts.key, ts.value,
+                COUNT(*) as session_count,
+                COALESCE(SUM(ts.session_cost), 0.0) as total_cost_cents
+         FROM (
+             SELECT DISTINCT t.key, t.value, tm.session_id,
+                    (SELECT COALESCE(SUM(sm.cost_cents), 0.0)
+                     FROM messages sm WHERE sm.session_id = tm.session_id) as session_cost
+             FROM tags t
+             JOIN messages tm ON t.message_uuid = tm.uuid
+             WHERE tm.session_id IS NOT NULL
+             {}
+         ) ts
+         GROUP BY ts.key, ts.value
+         ORDER BY total_cost_cents DESC
+         LIMIT ?{}",
+        extra_conditions, limit_idx
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(TagCost {
+                key: row.get(0)?,
+                value: row.get(1)?,
+                message_count: row.get(2)?,
+                cost_cents: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 /// Model usage breakdown: tokens grouped by model name.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelUsage {

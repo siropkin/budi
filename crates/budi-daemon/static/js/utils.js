@@ -51,6 +51,10 @@ function fmtCostTokens(_, item) {
   const cost = (item.cost_cents || 0) / 100;
   return fmtCost(cost);
 }
+function fmtCostMsgs(_, item) {
+  const cost = (item.cost_cents || 0) / 100;
+  return fmtCost(cost) + ' (' + fmtNum(item.message_count || 0) + ' msgs)';
+}
 function fmtDuration(firstSeen, lastSeen) {
   if (!firstSeen || !lastSeen) return '--';
   const ms = new Date(lastSeen) - new Date(firstSeen);
