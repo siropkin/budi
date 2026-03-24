@@ -75,9 +75,6 @@ enum Commands {
         /// Filter by provider (e.g. claude_code, cursor)
         #[arg(long)]
         provider: Option<String>,
-        /// Show cost per PR (from git commit data)
-        #[arg(long, default_value_t = false)]
-        prs: bool,
         /// Show cost breakdown by tag (e.g. --tag ticket_id or --tag team=platform)
         #[arg(long)]
         tag: Option<String>,
@@ -213,12 +210,10 @@ fn main() -> Result<()> {
             models,
             sessions,
             provider,
-            prs,
             tag,
             json,
         } => commands::stats::cmd_stats(
-            period, session, projects, branches, branch, models, sessions, provider, prs, tag,
-            json,
+            period, session, projects, branches, branch, models, sessions, provider, tag, json,
         ),
         Commands::Sync { backfill_tags } => commands::sync::cmd_sync_with_options(backfill_tags),
         Commands::Open => commands::open::cmd_open(),

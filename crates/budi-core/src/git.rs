@@ -119,14 +119,28 @@ pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrich
             continue;
         }
 
+        // Resolve git author first (cached per repo) — needed to filter commits
+        let (author_name, author_email) = author_cache
+            .entry(project_dir.clone())
+            .or_insert_with(|| git_author(dir))
+            .clone();
+
         // Delete existing commits for this session (re-enrich on update)
         tx.execute(
             "DELETE FROM commits WHERE session_id = ?1",
             params![session_id],
         )?;
 
-        // Get commits during the session time range
-        let commits = git_log_commits(dir, first_seen, last_seen, git_branch.as_deref());
+        // Get commits during the session time range, filtered to this author only.
+        // This ensures we only capture the user's own commits, not team commits
+        // from busy repos.
+        let commits = git_log_commits(
+            dir,
+            first_seen,
+            last_seen,
+            git_branch.as_deref(),
+            author_email.as_deref(),
+        );
         for commit in &commits {
             tx.execute(
                 "INSERT INTO commits (session_id, hash, author_name, author_email, timestamp, message, lines_added, lines_removed, pr_number)
@@ -145,12 +159,6 @@ pub fn enrich_git_batch(conn: &mut Connection, limit: usize) -> Result<GitEnrich
             )?;
             total_commits += 1;
         }
-
-        // Get git author with cache
-        let (author_name, author_email) = author_cache
-            .entry(project_dir.clone())
-            .or_insert_with(|| git_author(dir))
-            .clone();
 
         // Update session with author info and enrichment timestamp
         tx.execute(
@@ -213,11 +221,13 @@ fn is_inside_git_repo(dir: &Path) -> bool {
 }
 
 /// Run git log to find commits made during a session's time range.
+/// When `author_email` is provided, only returns commits by that author.
 fn git_log_commits(
     dir: &Path,
     since: &str,
     until: &str,
     branch: Option<&str>,
+    author_email: Option<&str>,
 ) -> Vec<GitCommit> {
     // Format: hash<SEP>author_name<SEP>author_email<SEP>ISO timestamp<SEP>subject
     // Followed by numstat lines (added\tremoved\tfile)
@@ -231,6 +241,13 @@ fn git_log_commits(
         &format_str,
         "--numstat",
     ];
+
+    // Filter to this author's commits only
+    let author_arg;
+    if let Some(email) = author_email {
+        author_arg = format!("--author={}", email);
+        args.push(&author_arg);
+    }
 
     // If branch is specified, use it to scope commits
     let branch_name;

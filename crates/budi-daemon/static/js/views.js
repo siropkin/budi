@@ -53,7 +53,7 @@ function renderSessionsSection(sessions) {
 
 /* ===== View Renderer ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets, gitSummary, prCost } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets, gitSummary } = statsData;
   content.innerHTML = `
     ${renderCards(summary, cost, gitSummary)}
     <div class="panel section-mb">
@@ -117,22 +117,6 @@ function renderStatsView(content) {
           t => t.cost_cents,
           (t, i) => paletteColor(i),
           'No ticket data for this period',
-          fmtCostTokens
-        )}
-      </div>
-    </div>
-    <div class="grid-2 section-mb">
-      <div class="panel">
-        <h2>PR Cost</h2>
-        ${renderBarChart((prCost || []).slice(0, DEFAULT_CHART_ROWS),
-          (p, full) => {
-            const repo = repoName(p.repo_id) || '';
-            const label = '#' + p.pr_number + (repo ? ' (' + repo + ')' : '');
-            return full ? label + ' — ' + p.commit_count + ' commits, +' + fmtNum(p.lines_added) + '/-' + fmtNum(p.lines_removed) + ' lines' : label;
-          },
-          p => p.cost_cents,
-          (p, i) => paletteColor(i),
-          'No PR cost data for this period',
           fmtCostTokens
         )}
       </div>
