@@ -718,7 +718,7 @@ pub fn format_cost(dollars: f64) -> String {
     } else if dollars >= 1.0 {
         format!("${:.2}", dollars)
     } else if dollars > 0.0 {
-        format!("${:.3}", dollars)
+        format!("${:.2}", dollars)
     } else {
         "$0.00".to_string()
     }

@@ -44,7 +44,7 @@ function fmtCost(n) {
   if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'K';
   if (n >= 100) return '$' + n.toFixed(0);
   if (n >= 1) return '$' + n.toFixed(2);
-  if (n > 0) return '$' + n.toFixed(3);
+  if (n > 0) return '$' + n.toFixed(2);
   return '$0.00';
 }
 function fmtCostTokens(_, item) {
