@@ -32,13 +32,31 @@ impl Pipeline {
 
     /// Process a batch of messages through all enrichers.
     /// Returns a parallel Vec of tags for each message.
+    /// Session-level tags (ticket_id, ticket_prefix, branch, repo) are
+    /// deduplicated: only emitted for the first message in each session.
     pub fn process(&mut self, messages: &mut [ParsedMessage]) -> Vec<Vec<Tag>> {
+        use std::collections::HashSet;
         let mut all_tags = Vec::with_capacity(messages.len());
+        // Track (session_id, key, value) to avoid duplicate session-level tags.
+        let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
+        let session_level_keys: &[&str] =
+            &["ticket_id", "ticket_prefix", "branch", "repo"];
+
         for msg in messages.iter_mut() {
             normalize(msg);
             let mut msg_tags = Vec::new();
             for enricher in &mut self.enrichers {
-                msg_tags.extend(enricher.enrich(msg));
+                for tag in enricher.enrich(msg) {
+                    if session_level_keys.contains(&tag.key.as_str()) {
+                        if let Some(ref sid) = msg.session_id {
+                            let key = (sid.clone(), tag.key.clone(), tag.value.clone());
+                            if !seen_session_tags.insert(key) {
+                                continue; // Already emitted for this session
+                            }
+                        }
+                    }
+                    msg_tags.push(tag);
+                }
             }
             all_tags.push(msg_tags);
         }

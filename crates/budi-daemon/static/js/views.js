@@ -24,15 +24,14 @@ function renderSessionsSection(sessions) {
     const provDisplay = (registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider;
     const provCol = multiProvider ? `<td>${esc(provDisplay)}</td>` : '';
     const branch = (s.git_branch || '').replace(/^refs\/heads\//, '');
-    const ticketMatch = branch.match(/[a-zA-Z]{2,}-\d+/);
-    const ticket = ticketMatch ? ticketMatch[0].toUpperCase() : '';
+    const tickets = (s.ticket_ids || []).join(', ');
     return `<tr>
       <td>${esc(fmtDate(s.last_seen))}</td>
       <td title="${esc(s.session_id)}">${esc(title)}</td>
       ${provCol}
       <td class="dir" title="${esc(s.repo_id || s.project_dir || '')}">${esc(repoName(s.repo_id) || shortenDir(s.project_dir))}</td>
       <td class="dir" title="${esc(s.git_branch || '')}">${esc(branch)}</td>
-      <td>${esc(ticket)}</td>
+      <td>${esc(tickets)}</td>
       <td class="right">${fmtDuration(s.first_seen, s.last_seen)}</td>
       <td class="right">${fmtNum(s.message_count)}</td>
       <td class="right">${fmtNum(totalTok)}</td>

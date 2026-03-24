@@ -245,7 +245,7 @@ pub fn ingest_messages(
             if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
                 for tag in msg_tags {
                     tx.execute(
-                        "INSERT INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                        "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
                         params![msg.uuid, tag.key, tag.value],
                     )?;
                 }
@@ -337,7 +337,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
         if let Some(msg_tags) = all_tags.get(i) {
             for tag in msg_tags {
                 tx.execute(
-                    "INSERT INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                    "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
                     params![msg.uuid, tag.key, tag.value],
                 )?;
                 count += 1;
@@ -591,6 +591,7 @@ pub struct SessionSummary {
     pub git_branch: Option<String>,
     pub user_name: Option<String>,
     pub machine_name: Option<String>,
+    pub ticket_ids: Vec<String>,
 }
 
 /// Paginated session list result.
@@ -694,7 +695,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let sessions = stmt
+    let mut sessions = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(SessionSummary {
                 session_id: row.get(0)?,
@@ -713,6 +714,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 git_branch: row.get(13)?,
                 user_name: row.get(14)?,
                 machine_name: row.get(15)?,
+                ticket_ids: Vec::new(), // populated below
             })
         })?
         .filter_map(|r| match r {
@@ -722,7 +724,41 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 None
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    // Populate ticket_ids from tags for each session.
+    if !sessions.is_empty() {
+        let placeholders: String = sessions.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let ticket_sql = format!(
+            "SELECT DISTINCT tm.session_id, t.value
+             FROM tags t
+             JOIN messages tm ON t.message_uuid = tm.uuid
+             WHERE t.key = 'ticket_id' AND tm.session_id IN ({})",
+            placeholders
+        );
+        let mut ticket_stmt = conn.prepare(&ticket_sql)?;
+        let session_params: Vec<&dyn rusqlite::types::ToSql> = sessions
+            .iter()
+            .map(|s| &s.session_id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let ticket_rows = ticket_stmt
+            .query_map(session_params.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+
+        let mut ticket_map: HashMap<String, Vec<String>> = HashMap::new();
+        for (sid, ticket) in ticket_rows {
+            ticket_map.entry(sid).or_default().push(ticket);
+        }
+        for session in &mut sessions {
+            if let Some(tickets) = ticket_map.remove(&session.session_id) {
+                session.ticket_ids = tickets;
+            }
+        }
+    }
+
     Ok(PaginatedSessions {
         sessions,
         total_count,
@@ -1338,14 +1374,23 @@ pub fn tag_stats(
         format!("AND {}", conditions.join(" AND "))
     };
 
+    // When a session has multiple distinct tag values for the same key (e.g.
+    // three tickets worked on in one session), split the session cost evenly
+    // among them so the total across tickets equals the session cost, not N×.
     let sql = format!(
         "SELECT ts.key, ts.value,
                 COUNT(*) as session_count,
-                COALESCE(SUM(ts.session_cost), 0.0) as total_cost_cents
+                COALESCE(SUM(ts.split_cost), 0.0) as total_cost_cents
          FROM (
              SELECT DISTINCT t.key, t.value, tm.session_id,
                     (SELECT COALESCE(SUM(sm.cost_cents), 0.0)
-                     FROM messages sm WHERE sm.session_id = tm.session_id) as session_cost
+                     FROM messages sm WHERE sm.session_id = tm.session_id)
+                    /
+                    (SELECT COUNT(DISTINCT t2.value)
+                     FROM tags t2
+                     JOIN messages tm2 ON t2.message_uuid = tm2.uuid
+                     WHERE t2.key = t.key
+                       AND tm2.session_id = tm.session_id) as split_cost
              FROM tags t
              JOIN messages tm ON t.message_uuid = tm.uuid
              JOIN sessions s ON s.session_id = tm.session_id

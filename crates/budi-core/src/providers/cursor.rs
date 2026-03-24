@@ -39,7 +39,15 @@ impl Provider for CursorProvider {
         let projects_dir = home.join("projects");
         let mut files = Vec::new();
         collect_cursor_transcripts(&projects_dir, &mut files);
-        files.sort();
+        // Sort by mtime descending (newest first) for progressive sync.
+        files.sort_by(|a, b| {
+            let mtime = |p: &PathBuf| {
+                p.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            };
+            mtime(b).cmp(&mtime(a))
+        });
         Ok(files
             .into_iter()
             .map(|path| DiscoveredFile { path })

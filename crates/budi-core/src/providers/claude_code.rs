@@ -1,5 +1,5 @@
 //! Claude Code provider — implements the Provider trait by delegating to
-//! existing modules (jsonl, cost, claude_data, pre_filter, hooks).
+//! existing modules (jsonl, cost, hooks).
 
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 
 use crate::hooks;
 use crate::jsonl::{self, ParsedMessage};
-use crate::pre_filter;
 use crate::provider::{DiscoveredFile, HookHandler, ModelPricing, Provider};
 
 /// The Claude Code provider.
@@ -87,7 +86,18 @@ pub fn discover_jsonl_files() -> Result<Vec<PathBuf>> {
     let claude_dir = claude_home()?.join("projects");
     let mut files = Vec::new();
     collect_jsonl_recursive(&claude_dir, &mut files, 0);
-    files.sort();
+    // Sort by modification time descending (newest first) so that the most
+    // recent transcripts are synced first — this gives progressive first-sync
+    // UX where today's data appears in seconds instead of waiting for full
+    // history to be processed.
+    files.sort_by(|a, b| {
+        let mtime = |p: &PathBuf| {
+            p.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        };
+        mtime(b).cmp(&mtime(a))
+    });
     Ok(files)
 }
 
@@ -150,7 +160,3 @@ pub fn claude_pricing_for_model(model: &str) -> ModelPricing {
     }
 }
 
-/// Check if a prompt should be skipped by Claude Code pre-filter logic.
-pub fn should_skip_prompt(prompt: &str) -> bool {
-    pre_filter::is_obviously_non_code(prompt) || pre_filter::is_conversational_followup(prompt)
-}

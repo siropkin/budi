@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -127,6 +127,29 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             ",
         )?;
         needs_tag_backfill = true;
+    }
+
+    if version < 2 {
+        // Deduplicate tags: remove duplicate (message_uuid, key, value) rows,
+        // then recreate the table with a UNIQUE constraint.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS tags_new (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_uuid TEXT NOT NULL,
+                key          TEXT NOT NULL,
+                value        TEXT NOT NULL,
+                UNIQUE(message_uuid, key, value),
+                FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
+            );
+            INSERT OR IGNORE INTO tags_new (message_uuid, key, value)
+                SELECT message_uuid, key, value FROM tags;
+            DROP TABLE tags;
+            ALTER TABLE tags_new RENAME TO tags;
+            CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
+            CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
+            ",
+        )?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
