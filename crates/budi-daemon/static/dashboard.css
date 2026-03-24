@@ -71,23 +71,26 @@ a:hover { text-decoration: underline; }
 .bar-chart .bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
 .bar-chart .bar-count { width: 60px; font-variant-numeric: tabular-nums; color: var(--text-muted); text-align: right; }
 
-.sortable-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.sortable-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; table-layout: fixed; }
 .sortable-table th {
-  text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
-  color: var(--text-muted); font-weight: 500; font-size: 0.78rem;
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
+  color: var(--text-muted); font-weight: 500; font-size: 0.75rem;
   text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; user-select: none; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
 .sortable-table th:hover { color: var(--text); }
 .sortable-table th .sort-arrow { margin-left: 4px; font-size: 0.7rem; }
 .sortable-table td {
-  padding: 8px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--text-muted);
+  padding: 6px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sortable-table tr:hover td { background: rgba(88,166,255,0.05); }
 .sortable-table .mono { font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
 .sortable-table .dir {
-  max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
 }
 .sortable-table .right { text-align: right; }
+.table-scroll { overflow-x: auto; }
 
 .empty { text-align: center; color: var(--text-muted); padding: 32px; display: flex; align-items: center; justify-content: center; min-height: 120px; }
 .loading { text-align: center; color: var(--text-muted); padding: 48px; }

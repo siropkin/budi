@@ -42,12 +42,14 @@ function renderSessionsSection(sessions) {
     </tr>`;
   };
   return `
+  <div class="table-scroll">
   <table class="sortable-table" id="sessionsTable">
     <thead><tr>${cols.map(c =>
       `<th data-col="${c.key}"${c.right ? ' class="right"' : ''}>${c.label}${arrow(c.key)}</th>`
     ).join('')}</tr></thead>
     <tbody>${sessions.map(rowFn).join('')}</tbody>
   </table>
+  </div>
   ${hasMore ? `<button class="show-more-btn" data-table="sessionsTable">Show more (${remaining} remaining)</button>` : ''}`;
 }
 
