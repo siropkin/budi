@@ -135,13 +135,6 @@ pub struct BudiConfig {
     pub daemon_host: String,
     /// Port the daemon listens on. Default: 7878.
     pub daemon_port: u16,
-
-    /// Enable hook I/O telemetry. Default: false.
-    pub debug_io: bool,
-    /// Include full injected context text in telemetry log entries. Default: false.
-    pub debug_io_full_text: bool,
-    /// Maximum characters of context text to include per telemetry entry. Default: 1200.
-    pub debug_io_max_chars: usize,
 }
 
 impl Default for BudiConfig {
@@ -149,9 +142,6 @@ impl Default for BudiConfig {
         Self {
             daemon_host: DEFAULT_DAEMON_HOST.to_string(),
             daemon_port: DEFAULT_DAEMON_PORT,
-            debug_io: false,
-            debug_io_full_text: false,
-            debug_io_max_chars: 1200,
         }
     }
 }
@@ -241,10 +231,6 @@ pub fn repos_root_dir() -> Result<PathBuf> {
 
 pub fn config_path(repo_root: &Path) -> Result<PathBuf> {
     Ok(repo_paths(repo_root)?.config_file)
-}
-
-pub fn hook_log_path(repo_root: &Path) -> Result<PathBuf> {
-    Ok(repo_paths(repo_root)?.log_dir.join("hook-io.jsonl"))
 }
 
 pub fn daemon_log_path(repo_root: &Path) -> Result<PathBuf> {

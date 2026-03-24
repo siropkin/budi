@@ -8,12 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::config::{self, BudiConfig};
-use budi_core::rpc::{StatusRequest, StatusResponse};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 
 use crate::HEALTH_TIMEOUT_SECS;
-use crate::STATUS_TIMEOUT_SECS;
 
 pub fn daemon_client_with_timeout(timeout: Duration) -> Client {
     Client::builder()
@@ -41,23 +39,6 @@ pub fn fetch_session_stats(config: &BudiConfig, session_id: &str) -> Option<Valu
         .send()
         .ok()
         .and_then(|r| r.json::<Value>().ok())
-}
-
-pub fn fetch_status_snapshot(base_url: &str, repo_root: &str) -> Result<StatusResponse> {
-    let client = daemon_client_with_timeout(Duration::from_secs(STATUS_TIMEOUT_SECS));
-    let url = format!("{base_url}/status");
-    let response: StatusResponse = client
-        .post(url)
-        .json(&StatusRequest {
-            repo_root: repo_root.to_string(),
-        })
-        .send()
-        .context("Failed requesting daemon status")?
-        .error_for_status()
-        .context("Status endpoint returned error")?
-        .json()
-        .context("Invalid status response JSON")?;
-    Ok(response)
 }
 
 pub fn daemon_health(config: &BudiConfig) -> bool {

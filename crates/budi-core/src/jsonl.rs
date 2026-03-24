@@ -137,8 +137,6 @@ pub struct ParsedMessage {
     pub context_tokens_used: Option<u64>,
     /// Context window token limit for this request.
     pub context_token_limit: Option<u64>,
-    /// Interaction mode: "agent", "chat", "composer", "tab".
-    pub interaction_mode: Option<String>,
     /// Human-readable session title.
     pub session_title: Option<String>,
     /// Lines of code added in this session.
@@ -183,7 +181,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             cost_cents: None,
             context_tokens_used: None,
             context_token_limit: None,
-            interaction_mode: None,
             session_title: None,
             lines_added: None,
             lines_removed: None,
@@ -237,7 +234,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 cost_cents: None, // Calculated during ingest from tokens × pricing
                 context_tokens_used,
                 context_token_limit: None,
-                interaction_mode: Some("agent".to_string()), // Claude Code is always agent mode
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,

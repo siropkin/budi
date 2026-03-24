@@ -6,7 +6,6 @@ pub mod hooks;
 pub mod jsonl;
 pub mod migration;
 pub mod pipeline;
-pub mod pre_filter;
 pub mod provider;
 pub mod providers;
 pub mod repo_id;

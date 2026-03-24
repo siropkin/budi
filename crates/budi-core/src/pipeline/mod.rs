@@ -282,7 +282,6 @@ mod tests {
             cost_cents: None,
             context_tokens_used: None,
             context_token_limit: None,
-            interaction_mode: None,
             session_title: None,
             lines_added: None,
             lines_removed: None,

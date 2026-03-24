@@ -202,9 +202,9 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         }
         StatuslineFormat::Claude => {
             let dashboard_url = format!("{}/dashboard", base);
-            let budi_label = "\x1b[36m📊 budi\x1b[0m";
-            let dashboard_link = format!(
-                "\x1b]8;;{}\x1b\\\x1b[36m↗ dashboard\x1b[0m\x1b]8;;\x1b\\",
+            // "budi" is the clickable dashboard link
+            let budi_link = format!(
+                "\x1b]8;;{}\x1b\\\x1b[36m📊 budi\x1b[0m\x1b]8;;\x1b\\",
                 dashboard_url,
             );
             let dim = "\x1b[90m";
@@ -222,7 +222,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
                 .collect();
 
             let joined = parts.join(&format!(" {dim}·{reset} "));
-            println!("{budi_label} {dim}·{reset} {joined} {dim}·{reset} {dashboard_link}");
+            println!("{budi_link} {dim}·{reset} {joined}");
         }
     }
 

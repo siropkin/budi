@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -44,7 +44,6 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 repo_id          TEXT,
                 provider         TEXT DEFAULT 'claude_code',
                 session_title    TEXT,
-                interaction_mode TEXT,
                 lines_added      INTEGER DEFAULT 0,
                 lines_removed    INTEGER DEFAULT 0,
                 user_name        TEXT,
@@ -70,7 +69,6 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 cost_cents             REAL,
                 context_tokens_used    INTEGER,
                 context_token_limit    INTEGER,
-                interaction_mode       TEXT,
                 parent_uuid            TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
@@ -88,24 +86,6 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 key          TEXT NOT NULL,
                 value        TEXT NOT NULL,
                 FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
-            );
-
-            CREATE TABLE IF NOT EXISTS commits (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id    TEXT,
-                hash          TEXT NOT NULL,
-                author_name   TEXT,
-                author_email  TEXT,
-                timestamp     TEXT NOT NULL,
-                message       TEXT,
-                lines_added   INTEGER NOT NULL DEFAULT 0,
-                lines_removed INTEGER NOT NULL DEFAULT 0,
-                pr_number     INTEGER,
-                ai_created    INTEGER NOT NULL DEFAULT 0,
-                ai_percentage REAL,
-                branch_name   TEXT,
-                provider      TEXT DEFAULT 'cursor',
-                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
 
             CREATE TABLE IF NOT EXISTS sync_state (
@@ -127,11 +107,6 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);
             CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
-            CREATE INDEX IF NOT EXISTS idx_commits_session ON commits(session_id);
-            CREATE INDEX IF NOT EXISTS idx_commits_hash ON commits(hash);
-            CREATE INDEX IF NOT EXISTS idx_commits_pr ON commits(pr_number);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_hash_branch
-                ON commits(hash, branch_name);
             ",
         )?;
         needs_tag_backfill = true;
@@ -175,7 +150,6 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 repo_id          TEXT,
                 provider         TEXT DEFAULT 'claude_code',
                 session_title    TEXT,
-                interaction_mode TEXT,
                 lines_added      INTEGER DEFAULT 0,
                 lines_removed    INTEGER DEFAULT 0,
                 user_name        TEXT,
@@ -183,7 +157,7 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             );
             INSERT OR REPLACE INTO sessions_new
                 SELECT session_id, project_dir, first_seen, last_seen, version,
-                       git_branch, repo_id, provider, session_title, interaction_mode,
+                       git_branch, repo_id, provider, session_title,
                        lines_added, lines_removed, user_name, machine_name
                 FROM sessions;
             DROP TABLE sessions;
@@ -223,12 +197,45 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 CREATE INDEX IF NOT EXISTS idx_commits_session ON commits(session_id);
                 CREATE INDEX IF NOT EXISTS idx_commits_hash ON commits(hash);
                 CREATE INDEX IF NOT EXISTS idx_commits_pr ON commits(pr_number);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_hash_branch
+                    ON commits(hash, branch_name);
                 ",
             )?;
         }
+    }
+
+    if version < 5 {
+        // Drop interaction_mode from sessions (rebuild table without it).
+        // Drop commits table entirely (AI contribution feature removed).
         conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_commits_hash_branch
-                ON commits(hash, branch_name);",
+            "
+            CREATE TABLE IF NOT EXISTS sessions_v5 (
+                session_id       TEXT PRIMARY KEY,
+                project_dir      TEXT,
+                first_seen       TEXT NOT NULL,
+                last_seen        TEXT NOT NULL,
+                version          TEXT,
+                git_branch       TEXT,
+                repo_id          TEXT,
+                provider         TEXT DEFAULT 'claude_code',
+                session_title    TEXT,
+                lines_added      INTEGER DEFAULT 0,
+                lines_removed    INTEGER DEFAULT 0,
+                user_name        TEXT,
+                machine_name     TEXT
+            );
+            INSERT OR REPLACE INTO sessions_v5
+                SELECT session_id, project_dir, first_seen, last_seen, version,
+                       git_branch, repo_id, provider, session_title,
+                       lines_added, lines_removed, user_name, machine_name
+                FROM sessions;
+            DROP TABLE sessions;
+            ALTER TABLE sessions_v5 RENAME TO sessions;
+            CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
+            CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);
+            DROP TABLE IF EXISTS commits;
+            ",
         )?;
     }
 

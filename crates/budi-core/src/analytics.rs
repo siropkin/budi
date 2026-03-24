@@ -89,7 +89,6 @@ fn upsert_session(
     repo_id: Option<&str>,
     provider: &str,
     session_title: Option<&str>,
-    interaction_mode: Option<&str>,
     lines_added: Option<u64>,
     lines_removed: Option<u64>,
     user_name: Option<&str>,
@@ -99,8 +98,8 @@ fn upsert_session(
     let la = lines_added.map(|v| v as i64);
     let lr = lines_removed.map(|v| v as i64);
     conn.execute(
-        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider, session_title, interaction_mode, lines_added, lines_removed, user_name, machine_name)
-         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, 0), COALESCE(?11, 0), ?12, ?13)
+        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider, session_title, lines_added, lines_removed, user_name, machine_name)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, 0), COALESCE(?10, 0), ?11, ?12)
          ON CONFLICT(session_id) DO UPDATE SET
            last_seen = MAX(sessions.last_seen, ?3),
            project_dir = COALESCE(?2, sessions.project_dir),
@@ -109,12 +108,11 @@ fn upsert_session(
            repo_id = COALESCE(?6, sessions.repo_id),
            provider = COALESCE(?7, sessions.provider),
            session_title = COALESCE(?8, sessions.session_title),
-           interaction_mode = COALESCE(?9, sessions.interaction_mode),
-           lines_added = MAX(sessions.lines_added, COALESCE(?10, 0)),
-           lines_removed = MAX(sessions.lines_removed, COALESCE(?11, 0)),
-           user_name = COALESCE(?12, sessions.user_name),
-           machine_name = COALESCE(?13, sessions.machine_name)",
-        params![session_id, cwd, ts, version, git_branch, repo_id, provider, session_title, interaction_mode, la, lr, user_name, machine_name],
+           lines_added = MAX(sessions.lines_added, COALESCE(?9, 0)),
+           lines_removed = MAX(sessions.lines_removed, COALESCE(?10, 0)),
+           user_name = COALESCE(?11, sessions.user_name),
+           machine_name = COALESCE(?12, sessions.machine_name)",
+        params![session_id, cwd, ts, version, git_branch, repo_id, provider, session_title, la, lr, user_name, machine_name],
     )?;
     Ok(())
 }
@@ -149,7 +147,6 @@ pub fn ingest_messages(
                 msg.repo_id.as_deref(),
                 &msg.provider,
                 msg.session_title.as_deref(),
-                msg.interaction_mode.as_deref(),
                 msg.lines_added,
                 msg.lines_removed,
                 msg.user_name.as_deref(),
@@ -168,9 +165,9 @@ pub fn ingest_messages(
              (uuid, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               has_thinking, stop_reason, text_length, cwd, repo_id, provider,
-              cost_cents, context_tokens_used, context_token_limit, interaction_mode,
+              cost_cents, context_tokens_used, context_token_limit,
               parent_uuid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -190,7 +187,6 @@ pub fn ingest_messages(
                 cost_cents,
                 ctx_used,
                 ctx_limit,
-                msg.interaction_mode,
                 msg.parent_uuid,
             ],
         )?;
@@ -273,7 +269,6 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
                     cost_cents: row.get(11)?,
                     context_tokens_used: None,
                     context_token_limit: None,
-                    interaction_mode: None,
                     session_title: None,
                     lines_added: None,
                     lines_removed: None,
@@ -747,7 +742,6 @@ pub struct SessionDetail {
     pub top_tools: Vec<(String, u64)>,
     pub provider: String,
     pub session_title: Option<String>,
-    pub interaction_mode: Option<String>,
     pub lines_added: u64,
     pub lines_removed: u64,
     pub cost_cents: f64,
@@ -759,7 +753,7 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
     let session_row = conn
         .query_row(
             "SELECT session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id,
-                    COALESCE(provider, 'claude_code'), session_title, interaction_mode,
+                    COALESCE(provider, 'claude_code'), session_title,
                     COALESCE(lines_added, 0), COALESCE(lines_removed, 0)
              FROM sessions WHERE session_id = ?1 OR session_id LIKE ?2
              ORDER BY last_seen DESC LIMIT 1",
@@ -775,9 +769,8 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
                     repo_id: row.get(6)?,
                     provider: row.get(7)?,
                     session_title: row.get(8)?,
-                    interaction_mode: row.get(9)?,
-                    lines_added: row.get(10)?,
-                    lines_removed: row.get(11)?,
+                    lines_added: row.get(9)?,
+                    lines_removed: row.get(10)?,
                     user_messages: 0,
                     assistant_messages: 0,
                     input_tokens: 0,
@@ -1694,43 +1687,6 @@ pub fn provider_stats(
     Ok(result)
 }
 
-/// Interaction mode breakdown: count of sessions by mode.
-pub fn interaction_mode_breakdown(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<Vec<(String, u64)>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
-    let extra = if where_clause.is_empty() {
-        "WHERE interaction_mode IS NOT NULL".to_string()
-    } else {
-        format!("{} AND interaction_mode IS NOT NULL", where_clause)
-    };
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let sql = format!(
-        "SELECT interaction_mode, COUNT(DISTINCT session_id) FROM sessions {} GROUP BY interaction_mode ORDER BY COUNT(DISTINCT session_id) DESC",
-        extra.replace("timestamp", "last_seen")
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-        })?
-        .filter_map(|r| match r {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!("skipping row: {e}");
-                None
-            }
-        })
-        .collect();
-    Ok(rows)
-}
 
 /// Context window utilization stats.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1881,113 +1837,6 @@ pub fn usage_summary_filtered(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Scored commits — AI attribution data from Cursor's ai-code-tracking.db
-// ---------------------------------------------------------------------------
-
-/// A scored commit with AI contribution percentage.
-pub struct ScoredCommit {
-    pub hash: String,
-    pub branch_name: String,
-    pub message: Option<String>,
-    pub timestamp: String,
-    pub lines_added: u64,
-    pub lines_removed: u64,
-    pub ai_percentage: f64,
-}
-
-/// Ingest scored commits into the commits table. Uses INSERT OR REPLACE
-/// to handle re-scoring of existing commits.
-pub fn ingest_scored_commits(conn: &Connection, commits: &[ScoredCommit]) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let mut count = 0;
-    {
-        let mut stmt = tx.prepare_cached(
-            "INSERT OR REPLACE INTO commits
-                (hash, branch_name, message, timestamp, lines_added, lines_removed,
-                 ai_percentage, ai_created, provider)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'cursor')",
-        )?;
-        for c in commits {
-            let ai_created = if c.ai_percentage > 50.0 { 1 } else { 0 };
-            stmt.execute(params![
-                c.hash,
-                c.branch_name,
-                c.message,
-                c.timestamp,
-                c.lines_added,
-                c.lines_removed,
-                c.ai_percentage,
-                ai_created,
-            ])?;
-            count += 1;
-        }
-    }
-    tx.commit()?;
-    Ok(count)
-}
-
-/// Summary of AI contribution across scored commits.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct AiContributionSummary {
-    pub total_commits: u64,
-    pub avg_ai_percentage: f64,
-    pub total_lines_added: u64,
-    pub total_lines_removed: u64,
-    pub ai_commits: u64, // commits with ai_percentage > 50%
-}
-
-/// Query AI contribution summary, optionally filtered by date range.
-pub fn ai_contribution_summary(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<AiContributionSummary> {
-    let mut where_parts = Vec::new();
-    let mut param_values: Vec<String> = Vec::new();
-
-    if let Some(s) = since {
-        param_values.push(s.to_string());
-        where_parts.push(format!("timestamp >= ?{}", param_values.len()));
-    }
-    if let Some(u) = until {
-        param_values.push(u.to_string());
-        where_parts.push(format!("timestamp <= ?{}", param_values.len()));
-    }
-
-    let where_clause = if where_parts.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", where_parts.join(" AND "))
-    };
-
-    let sql = format!(
-        "SELECT COUNT(*),
-                COALESCE(AVG(ai_percentage), 0),
-                COALESCE(SUM(lines_added), 0),
-                COALESCE(SUM(lines_removed), 0),
-                SUM(CASE WHEN ai_percentage > 50 THEN 1 ELSE 0 END)
-         FROM commits {}",
-        where_clause
-    );
-
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    conn.query_row(&sql, param_refs.as_slice(), |r| {
-        Ok(AiContributionSummary {
-            total_commits: r.get(0)?,
-            avg_ai_percentage: r.get(1)?,
-            total_lines_added: r.get(2)?,
-            total_lines_removed: r.get(3)?,
-            ai_commits: r.get(4)?,
-        })
-    })
-    .context("ai_contribution_summary query failed")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2048,7 +1897,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2078,7 +1926,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2135,7 +1982,6 @@ mod tests {
             cost_cents: None,
             context_tokens_used: None,
             context_token_limit: None,
-            interaction_mode: None,
             session_title: None,
             lines_added: None,
             lines_removed: None,
@@ -2197,7 +2043,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2227,7 +2072,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2272,7 +2116,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2302,7 +2145,6 @@ mod tests {
                 cost_cents: Some(2.0), // Pre-calculated by CostEnricher in production
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2332,7 +2174,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2436,7 +2277,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2470,7 +2310,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2501,7 +2340,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2618,7 +2456,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2648,7 +2485,6 @@ mod tests {
                 cost_cents: Some(1.75), // Pre-calculated by CostEnricher in production
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2682,7 +2518,6 @@ mod tests {
                 cost_cents: None,
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2712,7 +2547,6 @@ mod tests {
                 cost_cents: Some(0.62), // Pre-calculated by CostEnricher in production
                 context_tokens_used: None,
                 context_token_limit: None,
-                interaction_mode: None,
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
@@ -2761,71 +2595,4 @@ mod tests {
         assert!(cc_stats.estimated_cost > 0.0);
     }
 
-    #[test]
-    fn scored_commits_ingest_and_query() {
-        let conn = test_db();
-
-        let commits = vec![
-            ScoredCommit {
-                hash: "abc123".to_string(),
-                branch_name: "feature/PAVA-42".to_string(),
-                message: Some("Fix login".to_string()),
-                timestamp: "2026-03-20T10:00:00Z".to_string(),
-                lines_added: 100,
-                lines_removed: 20,
-                ai_percentage: 85.5,
-            },
-            ScoredCommit {
-                hash: "def456".to_string(),
-                branch_name: "main".to_string(),
-                message: Some("Update readme".to_string()),
-                timestamp: "2026-03-21T12:00:00Z".to_string(),
-                lines_added: 10,
-                lines_removed: 5,
-                ai_percentage: 30.0,
-            },
-        ];
-
-        let count = ingest_scored_commits(&conn, &commits).unwrap();
-        assert_eq!(count, 2);
-
-        let summary = ai_contribution_summary(&conn, None, None).unwrap();
-        assert_eq!(summary.total_commits, 2);
-        assert!((summary.avg_ai_percentage - 57.75).abs() < 0.01);
-        assert_eq!(summary.total_lines_added, 110);
-        assert_eq!(summary.total_lines_removed, 25);
-        assert_eq!(summary.ai_commits, 1); // only abc123 has > 50%
-    }
-
-    #[test]
-    fn scored_commits_upsert_on_rescore() {
-        let conn = test_db();
-
-        let commits = vec![ScoredCommit {
-            hash: "abc123".to_string(),
-            branch_name: "main".to_string(),
-            message: Some("Initial".to_string()),
-            timestamp: "2026-03-20T10:00:00Z".to_string(),
-            lines_added: 50,
-            lines_removed: 10,
-            ai_percentage: 40.0,
-        }];
-        ingest_scored_commits(&conn, &commits).unwrap();
-
-        // Re-score with updated percentage
-        let updated = vec![ScoredCommit {
-            hash: "abc123".to_string(),
-            branch_name: "main".to_string(),
-            message: Some("Initial".to_string()),
-            timestamp: "2026-03-20T10:00:00Z".to_string(),
-            lines_added: 50,
-            lines_removed: 10,
-            ai_percentage: 75.0,
-        }];
-        ingest_scored_commits(&conn, &updated).unwrap();
-
-        let summary = ai_contribution_summary(&conn, None, None).unwrap();
-        assert_eq!(summary.total_commits, 1); // not duplicated
-        assert!((summary.avg_ai_percentage - 75.0).abs() < 0.01);
-    }
 }

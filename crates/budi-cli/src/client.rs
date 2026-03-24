@@ -62,13 +62,12 @@ impl DaemonClient {
 
     // ─── Sync & Migration ────────────────────────────────────────────
 
-    pub fn sync(&self, migrate: bool, backfill_tags: bool) -> Result<Value> {
+    pub fn sync(&self, migrate: bool) -> Result<Value> {
         let resp = self
             .client
             .post(format!("{}/sync", self.base_url))
             .json(&serde_json::json!({
                 "migrate": migrate,
-                "backfill_tags": backfill_tags,
             }))
             .send()
             .context("Failed to connect to budi daemon")?
@@ -378,7 +377,7 @@ impl DaemonClient {
         }
         let resp = self
             .client
-            .get(format!("{}/analytics/top-tools", self.base_url))
+            .get(format!("{}/analytics/tools", self.base_url))
             .query(&params)
             .send()
             .context("Failed to connect to budi daemon")?

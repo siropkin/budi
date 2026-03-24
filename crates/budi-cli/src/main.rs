@@ -9,9 +9,6 @@ mod commands;
 mod daemon;
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
-const STATUS_TIMEOUT_SECS: u64 = 120;
-const HOOK_LOG_LOCK_TIMEOUT_MS: u64 = 800;
-const HOOK_LOG_LOCK_STALE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "budi")]
@@ -39,11 +36,6 @@ enum Commands {
     Doctor {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
-    },
-    #[command(hide = true)]
-    Repo {
-        #[command(subcommand)]
-        command: RepoCommands,
     },
     #[command(hide = true)]
     Hook {
@@ -84,11 +76,7 @@ enum Commands {
         json: bool,
     },
     /// Sync transcripts into the analytics database
-    Sync {
-        /// Regenerate all tags from existing data (useful after updating tag extraction)
-        #[arg(long, default_value_t = false)]
-        backfill_tags: bool,
-    },
+    Sync,
     /// Open the budi dashboard in the browser
     Open,
     /// Update budi to the latest version
@@ -141,34 +129,6 @@ enum HookCommands {
     SubagentStart,
 }
 
-#[derive(Debug, Subcommand)]
-enum RepoCommands {
-    #[command(hide = true)]
-    List {
-        #[arg(long, default_value_t = false)]
-        stale_only: bool,
-    },
-    #[command(hide = true)]
-    Remove {
-        #[arg(long)]
-        repo_root: PathBuf,
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-    },
-    #[command(hide = true)]
-    Wipe {
-        #[arg(long, default_value_t = false)]
-        confirm: bool,
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-    },
-    /// Show daemon status for the current repo
-    Status {
-        #[arg(long, hide = true)]
-        repo_root: Option<PathBuf>,
-    },
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -185,16 +145,6 @@ fn main() -> Result<()> {
             global,
         } => commands::init::cmd_init(repo_root, no_daemon, global),
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
-        Commands::Repo { command } => match command {
-            RepoCommands::List { stale_only } => commands::repo::cmd_repo_list(stale_only),
-            RepoCommands::Remove { repo_root, dry_run } => {
-                commands::repo::cmd_repo_remove(repo_root, dry_run)
-            }
-            RepoCommands::Wipe { confirm, dry_run } => {
-                commands::repo::cmd_repo_wipe(confirm, dry_run)
-            }
-            RepoCommands::Status { repo_root } => commands::repo::cmd_status(repo_root),
-        },
         Commands::Hook { command } => match command {
             HookCommands::UserPromptSubmit => commands::hook::cmd_hook_user_prompt_submit(),
             HookCommands::PostToolUse => commands::hook::cmd_hook_post_tool_use(),
@@ -216,7 +166,7 @@ fn main() -> Result<()> {
         } => commands::stats::cmd_stats(
             period, session, projects, branches, branch, models, sessions, provider, tag, json,
         ),
-        Commands::Sync { backfill_tags } => commands::sync::cmd_sync_with_options(backfill_tags),
+        Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),
         Commands::Migrate => {
@@ -273,7 +223,6 @@ mod tests {
         let lower = help.to_ascii_lowercase();
         assert!(lower.contains("init"));
         assert!(lower.contains("doctor"));
-        assert!(lower.contains("repo"));
         assert!(lower.contains("stats"));
         assert!(lower.contains("sync"));
     }

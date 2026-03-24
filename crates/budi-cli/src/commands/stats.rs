@@ -282,12 +282,7 @@ fn cmd_stats_session(client: &DaemonClient, session_id: &str) -> Result<()> {
     println!("  \x1b[1;36m Session\x1b[0m \x1b[90m{}\x1b[0m", title);
     println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
 
-    // Provider and mode badges
-    let mode_badge = d.interaction_mode.as_deref().unwrap_or("unknown");
-    println!(
-        "  \x1b[1mProvider\x1b[0m  {} \x1b[90m({})\x1b[0m",
-        d.provider, mode_badge
-    );
+    println!("  \x1b[1mProvider\x1b[0m  {}", d.provider);
 
     if let Some(ref repo) = d.repo_id {
         println!("  \x1b[1mRepo\x1b[0m      {}", repo);

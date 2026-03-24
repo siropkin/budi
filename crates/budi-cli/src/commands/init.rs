@@ -1,5 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -23,7 +22,6 @@ pub fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool, global: bool) -> Re
     };
 
     install_statusline_if_missing();
-    install_starship_if_detected();
 
     if !no_daemon {
         ensure_daemon_running(&repo_root, &config)?;
@@ -172,81 +170,6 @@ fn install_hooks_global() -> Result<PathBuf> {
     let settings_path = PathBuf::from(home).join(super::statusline::CLAUDE_USER_SETTINGS);
     write_hooks_to_settings(&settings_path)?;
     Ok(settings_path)
-}
-
-// ─── Starship ────────────────────────────────────────────────────────────────
-
-pub fn is_starship_installed() -> bool {
-    Command::new("which")
-        .arg("starship")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-pub fn starship_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("STARSHIP_CONFIG") {
-        return PathBuf::from(p);
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("starship.toml");
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/starship.toml")
-}
-
-pub fn is_budi_configured_in_starship() -> bool {
-    let path = starship_config_path();
-    fs::read_to_string(&path)
-        .unwrap_or_default()
-        .contains("[custom.budi]")
-}
-
-const STARSHIP_BUDI_MODULE: &str = r#"
-# Budi — AI code analytics (budi statusline --format=starship)
-[custom.budi]
-command = "budi statusline --format=starship"
-when = "command -v budi-daemon"
-format = "[$output]($style) "
-style = "cyan"
-shell = ["sh"]
-"#;
-
-fn install_starship_module() -> Result<()> {
-    let path = starship_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed creating {}", parent.display()))?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("Failed opening {}", path.display()))?;
-    file.write_all(STARSHIP_BUDI_MODULE.as_bytes())
-        .with_context(|| format!("Failed writing {}", path.display()))?;
-    Ok(())
-}
-
-fn install_starship_if_detected() {
-    if !is_starship_installed() {
-        return;
-    }
-    if is_budi_configured_in_starship() {
-        return;
-    }
-    match install_starship_module() {
-        Ok(()) => {
-            eprintln!(
-                "Starship: installed budi module in {}",
-                starship_config_path().display()
-            );
-        }
-        Err(e) => {
-            tracing::warn!("Failed to install Starship module: {e}");
-        }
-    }
 }
 
 fn install_statusline_if_missing() {

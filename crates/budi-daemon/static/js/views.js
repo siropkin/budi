@@ -52,7 +52,7 @@ function renderSessionsSection(sessions) {
 
 /* ===== View Renderer ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, topTools, branches, tickets } = statsData;
   content.innerHTML = `
     ${renderCards(summary, cost)}
     <div class="panel section-mb">
@@ -120,25 +120,14 @@ function renderStatsView(content) {
         )}
       </div>
     </div>
-    <div class="grid-2 section-mb">
-      <div class="panel">
-        <h2>Tools${ccOnlyLabel()}</h2>
-        ${renderBarChart((topTools || []).filter(t => !t[0].startsWith('mcp__')).slice(0, DEFAULT_CHART_ROWS),
-          (t) => t[0],
-          t => t[1],
-          (t, i) => paletteColor(i),
-          'No tool usage data for this period'
-        )}
-      </div>
-      <div class="panel">
-        <h2>MCP${ccOnlyLabel()}</h2>
-        ${renderBarChart((mcpTools || []).slice(0, DEFAULT_CHART_ROWS),
-          (m, full) => full ? m.tool : m.tool.replace(/^mcp__/, ''),
-          m => m.call_count,
-          (m, i) => paletteColor(i),
-          'No MCP tools used in this period'
-        )}
-      </div>
+    <div class="panel section-mb">
+      <h2>Tools${ccOnlyLabel()}</h2>
+      ${renderBarChart((topTools || []).slice(0, DEFAULT_CHART_ROWS),
+        (t) => t[0],
+        t => t[1],
+        (t, i) => paletteColor(i),
+        'No tool usage data for this period'
+      )}
     </div>
     <div class="panel section-mb">
       <h2>Sessions</h2>

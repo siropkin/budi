@@ -7,7 +7,6 @@ pub mod doctor;
 pub mod hook;
 pub mod init;
 pub mod open;
-pub mod repo;
 pub mod stats;
 pub mod statusline;
 pub mod sync;

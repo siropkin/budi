@@ -4,7 +4,7 @@ use crate::client::DaemonClient;
 
 pub fn init_auto_sync() -> Result<(usize, usize)> {
     let client = DaemonClient::connect()?;
-    let result = client.sync(true, false)?;
+    let result = client.sync(true)?;
     let files = result
         .get("files_synced")
         .and_then(|v| v.as_u64())
@@ -16,11 +16,11 @@ pub fn init_auto_sync() -> Result<(usize, usize)> {
     Ok((files, msgs))
 }
 
-pub fn cmd_sync_with_options(backfill_tags: bool) -> Result<()> {
+pub fn cmd_sync() -> Result<()> {
     let client = DaemonClient::connect()?;
 
     println!("Syncing transcripts...");
-    let result = client.sync(true, backfill_tags)?;
+    let result = client.sync(true)?;
 
     let files_synced = result
         .get("files_synced")
@@ -38,14 +38,6 @@ pub fn cmd_sync_with_options(backfill_tags: bool) -> Result<()> {
             "Synced \x1b[1m{}\x1b[0m new messages from \x1b[1m{}\x1b[0m files.",
             messages_ingested, files_synced
         );
-    }
-
-    if backfill_tags {
-        let tags_generated = result
-            .get("tags_generated")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        println!("Generated \x1b[1m{}\x1b[0m tags.", tags_generated);
     }
 
     Ok(())

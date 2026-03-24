@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use budi_core::config::{self, CLAUDE_LOCAL_SETTINGS};
 
-use super::init::{is_budi_configured_in_starship, is_starship_installed, starship_config_path};
 use crate::daemon::{daemon_health, ensure_daemon_running, fetch_daemon_stats};
 
 pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
@@ -55,17 +54,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 println!("  x daemon start failed: {e}");
                 issues.push(format!("Daemon start error: {e}"));
             }
-        }
-    }
-
-    // Starship integration (only shown if starship is installed)
-    if is_starship_installed() {
-        let configured = is_budi_configured_in_starship();
-        doctor_check("starship", configured, Some(&starship_config_path()));
-        if !configured {
-            issues.push(
-                "Starship detected but budi module not configured. Run `budi init` to fix.".into(),
-            );
         }
     }
 

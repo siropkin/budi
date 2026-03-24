@@ -5,7 +5,6 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use budi_core::config;
 use budi_core::hooks::UserPromptSubmitInput;
-use budi_core::pre_filter;
 use budi_core::rpc::{StatusRequest, StatusResponse};
 use serde_json::json;
 
@@ -70,13 +69,10 @@ pub async fn hook_prompt_submit(
         }
     };
 
-    let skipped = pre_filter::is_obviously_non_code(&input.prompt)
-        || pre_filter::is_conversational_followup(&input.prompt);
-
     let repo_root_str = repo_root.display().to_string();
     state
         .daemon_state
-        .record_prompt(&repo_root_str, Some(&session_id), skipped);
+        .record_prompt(&repo_root_str, Some(&session_id), false);
 
     // Trigger debounced sync of this transcript file so statusline data stays fresh.
     let _ = state
