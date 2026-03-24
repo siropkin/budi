@@ -119,25 +119,6 @@ fn upsert_session(
     Ok(())
 }
 
-/// Estimate cost in dollars for a message using the appropriate provider's pricing.
-fn estimate_cost_for_provider(
-    provider: &str,
-    model: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_tokens: u64,
-    cache_read_tokens: u64,
-) -> f64 {
-    let pricing = match provider {
-        "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
-        _ => crate::providers::claude_code::claude_pricing_for_model(model),
-    };
-    input_tokens as f64 * pricing.input / 1_000_000.0
-        + output_tokens as f64 * pricing.output / 1_000_000.0
-        + cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
-        + cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0
-}
-
 /// A tag to be stored alongside a message.
 #[derive(Debug, Clone)]
 pub struct Tag {
@@ -178,26 +159,8 @@ pub fn ingest_messages(
 
         // Insert message (skip duplicates).
         let ts = msg.timestamp.to_rfc3339();
-        // Calculate cost_cents at ingest time if not already provided
-        let cost_cents = msg.cost_cents.or_else(|| {
-            if msg.role == "assistant" {
-                let pricing = estimate_cost_for_provider(
-                    &msg.provider,
-                    msg.model.as_deref().unwrap_or("unknown"),
-                    msg.input_tokens,
-                    msg.output_tokens,
-                    msg.cache_creation_tokens,
-                    msg.cache_read_tokens,
-                );
-                if pricing > 0.0 {
-                    Some((pricing * 100.0 * 100.0).round() / 100.0) // cents, 2 decimal places
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        });
+        // cost_cents is set by CostEnricher in the pipeline before ingest
+        let cost_cents = msg.cost_cents;
         let ctx_used = msg.context_tokens_used.map(|v| v as i64);
         let ctx_limit = msg.context_token_limit.map(|v| v as i64);
         let inserted = tx.execute(
@@ -2039,8 +2002,11 @@ mod tests {
 
     #[test]
     fn cost_cents_baked_at_ingest() {
+        use crate::pipeline::enrichers::CostEnricher;
+        use crate::pipeline::Enricher;
+
         let mut conn = test_db();
-        let msg = ParsedMessage {
+        let mut msg = ParsedMessage {
             uuid: "cost-test-1".to_string(),
             session_id: Some("s1".to_string()),
             timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
@@ -2059,7 +2025,7 @@ mod tests {
             git_branch: None,
             repo_id: None,
             provider: "claude_code".to_string(),
-            cost_cents: None, // Should be calculated at ingest
+            cost_cents: None,
             context_tokens_used: None,
             context_token_limit: None,
             interaction_mode: None,
@@ -2070,6 +2036,8 @@ mod tests {
             user_name: None,
             machine_name: None,
         };
+        // CostEnricher is the single source of truth for cost_cents
+        CostEnricher.enrich(&mut msg);
         ingest_messages(&mut conn, &[msg], None).unwrap();
 
         // Verify cost_cents was baked in: 1M input * $5/M + 100K output * $25/M = $5 + $2.50 = $7.50 = 750 cents
@@ -2224,7 +2192,7 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
-                cost_cents: None,
+                cost_cents: Some(2.0), // Pre-calculated by CostEnricher in production
                 context_tokens_used: None,
                 context_token_limit: None,
                 interaction_mode: None,
@@ -2570,7 +2538,7 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
-                cost_cents: None,
+                cost_cents: Some(1.75), // Pre-calculated by CostEnricher in production
                 context_tokens_used: None,
                 context_token_limit: None,
                 interaction_mode: None,
@@ -2634,7 +2602,7 @@ mod tests {
                 git_branch: None,
                 repo_id: None,
                 provider: "cursor".to_string(),
-                cost_cents: None,
+                cost_cents: Some(0.62), // Pre-calculated by CostEnricher in production
                 context_tokens_used: None,
                 context_token_limit: None,
                 interaction_mode: None,

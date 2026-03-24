@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -42,10 +42,7 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 lines_added      INTEGER DEFAULT 0,
                 lines_removed    INTEGER DEFAULT 0,
                 user_name        TEXT,
-                machine_name     TEXT,
-                git_author_name  TEXT,
-                git_author_email TEXT,
-                git_enriched_at  TEXT
+                machine_name     TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -148,6 +145,41 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             ALTER TABLE tags_new RENAME TO tags;
             CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
+            ",
+        )?;
+    }
+
+    if version < 3 {
+        // Remove dead columns: git_author_name, git_author_email, git_enriched_at
+        // These were from removed git enrichment and were never populated.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS sessions_new (
+                session_id       TEXT PRIMARY KEY,
+                project_dir      TEXT,
+                first_seen       TEXT NOT NULL,
+                last_seen        TEXT NOT NULL,
+                version          TEXT,
+                git_branch       TEXT,
+                repo_id          TEXT,
+                provider         TEXT DEFAULT 'claude_code',
+                session_title    TEXT,
+                interaction_mode TEXT,
+                lines_added      INTEGER DEFAULT 0,
+                lines_removed    INTEGER DEFAULT 0,
+                user_name        TEXT,
+                machine_name     TEXT
+            );
+            INSERT INTO sessions_new
+                SELECT session_id, project_dir, first_seen, last_seen, version,
+                       git_branch, repo_id, provider, session_title, interaction_mode,
+                       lines_added, lines_removed, user_name, machine_name
+                FROM sessions;
+            DROP TABLE sessions;
+            ALTER TABLE sessions_new RENAME TO sessions;
+            CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
+            CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(session_title);
             ",
         )?;
     }
