@@ -75,10 +75,12 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 - **Local-first** — all data stays on your machine in a SQLite database, no cloud, no uploads
 - **Automatic** — data collection runs silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
+- **Cost attribution** — cost per branch, ticket (auto-extracted from branch names), team, and custom tags
 - **Session analytics** — prompt counts, token usage, and cost per session
 - **Multi-agent dashboard** — unified stats view across Claude Code, Cursor, and more
 - **Configurable status line** — live cost stats in Claude Code and Starship, with customizable data slots and format templates
 - **Web dashboard** — analytics UI at `http://localhost:7878/dashboard`
+- **Tags system** — flexible tagging with auto-detected tags (repo, branch, ticket, model) and custom rules via `~/.config/budi/tags.toml`
 
 ## How budi compares
 
@@ -249,7 +251,7 @@ budi statusline --format=custom    # custom format from ~/.config/budi/statuslin
 
 Run `budi open` to open the web UI in your browser, or click the dashboard link in the status line.
 
-The Stats page shows: cost breakdown, token usage, activity chart, agents, models (per-provider), projects, branches (cost per git branch), tools, MCP tools, sessions table with search. All tables support search, sortable columns, and paginated "Show more". Sessions use server-side pagination (handles 20K+ sessions efficiently).
+The Stats page shows: cost breakdown, token usage, activity chart, agents, models (per-provider), projects, branches (cost per git branch), tickets (cost per ticket ID), tools, MCP tools, sessions table with search. All tables support search, sortable columns, and paginated "Show more". Sessions use server-side pagination (handles 20K+ sessions efficiently).
 
 ## CLI commands
 
@@ -262,6 +264,10 @@ budi stats                    # usage summary with cost breakdown
 budi stats --sessions         # list sessions with stats
 budi stats --models           # model usage breakdown
 budi stats --projects         # repositories ranked by usage
+budi stats --branches         # branches ranked by cost
+budi stats --branch <name>    # cost for a specific branch
+budi stats --tag ticket_id    # cost per ticket (auto-extracted from branch names)
+budi stats --tag ticket_prefix # cost per team prefix (e.g. PAVA, SEN)
 budi stats --session <id>     # per-session detail
 budi stats --provider <name>  # filter by provider (e.g. claude_code, cursor)
 budi sync                     # sync all providers into the analytics database
@@ -279,6 +285,48 @@ All data commands support `--period today|week|month|all` and `--json` for scrip
 ```bash
 budi stats --period today --json          # pipe to jq, scripts, or dashboards
 budi stats --sessions --json | jq '.[0]'  # get latest session as JSON
+```
+
+## Tags & cost attribution
+
+Budi automatically tags every message with metadata extracted during ingestion:
+
+| Tag | Source | Example |
+|-----|--------|---------|
+| `provider` | Agent name | `claude_code`, `cursor` |
+| `model` | Model used | `claude-opus-4-6` |
+| `repo` | Git remote URL | `github.com/user/repo` |
+| `branch` | Git branch name | `feature/PAVA-2057-auth` |
+| `ticket_id` | Extracted from branch (`[A-Z]+-\d+`) | `PAVA-2057` |
+| `ticket_prefix` | Ticket prefix | `PAVA` |
+
+### Custom tag rules
+
+Create `~/.config/budi/tags.toml` to add your own tags:
+
+```toml
+[[rules]]
+key = "team"
+value = "platform"
+match_repo = "github.com/verkada/Verkada-Web"
+
+[[rules]]
+key = "team"
+value = "backend"
+match_repo = "*Verkada-Backend*"
+
+[[rules]]
+key = "org"
+value = "mycompany"
+# No match_repo → applies to all messages
+```
+
+Query tags via CLI or API:
+
+```bash
+budi stats --tag ticket_id              # cost per ticket
+budi stats --tag ticket_prefix          # cost per team prefix
+budi stats --tag ticket_id --json       # JSON output for scripting
 ```
 
 ## Daemon API
@@ -318,13 +366,13 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | GET | `/analytics/mcp-tools` | MCP tool usage |
 | GET | `/analytics/context-usage` | Context window stats |
 | GET | `/analytics/interaction-modes` | Agent vs normal mode breakdown |
+| GET | `/analytics/tags` | Cost breakdown by tag (key, since, until, limit) |
 | GET | `/analytics/statusline` | Day/week/month/session/branch/project costs (used by status line) |
 
 Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering and `?tz_offset=<minutes>` for timezone adjustment. The statusline endpoint also accepts `?session_id=<id>&branch=<name>&project_dir=<path>` for extra cost data.
 
 ## Roadmap
 
-- **Project-level cost attribution** — connect AI spend to repos, branches, and features ("how much did this feature cost?")
 - **More agents** — Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI (see [agent integrations](#agent-integrations) above)
 - **Plugin architecture** — add new agents without touching core code
 - **Homebrew distribution** — `brew install budi`
