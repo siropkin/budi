@@ -5,6 +5,7 @@ function renderSessionsSection(sessions) {
     { key: 'session_id', label: 'Session' },
     ...(multiProvider ? [{ key: 'provider', label: 'Agent' }] : []),
     { key: 'repo_id', label: 'Repo' },
+    { key: 'git_branch', label: 'Branch' },
     { key: 'last_seen', label: 'Last Active' },
     { key: 'duration', label: 'Duration', right: true },
     { key: 'message_count', label: 'Messages', right: true },
@@ -21,10 +22,12 @@ function renderSessionsSection(sessions) {
     const costVal = (s.cost_cents || 0) / 100;
     const provDisplay = (registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider;
     const provCol = multiProvider ? `<td>${esc(provDisplay)}</td>` : '';
+    const branch = (s.git_branch || '').replace(/^refs\/heads\//, '');
     return `<tr>
       <td title="${esc(s.session_id)}">${esc(title)}</td>
       ${provCol}
       <td class="dir" title="${esc(s.repo_id || s.project_dir || '')}">${esc(repoName(s.repo_id) || shortenDir(s.project_dir))}</td>
+      <td class="dir" title="${esc(s.git_branch || '')}">${esc(branch)}</td>
       <td>${esc(fmtDate(s.last_seen))}</td>
       <td class="right">${fmtDuration(s.first_seen, s.last_seen)}</td>
       <td class="right">${fmtNum(s.message_count)}</td>
@@ -76,7 +79,7 @@ function renderStatsView(content) {
         )}
       </div>
     </div>
-    <div class="grid-2 section-mb">
+    <div class="grid-3 section-mb">
       <div class="panel">
         <h2>Projects</h2>
         ${renderBarChart(cwds,
@@ -101,17 +104,17 @@ function renderStatsView(content) {
           fmtCostTokens
         )}
       </div>
+      <div class="panel">
+        <h2>Tickets${ccOnlyLabel()}</h2>
+        ${renderBarChart((tickets || []).slice(0, DEFAULT_CHART_ROWS),
+          t => t.value,
+          t => t.cost_cents,
+          (t, i) => paletteColor(i),
+          'No ticket data for this period',
+          fmtCostMsgs
+        )}
+      </div>
     </div>
-    ${(tickets || []).length > 0 ? `<div class="panel section-mb">
-      <h2>Tickets${ccOnlyLabel()}</h2>
-      ${renderBarChart((tickets || []).slice(0, DEFAULT_CHART_ROWS),
-        t => t.value,
-        t => t.cost_cents,
-        (t, i) => paletteColor(i),
-        'No ticket data for this period',
-        fmtCostMsgs
-      )}
-    </div>` : ''}
     <div class="grid-2 section-mb">
       <div class="panel">
         <h2>Tools${ccOnlyLabel()}</h2>

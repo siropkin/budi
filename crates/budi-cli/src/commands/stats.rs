@@ -602,11 +602,23 @@ fn cmd_stats_sessions(
             .repo_id
             .as_deref()
             .unwrap_or_else(|| s.project_dir.as_deref().unwrap_or(""));
+        let branch = s
+            .git_branch
+            .as_deref()
+            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
+            .unwrap_or("");
         let total_tok = s.input_tokens + s.output_tokens;
         let cost_str = if s.cost_cents > 0.0 {
             format!("${:.2}", s.cost_cents / 100.0)
         } else {
             "--".to_string()
+        };
+        let location = if !branch.is_empty() && !project.is_empty() {
+            format!("{} / {}", project, branch)
+        } else if !project.is_empty() {
+            project.to_string()
+        } else {
+            branch.to_string()
         };
         println!(
             "    \x1b[36m{}…\x1b[0m  {:>4} msgs  {:>8} tok  {:>6}  {}  \x1b[90m{}\x1b[0m",
@@ -615,7 +627,7 @@ fn cmd_stats_sessions(
             format_tokens(total_tok),
             cost_str,
             format_timestamp(&s.first_seen),
-            project
+            location
         );
     }
 

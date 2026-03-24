@@ -671,6 +671,9 @@ pub struct SessionSummary {
     pub provider: String,
     pub session_title: Option<String>,
     pub cost_cents: f64,
+    pub git_branch: Option<String>,
+    pub user_name: Option<String>,
+    pub machine_name: Option<String>,
 }
 
 /// Paginated session list result.
@@ -711,7 +714,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         param_values.push(format!("%{q}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(s.session_title LIKE ?{idx} OR s.session_id LIKE ?{idx} OR s.repo_id LIKE ?{idx} OR s.project_dir LIKE ?{idx})"
+            "(s.session_title LIKE ?{idx} OR s.session_id LIKE ?{idx} OR s.repo_id LIKE ?{idx} OR s.project_dir LIKE ?{idx} OR s.git_branch LIKE ?{idx})"
         ));
     }
     let where_clause = if conditions.is_empty() {
@@ -728,6 +731,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     let order_col = match p.sort_by.unwrap_or("last_seen") {
         "session_id" => "s.session_id",
         "repo_id" => "s.repo_id",
+        "git_branch" => "s.git_branch",
         "last_seen" => "s.last_seen",
         "duration" => "(julianday(s.last_seen) - julianday(s.first_seen))",
         "message_count" => "msg_count",
@@ -758,7 +762,10 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 s.repo_id,
                 COALESCE(s.provider, 'claude_code'),
                 s.session_title,
-                COALESCE(SUM(m.cost_cents), 0.0) as cost_sum
+                COALESCE(SUM(m.cost_cents), 0.0) as cost_sum,
+                s.git_branch,
+                s.user_name,
+                s.machine_name
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.session_id
          {}
@@ -785,6 +792,9 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 provider: row.get(10)?,
                 session_title: row.get(11)?,
                 cost_cents: row.get(12)?,
+                git_branch: row.get(13)?,
+                user_name: row.get(14)?,
+                machine_name: row.get(15)?,
             })
         })?
         .filter_map(|r| match r {
