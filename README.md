@@ -16,7 +16,7 @@ budi is built on a pluggable provider architecture — each AI coding agent is a
 | Agent | Status | Tokens | Cost | Sessions | Detection |
 |-------|--------|--------|------|----------|-----------|
 | **Claude Code** | Supported | Per-message | Per-model pricing | Via hooks | `~/.claude/` |
-| **Cursor** | Supported | Per-session (contextTokensUsed) | Per-model pricing | Via state.vscdb | `~/Library/Application Support/Cursor/` |
+| **Cursor** | Supported | Per-session (contextTokensUsed) | Per-model pricing | Via state.vscdb + ai-tracking | `~/Library/Application Support/Cursor/` |
 | **GitHub Copilot CLI** | Planned | | | | `~/.copilot/` |
 | **Codex CLI** | Planned | | | | `~/.codex/` |
 | **Cline** | Planned | | | | VS Code globalStorage |
@@ -55,7 +55,7 @@ Hooks fire as HTTP calls to the daemon. Hook responses return in sub-millisecond
 
 ### Cursor (full support)
 
-Budi reads Cursor's `state.vscdb` SQLite database — the internal store where Cursor keeps composer session data. This provides ground-truth cost data, per-model usage breakdowns, lines changed, and session metadata. No proxy or API interception needed.
+Budi reads Cursor's `state.vscdb` SQLite database and `ai-code-tracking.db` — Cursor's internal stores for session data and AI contribution scoring. This provides cost data, per-model usage, lines changed, git branch context, and per-commit AI contribution percentages. No proxy or API interception needed.
 
 | Data | Source | Quality |
 |------|--------|---------|
@@ -64,6 +64,8 @@ Budi reads Cursor's `state.vscdb` SQLite database — the internal store where C
 | **Tokens** | `composerData.contextTokensUsed` (input) + estimated output | Session-level totals |
 | **Lines changed** | `composerData.totalLinesAdded/Removed` | Per-session totals |
 | **Sessions** | `composerData` entries in globalStorage + workspaceStorage | Titles, timestamps, agent vs composer mode |
+| **Git branch** | `composerData.createdOnBranch` or `.git/HEAD` fallback | Enables ticket/branch attribution |
+| **AI contribution** | `ai-code-tracking.db` scored_commits | Per-commit AI % (v2 algorithm) |
 
 Note: Cursor's `usageData` field (which previously contained per-model cost breakdowns) is empty in recent Cursor versions. Budi falls back to `contextTokensUsed` for token data and estimates cost using published API rates.
 
@@ -76,7 +78,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 - **Automatic** — data collection runs silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Cost attribution** — cost per branch, ticket (auto-extracted from branch names), team, and custom tags
-- **AI commit tagging** — lightweight detection of AI-authored commits via Co-Authored-By trailers (Claude, Copilot, Cursor, Cline, Aider, Gemini, Devin, Windsurf)
+- **AI contribution tracking** — per-commit AI contribution % from Cursor's scoring, plus Co-Authored-By trailer detection (Claude, Copilot, Cursor, Cline, Aider, Gemini, Devin, Windsurf)
 - **Session analytics** — prompt counts, token usage, and cost per session
 - **Multi-agent dashboard** — unified stats view across Claude Code, Cursor, and more
 - **Configurable status line** — live cost stats in Claude Code and Starship, with customizable data slots and format templates
@@ -368,6 +370,7 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | GET | `/analytics/context-usage` | Context window stats |
 | GET | `/analytics/interaction-modes` | Agent vs normal mode breakdown |
 | GET | `/analytics/tags` | Cost breakdown by tag (key, since, until, limit) |
+| GET | `/analytics/ai-contribution` | AI contribution summary (commits, avg AI %, lines) |
 | GET | `/analytics/statusline` | Day/week/month/session/branch/project costs (used by status line) |
 
 Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering and `?tz_offset=<minutes>` for timezone adjustment. The statusline endpoint also accepts `?session_id=<id>&branch=<name>&project_dir=<path>` for extra cost data.
