@@ -25,9 +25,17 @@ function agentBarData() {
 }
 
 /* ===== Render: Summary Cards ===== */
-function renderCards(s, cost) {
+function renderCards(s, cost, gitSummary) {
   const totalTokens = s.total_input_tokens + s.total_output_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
   const totalIn = s.total_input_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
+  const git = gitSummary || {};
+  const hasGit = git.total_commits > 0;
+  const gitCard = hasGit ? `
+    <div class="card">
+      <div class="label">Git</div>
+      <div class="value">${fmtNum(git.total_commits)} commit${git.total_commits !== 1 ? 's' : ''}</div>
+      <div class="sub">+${fmtNum(git.total_lines_added)} / -${fmtNum(git.total_lines_removed)}${git.unique_prs > 0 ? ' / ' + git.unique_prs + ' PR' + (git.unique_prs !== 1 ? 's' : '') : ''}</div>
+    </div>` : '';
   return `
   <div class="cards">
     <div class="card">
@@ -45,6 +53,7 @@ function renderCards(s, cost) {
       <div class="value">${fmtNum(s.total_sessions)}</div>
       <div class="sub">${fmtNum(s.total_user_messages)} prompts / ${fmtNum(s.total_assistant_messages)} responses</div>
     </div>
+    ${gitCard}
   </div>`;
 }
 

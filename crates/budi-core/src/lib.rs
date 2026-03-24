@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod config;
 pub mod cost;
 pub mod daemon;
+pub mod git;
 pub mod hooks;
 pub mod jsonl;
 pub mod migration;

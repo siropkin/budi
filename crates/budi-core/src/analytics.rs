@@ -398,6 +398,15 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
         }
     }
 
+    // Post-sync: enrich sessions with git commit data
+    if total_messages > 0 {
+        match crate::git::enrich_git_commits(conn) {
+            Ok(n) if n > 0 => tracing::info!("Git enrichment: {} commits found", n),
+            Err(e) => tracing::warn!("Git enrichment failed: {e}"),
+            _ => {}
+        }
+    }
+
     Ok((total_files, total_messages))
 }
 
@@ -427,6 +436,14 @@ pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
     let tags = pipeline.process(&mut messages);
     let count = ingest_messages(conn, &messages, Some(&tags))?;
     set_sync_offset(conn, &path_str, new_offset)?;
+
+    // Post-sync: enrich sessions with git commit data
+    if count > 0 {
+        if let Err(e) = crate::git::enrich_git_commits(conn) {
+            tracing::warn!("Git enrichment failed: {e}");
+        }
+    }
+
     Ok(count)
 }
 
@@ -591,6 +608,8 @@ pub struct SessionSummary {
     pub git_branch: Option<String>,
     pub user_name: Option<String>,
     pub machine_name: Option<String>,
+    pub commit_count: u64,
+    pub git_author_name: Option<String>,
 }
 
 /// Paginated session list result.
@@ -682,7 +701,9 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 COALESCE(SUM(m.cost_cents), 0.0) as cost_sum,
                 s.git_branch,
                 s.user_name,
-                s.machine_name
+                s.machine_name,
+                (SELECT COUNT(*) FROM commits c WHERE c.session_id = s.session_id) as commit_count,
+                s.git_author_name
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.session_id
          {}
@@ -712,6 +733,8 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 git_branch: row.get(13)?,
                 user_name: row.get(14)?,
                 machine_name: row.get(15)?,
+                commit_count: row.get(16)?,
+                git_author_name: row.get(17)?,
             })
         })?
         .filter_map(|r| match r {
@@ -751,6 +774,9 @@ pub struct SessionDetail {
     pub lines_added: u64,
     pub lines_removed: u64,
     pub cost_cents: f64,
+    pub git_author_name: Option<String>,
+    pub git_author_email: Option<String>,
+    pub commits: Vec<crate::git::GitCommit>,
 }
 
 /// Get detailed stats for a single session by ID (prefix match supported).
@@ -760,7 +786,8 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
         .query_row(
             "SELECT session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id,
                     COALESCE(provider, 'claude_code'), session_title, interaction_mode,
-                    COALESCE(lines_added, 0), COALESCE(lines_removed, 0)
+                    COALESCE(lines_added, 0), COALESCE(lines_removed, 0),
+                    git_author_name, git_author_email
              FROM sessions WHERE session_id = ?1 OR session_id LIKE ?2
              ORDER BY last_seen DESC LIMIT 1",
             params![session_id_prefix, format!("{}%", session_id_prefix)],
@@ -778,6 +805,8 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
                     interaction_mode: row.get(9)?,
                     lines_added: row.get(10)?,
                     lines_removed: row.get(11)?,
+                    git_author_name: row.get(12)?,
+                    git_author_email: row.get(13)?,
                     user_messages: 0,
                     assistant_messages: 0,
                     input_tokens: 0,
@@ -786,6 +815,7 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
                     cache_read_tokens: 0,
                     top_tools: vec![],
                     cost_cents: 0.0,
+                    commits: vec![],
                 })
             },
         )
@@ -840,6 +870,9 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
             .collect()
         })
         .unwrap_or_default();
+
+    // Load git commits for this session
+    detail.commits = crate::git::commits_for_session(conn, sid).unwrap_or_default();
 
     Ok(Some(detail))
 }

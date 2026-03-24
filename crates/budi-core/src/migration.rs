@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -142,6 +142,31 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
              CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uuid);",
         )?;
         needs_tag_backfill = true;
+    }
+
+    if version < 8 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS commits (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 hash TEXT NOT NULL,
+                 author_name TEXT,
+                 author_email TEXT,
+                 timestamp TEXT NOT NULL,
+                 message TEXT,
+                 lines_added INTEGER NOT NULL DEFAULT 0,
+                 lines_removed INTEGER NOT NULL DEFAULT 0,
+                 pr_number INTEGER,
+                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_commits_session ON commits(session_id);
+             CREATE INDEX IF NOT EXISTS idx_commits_hash ON commits(hash);
+             CREATE INDEX IF NOT EXISTS idx_commits_pr ON commits(pr_number);
+
+             ALTER TABLE sessions ADD COLUMN git_author_name TEXT;
+             ALTER TABLE sessions ADD COLUMN git_author_email TEXT;
+             ALTER TABLE sessions ADD COLUMN git_enriched_at TEXT;",
+        )?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
