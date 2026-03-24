@@ -8,7 +8,6 @@ function renderSessionsSection(sessions) {
     { key: 'repo_id', label: 'Repo' },
     { key: 'git_branch', label: 'Branch' },
     { key: 'ticket', label: 'Ticket' },
-    { key: 'commit_count', label: 'Commits', right: true },
     { key: 'duration', label: 'Duration', right: true },
     { key: 'message_count', label: 'Messages', right: true },
     { key: 'tokens', label: 'Tokens', right: true },
@@ -34,7 +33,6 @@ function renderSessionsSection(sessions) {
       <td class="dir" title="${esc(s.repo_id || s.project_dir || '')}">${esc(repoName(s.repo_id) || shortenDir(s.project_dir))}</td>
       <td class="dir" title="${esc(s.git_branch || '')}">${esc(branch)}</td>
       <td>${esc(ticket)}</td>
-      <td class="right">${s.commit_count || ''}</td>
       <td class="right">${fmtDuration(s.first_seen, s.last_seen)}</td>
       <td class="right">${fmtNum(s.message_count)}</td>
       <td class="right">${fmtNum(totalTok)}</td>
@@ -55,9 +53,9 @@ function renderSessionsSection(sessions) {
 
 /* ===== View Renderer ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets, gitSummary } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, interactionModes, topTools, mcpTools, branches, tickets } = statsData;
   content.innerHTML = `
-    ${renderCards(summary, cost, gitSummary)}
+    ${renderCards(summary, cost)}
     <div class="panel section-mb">
       <h2>${cachedActivityChartTitle}</h2>
       ${renderActivityChart(activityChart)}

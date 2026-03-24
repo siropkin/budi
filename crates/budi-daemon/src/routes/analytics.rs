@@ -354,17 +354,4 @@ pub async fn analytics_tags(
     Ok(Json(result))
 }
 
-pub async fn analytics_git_summary(
-    Query(params): Query<SummaryParams>,
-) -> Result<Json<budi_core::git::GitSummary>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        budi_core::git::git_summary(&conn, params.since.as_deref(), params.until.as_deref())
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
 

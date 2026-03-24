@@ -76,7 +76,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 - **Automatic** — data collection runs silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Cost attribution** — cost per branch, ticket (auto-extracted from branch names), team, and custom tags
-- **AI commit detection** — identifies AI commits via two signals: JSONL tool call extraction and Co-Authored-By trailer parsing (supports Claude, Copilot, Cursor, Cline, Aider, Gemini, Devin, Windsurf)
+- **AI commit tagging** — lightweight detection of AI-authored commits via Co-Authored-By trailers (Claude, Copilot, Cursor, Cline, Aider, Gemini, Devin, Windsurf)
 - **Session analytics** — prompt counts, token usage, and cost per session
 - **Multi-agent dashboard** — unified stats view across Claude Code, Cursor, and more
 - **Configurable status line** — live cost stats in Claude Code and Starship, with customizable data slots and format templates
@@ -368,7 +368,6 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | GET | `/analytics/context-usage` | Context window stats |
 | GET | `/analytics/interaction-modes` | Agent vs normal mode breakdown |
 | GET | `/analytics/tags` | Cost breakdown by tag (key, since, until, limit) |
-| GET | `/analytics/git-summary` | Git commit stats (total, AI-created, lines +/-) |
 | GET | `/analytics/statusline` | Day/week/month/session/branch/project costs (used by status line) |
 
 Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering and `?tz_offset=<minutes>` for timezone adjustment. The statusline endpoint also accepts `?session_id=<id>&branch=<name>&project_dir=<path>` for extra cost data.

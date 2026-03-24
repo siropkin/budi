@@ -25,19 +25,9 @@ function agentBarData() {
 }
 
 /* ===== Render: Summary Cards ===== */
-function renderCards(s, cost, gitSummary) {
+function renderCards(s, cost) {
   const totalTokens = s.total_input_tokens + s.total_output_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
   const totalIn = s.total_input_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
-  const git = gitSummary || {};
-  const aiCount = git.ai_created_commits || 0;
-  const totalCommits = git.total_commits || 0;
-  const aiSub = aiCount > 0 ? `${fmtNum(aiCount)} AI commit${aiCount !== 1 ? 's' : ''}` : 'no AI commits detected';
-  const gitCard = `
-    <div class="card">
-      <div class="label">Git (during sessions)</div>
-      <div class="value">${fmtNum(totalCommits)} commit${totalCommits !== 1 ? 's' : ''}</div>
-      <div class="sub">${aiSub}</div>
-    </div>`;
   return `
   <div class="cards">
     <div class="card">
@@ -55,7 +45,6 @@ function renderCards(s, cost, gitSummary) {
       <div class="value">${fmtNum(s.total_sessions)}</div>
       <div class="sub">${fmtNum(s.total_user_messages)} prompts / ${fmtNum(s.total_assistant_messages)} responses</div>
     </div>
-    ${gitCard}
   </div>`;
 }
 
