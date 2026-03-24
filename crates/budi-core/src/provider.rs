@@ -65,7 +65,11 @@ pub trait Provider: Send + Sync {
     /// Returns Some((files_synced, messages_ingested)) if this provider uses
     /// direct sync instead of file-based discovery. Returns None to fall back
     /// to discover_files() + parse_file().
-    fn sync_direct(&self, _conn: &mut Connection) -> Option<Result<(usize, usize)>> {
+    fn sync_direct(
+        &self,
+        _conn: &mut Connection,
+        _pipeline: &mut crate::pipeline::Pipeline,
+    ) -> Option<Result<(usize, usize)>> {
         None
     }
 }

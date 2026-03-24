@@ -101,9 +101,6 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
-                continue;
-            }
             collect_jsonl_recursive(&path, files, depth + 1);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
             files.push(path);

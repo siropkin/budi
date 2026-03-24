@@ -30,6 +30,7 @@ pub struct UserEntry {
     pub message: UserMessage,
     pub version: Option<String>,
     pub git_branch: Option<String>,
+    pub parent_uuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +67,7 @@ pub struct AssistantEntry {
     pub timestamp: DateTime<Utc>,
     pub cwd: Option<String>,
     pub message: AssistantMessage,
+    pub parent_uuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +145,12 @@ pub struct ParsedMessage {
     pub lines_added: Option<u64>,
     /// Lines of code removed in this session.
     pub lines_removed: Option<u64>,
+    /// Parent message UUID (for subagent messages).
+    pub parent_uuid: Option<String>,
+    /// User name (set by IdentityEnricher).
+    pub user_name: Option<String>,
+    /// Machine name (set by IdentityEnricher).
+    pub machine_name: Option<String>,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -179,6 +187,9 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
             session_title: None,
             lines_added: None,
             lines_removed: None,
+            parent_uuid: u.parent_uuid,
+            user_name: None,
+            machine_name: None,
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
@@ -230,6 +241,9 @@ pub fn parse_line(line: &str) -> Option<ParsedMessage> {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: a.parent_uuid,
+                user_name: None,
+                machine_name: None,
             })
         }
         TranscriptEntry::Other => None,

@@ -1,0 +1,239 @@
+//! Data pipeline: Extract → Normalize → Enrich → Load.
+//!
+//! Provides a pluggable enrichment pipeline that transforms raw `ParsedMessage`s
+//! before they are ingested into the database.
+
+pub mod enrichers;
+
+use crate::analytics::Tag;
+use crate::jsonl::ParsedMessage;
+
+/// Trait for pipeline enrichers. Each enricher can mutate a message and produce tags.
+pub trait Enricher: Send {
+    fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag>;
+}
+
+/// The enrichment pipeline — runs a sequence of enrichers over messages.
+pub struct Pipeline {
+    enrichers: Vec<Box<dyn Enricher>>,
+}
+
+impl Pipeline {
+    /// Create the default pipeline with all standard enrichers.
+    pub fn default_pipeline(tags_config: Option<crate::config::TagsConfig>) -> Self {
+        let enrichers: Vec<Box<dyn Enricher>> = vec![
+            Box::new(enrichers::IdentityEnricher::new()),
+            Box::new(enrichers::GitEnricher::new()),
+            Box::new(enrichers::CostEnricher),
+            Box::new(enrichers::TagEnricher::new(tags_config)),
+        ];
+        Self { enrichers }
+    }
+
+    /// Process a batch of messages through all enrichers.
+    /// Returns a parallel Vec of tags for each message.
+    pub fn process(&mut self, messages: &mut [ParsedMessage]) -> Vec<Vec<Tag>> {
+        let mut all_tags = Vec::with_capacity(messages.len());
+        for msg in messages.iter_mut() {
+            normalize(msg);
+            let mut msg_tags = Vec::new();
+            for enricher in &mut self.enrichers {
+                msg_tags.extend(enricher.enrich(msg));
+            }
+            all_tags.push(msg_tags);
+        }
+        all_tags
+    }
+}
+
+/// Normalize a parsed message (trim whitespace, apply defaults).
+fn normalize(msg: &mut ParsedMessage) {
+    // Trim whitespace from string fields
+    if let Some(ref mut cwd) = msg.cwd {
+        let trimmed = cwd.trim().to_string();
+        if trimmed.is_empty() {
+            msg.cwd = None;
+        } else {
+            *cwd = trimmed;
+        }
+    }
+    if let Some(ref mut branch) = msg.git_branch {
+        let trimmed = branch.trim().to_string();
+        if trimmed.is_empty() {
+            msg.git_branch = None;
+        } else {
+            *branch = trimmed;
+        }
+    }
+}
+
+/// Simple glob matching supporting `*` (any chars) and `?` (single char).
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    glob_match_inner(&pat, &txt)
+}
+
+fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0);
+
+    while ti < txt.len() {
+        if pi < pat.len() && (pat[pi] == '?' || pat[pi] == txt[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pat.len() && pat[pi] == '*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pat.len() && pat[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == pat.len()
+}
+
+/// Extract a ticket ID (e.g. `PAVA-2057`) from a branch name.
+/// Matches the pattern `[A-Z]+-\d+`.
+pub fn extract_ticket_id(branch: &str) -> Option<&str> {
+    let bytes = branch.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Find start of uppercase sequence
+        if !bytes[i].is_ascii_uppercase() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < len && bytes[i].is_ascii_uppercase() {
+            i += 1;
+        }
+        // Need at least one uppercase char followed by '-'
+        if i >= len || bytes[i] != b'-' || i == start {
+            continue;
+        }
+        i += 1; // skip '-'
+        // Need at least one digit
+        let digit_start = i;
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > digit_start {
+            return Some(&branch[start..i]);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glob_exact_match() {
+        assert!(glob_match("hello", "hello"));
+        assert!(!glob_match("hello", "world"));
+    }
+
+    #[test]
+    fn glob_star() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("foo*", "foobar"));
+        assert!(glob_match("*bar", "foobar"));
+        assert!(glob_match(
+            "*Verkada*",
+            "github.com/verkada/Verkada-Backend"
+        ));
+    }
+
+    #[test]
+    fn glob_question_mark() {
+        assert!(glob_match("h?llo", "hello"));
+        assert!(!glob_match("h?llo", "heello"));
+    }
+
+    #[test]
+    fn glob_combined() {
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(glob_match("src/*/*.rs", "src/lib/mod.rs"));
+    }
+
+    #[test]
+    fn extract_ticket_basic() {
+        assert_eq!(extract_ticket_id("PAVA-2057-fix-thing"), Some("PAVA-2057"));
+        assert_eq!(extract_ticket_id("feature/ABC-123"), Some("ABC-123"));
+        assert_eq!(extract_ticket_id("main"), None);
+        assert_eq!(extract_ticket_id("fix-bug"), None);
+    }
+
+    #[test]
+    fn extract_ticket_at_end() {
+        assert_eq!(extract_ticket_id("feature/TICKET-99"), Some("TICKET-99"));
+    }
+
+    #[test]
+    fn extract_ticket_multiple() {
+        // Returns first match
+        assert_eq!(extract_ticket_id("ABC-1-DEF-2"), Some("ABC-1"));
+    }
+
+    #[test]
+    fn normalize_trims_cwd() {
+        let mut msg = test_msg();
+        msg.cwd = Some("  /tmp/project  ".to_string());
+        normalize(&mut msg);
+        assert_eq!(msg.cwd.as_deref(), Some("/tmp/project"));
+    }
+
+    #[test]
+    fn normalize_clears_empty_cwd() {
+        let mut msg = test_msg();
+        msg.cwd = Some("   ".to_string());
+        normalize(&mut msg);
+        assert!(msg.cwd.is_none());
+    }
+
+    pub fn test_msg() -> ParsedMessage {
+        ParsedMessage {
+            uuid: "test".to_string(),
+            session_id: None,
+            timestamp: "2026-03-14T18:13:42Z".parse().unwrap(),
+            cwd: None,
+            role: "user".to_string(),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            tool_names: vec![],
+            has_thinking: false,
+            stop_reason: None,
+            text_length: 0,
+            version: None,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: None,
+            context_tokens_used: None,
+            context_token_limit: None,
+            interaction_mode: None,
+            session_title: None,
+            lines_added: None,
+            lines_removed: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+        }
+    }
+}

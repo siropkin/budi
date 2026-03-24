@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::jsonl::ParsedMessage;
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 /// Open (or create) the analytics database at the given path.
 pub fn open_db(db_path: &Path) -> Result<Connection> {
@@ -145,6 +145,25 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 7 {
+        conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN user_name TEXT;
+             ALTER TABLE sessions ADD COLUMN machine_name TEXT;
+             ALTER TABLE messages ADD COLUMN parent_uuid TEXT;
+
+             CREATE TABLE IF NOT EXISTS tags (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 message_uuid TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
+             );
+             CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
+             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
+             CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uuid);",
+        )?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
     Ok(())
@@ -241,13 +260,15 @@ fn upsert_session(
     interaction_mode: Option<&str>,
     lines_added: Option<u64>,
     lines_removed: Option<u64>,
+    user_name: Option<&str>,
+    machine_name: Option<&str>,
 ) -> Result<()> {
     let ts = timestamp.to_rfc3339();
     let la = lines_added.map(|v| v as i64);
     let lr = lines_removed.map(|v| v as i64);
     conn.execute(
-        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider, session_title, interaction_mode, lines_added, lines_removed)
-         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, 0), COALESCE(?11, 0))
+        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen, version, git_branch, repo_id, provider, session_title, interaction_mode, lines_added, lines_removed, user_name, machine_name)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, 0), COALESCE(?11, 0), ?12, ?13)
          ON CONFLICT(session_id) DO UPDATE SET
            last_seen = MAX(sessions.last_seen, ?3),
            project_dir = COALESCE(?2, sessions.project_dir),
@@ -258,8 +279,10 @@ fn upsert_session(
            session_title = COALESCE(?8, sessions.session_title),
            interaction_mode = COALESCE(?9, sessions.interaction_mode),
            lines_added = MAX(sessions.lines_added, COALESCE(?10, 0)),
-           lines_removed = MAX(sessions.lines_removed, COALESCE(?11, 0))",
-        params![session_id, cwd, ts, version, git_branch, repo_id, provider, session_title, interaction_mode, la, lr],
+           lines_removed = MAX(sessions.lines_removed, COALESCE(?11, 0)),
+           user_name = COALESCE(?12, sessions.user_name),
+           machine_name = COALESCE(?13, sessions.machine_name)",
+        params![session_id, cwd, ts, version, git_branch, repo_id, provider, session_title, interaction_mode, la, lr, user_name, machine_name],
     )?;
     Ok(())
 }
@@ -283,12 +306,24 @@ fn estimate_cost_for_provider(
         + cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0
 }
 
+/// A tag to be stored alongside a message.
+#[derive(Debug, Clone)]
+pub struct Tag {
+    pub key: String,
+    pub value: String,
+}
+
 /// Ingest a batch of parsed messages into the database.
-pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Result<usize> {
+/// `tags` is parallel to `messages` — each entry is the list of tags for that message.
+pub fn ingest_messages(
+    conn: &mut Connection,
+    messages: &[ParsedMessage],
+    tags: Option<&[Vec<Tag>]>,
+) -> Result<usize> {
     let tx = conn.transaction()?;
     let mut count = 0;
 
-    for msg in messages {
+    for (i, msg) in messages.iter().enumerate() {
         // Upsert session if we have a session_id.
         if let Some(ref sid) = msg.session_id {
             upsert_session(
@@ -304,6 +339,8 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                 msg.interaction_mode.as_deref(),
                 msg.lines_added,
                 msg.lines_removed,
+                msg.user_name.as_deref(),
+                msg.machine_name.as_deref(),
             )?;
         }
 
@@ -336,8 +373,9 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
              (uuid, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               has_thinking, stop_reason, text_length, cwd, repo_id, provider,
-              cost_cents, context_tokens_used, context_token_limit, interaction_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+              cost_cents, context_tokens_used, context_token_limit, interaction_mode,
+              parent_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -358,6 +396,7 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                 ctx_used,
                 ctx_limit,
                 msg.interaction_mode,
+                msg.parent_uuid,
             ],
         )?;
 
@@ -369,6 +408,15 @@ pub fn ingest_messages(conn: &mut Connection, messages: &[ParsedMessage]) -> Res
                     "INSERT INTO tool_usage (message_uuid, tool_name) VALUES (?1, ?2)",
                     params![msg.uuid, tool_name],
                 )?;
+            }
+            // Insert tags.
+            if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
+                for tag in msg_tags {
+                    tx.execute(
+                        "INSERT INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                        params![msg.uuid, tag.key, tag.value],
+                    )?;
+                }
             }
         }
     }
@@ -388,13 +436,14 @@ pub fn db_path() -> Result<PathBuf> {
 /// Returns (files_synced, messages_ingested).
 pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
     let providers = crate::provider::available_providers();
+    let tags_config = crate::config::load_tags_config();
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
     let mut total_files = 0;
     let mut total_messages = 0;
-    let mut repo_cache = crate::repo_id::RepoIdCache::new();
 
     for provider in &providers {
         // Try direct sync first (e.g. Cursor state.vscdb).
-        if let Some(result) = provider.sync_direct(conn) {
+        if let Some(result) = provider.sync_direct(conn, &mut pipeline) {
             let (files, messages) = result?;
             total_files += files;
             total_messages += messages;
@@ -421,14 +470,8 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
                 continue;
             }
 
-            // Resolve repo_id for each message from its cwd.
-            for msg in &mut messages {
-                if let Some(ref cwd) = msg.cwd {
-                    msg.repo_id = Some(repo_cache.resolve(Path::new(cwd)));
-                }
-            }
-
-            let count = ingest_messages(conn, &messages)?;
+            let tags = pipeline.process(&mut messages);
+            let count = ingest_messages(conn, &messages, Some(&tags))?;
             set_sync_offset(conn, &path_str, new_offset)?;
 
             if count > 0 {
@@ -446,7 +489,8 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
 pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
     use crate::provider::Provider;
     let provider = crate::providers::claude_code::ClaudeCodeProvider;
-    let mut repo_cache = crate::repo_id::RepoIdCache::new();
+    let tags_config = crate::config::load_tags_config();
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
     let path_str = file_path.display().to_string();
     let offset = get_sync_offset(conn, &path_str)?;
 
@@ -463,13 +507,8 @@ pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
         return Ok(0);
     }
 
-    for msg in &mut messages {
-        if let Some(ref cwd) = msg.cwd {
-            msg.repo_id = Some(repo_cache.resolve(Path::new(cwd)));
-        }
-    }
-
-    let count = ingest_messages(conn, &messages)?;
+    let tags = pipeline.process(&mut messages);
+    let count = ingest_messages(conn, &messages, Some(&tags))?;
     set_sync_offset(conn, &path_str, new_offset)?;
     Ok(count)
 }
@@ -1882,6 +1921,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1909,14 +1951,17 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
         ];
 
-        let count = ingest_messages(&mut conn, &msgs).unwrap();
+        let count = ingest_messages(&mut conn, &msgs, None).unwrap();
         assert_eq!(count, 2);
 
         // Duplicate insert should be skipped.
-        let count2 = ingest_messages(&mut conn, &msgs).unwrap();
+        let count2 = ingest_messages(&mut conn, &msgs, None).unwrap();
         assert_eq!(count2, 0);
 
         let summary = usage_summary(&conn, None, None).unwrap();
@@ -1960,8 +2005,11 @@ mod tests {
             session_title: None,
             lines_added: None,
             lines_removed: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
         };
-        ingest_messages(&mut conn, &[msg]).unwrap();
+        ingest_messages(&mut conn, &[msg], None).unwrap();
 
         // Verify cost_cents was baked in: 1M input * $5/M + 100K output * $25/M = $5 + $2.50 = $7.50 = 750 cents
         let cost_cents: f64 = conn
@@ -2017,6 +2065,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -2044,9 +2095,12 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
         ];
-        ingest_messages(&mut conn, &msgs).unwrap();
+        ingest_messages(&mut conn, &msgs, None).unwrap();
 
         let last_seen: String = conn
             .query_row(
@@ -2086,6 +2140,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -2113,6 +2170,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -2140,6 +2200,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
         ]
     }
@@ -2147,7 +2210,7 @@ mod tests {
     #[test]
     fn session_list_returns_sessions() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        ingest_messages(&mut conn, &sample_messages(), None).unwrap();
 
         let result = session_list(
             &conn,
@@ -2173,7 +2236,7 @@ mod tests {
     #[test]
     fn session_detail_exact_and_prefix() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        ingest_messages(&mut conn, &sample_messages(), None).unwrap();
 
         // Exact match.
         let d = session_detail(&conn, "sess-abc").unwrap().unwrap();
@@ -2202,7 +2265,7 @@ mod tests {
         msgs[2].repo_id = Some("project-b".to_string());
         // Give project-b's user message some tokens so it appears in results
         msgs[2].input_tokens = 50;
-        ingest_messages(&mut conn, &msgs).unwrap();
+        ingest_messages(&mut conn, &msgs, None).unwrap();
 
         let repos = repo_usage(&conn, None, None, 10).unwrap();
         assert_eq!(repos.len(), 2);
@@ -2241,6 +2304,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -2272,6 +2338,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -2300,6 +2369,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
         ]
     }
@@ -2307,7 +2379,7 @@ mod tests {
     #[test]
     fn mcp_tool_stats_groups_by_server() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &messages_with_tools()).unwrap();
+        ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
 
         let mcp = mcp_tool_stats(&conn, None, None).unwrap();
         assert_eq!(mcp.len(), 2);
@@ -2320,7 +2392,7 @@ mod tests {
     #[test]
     fn cache_stats_computes_hit_rate() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &messages_with_tools()).unwrap();
+        ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
 
         let cs = cache_stats(&conn, None, None).unwrap();
         // total_input = (500+0+200) + (300+100+150) + (50000+0+0) = 51250
@@ -2347,7 +2419,7 @@ mod tests {
     #[test]
     fn statusline_stats_with_data() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        ingest_messages(&mut conn, &sample_messages(), None).unwrap();
         let params = StatuslineParams::default();
         // sample_messages have timestamps on 2026-03-14
         let stats =
@@ -2358,7 +2430,7 @@ mod tests {
     #[test]
     fn statusline_stats_with_session_filter() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        ingest_messages(&mut conn, &sample_messages(), None).unwrap();
         let params = StatuslineParams {
             session_id: Some("sess-1".to_string()),
             ..Default::default()
@@ -2372,7 +2444,7 @@ mod tests {
     #[test]
     fn statusline_stats_with_branch_filter() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &sample_messages()).unwrap();
+        ingest_messages(&mut conn, &sample_messages(), None).unwrap();
         let params = StatuslineParams {
             branch: Some("main".to_string()),
             ..Default::default()
@@ -2414,6 +2486,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "cc-a1".to_string(),
@@ -2441,6 +2516,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
         ];
 
@@ -2472,6 +2550,9 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
             ParsedMessage {
                 uuid: "cu-a1".to_string(),
@@ -2499,11 +2580,14 @@ mod tests {
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             },
         ];
 
-        ingest_messages(&mut conn, &claude_msgs).unwrap();
-        ingest_messages(&mut conn, &cursor_msgs).unwrap();
+        ingest_messages(&mut conn, &claude_msgs, None).unwrap();
+        ingest_messages(&mut conn, &cursor_msgs, None).unwrap();
 
         // All providers: should see 4 messages, 2 sessions
         let all = usage_summary(&conn, None, None).unwrap();

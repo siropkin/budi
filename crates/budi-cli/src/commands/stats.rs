@@ -462,8 +462,7 @@ fn cmd_stats_branch_detail(
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let result =
-        analytics::branch_cost_single(conn, branch, since.as_deref(), until.as_deref())?;
+    let result = analytics::branch_cost_single(conn, branch, since.as_deref(), until.as_deref())?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -487,10 +486,7 @@ fn cmd_stats_branch_detail(
             println!("  \x1b[1mSessions\x1b[0m   {}", b.session_count);
             println!("  \x1b[1mMessages\x1b[0m   {}", b.message_count);
             let total_input = b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens;
-            println!(
-                "  \x1b[1mInput\x1b[0m      {}",
-                format_tokens(total_input)
-            );
+            println!("  \x1b[1mInput\x1b[0m      {}", format_tokens(total_input));
             println!(
                 "  \x1b[1mOutput\x1b[0m     {}",
                 format_tokens(b.output_tokens)

@@ -69,7 +69,11 @@ impl Provider for CursorProvider {
         cursor_pricing_for_model(model)
     }
 
-    fn sync_direct(&self, conn: &mut Connection) -> Option<Result<(usize, usize)>> {
+    fn sync_direct(
+        &self,
+        conn: &mut Connection,
+        pipeline: &mut crate::pipeline::Pipeline,
+    ) -> Option<Result<(usize, usize)>> {
         let paths = all_state_vscdb_paths();
         if paths.is_empty() {
             return None; // Fall back to JSONL
@@ -77,7 +81,7 @@ impl Provider for CursorProvider {
         let mut total_sessions = 0;
         let mut total_messages = 0;
         for path in &paths {
-            match sync_from_state_vscdb(conn, path) {
+            match sync_from_state_vscdb(conn, path, pipeline) {
                 Ok((s, m)) => {
                     total_sessions += s;
                     total_messages += m;
@@ -146,7 +150,11 @@ fn scan_workspace_dbs(ws_dir: &Path, paths: &mut Vec<PathBuf>) {
 
 /// Sync from Cursor's state.vscdb SQLite database.
 /// Reads composerData and bubbleId entries from the cursorDiskKV table.
-fn sync_from_state_vscdb(budi_conn: &mut Connection, vscdb_path: &Path) -> Result<(usize, usize)> {
+fn sync_from_state_vscdb(
+    budi_conn: &mut Connection,
+    vscdb_path: &Path,
+    pipeline: &mut crate::pipeline::Pipeline,
+) -> Result<(usize, usize)> {
     // Open state.vscdb read-only (Cursor may be running with WAL mode)
     let vscdb = Connection::open_with_flags(
         vscdb_path,
@@ -165,9 +173,10 @@ fn sync_from_state_vscdb(budi_conn: &mut Connection, vscdb_path: &Path) -> Resul
     let (sessions, new_watermark) = parse_composer_sessions(&vscdb, last_watermark)?;
 
     for session in &sessions {
-        let messages = composer_session_to_messages(session);
+        let mut messages = composer_session_to_messages(session);
         if !messages.is_empty() {
-            let count = analytics::ingest_messages(budi_conn, &messages)?;
+            let tags = pipeline.process(&mut messages);
+            let count = analytics::ingest_messages(budi_conn, &messages, Some(&tags))?;
             if count > 0 {
                 total_sessions += 1;
                 total_messages += count;
@@ -395,6 +404,9 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         session_title: session.name.clone(),
         lines_added: Some(session.lines_added),
         lines_removed: Some(session.lines_removed),
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
     });
 
     // Create an assistant message per model used in the session
@@ -429,6 +441,9 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             session_title: session.name.clone(),
             lines_added: Some(session.lines_added),
             lines_removed: Some(session.lines_removed),
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
         });
     }
 
@@ -475,6 +490,9 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             session_title: session.name.clone(),
             lines_added: Some(session.lines_added),
             lines_removed: Some(session.lines_removed),
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
         });
     }
 
@@ -731,6 +749,9 @@ fn parse_cursor_line(
             session_title: None,
             lines_added: None,
             lines_removed: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -766,6 +787,9 @@ fn parse_cursor_line(
                 session_title: None,
                 lines_added: None,
                 lines_removed: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
             })
         }
         _ => None,

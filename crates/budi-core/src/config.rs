@@ -97,6 +97,37 @@ pub fn load_statusline_config() -> StatuslineConfig {
     toml::from_str(&raw).unwrap_or_default()
 }
 
+/// A single tag rule from `~/.config/budi/tags.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagRule {
+    pub key: String,
+    pub value: String,
+    pub match_repo: Option<String>,
+}
+
+/// Tags configuration loaded from `~/.config/budi/tags.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TagsConfig {
+    #[serde(default)]
+    pub rules: Vec<TagRule>,
+}
+
+/// Path to the global tags config file.
+pub fn tags_config_path() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home).join(".config/budi/tags.toml"))
+}
+
+/// Load tags config, returning None if the file doesn't exist.
+pub fn load_tags_config() -> Option<TagsConfig> {
+    let path = tags_config_path().ok()?;
+    if !path.exists() {
+        return None;
+    }
+    let raw = fs::read_to_string(&path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudiConfig {
