@@ -76,7 +76,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 - **Automatic** — data collection runs silently in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Cost attribution** — cost per branch, ticket (auto-extracted from branch names), team, and custom tags
-- **AI commit detection** — identifies commits created by AI agents from JSONL tool calls (zero false positives)
+- **AI commit detection** — identifies AI commits via two signals: JSONL tool call extraction and Co-Authored-By trailer parsing (supports Claude, Copilot, Cursor, Cline, Aider, Gemini, Devin, Windsurf)
 - **Session analytics** — prompt counts, token usage, and cost per session
 - **Multi-agent dashboard** — unified stats view across Claude Code, Cursor, and more
 - **Configurable status line** — live cost stats in Claude Code and Starship, with customizable data slots and format templates
