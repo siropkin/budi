@@ -7,6 +7,28 @@
 
 **AI cost analytics for coding agents.** Know where your AI tokens and money go.
 
+### TL;DR
+
+```
+Free, open-source, local-only analytics for AI coding agents.
+See where your tokens and money go across Claude Code, Cursor, and more.
+Live cost tracking in the Claude Code status line and a full web dashboard.
+
+Install:
+  brew install siropkin/budi/budi
+
+Commands:
+  budi init       — one-time setup, works for all repos and worktrees
+  budi stats      — usage summary (tokens, sessions, cost)
+  budi open       — open the web dashboard
+
+Links:
+  Dashboard: http://localhost:7878/dashboard
+  GitHub:    https://github.com/siropkin/budi
+```
+
+---
+
 `budi` is a local-first cost analytics tool for AI coding agents. It tracks tokens, costs, and usage across Claude Code, Cursor, and more — so you can answer "how much did this feature cost?" No cloud. No uploads.
 
 ### Agent integrations
@@ -111,7 +133,12 @@ Your AI agent will clone the repo, run the installer, and set up your project au
 
 **Step 1 — Install binaries**
 
-macOS / Linux (installs binaries and adds them to your PATH automatically):
+Homebrew (macOS / Linux):
+```bash
+brew install siropkin/budi/budi
+```
+
+Shell script (macOS / Linux):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh
 ```
@@ -381,24 +408,25 @@ The daemon is the single source of truth — the CLI never opens the database di
 
 - **More agents** — Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI (see [agent integrations](#agent-integrations) above)
 - **Budget alerts** — threshold notifications for daily/weekly/monthly spend
-- **Homebrew distribution** — `brew install budi`
+- **Homebrew core** — `brew install budi` (currently available via `brew install siropkin/budi/budi`)
 - **Team features** — shared dashboards, per-developer breakdown
 
 ## Uninstall
 
-To remove budi completely:
+If installed via Homebrew:
 
 ```bash
-# Stop the daemon and remove binaries
-scripts/uninstall.sh
+pkill -f budi-daemon
+brew uninstall budi
+rm -rf ~/.local/share/budi               # remove data
 ```
 
-Or manually:
+If installed via shell script or from source:
 
 ```bash
-pkill -f budi-daemon                     # stop the daemon
-rm ~/.local/bin/budi ~/.local/bin/budi-daemon  # remove binaries
-rm -rf ~/.local/share/budi               # remove data (SQLite database, logs)
+pkill -f budi-daemon
+rm ~/.local/bin/budi ~/.local/bin/budi-daemon
+rm -rf ~/.local/share/budi               # remove data
 ```
 
 Optionally, clean up hook entries from `~/.claude/settings.json` and `~/.cursor/hooks.json` (remove the `"budi hook"` entries), and remove the status line block from `~/.claude/settings.json`.
