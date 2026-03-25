@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -33,7 +33,7 @@ pub fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> boo
         .unwrap_or(false)
 }
 
-pub fn ensure_daemon_running(repo_root: &Path, config: &BudiConfig) -> Result<()> {
+pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
     if daemon_health(config) {
         return Ok(());
     }
@@ -66,7 +66,7 @@ pub fn ensure_daemon_running(repo_root: &Path, config: &BudiConfig) -> Result<()
     ) {
         return Ok(());
     }
-    let log_hint = config::daemon_log_path(repo_root)
+    let log_hint = daemon_log_path(repo_root)
         .map(|p| format!("\nCheck daemon log: {}", p.display()))
         .unwrap_or_default();
     anyhow::bail!(
@@ -92,7 +92,7 @@ fn wait_for_daemon_health(
     false
 }
 
-fn restart_unhealthy_daemon_listener(repo_root: &Path, config: &BudiConfig) -> Result<bool> {
+fn restart_unhealthy_daemon_listener(repo_root: Option<&Path>, config: &BudiConfig) -> Result<bool> {
     let listener_pids = daemon_listener_pids(config.daemon_port)?;
     if listener_pids.is_empty() {
         return Ok(false);
@@ -221,9 +221,21 @@ fn daemon_port_is_listening(config: &BudiConfig) -> bool {
     false
 }
 
-fn spawn_daemon_process(repo_root: &Path, config: &BudiConfig) -> Result<()> {
+/// Resolve the daemon log path — use repo-specific path if available, otherwise global.
+fn daemon_log_path(repo_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(root) = repo_root {
+        config::daemon_log_path(root).ok()
+    } else {
+        config::budi_home_dir()
+            .ok()
+            .map(|home| home.join("logs").join("daemon.log"))
+    }
+}
+
+fn spawn_daemon_process(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
     let daemon_bin = resolve_daemon_binary()?;
-    let log_path = config::daemon_log_path(repo_root)?;
+    let log_path = daemon_log_path(repo_root)
+        .context("Could not determine daemon log path")?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
     }

@@ -130,11 +130,10 @@ git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.s
 **Step 2 — Initialize budi**
 
 ```bash
-cd /path/to/your/repo
 budi init
 ```
 
-This starts the daemon, installs the status line, sets up hooks for Claude Code and Cursor, and syncs existing transcripts. Data syncs automatically every 30 seconds.
+This starts the daemon, installs the status line, sets up hooks for Claude Code and Cursor, and syncs existing transcripts. Works from any directory — no need to be in a git repo. Data syncs automatically every 30 seconds.
 
 **Step 3 — Use your AI coding agent normally.** Budi tracks your sessions in the background.
 
@@ -235,6 +234,7 @@ The dashboard shows: cost cards, activity chart, agents breakdown, models (per-p
 
 ```bash
 budi init                     # start daemon, install statusline, sync data
+budi init --local             # same, but scoped to the current git repo
 budi doctor                   # check health: daemon, database, config
 budi open                     # open the web dashboard in the browser
 budi stats                    # usage summary with cost breakdown
@@ -383,6 +383,25 @@ The daemon is the single source of truth — the CLI never opens the database di
 - **Budget alerts** — threshold notifications for daily/weekly/monthly spend
 - **Homebrew distribution** — `brew install budi`
 - **Team features** — shared dashboards, per-developer breakdown
+
+## Uninstall
+
+To remove budi completely:
+
+```bash
+# Stop the daemon and remove binaries
+scripts/uninstall.sh
+```
+
+Or manually:
+
+```bash
+pkill -f budi-daemon                     # stop the daemon
+rm ~/.local/bin/budi ~/.local/bin/budi-daemon  # remove binaries
+rm -rf ~/.local/share/budi               # remove data (SQLite database, logs)
+```
+
+Optionally, clean up hook entries from `~/.claude/settings.json` and `~/.cursor/hooks.json` (remove the `"budi hook"` entries), and remove the status line block from `~/.claude/settings.json`.
 
 ## Privacy
 

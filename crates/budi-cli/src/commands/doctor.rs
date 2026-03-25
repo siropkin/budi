@@ -6,24 +6,37 @@ use budi_core::config;
 use crate::daemon::{daemon_health, ensure_daemon_running};
 
 pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
-    let repo_root = super::resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    let paths = config::repo_paths(&repo_root)?;
+    let repo_root = super::try_resolve_repo_root(repo_root);
+
+    let config = match &repo_root {
+        Some(root) => config::load_or_default(root)?,
+        None => config::BudiConfig::default(),
+    };
     let mut issues: Vec<String> = Vec::new();
 
-    println!("budi doctor — {}", repo_root.display());
+    if let Some(ref root) = repo_root {
+        println!("budi doctor — {}", root.display());
+    } else {
+        println!("budi doctor — global (not in a git repo)");
+    }
     println!();
 
-    let has_git = repo_root.join(".git").exists();
-    doctor_check("git repo", has_git, None);
-    if !has_git {
-        issues.push("Not a git repository. Run `git init` first.".into());
-    }
+    if let Some(ref root) = repo_root {
+        let has_git = root.join(".git").exists();
+        doctor_check("git repo", has_git, None);
+        if !has_git {
+            issues.push("Not a git repository.".into());
+        }
 
-    let has_config = paths.config_file.exists();
-    if has_config {
-        doctor_check("config", true, Some(&paths.config_file));
+        let paths = config::repo_paths(root)?;
+        let has_config = paths.config_file.exists();
+        if has_config {
+            doctor_check("config", true, Some(&paths.config_file));
+        } else {
+            println!("  [ok] config: using defaults");
+        }
     } else {
+        println!("  [--] git repo: not in a git repository (global mode)");
         println!("  [ok] config: using defaults");
     }
 
@@ -31,16 +44,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     doctor_check("daemon", health, None);
     if !health {
         println!("  Attempting daemon start...");
-        match ensure_daemon_running(&repo_root, &config) {
+        match ensure_daemon_running(repo_root.as_deref(), &config) {
             Ok(()) => {
                 let retry = daemon_health(&config);
                 doctor_check("daemon (retry)", retry, None);
                 if !retry {
-                    let log_hint = config::daemon_log_path(&repo_root).map_or_else(
-                        |_| "Check logs with `budi -vv doctor`.".to_string(),
-                        |p| format!("Logs: {}", p.display()),
-                    );
-                    issues.push(format!("Daemon failed to start. {log_hint}"));
+                    issues.push("Daemon failed to start. Check logs with `budi -vv doctor`.".to_string());
                 }
             }
             Err(e) => {

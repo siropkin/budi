@@ -68,11 +68,15 @@ pub fn cmd_update() -> Result<()> {
     let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
     thread::sleep(Duration::from_millis(500));
 
-    if let Ok(cwd) = std::env::current_dir()
-        && let Ok(repo_root) = config::find_repo_root(&cwd)
     {
-        let config = config::load_or_default(&repo_root)?;
-        let _ = ensure_daemon_running(&repo_root, &config);
+        let repo_root = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| config::find_repo_root(&cwd).ok());
+        let config = match &repo_root {
+            Some(root) => config::load_or_default(root).unwrap_or_default(),
+            None => config::BudiConfig::default(),
+        };
+        let _ = ensure_daemon_running(repo_root.as_deref(), &config);
     }
 
     // Run database migration after updating binary (via daemon)

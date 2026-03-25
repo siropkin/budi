@@ -8,18 +8,37 @@ use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
-    let repo_root = super::resolve_repo_root(repo_root)?;
-    let config = config::load_or_default(&repo_root)?;
-    config::ensure_repo_layout(&repo_root)?;
-    config::save(&repo_root, &config)?;
+pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
+    let repo_root = if local || repo_root.is_some() {
+        let root = super::try_resolve_repo_root(repo_root);
+        if root.is_none() {
+            anyhow::bail!(
+                "Not in a git repository. Use `budi init` (without --local) for global setup,\n\
+                 or run from inside a git repo."
+            );
+        }
+        root
+    } else {
+        None
+    };
+
+    // Config defaults are fine without a repo root.
+    let config = match &repo_root {
+        Some(root) => {
+            let cfg = config::load_or_default(root)?;
+            config::ensure_repo_layout(root)?;
+            config::save(root, &cfg)?;
+            cfg
+        }
+        None => config::BudiConfig::default(),
+    };
 
     super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
     install_hooks();
 
     if !no_daemon {
-        ensure_daemon_running(&repo_root, &config)?;
+        ensure_daemon_running(repo_root.as_deref(), &config)?;
     }
 
     // Auto-sync existing transcripts on first run
@@ -28,26 +47,40 @@ pub fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
 
     println!();
-    // Check if already initialized (database exists)
-    let is_reinit = config::repo_paths(&repo_root)
-        .map(|p| p.data_dir.join("analytics.db").exists())
-        .unwrap_or(false);
-    if is_reinit {
+    if let Some(ref root) = repo_root {
+        let is_reinit = config::repo_paths(root)
+            .map(|p| p.data_dir.join("analytics.db").exists())
+            .unwrap_or(false);
+        if is_reinit {
+            println!(
+                "\x1b[1;36m  budi\x1b[0m re-initialized in {}",
+                root.display()
+            );
+        } else {
+            println!(
+                "\x1b[1;36m  budi\x1b[0m initialized in {}",
+                root.display()
+            );
+        }
+    } else {
+        println!("\x1b[1;36m  budi\x1b[0m initialized (global)");
+    }
+    println!();
+    if let Some(ref root) = repo_root {
         println!(
-            "\x1b[1;36m  budi\x1b[0m re-initialized in {}",
-            repo_root.display()
+            "  Data:      {}",
+            config::repo_paths(root)
+                .map(|p| p.data_dir.display().to_string())
+                .unwrap_or_else(|_| "~/.local/share/budi".to_string())
         );
     } else {
         println!(
-            "\x1b[1;36m  budi\x1b[0m initialized in {}",
-            repo_root.display()
+            "  Data:      {}",
+            config::budi_home_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "~/.local/share/budi".to_string())
         );
     }
-    println!();
-    println!(
-        "  Data:      {}",
-        config::repo_paths(&repo_root)?.data_dir.display()
-    );
     println!("  Dashboard: {dashboard_url}");
     println!();
     match sync_result {

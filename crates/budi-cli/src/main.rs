@@ -24,6 +24,9 @@ struct Cli {
 enum Commands {
     /// Set up budi (starts daemon, installs status line, syncs existing data)
     Init {
+        /// Initialize for the current git repo only (default: global)
+        #[arg(long)]
+        local: bool,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
@@ -129,9 +132,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init {
+            local,
             repo_root,
             no_daemon,
-        } => commands::init::cmd_init(repo_root, no_daemon),
+        } => commands::init::cmd_init(local, repo_root, no_daemon),
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
         Commands::Stats {
             period,

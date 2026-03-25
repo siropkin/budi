@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
 use budi_core::config;
 
 pub mod doctor;
@@ -12,10 +11,11 @@ pub mod statusline;
 pub mod sync;
 pub mod update;
 
-pub fn resolve_repo_root(candidate: Option<PathBuf>) -> Result<PathBuf> {
+/// Try to resolve a repo root, but return None if not in a git repository.
+pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(path) = candidate {
-        return Ok(path);
+        return Some(path);
     }
-    let cwd = std::env::current_dir()?;
-    config::find_repo_root(&cwd)
+    let cwd = std::env::current_dir().ok()?;
+    config::find_repo_root(&cwd).ok()
 }
