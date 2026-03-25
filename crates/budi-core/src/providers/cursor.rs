@@ -18,6 +18,20 @@ use crate::analytics;
 use crate::jsonl::ParsedMessage;
 use crate::provider::{DiscoveredFile, ModelPricing, Provider};
 
+/// Resolve the Cursor default model from ~/.cursor/cli-config.json.
+/// Returns None if the file doesn't exist or can't be parsed.
+fn resolve_default_model() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = PathBuf::from(home).join(".cursor/cli-config.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    parsed
+        .get("model")
+        .and_then(|m| m.get("modelId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// The Cursor provider.
 pub struct CursorProvider;
 
@@ -246,6 +260,9 @@ fn parse_composer_sessions(
     let mut sessions = Vec::new();
     let mut max_watermark = since_watermark;
 
+    // Resolve "default" model name once for the entire sync
+    let default_model = resolve_default_model();
+
     // Query all composerData:* keys from cursorDiskKV
     let mut stmt =
         vscdb.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")?;
@@ -317,11 +334,16 @@ fn parse_composer_sessions(
                 Some((pct / 100.0 * limit as f64) as u64)
             });
 
-        let model_name = parsed
+        let raw_model = parsed
             .get("modelConfig")
             .and_then(|v| v.get("modelName"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Resolve "default" to the actual configured model
+        let model_name = match raw_model.as_deref() {
+            Some("default") | None => default_model.clone().or(raw_model),
+            _ => raw_model,
+        };
 
         // Parse usageData — per-model cost breakdown
         let mut usage_entries = Vec::new();
