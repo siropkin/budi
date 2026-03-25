@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::hooks;
-
 /// Per-million-token pricing for a model.
 #[derive(Debug, Clone)]
 pub struct ModelPricing {
@@ -24,14 +22,6 @@ pub struct ModelPricing {
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
     pub path: PathBuf,
-}
-
-/// Hook handler trait for providers that support hooks.
-pub trait HookHandler: Send + Sync {
-    fn handle_prompt_submit(
-        &self,
-        input: &hooks::UserPromptSubmitInput,
-    ) -> hooks::UserPromptSubmitOutput;
 }
 
 /// The core provider trait. Every coding agent implements this.
@@ -48,18 +38,6 @@ pub trait Provider: Send + Sync {
         offset: usize,
     ) -> Result<(Vec<crate::jsonl::ParsedMessage>, usize)>;
     fn pricing_for_model(&self, model: &str) -> ModelPricing;
-
-    // === Optional capabilities ===
-
-    /// Hook integration — for statusline and pre-filtering.
-    fn hook_support(&self) -> Option<Box<dyn HookHandler>> {
-        None
-    }
-
-    /// Pre-filter logic for this provider's system messages.
-    fn system_message_patterns(&self) -> Vec<&str> {
-        vec![]
-    }
 
     /// Direct sync from a structured data source (e.g. SQLite database).
     /// Returns Some((files_synced, messages_ingested)) if this provider uses

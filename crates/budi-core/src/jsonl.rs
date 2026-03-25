@@ -121,7 +121,6 @@ pub struct ParsedMessage {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
-    pub tool_names: Vec<String>,
     pub has_thinking: bool,
     pub stop_reason: Option<String>,
     pub text_length: usize,
@@ -170,7 +169,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            tool_names: vec![],
             has_thinking: false,
             stop_reason: None,
             text_length: u.message.content.text_length(),
@@ -191,13 +189,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
             let blocks = a.message.content.as_deref().unwrap_or(&[]);
-            let tool_names: Vec<String> = blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { name } => Some(name.clone()),
-                    _ => None,
-                })
-                .collect();
             let has_thinking = blocks
                 .iter()
                 .any(|b| matches!(b, ContentBlock::Thinking { .. }));
@@ -223,7 +214,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                     .and_then(|u| u.cache_creation_input_tokens)
                     .unwrap_or(0),
                 cache_read_tokens: usage.and_then(|u| u.cache_read_input_tokens).unwrap_or(0),
-                tool_names,
                 has_thinking,
                 stop_reason: a.message.stop_reason,
                 text_length,
@@ -295,7 +285,6 @@ mod tests {
         assert_eq!(msg.output_tokens, 50);
         assert_eq!(msg.cache_creation_tokens, 200);
         assert_eq!(msg.cache_read_tokens, 300);
-        assert_eq!(msg.tool_names, vec!["Read"]);
         assert_eq!(msg.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(msg.text_length, 6);
         assert_eq!(msg.model.as_deref(), Some("claude-opus-4-6"));
@@ -306,7 +295,6 @@ mod tests {
         let line = r#"{"parentUuid":"abc","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"msg_2","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"}],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":5}},"uuid":"ghi-789","timestamp":"2026-03-14T18:14:12.000Z","sessionId":"sess-1"}"#;
         let msg = parse_line(line).unwrap();
         assert!(msg.has_thinking);
-        assert!(msg.tool_names.is_empty());
     }
 
     #[test]

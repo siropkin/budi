@@ -497,7 +497,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         output_tokens: 0,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
-        tool_names: vec![],
         has_thinking: false,
         stop_reason: None,
         text_length: 0,
@@ -533,7 +532,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             output_tokens,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            tool_names: vec![],
             has_thinking: false,
             stop_reason: Some("end_turn".to_string()),
             text_length: 0,
@@ -577,7 +575,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             output_tokens,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            tool_names: vec![],
             has_thinking: false,
             stop_reason: Some("end_turn".to_string()),
             text_length: 0,
@@ -730,8 +727,6 @@ struct CursorEntry {
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     cwd: Option<String>,
-    #[serde(rename = "toolCalls")]
-    tool_calls: Option<Vec<CursorToolCall>>,
     #[serde(rename = "stopReason")]
     stop_reason: Option<String>,
 }
@@ -788,13 +783,6 @@ impl CursorUsage {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CursorToolCall {
-    name: Option<String>,
-    #[serde(rename = "type")]
-    call_type: Option<String>,
-}
-
 /// Parse a single Cursor JSONL line into a `ParsedMessage`.
 fn parse_cursor_line(
     line: &str,
@@ -839,7 +827,6 @@ fn parse_cursor_line(
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            tool_names: vec![],
             has_thinking: false,
             stop_reason: None,
             text_length,
@@ -859,12 +846,6 @@ fn parse_cursor_line(
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
-            let tool_names: Vec<String> = entry
-                .tool_calls
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|tc| tc.name.or(tc.call_type))
-                .collect();
             Some(ParsedMessage {
                 uuid,
                 session_id: Some(msg_session_id),
@@ -876,7 +857,6 @@ fn parse_cursor_line(
                 output_tokens: usage.and_then(|u| u.output_tokens).unwrap_or(0),
                 cache_creation_tokens: usage.map(|u| u.cache_creation()).unwrap_or(0),
                 cache_read_tokens: usage.map(|u| u.cache_read()).unwrap_or(0),
-                tool_names,
                 has_thinking: false,
                 stop_reason: entry.stop_reason,
                 text_length,
@@ -1112,7 +1092,6 @@ mod tests {
         assert_eq!(msg.model.as_deref(), Some("gpt-4o"));
         assert_eq!(msg.input_tokens, 500);
         assert_eq!(msg.output_tokens, 200);
-        assert_eq!(msg.tool_names, vec!["edit_file"]);
     }
 
     #[test]

@@ -213,35 +213,6 @@ pub async fn analytics_providers(
     Ok(Json(result))
 }
 
-pub async fn analytics_top_tools(
-    Query(params): Query<SummaryParams>,
-) -> Result<Json<Vec<(String, u64)>>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::top_tools_filtered(&conn, params.since.as_deref(), params.until.as_deref(), params.provider.as_deref())
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}
-
-pub async fn analytics_mcp_tools(
-    Query(params): Query<SummaryParams>,
-) -> Result<Json<Vec<analytics::McpToolStat>>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::mcp_tool_stats(&conn, params.since.as_deref(), params.until.as_deref())
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
 pub async fn analytics_registered_providers() -> Json<serde_json::Value> {
     let providers = budi_core::provider::all_providers();
     let list: Vec<serde_json::Value> = providers

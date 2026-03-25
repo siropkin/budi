@@ -271,7 +271,6 @@ mod tests {
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            tool_names: vec![],
             has_thinking: false,
             stop_reason: None,
             text_length: 0,

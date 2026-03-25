@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use budi_core::config::{self, BudiConfig};
 use reqwest::blocking::Client;
-use serde_json::{Value, json};
 
 use crate::HEALTH_TIMEOUT_SECS;
 
@@ -18,27 +17,6 @@ pub fn daemon_client_with_timeout(timeout: Duration) -> Client {
         .timeout(timeout)
         .build()
         .expect("Failed to construct HTTP client")
-}
-
-pub fn fetch_daemon_stats(config: &BudiConfig) -> Option<Value> {
-    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
-    let url = format!("{}/stats", config.daemon_base_url());
-    client
-        .get(url)
-        .send()
-        .ok()
-        .and_then(|r| r.json::<Value>().ok())
-}
-
-pub fn fetch_session_stats(config: &BudiConfig, session_id: &str) -> Option<Value> {
-    let client = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS));
-    let url = format!("{}/session-stats", config.daemon_base_url());
-    client
-        .post(url)
-        .json(&json!({"session_id": session_id}))
-        .send()
-        .ok()
-        .and_then(|r| r.json::<Value>().ok())
 }
 
 pub fn daemon_health(config: &BudiConfig) -> bool {

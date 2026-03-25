@@ -14,7 +14,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(name = "budi")]
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
-#[command(after_help = "Get started:\n  budi init --global")]
+#[command(after_help = "Get started:\n  budi init")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,25 +22,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Set up budi (use --global for all repos, or run in a repo for local setup)
+    /// Set up budi (starts daemon, installs status line, syncs existing data)
     Init {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
-        /// Install hooks globally in ~/.claude/settings.json (works for all repos)
-        #[arg(long, default_value_t = false)]
-        global: bool,
     },
-    /// Check repo health: config, hooks, daemon
+    /// Check health: daemon, database, config
     Doctor {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
-    },
-    #[command(hide = true)]
-    Hook {
-        #[command(subcommand)]
-        command: HookCommands,
     },
     /// Show usage analytics
     Stats {
@@ -115,20 +107,6 @@ pub enum StatuslineFormat {
     Custom,
 }
 
-#[derive(Debug, Subcommand)]
-enum HookCommands {
-    #[command(hide = true)]
-    UserPromptSubmit,
-    #[command(hide = true)]
-    PostToolUse,
-    #[command(hide = true)]
-    SessionStart,
-    #[command(hide = true)]
-    SessionEnd,
-    #[command(hide = true)]
-    SubagentStart,
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -142,16 +120,8 @@ fn main() -> Result<()> {
         Commands::Init {
             repo_root,
             no_daemon,
-            global,
-        } => commands::init::cmd_init(repo_root, no_daemon, global),
+        } => commands::init::cmd_init(repo_root, no_daemon),
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
-        Commands::Hook { command } => match command {
-            HookCommands::UserPromptSubmit => commands::hook::cmd_hook_user_prompt_submit(),
-            HookCommands::PostToolUse => commands::hook::cmd_hook_post_tool_use(),
-            HookCommands::SessionStart => commands::hook::cmd_hook_session_start(),
-            HookCommands::SessionEnd => commands::hook::cmd_hook_session_end(),
-            HookCommands::SubagentStart => commands::hook::cmd_hook_subagent_start(),
-        },
         Commands::Stats {
             period,
             session,

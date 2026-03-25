@@ -1,12 +1,10 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use axum::Router;
 use axum::routing::{get, post};
 use budi_core::analytics;
 use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
-use budi_core::daemon::DaemonState;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -33,9 +31,7 @@ enum Commands {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub daemon_state: DaemonState,
     pub syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub hook_sync_tx: tokio::sync::mpsc::Sender<PathBuf>,
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -43,11 +39,6 @@ fn build_router(app_state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(h::health))
-        .route("/status", post(h::status_repo))
-        .route("/stats", get(h::hook_stats))
-        .route("/session-stats", post(h::hook_session_stats))
-        .route("/hook/prompt-submit", post(h::hook_prompt_submit))
-        .route("/hook/tool-use", post(h::hook_tool_use))
         .route("/sync", post(h::analytics_sync))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/sessions", get(a::analytics_sessions))
@@ -56,8 +47,6 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/cost", get(a::analytics_cost))
         .route("/analytics/models", get(a::analytics_models))
         .route("/analytics/activity", get(a::analytics_activity))
-        .route("/analytics/tools", get(a::analytics_top_tools))
-        .route("/analytics/mcp-tools", get(a::analytics_mcp_tools))
         .route("/analytics/branches", get(a::analytics_branches))
         .route("/analytics/tags", get(a::analytics_tags))
         .route(
@@ -96,64 +85,14 @@ async fn main() -> Result<()> {
         Commands::Serve { host, port } => (host, port),
     };
 
-    let (hook_sync_tx, mut hook_sync_rx) = tokio::sync::mpsc::channel::<PathBuf>(64);
-
     let app_state = AppState {
-        daemon_state: DaemonState::new(),
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        hook_sync_tx,
     };
 
     let sync_flag = app_state.syncing.clone();
-
-    // Debounced hook-triggered sync: when hooks fire, sync just the active transcript
-    // file after a 500ms debounce to collapse rapid hook bursts.
-    tokio::spawn(async move {
-        let mut pending_path: Option<PathBuf> = None;
-        loop {
-            if pending_path.is_some() {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(500),
-                    hook_sync_rx.recv(),
-                )
-                .await
-                {
-                    Ok(Some(path)) => {
-                        pending_path = Some(path);
-                        continue; // reset debounce timer
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        // Debounce expired — sync the file
-                        let path = pending_path.take().unwrap();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            let db_path = analytics::db_path().ok()?;
-                            let mut conn = analytics::open_db(&db_path).ok()?;
-                            if budi_core::migration::needs_migration(&conn) {
-                                tracing::warn!(
-                                    "Database needs migration. Run `budi sync` or `budi update`."
-                                );
-                                return None;
-                            }
-                            analytics::sync_one_file(&mut conn, &path).ok()
-                        })
-                        .await;
-                    }
-                }
-            } else {
-                match hook_sync_rx.recv().await {
-                    Some(path) => {
-                        pending_path = Some(path);
-                    }
-                    None => break,
-                }
-            }
-        }
-    });
-
     let app = build_router(app_state);
 
-    // Auto-sync JSONL transcripts every 30 seconds to keep analytics fresh.
+    // Auto-sync transcripts every 30 seconds to keep analytics fresh.
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.tick().await; // skip immediate first tick
@@ -204,11 +143,8 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
-        let (hook_sync_tx, _hook_sync_rx) = tokio::sync::mpsc::channel(64);
         build_router(AppState {
-            daemon_state: DaemonState::new(),
             syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hook_sync_tx,
         })
     }
 
@@ -223,19 +159,6 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json, serde_json::json!({ "ok": true }));
-    }
-
-    #[tokio::test]
-    async fn stats_returns_json() {
-        let app = test_app();
-        let resp = app
-            .oneshot(Request::get("/stats").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.get("queries").is_some());
     }
 
     #[tokio::test]

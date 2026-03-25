@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use budi_core::config::{self, CLAUDE_LOCAL_SETTINGS};
+use budi_core::config;
 
-use crate::daemon::{daemon_health, ensure_daemon_running, fetch_daemon_stats};
+use crate::daemon::{daemon_health, ensure_daemon_running};
 
 pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     let repo_root = super::resolve_repo_root(repo_root)?;
@@ -25,13 +25,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         doctor_check("config", true, Some(&paths.config_file));
     } else {
         println!("  [ok] config: using defaults");
-    }
-
-    let hooks_path = repo_root.join(CLAUDE_LOCAL_SETTINGS);
-    let has_hooks = hooks_path.exists();
-    doctor_check("hook settings", has_hooks, Some(&hooks_path));
-    if !has_hooks {
-        issues.push("No hook settings. Run `budi init` to install hooks.".into());
     }
 
     let health = daemon_health(&config);
@@ -80,18 +73,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    // Activity summary
-    if daemon_health(&config)
-        && let Some(stats) = fetch_daemon_stats(&config)
-    {
-        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
-        if queries > 0 {
-            let skips = stats.get("skips").and_then(|v| v.as_u64()).unwrap_or(0);
-            println!();
-            println!("  activity: {} queries, {} skipped", queries, skips);
-        }
-    }
-
     println!();
     if issues.is_empty() {
         println!("All checks passed.");
@@ -99,18 +80,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         println!("Issues found:");
         for issue in &issues {
             println!("  - {issue}");
-        }
-    }
-
-    if issues.is_empty()
-        && let Some(stats) = daemon_health(&config)
-            .then(|| fetch_daemon_stats(&config))
-            .flatten()
-    {
-        let queries = stats.get("queries").and_then(|v| v.as_u64()).unwrap_or(0);
-        if queries == 0 {
-            println!();
-            println!("No queries yet. Start a Claude Code session to see budi in action.");
         }
     }
     Ok(())

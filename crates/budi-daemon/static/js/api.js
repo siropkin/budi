@@ -23,7 +23,7 @@ async function loadStatsData(signal) {
   const opts = signal ? { signal } : {};
 
   const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
-  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, topTools, mcpTools, branches, tickets] = await Promise.all([
+  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, branches, tickets] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
     fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
     fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
@@ -32,15 +32,13 @@ async function loadStatsData(signal) {
     fetch('/analytics/activity' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(r => r.json()),
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/context-usage' + q, opts).then(r => r.json()).catch(() => ({avg_usage_pct:0,max_usage_pct:0,sessions_over_80_pct:0,total_sessions_with_data:0})),
-    fetch('/analytics/tools' + q, opts).then(r => r.json()).catch(() => []),
-    fetch('/analytics/mcp-tools' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/branches' + q, opts).then(r => r.json()).catch(() => []),
     fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=ticket_id&limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()).catch(() => []),
   ]);
 
   const sessions = sessionsResult.sessions || [];
   sessionTotalCount = sessionsResult.total_count || 0;
-  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, topTools, mcpTools, branches, tickets };
+  statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, branches, tickets };
   lastSessionData = sessions;
   providersData = providers;
 

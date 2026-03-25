@@ -363,30 +363,4 @@ impl DaemonClient {
             .unwrap_or(0) as usize)
     }
 
-    pub fn top_tools(
-        &self,
-        since: Option<&str>,
-        until: Option<&str>,
-        provider: Option<&str>,
-    ) -> Result<Vec<(String, u64)>> {
-        let mut params = Vec::new();
-        if let Some(s) = since {
-            params.push(("since", s));
-        }
-        if let Some(u) = until {
-            params.push(("until", u));
-        }
-        if let Some(p) = provider {
-            params.push(("provider", p));
-        }
-        let resp = self
-            .client
-            .get(format!("{}/analytics/tools", self.base_url))
-            .query(&params)
-            .send()
-            .context("Failed to connect to budi daemon")?
-            .error_for_status()
-            .context("Top tools request failed")?;
-        Ok(resp.json()?)
-    }
 }

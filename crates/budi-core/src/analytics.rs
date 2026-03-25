@@ -193,13 +193,6 @@ pub fn ingest_messages(
 
         if inserted > 0 {
             count += 1;
-            // Insert tool usage rows.
-            for tool_name in &msg.tool_names {
-                tx.execute(
-                    "INSERT INTO tool_usage (message_uuid, tool_name) VALUES (?1, ?2)",
-                    params![msg.uuid, tool_name],
-                )?;
-            }
             // Insert tags.
             if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
                 for tag in msg_tags {
@@ -256,7 +249,6 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
                     output_tokens: row.get::<_, i64>(7)? as u64,
                     cache_creation_tokens: row.get::<_, i64>(8)? as u64,
                     cache_read_tokens: row.get::<_, i64>(9)? as u64,
-                    tool_names: vec![],
                     has_thinking: false,
                     stop_reason: None,
                     text_length: 0,
@@ -494,61 +486,6 @@ pub fn usage_summary(
 }
 
 /// Top tools by usage count, optionally filtered by date range.
-pub fn top_tools(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<Vec<(String, u64)>> {
-    top_tools_filtered(conn, since, until, None)
-}
-
-pub fn top_tools_filtered(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-    provider: Option<&str>,
-) -> Result<Vec<(String, u64)>> {
-    let (mut where_clause, mut date_params) = date_filter(since, until, "WHERE", 0);
-
-    if let Some(p) = provider {
-        if where_clause.is_empty() {
-            where_clause = format!("WHERE m.provider = ?{}", date_params.len() + 1);
-        } else {
-            where_clause = format!("{} AND m.provider = ?{}", where_clause, date_params.len() + 1);
-        }
-        date_params.push(p.to_string());
-    }
-
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let sql = if where_clause.is_empty() {
-        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage GROUP BY tool_name ORDER BY cnt DESC LIMIT 50".to_string()
-    } else {
-        format!(
-            "SELECT tu.tool_name, COUNT(*) as cnt FROM tool_usage tu
-             JOIN messages m ON tu.message_uuid = m.uuid
-             {}
-             GROUP BY tu.tool_name ORDER BY cnt DESC LIMIT 50",
-            where_clause
-        )
-    };
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| match r {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!("skipping row: {e}");
-                None
-            }
-        })
-        .collect();
-    Ok(rows)
-}
-
 /// A session row with aggregated stats.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
@@ -758,7 +695,6 @@ pub struct SessionDetail {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
-    pub top_tools: Vec<(String, u64)>,
     pub provider: String,
     pub session_title: Option<String>,
     pub lines_added: u64,
@@ -796,7 +732,6 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
                     output_tokens: 0,
                     cache_creation_tokens: 0,
                     cache_read_tokens: 0,
-                    top_tools: vec![],
                     cost_cents: 0.0,
                 })
             },
@@ -830,28 +765,6 @@ pub fn session_detail(conn: &Connection, session_id_prefix: &str) -> Result<Opti
             Ok(())
         },
     )?;
-
-    let mut stmt = conn.prepare(
-        "SELECT tu.tool_name, COUNT(*) as cnt
-         FROM tool_usage tu
-         JOIN messages m ON tu.message_uuid = m.uuid
-         WHERE m.session_id = ?1
-         GROUP BY tu.tool_name ORDER BY cnt DESC LIMIT 10",
-    )?;
-    detail.top_tools = stmt
-        .query_map(params![sid], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()
-        .map(|rows| {
-            rows.filter_map(|r| match r {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!("skipping row: {e}");
-                    None
-                }
-            })
-            .collect()
-        })
-        .unwrap_or_default();
 
     Ok(Some(detail))
 }
@@ -926,70 +839,6 @@ pub fn repo_usage(
         })
         .collect();
     Ok(rows)
-}
-
-/// MCP tool usage breakdown: tools with `mcp__` prefix, grouped by server.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct McpToolStat {
-    pub server: String,
-    pub tool: String,
-    pub call_count: u64,
-}
-
-pub fn mcp_tool_stats(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<Vec<McpToolStat>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
-
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let sql = if where_clause.is_empty() {
-        "SELECT tool_name, COUNT(*) as cnt FROM tool_usage WHERE tool_name LIKE 'mcp__%' GROUP BY tool_name ORDER BY cnt DESC".to_string()
-    } else {
-        format!(
-            "SELECT tu.tool_name, COUNT(*) as cnt FROM tool_usage tu
-             JOIN messages m ON tu.message_uuid = m.uuid
-             {} AND tu.tool_name LIKE 'mcp__%%'
-             GROUP BY tu.tool_name ORDER BY cnt DESC",
-            where_clause
-        )
-    };
-    let mut stmt = conn.prepare(&sql)?;
-
-    let rows: Vec<(String, u64)> = stmt
-        .query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| match r {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!("skipping row: {e}");
-                None
-            }
-        })
-        .collect();
-
-    let results = rows
-        .into_iter()
-        .map(|(tool_name, count)| {
-            // Parse server from tool name: mcp__server__tool → server
-            let server = tool_name
-                .strip_prefix("mcp__")
-                .and_then(|rest| rest.split("__").next())
-                .unwrap_or("unknown")
-                .to_string();
-            McpToolStat {
-                server,
-                tool: tool_name,
-                call_count: count,
-            }
-        })
-        .collect();
-
-    Ok(results)
 }
 
 /// Cache efficiency stats for a date range.
@@ -1905,7 +1754,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 20,
@@ -1934,7 +1782,6 @@ mod tests {
                 output_tokens: 50,
                 cache_creation_tokens: 200,
                 cache_read_tokens: 300,
-                tool_names: vec!["Read".to_string(), "Edit".to_string()],
                 has_thinking: true,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 150,
@@ -1968,9 +1815,6 @@ mod tests {
         assert_eq!(summary.total_assistant_messages, 1);
         assert_eq!(summary.total_input_tokens, 100);
         assert_eq!(summary.total_output_tokens, 50);
-        // top_tools is now a separate function
-        let tools = top_tools(&conn, None, None).unwrap();
-        assert_eq!(tools.len(), 2);
     }
 
     #[test]
@@ -1990,7 +1834,6 @@ mod tests {
             output_tokens: 100_000,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            tool_names: vec![],
             has_thinking: false,
             stop_reason: None,
             text_length: 0,
@@ -2051,7 +1894,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 5,
@@ -2080,7 +1922,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 5,
@@ -2124,7 +1965,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 20,
@@ -2153,7 +1993,6 @@ mod tests {
                 output_tokens: 50,
                 cache_creation_tokens: 200,
                 cache_read_tokens: 300,
-                tool_names: vec!["Read".to_string(), "Edit".to_string()],
                 has_thinking: true,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 150,
@@ -2182,7 +2021,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 10,
@@ -2240,7 +2078,6 @@ mod tests {
         assert_eq!(d.user_messages, 1);
         assert_eq!(d.assistant_messages, 1);
         assert_eq!(d.input_tokens, 100);
-        assert_eq!(d.top_tools.len(), 2);
         assert_eq!(d.version.as_deref(), Some("2.1.76"));
 
         // Prefix match.
@@ -2285,7 +2122,6 @@ mod tests {
                 output_tokens: 100,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 200,
-                tool_names: vec!["Grep".to_string(), "Glob".to_string(), "Read".to_string()],
                 has_thinking: false,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 50,
@@ -2314,11 +2150,6 @@ mod tests {
                 output_tokens: 200,
                 cache_creation_tokens: 100,
                 cache_read_tokens: 150,
-                tool_names: vec![
-                    "Edit".to_string(),
-                    "mcp__context7__query-docs".to_string(),
-                    "mcp__linear__get-issue".to_string(),
-                ],
                 has_thinking: false,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 80,
@@ -2348,7 +2179,6 @@ mod tests {
                 output_tokens: 500,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec!["Read".to_string()],
                 has_thinking: false,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 20,
@@ -2367,19 +2197,6 @@ mod tests {
                 machine_name: None,
             },
         ]
-    }
-
-    #[test]
-    fn mcp_tool_stats_groups_by_server() {
-        let mut conn = test_db();
-        ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
-
-        let mcp = mcp_tool_stats(&conn, None, None).unwrap();
-        assert_eq!(mcp.len(), 2);
-        // Both have count 1.
-        let servers: Vec<&str> = mcp.iter().map(|m| m.server.as_str()).collect();
-        assert!(servers.contains(&"context7"));
-        assert!(servers.contains(&"linear"));
     }
 
     #[test]
@@ -2464,7 +2281,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 10,
@@ -2493,7 +2309,6 @@ mod tests {
                 output_tokens: 500,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec!["Read".to_string()],
                 has_thinking: false,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 50,
@@ -2526,7 +2341,6 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec![],
                 has_thinking: false,
                 stop_reason: None,
                 text_length: 15,
@@ -2555,7 +2369,6 @@ mod tests {
                 output_tokens: 800,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                tool_names: vec!["edit_file".to_string()],
                 has_thinking: false,
                 stop_reason: Some("end_turn".to_string()),
                 text_length: 80,

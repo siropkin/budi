@@ -180,22 +180,7 @@ fn cmd_stats_summary_filtered(
         );
     }
 
-    let tools = client
-        .top_tools(since.as_deref(), until.as_deref(), provider)
-        .unwrap_or_default();
-    if !tools.is_empty() {
-        println!();
-        println!("  \x1b[1mTop tools\x1b[0m");
-        let max_count = tools.first().map(|(_, c)| *c).unwrap_or(1);
-        for (name, count) in tools.iter().take(10) {
-            let bar_len = ((*count as f64 / max_count as f64) * 20.0) as usize;
-            let bar: String = "█".repeat(bar_len);
-            println!(
-                "    \x1b[36m{:<16}\x1b[0m {:>5}  \x1b[36m{}\x1b[0m",
-                name, count, bar
-            );
-        }
-    }
+
 
     println!();
     Ok(())
@@ -335,14 +320,6 @@ fn cmd_stats_session(client: &DaemonClient, session_id: &str) -> Result<()> {
         "  \x1b[1mOutput\x1b[0m    {}",
         format_tokens(d.output_tokens)
     );
-
-    if !d.top_tools.is_empty() {
-        println!();
-        println!("  \x1b[1mTools used\x1b[0m");
-        for (name, count) in &d.top_tools {
-            println!("    \x1b[36m{:<16}\x1b[0m {}", name, count);
-        }
-    }
 
     println!();
     Ok(())

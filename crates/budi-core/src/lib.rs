@@ -1,12 +1,9 @@
 pub mod analytics;
 pub mod config;
 pub mod cost;
-pub mod daemon;
-pub mod hooks;
 pub mod jsonl;
 pub mod migration;
 pub mod pipeline;
 pub mod provider;
 pub mod providers;
 pub mod repo_id;
-pub mod rpc;

@@ -13,7 +13,6 @@ pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub const BUDI_LOG_DIR_NAME: &str = "logs";
 
-pub const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;

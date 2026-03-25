@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::hooks;
 use crate::jsonl::{self, ParsedMessage};
-use crate::provider::{DiscoveredFile, HookHandler, ModelPricing, Provider};
+use crate::provider::{DiscoveredFile, ModelPricing, Provider};
 
 /// The Claude Code provider.
 pub struct ClaudeCodeProvider;
@@ -46,30 +45,6 @@ impl Provider for ClaudeCodeProvider {
         claude_pricing_for_model(model)
     }
 
-    fn hook_support(&self) -> Option<Box<dyn HookHandler>> {
-        Some(Box::new(ClaudeHookHandler))
-    }
-
-    fn system_message_patterns(&self) -> Vec<&str> {
-        vec![
-            "<task-notification>",
-            "<system-reminder>",
-            "<function_calls>",
-            "<function_results>",
-        ]
-    }
-}
-
-/// Claude Code hook handler.
-struct ClaudeHookHandler;
-
-impl HookHandler for ClaudeHookHandler {
-    fn handle_prompt_submit(
-        &self,
-        _input: &hooks::UserPromptSubmitInput,
-    ) -> hooks::UserPromptSubmitOutput {
-        hooks::UserPromptSubmitOutput::allow_with_context(String::new())
-    }
 }
 
 // ---------------------------------------------------------------------------
