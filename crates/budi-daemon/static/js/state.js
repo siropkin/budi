@@ -10,7 +10,6 @@ const DEFAULT_CHART_ROWS = 15;
 let lastSessionData = [];
 let sessionSortCol = 'timestamp';
 let sessionSortAsc = false;
-let sessionShowCount = DEFAULT_TABLE_ROWS;
 let sessionTotalCount = 0;
 
 // Search state

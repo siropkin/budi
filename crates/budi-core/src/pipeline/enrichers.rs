@@ -56,12 +56,8 @@ impl Enricher for GitEnricher {
             });
         }
 
-        // Extract ticket_id and branch tag from git_branch
+        // Extract ticket_id from git_branch (branch itself is stored as a column, not a tag)
         if let Some(ref branch) = msg.git_branch {
-            tags.push(Tag {
-                key: "branch".to_string(),
-                value: branch.clone(),
-            });
             if let Some(ticket) = extract_ticket_id(branch) {
                 tags.push(Tag {
                     key: "ticket_id".to_string(),
@@ -267,12 +263,6 @@ impl HookEnricher {
         Self { session_cache }
     }
 
-    /// Create an empty HookEnricher (no hook data available yet).
-    pub fn empty() -> Self {
-        Self {
-            session_cache: HashMap::new(),
-        }
-    }
 }
 
 impl Enricher for HookEnricher {
@@ -445,9 +435,9 @@ mod tests {
             tags.iter()
                 .any(|t| t.key == "ticket_prefix" && t.value == "PAVA")
         );
+        // branch should NOT be emitted as a tag (stored as column only)
         assert!(
-            tags.iter()
-                .any(|t| t.key == "branch" && t.value == "PAVA-2057-fix-auth")
+            !tags.iter().any(|t| t.key == "branch")
         );
     }
 }

@@ -161,34 +161,4 @@ function renderActivityChart(chartData) {
     </div>`;
 }
 
-/* ===== Generic Sort ===== */
-function genericSort(items, col, asc, getters) {
-  return [...items].sort((a, b) => {
-    const g = getters[col];
-    if (!g) return 0;
-    const va = g(a), vb = g(b);
-    if (typeof va === 'string') {
-      const cmp = va.localeCompare(vb, undefined, { sensitivity: 'base' });
-      return asc ? cmp : -cmp;
-    }
-    return asc ? va - vb : vb - va;
-  });
-}
-
-/* ===== Render: Sortable Table ===== */
-function renderSortableTable(id, cols, data, limit, sortCol, sortAsc, rowFn) {
-  if (!data.length) return `<div class="empty">No data for this period</div>`;
-  const arrow = col => col === sortCol ? `<span class="sort-arrow">${sortAsc ? '\u25b2' : '\u25bc'}</span>` : '';
-  const showing = data.slice(0, limit);
-  const hasMore = data.length > limit;
-  return `
-  <table class="sortable-table" id="${id}">
-    <thead><tr>${cols.map(c =>
-      `<th data-col="${c.key}"${c.right ? ' class="right"' : ''}>${c.label}${arrow(c.key)}</th>`
-    ).join('')}</tr></thead>
-    <tbody>${showing.map(rowFn).join('')}</tbody>
-  </table>
-  ${hasMore ? `<button class="show-more-btn" data-table="${id}">Show more (${data.length - limit} remaining)</button>` : ''}`;
-}
-
 

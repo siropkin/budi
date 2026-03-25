@@ -7,7 +7,8 @@ use crate::client::DaemonClient;
 
 pub fn init_auto_sync() -> Result<(usize, usize)> {
     let client = DaemonClient::connect()?;
-    let result = client.sync(true)?;
+    // Full history sync on first install so dashboard has all data
+    let result = client.history()?;
     let files = result
         .get("files_synced")
         .and_then(|v| v.as_u64())
@@ -58,8 +59,10 @@ fn print_sync_result(result: &serde_json::Value) {
     if files_synced == 0 && messages_ingested == 0 {
         println!("Already up to date.");
     } else {
+        let bold = super::ansi("\x1b[1m");
+        let reset = super::ansi("\x1b[0m");
         println!(
-            "Synced \x1b[1m{}\x1b[0m new messages from \x1b[1m{}\x1b[0m files.",
+            "Synced {bold}{}{reset} new messages from {bold}{}{reset} files.",
             messages_ingested, files_synced
         );
     }

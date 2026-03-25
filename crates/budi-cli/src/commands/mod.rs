@@ -11,6 +11,16 @@ pub mod statusline;
 pub mod sync;
 pub mod update;
 
+/// Returns true if color output should be used (NO_COLOR env var is not set).
+pub fn use_color() -> bool {
+    std::env::var("NO_COLOR").is_err()
+}
+
+/// Returns the ANSI escape code if color is enabled, otherwise empty string.
+pub fn ansi(code: &str) -> &str {
+    if use_color() { code } else { "" }
+}
+
 /// Try to resolve a repo root, but return None if not in a git repository.
 pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(path) = candidate {

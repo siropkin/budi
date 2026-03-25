@@ -281,37 +281,22 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
             )?;
         }
         _ => {
-            // Always update model to latest seen (user may switch models mid-session)
-            if let Some(ref model) = event.model {
-                conn.execute(
-                    "UPDATE sessions SET model = ?2
-                     WHERE conversation_id = ?1",
-                    params![conv_id, model],
-                )?;
-            }
-            // Update user_email if provided and not yet set
-            if let Some(ref email) = event.user_email {
-                conn.execute(
-                    "UPDATE sessions SET user_email = ?2
-                     WHERE conversation_id = ?1 AND user_email IS NULL",
-                    params![conv_id, email],
-                )?;
-            }
-            // Update repo_id/git_branch if not yet set
-            if let Some(ref rid) = event.repo_id {
-                conn.execute(
-                    "UPDATE sessions SET repo_id = ?2
-                     WHERE conversation_id = ?1 AND repo_id IS NULL",
-                    params![conv_id, rid],
-                )?;
-            }
-            if let Some(ref branch) = event.git_branch {
-                conn.execute(
-                    "UPDATE sessions SET git_branch = ?2
-                     WHERE conversation_id = ?1 AND git_branch IS NULL",
-                    params![conv_id, branch],
-                )?;
-            }
+            // Single UPDATE: always update model to latest, fill NULLs for email/repo/branch
+            conn.execute(
+                "UPDATE sessions SET
+                    model = COALESCE(?2, model),
+                    user_email = COALESCE(user_email, ?3),
+                    repo_id = COALESCE(repo_id, ?4),
+                    git_branch = COALESCE(git_branch, ?5)
+                 WHERE conversation_id = ?1",
+                params![
+                    conv_id,
+                    event.model,
+                    event.user_email,
+                    event.repo_id,
+                    event.git_branch,
+                ],
+            )?;
         }
     }
 

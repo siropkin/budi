@@ -5,13 +5,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
 
-fn use_color() -> bool {
-    std::env::var("NO_COLOR").is_err()
-}
-
-fn ansi(code: &str) -> &str {
-    if use_color() { code } else { "" }
-}
+use super::ansi;
 
 pub fn period_label(period: StatsPeriod) -> &'static str {
     match period {

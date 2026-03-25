@@ -26,7 +26,8 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
          PRAGMA foreign_keys=ON;
          PRAGMA cache_size=-40000;
          PRAGMA mmap_size=268435456;
-         PRAGMA synchronous=NORMAL;",
+         PRAGMA synchronous=NORMAL;
+         PRAGMA busy_timeout=5000;",
     )?;
     Ok(conn)
 }
@@ -43,12 +44,6 @@ pub fn open_db_with_migration(db_path: &Path) -> Result<Connection> {
         tracing::info!("Backfilled {} tags.", count);
     }
     Ok(conn)
-}
-
-/// Run schema migration. Exposed for cross-module test helpers.
-#[doc(hidden)]
-pub fn migrate_for_test(conn: &Connection) {
-    let _ = crate::migration::migrate(conn).expect("migration failed");
 }
 
 /// Returns the stored byte offset for a given JSONL file path, or 0 if unseen.
@@ -170,7 +165,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
             "SELECT m.uuid, m.session_id, m.timestamp, m.cwd, m.role, m.model,
                     m.input_tokens, m.output_tokens, m.cache_creation_tokens, m.cache_read_tokens,
                     m.provider, m.cost_cents, m.repo_id, m.parent_uuid,
-                    COALESCE(m.cost_confidence, 'exact')
+                    COALESCE(m.cost_confidence, 'exact'), m.git_branch
              FROM messages m",
         )?;
         stmt.query_map([], |row| {
@@ -189,11 +184,10 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
                 output_tokens: row.get::<_, i64>(7)? as u64,
                 cache_creation_tokens: row.get::<_, i64>(8)? as u64,
                 cache_read_tokens: row.get::<_, i64>(9)? as u64,
-                git_branch: None,
+                git_branch: row.get(15)?,
                 repo_id: row.get(12)?,
                 provider: row
-                    .get::<_, Option<String>>(10)?
-                    .unwrap_or_else(|| "claude_code".to_string()),
+                    .get::<_, String>(10)?,
                 cost_cents: row.get(11)?,
                 context_tokens_used: None,
                 context_token_limit: None,
@@ -209,9 +203,10 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
     }; // stmt dropped here
 
     // Populate fields from existing tags so enrichers can reproduce session-level tags
+    // (git_branch is read from the messages column above, not from tags)
     {
         let mut tag_stmt = conn.prepare(
-            "SELECT message_uuid, key, value FROM tags WHERE key IN ('branch', 'session_title', 'user', 'machine')",
+            "SELECT message_uuid, key, value FROM tags WHERE key IN ('session_title', 'user', 'machine')",
         )?;
         let tag_rows: Vec<(String, String, String)> = tag_stmt
             .query_map([], |row| {
@@ -229,7 +224,6 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
             if let Some(tags) = tag_map.get(&msg.uuid) {
                 for (key, value) in tags {
                     match key.as_str() {
-                        "branch" => msg.git_branch = Some(value.clone()),
                         "session_title" => msg.session_title = Some(value.clone()),
                         "user" => msg.user_name = Some(value.clone()),
                         "machine" => msg.machine_name = Some(value.clone()),
@@ -299,10 +293,17 @@ fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result
     for provider in &providers {
         // Try direct sync first (e.g. Cursor Usage API).
         if let Some(result) = provider.sync_direct(conn, &mut pipeline) {
-            let (files, messages) = result?;
-            total_files += files;
-            total_messages += messages;
-            continue;
+            match result {
+                Ok((files, messages)) => {
+                    total_files += files;
+                    total_messages += messages;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("Provider sync_direct failed: {e:#}");
+                    continue;
+                }
+            }
         }
 
         let files = provider.discover_files()?;
@@ -349,36 +350,6 @@ fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result
     }
 
     Ok((total_files, total_messages))
-}
-
-/// Sync a single JSONL transcript file (used for hook-triggered incremental sync).
-/// Returns the number of messages ingested.
-pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
-    use crate::provider::Provider;
-    let provider = crate::providers::claude_code::ClaudeCodeProvider;
-    let tags_config = crate::config::load_tags_config();
-    let session_cache = crate::hooks::load_session_meta(conn).unwrap_or_default();
-    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
-    let path_str = file_path.display().to_string();
-    let offset = get_sync_offset(conn, &path_str)?;
-
-    let content = std::fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read {}", file_path.display()))?;
-
-    if offset >= content.len() {
-        return Ok(0);
-    }
-
-    let (mut messages, new_offset) = provider.parse_file(file_path, &content, offset)?;
-    if messages.is_empty() {
-        set_sync_offset(conn, &path_str, new_offset)?;
-        return Ok(0);
-    }
-
-    let tags = pipeline.process(&mut messages);
-    let count = ingest_messages(conn, &messages, Some(&tags))?;
-    set_sync_offset(conn, &path_str, new_offset)?;
-    Ok(count)
 }
 
 /// Summary statistics for display.
@@ -704,52 +675,6 @@ pub fn repo_usage(
     Ok(rows)
 }
 
-/// Cache efficiency stats for a date range.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CacheStats {
-    pub total_input_tokens: u64,
-    pub total_cache_read_tokens: u64,
-    pub total_cache_creation_tokens: u64,
-    pub hit_rate: f64,
-}
-
-pub fn cache_stats(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<CacheStats> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let (total_input, cache_read, cache_creation): (u64, u64, u64) = conn.query_row(
-        &format!(
-            "SELECT COALESCE(SUM(input_tokens + cache_read_tokens), 0),
-                    COALESCE(SUM(cache_read_tokens), 0),
-                    COALESCE(SUM(cache_creation_tokens), 0)
-             FROM messages {}",
-            where_clause
-        ),
-        param_refs.as_slice(),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-
-    let hit_rate = if total_input > 0 {
-        cache_read as f64 / total_input as f64
-    } else {
-        0.0
-    };
-
-    Ok(CacheStats {
-        total_input_tokens: total_input,
-        total_cache_read_tokens: cache_read,
-        total_cache_creation_tokens: cache_creation,
-        hit_rate,
-    })
-}
-
 /// Activity data bucketed by time granularity.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActivityBucket {
@@ -990,7 +915,8 @@ pub fn branch_cost(
     Ok(rows)
 }
 
-/// Query cost for a single branch via branch_cost.
+/// Query cost for a single branch using a dedicated SQL query.
+/// Unlike `branch_cost()` (which has LIMIT 20), this searches all branches.
 pub fn branch_cost_single(
     conn: &Connection,
     branch: &str,
@@ -998,13 +924,66 @@ pub fn branch_cost_single(
     until: Option<&str>,
 ) -> Result<Option<BranchCost>> {
     let branch_stripped = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-    let all = branch_cost(conn, since, until)?;
-    Ok(all
-        .into_iter()
-        .find(|b| {
-            let v = b.git_branch.strip_prefix("refs/heads/").unwrap_or(&b.git_branch);
-            v.eq_ignore_ascii_case(branch_stripped)
-        }))
+
+    let mut conditions = vec![
+        "role = 'assistant'".to_string(),
+        "(git_branch = ?1 OR REPLACE(git_branch, 'refs/heads/', '') = ?1)".to_string(),
+    ];
+    let mut param_values: Vec<String> = vec![branch_stripped.to_string()];
+    let mut idx = 1usize;
+
+    if let Some(s) = since {
+        idx += 1;
+        conditions.push(format!("timestamp >= ?{idx}"));
+        param_values.push(s.to_string());
+    }
+    if let Some(u) = until {
+        idx += 1;
+        conditions.push(format!("timestamp < ?{idx}"));
+        param_values.push(u.to_string());
+    }
+
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let sql = format!(
+        "SELECT git_branch, COALESCE(repo_id, '') as repo,
+                COUNT(DISTINCT session_id) as sess,
+                COUNT(*) as cnt,
+                COALESCE(SUM(input_tokens), 0) as inp,
+                COALESCE(SUM(output_tokens), 0) as outp,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_r,
+                COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
+                COALESCE(SUM(cost_cents), 0.0) as cost
+         FROM messages
+         {where_clause}
+         GROUP BY git_branch, COALESCE(repo_id, '')
+         ORDER BY cost DESC
+         LIMIT 1",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(BranchCost {
+            git_branch: row.get(0)?,
+            repo_id: row.get(1)?,
+            session_count: row.get(2)?,
+            message_count: row.get(3)?,
+            input_tokens: row.get(4)?,
+            output_tokens: row.get(5)?,
+            cache_read_tokens: row.get(6)?,
+            cache_creation_tokens: row.get(7)?,
+            cost_cents: row.get(8)?,
+        })
+    })?;
+
+    match rows.next() {
+        Some(Ok(bc)) => Ok(Some(bc)),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
+    }
 }
 
 /// Tag-based cost breakdown: cost grouped by tag key+value.
@@ -1175,7 +1154,7 @@ pub fn model_usage(
 
     let sql = format!(
         "SELECT model as m,
-                COALESCE(provider, 'claude_code') as p,
+                provider as p,
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as total_input,
                 COALESCE(SUM(output_tokens), 0) as total_output,
@@ -1337,7 +1316,7 @@ pub fn statusline_stats(
     // Active provider: most recent provider used today
     let active_provider: Option<String> = conn
         .query_row(
-            "SELECT COALESCE(provider, 'claude_code') FROM messages \
+            "SELECT provider FROM messages \
              WHERE timestamp >= ?1 ORDER BY timestamp DESC LIMIT 1",
             [today],
             |r| r.get(0),
@@ -1358,7 +1337,7 @@ pub fn statusline_stats(
 /// Quick check: how many distinct providers have data in the database?
 pub fn provider_count(conn: &Connection) -> Result<usize> {
     let count: u64 = conn.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(provider, 'claude_code')) FROM messages",
+        "SELECT COUNT(DISTINCT provider) FROM messages",
         [],
         |r| r.get(0),
     )?;
@@ -1392,7 +1371,7 @@ pub fn provider_stats(
         .collect();
 
     let sql = format!(
-        "SELECT COALESCE(provider, 'claude_code') as p,
+        "SELECT provider as p,
                 COUNT(*) as msgs,
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
@@ -1458,56 +1437,6 @@ pub fn provider_stats(
 }
 
 
-/// Context window utilization stats.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ContextUsageStats {
-    pub avg_usage_pct: f64,
-    pub max_usage_pct: f64,
-    pub sessions_over_80_pct: u64,
-    pub total_sessions_with_data: u64,
-}
-
-pub fn context_usage_stats(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<ContextUsageStats> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
-    let extra = if where_clause.is_empty() {
-        "WHERE context_tokens_used IS NOT NULL AND context_token_limit IS NOT NULL AND context_token_limit > 0".to_string()
-    } else {
-        format!(
-            "{} AND context_tokens_used IS NOT NULL AND context_token_limit IS NOT NULL AND context_token_limit > 0",
-            where_clause
-        )
-    };
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let sql = format!(
-        "SELECT
-            AVG(CAST(context_tokens_used AS REAL) * 100.0 / CAST(context_token_limit AS REAL)),
-            MAX(CAST(context_tokens_used AS REAL) * 100.0 / CAST(context_token_limit AS REAL)),
-            SUM(CASE WHEN CAST(context_tokens_used AS REAL) * 100.0 / CAST(context_token_limit AS REAL) > 80.0 THEN 1 ELSE 0 END),
-            COUNT(*)
-         FROM messages {}",
-        extra
-    );
-
-    let result = conn.query_row(&sql, param_refs.as_slice(), |r| {
-        Ok(ContextUsageStats {
-            avg_usage_pct: r.get::<_, f64>(0).unwrap_or(0.0),
-            max_usage_pct: r.get::<_, f64>(1).unwrap_or(0.0),
-            sessions_over_80_pct: r.get::<_, u64>(2).unwrap_or(0),
-            total_sessions_with_data: r.get::<_, u64>(3).unwrap_or(0),
-        })
-    })?;
-
-    Ok(result)
-}
-
 /// Build a parameterized filter clause that includes optional date range and provider.
 fn date_provider_filter(
     since: Option<&str>,
@@ -1532,7 +1461,7 @@ fn date_provider_filter(
     if let Some(p) = provider {
         param_values.push(p.to_string());
         conditions.push(format!(
-            "COALESCE(provider, 'claude_code') = ?{}",
+            "provider = ?{}",
             param_start + param_values.len()
         ));
     }
@@ -1606,6 +1535,53 @@ pub fn usage_summary_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cache efficiency stats for a date range.
+    #[derive(Debug, Clone)]
+    struct CacheStats {
+        total_input_tokens: u64,
+        total_cache_read_tokens: u64,
+        #[allow(dead_code)]
+        total_cache_creation_tokens: u64,
+        hit_rate: f64,
+    }
+
+    fn cache_stats(
+        conn: &Connection,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<CacheStats> {
+        let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let (total_input, cache_read, cache_creation): (u64, u64, u64) = conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(input_tokens + cache_read_tokens), 0),
+                        COALESCE(SUM(cache_read_tokens), 0),
+                        COALESCE(SUM(cache_creation_tokens), 0)
+                 FROM messages {}",
+                where_clause
+            ),
+            param_refs.as_slice(),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+
+        let hit_rate = if total_input > 0 {
+            cache_read as f64 / total_input as f64
+        } else {
+            0.0
+        };
+
+        Ok(CacheStats {
+            total_input_tokens: total_input,
+            total_cache_read_tokens: cache_read,
+            total_cache_creation_tokens: cache_creation,
+            hit_rate,
+        })
+    }
 
     fn test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

@@ -1,17 +1,13 @@
 use std::process::Command;
 
 use anyhow::Result;
-use budi_core::config;
 
 pub fn cmd_open() -> Result<()> {
     // Ensure daemon is running before opening browser
     let _ = crate::client::DaemonClient::connect();
 
-    let url = format!(
-        "http://{}:{}/dashboard",
-        config::DEFAULT_DAEMON_HOST,
-        config::DEFAULT_DAEMON_PORT,
-    );
+    let config = crate::client::DaemonClient::load_config();
+    let url = format!("{}/dashboard", config.daemon_base_url());
     println!("{}", url);
 
     // Cross-platform browser launch

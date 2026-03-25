@@ -14,6 +14,11 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     };
     let mut issues: Vec<String> = Vec::new();
 
+    let green = super::ansi("\x1b[32m");
+    let red = super::ansi("\x1b[31m");
+    let dim = super::ansi("\x1b[90m");
+    let reset = super::ansi("\x1b[0m");
+
     if let Some(ref root) = repo_root {
         println!("budi doctor — {}", root.display());
     } else {
@@ -33,11 +38,11 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         if has_config {
             doctor_check("config", true, Some(&paths.config_file));
         } else {
-            println!("  \x1b[32m\u{2713}\x1b[0m config: using defaults");
+            println!("  {green}\u{2713}{reset} config: using defaults");
         }
     } else {
-        println!("  \x1b[90m-\x1b[0m git repo: not in a git repository (global mode)");
-        println!("  \x1b[32m\u{2713}\x1b[0m config: using defaults");
+        println!("  {dim}-{reset} git repo: not in a git repository (global mode)");
+        println!("  {green}\u{2713}{reset} config: using defaults");
     }
 
     let health = daemon_health(&config);
@@ -68,12 +73,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 let current = sv.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
                 let target = sv.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
                 if !exists {
-                    println!("  \x1b[31m\u{2717}\x1b[0m database: not created yet");
+                    println!("  {red}\u{2717}{reset} database: not created yet");
                     issues.push("No database. Run `budi sync` to create it.".into());
                 } else if current >= target {
-                    println!("  \x1b[32m\u{2713}\x1b[0m database schema: v{}", current);
+                    println!("  {green}\u{2713}{reset} database schema: v{}", current);
                 } else {
-                    println!("  \x1b[31m\u{2717}\x1b[0m database schema: v{} (needs v{})", current, target);
+                    println!("  {red}\u{2717}{reset} database schema: v{} (needs v{})", current, target);
                     issues.push(format!(
                         "Database needs migration (v{} → v{}). Run `budi sync` or `budi update`.",
                         current, target
@@ -99,9 +104,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         .into_iter()
         .flatten()
         .collect();
-        println!("  \x1b[32m\u{2713}\x1b[0m hooks: {}", sources.join(", "));
+        println!("  {green}\u{2713}{reset} hooks: {}", sources.join(", "));
     } else {
-        println!("  \x1b[31m\u{2717}\x1b[0m hooks: no hooks found or misconfigured");
+        println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
         println!("    Run `budi init` to install hooks");
         issues.push("No hooks installed. Run `budi init` to set up hooks.".into());
     }
@@ -119,9 +124,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         .into_iter()
         .flatten()
         .collect();
-        println!("  \x1b[32m\u{2713}\x1b[0m transcripts: {}", sources.join(", "));
+        println!("  {green}\u{2713}{reset} transcripts: {}", sources.join(", "));
     } else {
-        println!("  \x1b[31m\u{2717}\x1b[0m transcripts: no transcript directories found");
+        println!("  {red}\u{2717}{reset} transcripts: no transcript directories found");
         issues.push("No transcript directories found. Use Claude Code or Cursor to generate data.".into());
     }
 
@@ -133,6 +138,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         for issue in &issues {
             println!("  - {issue}");
         }
+        anyhow::bail!("{} issue(s) found", issues.len());
     }
     Ok(())
 }
@@ -197,8 +203,8 @@ fn validate_cursor_hooks(path: &str) -> bool {
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
     let (mark, color) = if ok { ("\u{2713}", "\x1b[32m") } else { ("\u{2717}", "\x1b[31m") };
-    let reset = if std::env::var("NO_COLOR").is_err() { "\x1b[0m" } else { "" };
-    let c = if std::env::var("NO_COLOR").is_err() { color } else { "" };
+    let c = super::ansi(color);
+    let reset = super::ansi("\x1b[0m");
     if let Some(p) = path {
         println!("  {c}{mark}{reset} {label}: {}", p.display());
     } else {

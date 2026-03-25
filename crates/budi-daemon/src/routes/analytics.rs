@@ -251,20 +251,6 @@ pub async fn analytics_statusline(
     Ok(Json(result))
 }
 
-pub async fn analytics_context_usage(
-    Query(params): Query<DateRangeParams>,
-) -> Result<Json<analytics::ContextUsageStats>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::context_usage_stats(&conn, params.since.as_deref(), params.until.as_deref())
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
 
 #[derive(serde::Deserialize)]
 pub struct TagParams {

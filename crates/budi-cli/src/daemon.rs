@@ -12,11 +12,11 @@ use reqwest::blocking::Client;
 
 use crate::HEALTH_TIMEOUT_SECS;
 
-pub fn daemon_client_with_timeout(timeout: Duration) -> Client {
+pub fn daemon_client_with_timeout(timeout: Duration) -> Result<Client> {
     Client::builder()
         .timeout(timeout)
         .build()
-        .expect("Failed to construct HTTP client")
+        .context("Failed to construct HTTP client")
 }
 
 pub fn daemon_health(config: &BudiConfig) -> bool {
@@ -24,7 +24,9 @@ pub fn daemon_health(config: &BudiConfig) -> bool {
 }
 
 pub fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> bool {
-    let client = daemon_client_with_timeout(timeout);
+    let Ok(client) = daemon_client_with_timeout(timeout) else {
+        return false;
+    };
     let url = format!("{}/health", config.daemon_base_url());
     client
         .get(url)

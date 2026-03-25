@@ -55,7 +55,7 @@ pub fn estimate_cost_filtered(
     if let Some(p) = provider {
         param_values.push(p.to_string());
         conditions.push(format!(
-            "COALESCE(provider, 'claude_code') = ?{}",
+            "provider = ?{}",
             param_values.len()
         ));
     }
@@ -69,16 +69,25 @@ pub fn estimate_cost_filtered(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    // Group by provider + model to apply correct per-provider pricing
+    // Use pre-computed SUM(cost_cents) for total_cost to match bar charts,
+    // and token-based calculation for the input/output/cache breakdown.
+    let sum_sql = format!(
+        "SELECT COALESCE(SUM(cost_cents), 0) FROM messages {}",
+        where_clause
+    );
+    let sum_cost_cents: f64 =
+        conn.query_row(&sum_sql, param_refs.as_slice(), |r| r.get(0))?;
+
+    // Group by provider + model to apply correct per-provider pricing for breakdown
     let sql = format!(
-        "SELECT COALESCE(provider, 'claude_code'),
+        "SELECT provider,
                 COALESCE(model, 'unknown'),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0)
          FROM messages {}
-         GROUP BY COALESCE(provider, 'claude_code'), COALESCE(model, 'unknown')",
+         GROUP BY provider, COALESCE(model, 'unknown')",
         where_clause
     );
 
@@ -120,8 +129,8 @@ pub fn estimate_cost_filtered(
         total.cache_savings += savings;
     }
 
-    total.total_cost =
-        total.input_cost + total.output_cost + total.cache_write_cost + total.cache_read_cost;
+    // Use pre-computed cost_cents for total (consistent with bar charts)
+    total.total_cost = sum_cost_cents / 100.0;
 
     // Round to cents
     total.total_cost = (total.total_cost * 100.0).round() / 100.0;
@@ -152,6 +161,7 @@ mod tests {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_cents REAL NOT NULL DEFAULT 0,
                 cwd TEXT,
                 provider TEXT DEFAULT 'claude_code'
             );",
@@ -170,13 +180,13 @@ mod tests {
     #[test]
     fn cost_single_opus_message() {
         let conn = setup_db();
+        // 1M input * $5/M = $5.00, 100K output * $25/M = $2.50, total = $7.50 = 750 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, ?4, ?5)",
-            params!["msg1", 1_000_000i64, 100_000i64, 0i64, 0i64],
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, ?4, ?5, ?6)",
+            params!["msg1", 1_000_000i64, 100_000i64, 0i64, 0i64, 750.0],
         ).unwrap();
         let cost = estimate_cost(&conn, None, None).unwrap();
-        // 1M input * $5/M = $5.00, 100K output * $25/M = $2.50
         assert_eq!(cost.input_cost, 5.0);
         assert_eq!(cost.output_cost, 2.5);
         assert_eq!(cost.total_cost, 7.5);
@@ -185,17 +195,17 @@ mod tests {
     #[test]
     fn cost_with_cache_savings() {
         let conn = setup_db();
+        // total = 0.30 + 0.75 + 0.75 + 0.15 = $1.95 = 195 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6-20260321', ?2, ?3, ?4, ?5)",
-            params!["msg1", 100_000i64, 50_000i64, 200_000i64, 500_000i64],
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6-20260321', ?2, ?3, ?4, ?5, ?6)",
+            params!["msg1", 100_000i64, 50_000i64, 200_000i64, 500_000i64, 195.0],
         ).unwrap();
         let cost = estimate_cost(&conn, None, None).unwrap();
         // input: 100K * $3/M = $0.30
         // output: 50K * $15/M = $0.75
         // cache_write: 200K * $3.75/M = $0.75
         // cache_read: 500K * $0.30/M = $0.15
-        // total = 0.30 + 0.75 + 0.75 + 0.15 = $1.95
         assert_eq!(cost.total_cost, 1.95);
         // savings: 500K * ($3.00 - $0.30) / 1M = $1.35
         assert_eq!(cost.cache_savings, 1.35);
@@ -204,15 +214,16 @@ mod tests {
     #[test]
     fn cost_with_date_filter() {
         let conn = setup_db();
+        // 1M input * $3/M = $3.00 = 300 cents each
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens)
-             VALUES ('old', 'assistant', '2026-03-01T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0)",
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+             VALUES ('old', 'assistant', '2026-03-01T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens)
-             VALUES ('new', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0)",
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+             VALUES ('new', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0)",
             [],
         )
         .unwrap();

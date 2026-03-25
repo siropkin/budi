@@ -55,7 +55,6 @@ function bindSearchHandlers() {
         const result = await fetchMessages(DEFAULT_TABLE_ROWS, 0);
         lastSessionData = result.messages || [];
         sessionTotalCount = result.total_count || 0;
-        sessionShowCount = lastSessionData.length;
         $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
         bindTableHandlers();
       }, 300);
@@ -91,7 +90,6 @@ function bindTableHandlers() {
         const result = await fetchMessages(DEFAULT_TABLE_ROWS, lastSessionData.length);
         lastSessionData = lastSessionData.concat(result.messages || []);
         sessionTotalCount = result.total_count || sessionTotalCount;
-        sessionShowCount = lastSessionData.length;
         $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
       }
       bindTableHandlers();

@@ -121,11 +121,8 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         .as_ref()
         .is_some_and(|root| root.join(".claude/settings.local.json").exists());
 
-    let base = format!(
-        "http://{}:{}",
-        config::DEFAULT_DAEMON_HOST,
-        config::DEFAULT_DAEMON_PORT,
-    );
+    let cfg = crate::client::DaemonClient::load_config();
+    let base = cfg.daemon_base_url();
 
     // For starship/json/custom: output nothing on error (Starship hides empty modules)
     if !repo_initialized {
@@ -168,7 +165,9 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         StatuslineFormat::Starship | StatuslineFormat::Custom => Duration::from_millis(300),
         _ => Duration::from_secs(3),
     };
-    let client = daemon_client_with_timeout(timeout);
+    let Ok(client) = daemon_client_with_timeout(timeout) else {
+        return Ok(());
+    };
     let statusline_url = format!("{}/analytics/statusline", base);
     let statusline_data: Value = client
         .get(&statusline_url)

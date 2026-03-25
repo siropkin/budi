@@ -45,7 +45,7 @@ impl DaemonClient {
         Ok(Self { base_url, client })
     }
 
-    fn load_config() -> BudiConfig {
+    pub(crate) fn load_config() -> BudiConfig {
         std::env::current_dir()
             .ok()
             .and_then(|cwd| config::find_repo_root(&cwd).ok())
@@ -72,7 +72,7 @@ impl DaemonClient {
     pub fn history(&self) -> Result<Value> {
         let resp = self
             .client
-            .post(format!("{}/history", self.base_url))
+            .post(format!("{}/sync/all", self.base_url))
             .timeout(std::time::Duration::from_secs(600)) // History can take minutes
             .send()
             .context("Failed to connect to budi daemon")?

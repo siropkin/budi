@@ -46,6 +46,11 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Res
 
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
 
+    let bold_cyan = super::ansi("\x1b[1;36m");
+    let bold = super::ansi("\x1b[1m");
+    let underline = super::ansi("\x1b[4m");
+    let reset = super::ansi("\x1b[0m");
+
     println!();
     if let Some(ref root) = repo_root {
         let is_reinit = config::repo_paths(root)
@@ -53,17 +58,17 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Res
             .unwrap_or(false);
         if is_reinit {
             println!(
-                "\x1b[1;36m  budi\x1b[0m re-initialized in {}",
+                "{bold_cyan}  budi{reset} re-initialized in {}",
                 root.display()
             );
         } else {
             println!(
-                "\x1b[1;36m  budi\x1b[0m initialized in {}",
+                "{bold_cyan}  budi{reset} initialized in {}",
                 root.display()
             );
         }
     } else {
-        println!("\x1b[1;36m  budi\x1b[0m initialized (global)");
+        println!("{bold_cyan}  budi{reset} initialized (global)");
     }
     println!();
     if let Some(ref root) = repo_root {
@@ -86,7 +91,7 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Res
     match sync_result {
         Ok((files, msgs)) if files > 0 => {
             println!(
-                "  Synced \x1b[1m{msgs}\x1b[0m messages from \x1b[1m{files}\x1b[0m transcript files."
+                "  Synced {bold}{msgs}{reset} messages from {bold}{files}{reset} transcript files."
             );
         }
         Ok(_) => {
@@ -98,8 +103,8 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Res
         }
     }
     println!();
-    println!("  \x1b[1mNext steps:\x1b[0m");
-    println!("    1. Open the dashboard: \x1b[4m{dashboard_url}\x1b[0m");
+    println!("  {bold}Next steps:{reset}");
+    println!("    1. Open the dashboard: {underline}{dashboard_url}{reset}");
     println!("    2. Run `budi doctor` to verify everything is working");
     println!();
 

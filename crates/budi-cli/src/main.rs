@@ -67,10 +67,12 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// Sync recent transcripts (last 7 days)
-    Sync,
-    /// Load full transcript history (all time — may take a while)
-    History,
+    /// Sync recent transcripts (last 7 days). Use --all for full history.
+    Sync {
+        /// Load full transcript history (all time — may take a while)
+        #[arg(long)]
+        all: bool,
+    },
     /// Open the budi dashboard in the browser
     Open,
     /// Update budi to the latest version
@@ -153,8 +155,13 @@ fn main() -> Result<()> {
                 period, projects, branches, branch, models, provider, tag, json_output,
             )
         }
-        Commands::Sync => commands::sync::cmd_sync(),
-        Commands::History => commands::sync::cmd_history(),
+        Commands::Sync { all } => {
+            if all {
+                commands::sync::cmd_history()
+            } else {
+                commands::sync::cmd_sync()
+            }
+        }
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),
         Commands::Migrate => {
@@ -165,7 +172,9 @@ fn main() -> Result<()> {
             if migrated {
                 let from = result.get("from").and_then(|v| v.as_u64()).unwrap_or(0);
                 println!("Migrated database v{} → v{}.", from, current);
-                println!("\x1b[32m✓\x1b[0m Migration complete.");
+                let green = commands::ansi("\x1b[32m");
+                let reset = commands::ansi("\x1b[0m");
+                println!("{green}✓{reset} Migration complete.");
             } else {
                 println!("Database schema is up to date (v{}).", current);
             }

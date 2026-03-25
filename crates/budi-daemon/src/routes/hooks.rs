@@ -121,7 +121,9 @@ pub async fn hooks_ingest(
         let event = budi_core::hooks::parse_hook_event(&payload)?;
 
         let db_path = budi_core::analytics::db_path()?;
-        let conn = budi_core::analytics::open_db(&db_path)?;
+        let mut conn = budi_core::analytics::open_db(&db_path)?;
+
+        let tx = conn.transaction()?;
 
         // If prompt submission, classify and update session
         if matches!(event.event.as_str(), "user_prompt_submit") {
@@ -131,13 +133,15 @@ pub async fn hooks_ingest(
                 .and_then(|v| v.as_str())
             {
                 if let Some(category) = budi_core::hooks::classify_prompt(prompt) {
-                    let _ = budi_core::hooks::update_session_category(&conn, &event, &category);
+                    let _ = budi_core::hooks::update_session_category(&tx, &event, &category);
                 }
             }
         }
 
-        budi_core::hooks::upsert_session(&conn, &event)?;
-        budi_core::hooks::ingest_hook_event(&conn, &event)?;
+        budi_core::hooks::upsert_session(&tx, &event)?;
+        budi_core::hooks::ingest_hook_event(&tx, &event)?;
+
+        tx.commit()?;
         Ok::<_, anyhow::Error>(())
     })
     .await

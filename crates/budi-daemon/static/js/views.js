@@ -56,7 +56,7 @@ function renderMessagesSection(messages) {
 
 /* ===== View Renderer ===== */
 function renderStatsView(content) {
-  const { summary, sessions, cwds, cost, models, activityChart, contextUsage, branches, tickets } = statsData;
+  const { summary, sessions, cwds, cost, models, activityChart, branches, tickets } = statsData;
   content.innerHTML = `
     ${renderCards(summary, cost)}
     <div class="panel section-mb">

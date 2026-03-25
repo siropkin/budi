@@ -47,15 +47,6 @@ function fmtCostTokens(_, item) {
   const cost = (item.cost_cents || 0) / 100;
   return fmtCost(cost);
 }
-function fmtDuration(firstSeen, lastSeen) {
-  if (!firstSeen || !lastSeen) return '--';
-  const ms = new Date(lastSeen) - new Date(firstSeen);
-  if (ms < 0) return '--';
-  const mins = Math.floor(ms / 60000);
-  if (mins < 1) return '<1m';
-  if (mins < 60) return mins + 'm';
-  return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
-}
 function fmtDate(iso) {
   if (!iso) return '--';
   const d = new Date(iso), now = new Date();
@@ -67,7 +58,6 @@ function fmtDate(iso) {
   if (diff === 1) return `Yesterday ${time}`;
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
 }
-function shortenDir(dir) { if (!dir) return '--'; return dir.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'); }
 function repoName(id) { if (!id) return '--'; return id.split('/').pop() || id; }
 
 function formatModelName(raw) {

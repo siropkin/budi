@@ -178,7 +178,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -193,7 +192,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tokio",
  "toml",
  "tracing",
  "ureq",

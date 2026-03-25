@@ -33,13 +33,19 @@ pub fn cmd_update() -> Result<()> {
         .context("Could not parse release tag")?;
     let latest = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
 
+    let green = super::ansi("\x1b[32m");
+    let bold = super::ansi("\x1b[1m");
+    let bold_green = super::ansi("\x1b[1;32m");
+    let yellow = super::ansi("\x1b[33m");
+    let reset = super::ansi("\x1b[0m");
+
     if latest == current {
-        println!("\x1b[32m✓\x1b[0m Already up to date (v{}).", current);
+        println!("{green}✓{reset} Already up to date (v{}).", current);
         return Ok(());
     }
 
     println!(
-        "New version available: \x1b[1mv{}\x1b[0m → \x1b[1;32mv{}\x1b[0m",
+        "New version available: {bold}v{}{reset} → {bold_green}v{}{reset}",
         current, latest
     );
     println!("Updating...");
@@ -84,10 +90,10 @@ pub fn cmd_update() -> Result<()> {
     match crate::client::DaemonClient::connect()
         .and_then(|c| c.migrate())
     {
-        Ok(_) => println!("\x1b[32m✓\x1b[0m Database migrated."),
-        Err(e) => println!("\x1b[33m!\x1b[0m Migration warning: {}", e),
+        Ok(_) => println!("{green}✓{reset} Database migrated."),
+        Err(e) => println!("{yellow}!{reset} Migration warning: {}", e),
     }
 
-    println!("\x1b[32m✓\x1b[0m Updated to v{}.", latest);
+    println!("{green}✓{reset} Updated to v{}.", latest);
     Ok(())
 }
