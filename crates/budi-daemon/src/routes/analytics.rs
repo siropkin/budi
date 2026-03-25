@@ -219,7 +219,7 @@ pub async fn analytics_top_tools(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::top_tools(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::top_tools_filtered(&conn, params.since.as_deref(), params.until.as_deref(), params.provider.as_deref())
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

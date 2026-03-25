@@ -499,7 +499,26 @@ pub fn top_tools(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<(String, u64)>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE", 0);
+    top_tools_filtered(conn, since, until, None)
+}
+
+pub fn top_tools_filtered(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+) -> Result<Vec<(String, u64)>> {
+    let (mut where_clause, mut date_params) = date_filter(since, until, "WHERE", 0);
+
+    if let Some(p) = provider {
+        if where_clause.is_empty() {
+            where_clause = format!("WHERE m.provider = ?{}", date_params.len() + 1);
+        } else {
+            where_clause = format!("{} AND m.provider = ?{}", where_clause, date_params.len() + 1);
+        }
+        date_params.push(p.to_string());
+    }
+
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)

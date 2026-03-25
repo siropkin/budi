@@ -181,7 +181,7 @@ fn cmd_stats_summary_filtered(
     }
 
     let tools = client
-        .top_tools(since.as_deref(), until.as_deref())
+        .top_tools(since.as_deref(), until.as_deref(), provider)
         .unwrap_or_default();
     if !tools.is_empty() {
         println!();

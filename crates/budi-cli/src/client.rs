@@ -367,6 +367,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        provider: Option<&str>,
     ) -> Result<Vec<(String, u64)>> {
         let mut params = Vec::new();
         if let Some(s) = since {
@@ -374,6 +375,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u));
+        }
+        if let Some(p) = provider {
+            params.push(("provider", p));
         }
         let resp = self
             .client
