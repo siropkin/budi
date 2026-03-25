@@ -79,7 +79,7 @@ try {
     Log "Installed: $ver"
     Log ""
     Log "Get started:"
-    Log "  budi init --global  # set up hooks globally (all repos and worktrees)"
+    Log "  budi init         # start daemon, install statusline, sync data"
     Log "  budi doctor      # verify everything is working"
     Log "  budi stats       # view usage analytics"
 } finally {

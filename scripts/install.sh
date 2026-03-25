@@ -307,7 +307,7 @@ main() {
 
 [budi-install] Get started:
   cd /path/to/your/repo
-  budi init --global  # set up hooks globally (all repos and worktrees)
+  budi init         # start daemon, install statusline, sync data
   budi doctor      # verify everything is working
   budi stats       # view usage analytics
 EOF

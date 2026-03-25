@@ -129,7 +129,7 @@ main() {
   log "Installed budi $tag ($target)"
   log ""
   log "Get started:"
-  log "  budi init --global  # set up hooks globally (all repos and worktrees)"
+  log "  budi init         # start daemon, install statusline, sync data"
   log "  budi doctor      # verify everything is working"
   log "  budi stats       # view usage analytics"
 }
