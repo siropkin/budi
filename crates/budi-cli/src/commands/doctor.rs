@@ -74,17 +74,13 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    // Check hooks installation
+    // Check hooks installation — validate structure, not just string presence
     let home = std::env::var("HOME").unwrap_or_default();
     let claude_settings = format!("{}/.claude/settings.json", home);
     let cursor_hooks = format!("{}/.cursor/hooks.json", home);
 
-    let claude_ok = std::fs::read_to_string(&claude_settings)
-        .map(|s| s.contains("budi hook"))
-        .unwrap_or(false);
-    let cursor_ok = std::fs::read_to_string(&cursor_hooks)
-        .map(|s| s.contains("budi hook"))
-        .unwrap_or(false);
+    let claude_ok = validate_claude_hooks(&claude_settings);
+    let cursor_ok = validate_cursor_hooks(&cursor_hooks);
 
     if claude_ok || cursor_ok {
         let sources: Vec<&str> = [
@@ -96,9 +92,28 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         .collect();
         println!("  [ok] hooks: {}", sources.join(", "));
     } else {
-        println!("  [!!] hooks: no hooks found");
+        println!("  [!!] hooks: no hooks found or misconfigured");
         println!("    Run `budi init` to install hooks");
         issues.push("No hooks installed. Run `budi init` to set up hooks.".into());
+    }
+
+    // Check transcript directories exist
+    let cc_transcripts = format!("{}/.claude/transcripts", home);
+    let cursor_transcripts = format!("{}/.cursor/projects", home);
+    let has_cc = Path::new(&cc_transcripts).is_dir();
+    let has_cursor = Path::new(&cursor_transcripts).is_dir();
+    if has_cc || has_cursor {
+        let sources: Vec<&str> = [
+            has_cc.then_some("Claude Code"),
+            has_cursor.then_some("Cursor"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        println!("  [ok] transcripts: {}", sources.join(", "));
+    } else {
+        println!("  [!!] transcripts: no transcript directories found");
+        issues.push("No transcript directories found. Use Claude Code or Cursor to generate data.".into());
     }
 
     println!();
@@ -111,6 +126,64 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Validate Claude Code hooks: check that budi hook entries exist in the correct nested format.
+fn validate_claude_hooks(path: &str) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let hooks = match settings.get("hooks").and_then(|v| v.as_object()) {
+        Some(h) => h,
+        None => return false,
+    };
+    // Check at least SessionStart and PostToolUse have budi hook
+    let required = ["SessionStart", "PostToolUse"];
+    required.iter().all(|event| {
+        hooks.get(*event)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|entry| {
+                entry.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| hooks.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str())
+                            .is_some_and(|c| c.trim() == "budi hook")
+                    }))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false)
+    })
+}
+
+/// Validate Cursor hooks: check that budi hook entries exist in the flat format.
+fn validate_cursor_hooks(path: &str) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let config: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let hooks = match config.get("hooks").and_then(|v| v.as_object()) {
+        Some(h) => h,
+        None => return false,
+    };
+    let required = ["sessionStart", "postToolUse"];
+    required.iter().all(|event| {
+        hooks.get(*event)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|entry| {
+                entry.get("command").and_then(|c| c.as_str())
+                    .is_some_and(|c| c.trim() == "budi hook")
+            }))
+            .unwrap_or(false)
+    })
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {

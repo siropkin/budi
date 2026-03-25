@@ -19,7 +19,7 @@ pub struct SyncParams {
 pub async fn analytics_sync(
     State(state): State<AppState>,
     params: Option<Json<SyncParams>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let params = params.map(|p| p.0).unwrap_or_default();
     if state
         .syncing
@@ -66,7 +66,7 @@ pub async fn analytics_sync(
 
 pub async fn analytics_history(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if state
         .syncing
         .compare_exchange(
@@ -116,7 +116,7 @@ pub async fn analytics_history(
 
 pub async fn hooks_ingest(
     Json(payload): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
     tokio::task::spawn_blocking(move || {
         let event = budi_core::hooks::parse_hook_event(&payload)?;
 
@@ -160,7 +160,7 @@ pub struct SessionsParams {
 
 pub async fn analytics_sessions(
     Query(params): Query<SessionsParams>,
-) -> Result<Json<Vec<budi_core::hooks::SessionStats>>, (StatusCode, String)> {
+) -> Result<Json<Vec<budi_core::hooks::SessionStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = budi_core::analytics::db_path()?;
         let conn = budi_core::analytics::open_db(&db_path)?;
@@ -187,7 +187,7 @@ pub struct ToolsParams {
 
 pub async fn analytics_tools(
     Query(params): Query<ToolsParams>,
-) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, String)> {
+) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = budi_core::analytics::db_path()?;
         let conn = budi_core::analytics::open_db(&db_path)?;
@@ -214,7 +214,7 @@ pub struct McpParams {
 
 pub async fn analytics_mcp(
     Query(params): Query<McpParams>,
-) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, String)> {
+) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = budi_core::analytics::db_path()?;
         let conn = budi_core::analytics::open_db(&db_path)?;

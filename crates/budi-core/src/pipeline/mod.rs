@@ -89,11 +89,11 @@ impl Pipeline {
             for enricher in &mut self.enrichers {
                 for tag in enricher.enrich(msg) {
                     if session_level_keys.contains(&tag.key.as_str()) {
-                        if let Some(ref sid) = msg.session_id {
-                            let key = (sid.clone(), tag.key.clone(), tag.value.clone());
-                            if !seen_session_tags.insert(key) {
-                                continue; // Already emitted for this session
-                            }
+                        // Use session_id for dedup, or message uuid for unsessionized messages
+                        let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
+                        let key = (dedup_id, tag.key.clone(), tag.value.clone());
+                        if !seen_session_tags.insert(key) {
+                            continue; // Already emitted for this session/message
                         }
                     }
                     msg_tags.push(tag);

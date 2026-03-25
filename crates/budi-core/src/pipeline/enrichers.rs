@@ -110,14 +110,14 @@ impl IdentityEnricher {
 }
 
 fn get_hostname() -> String {
-    let mut buf = vec![0u8; 256];
-    let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-    if ret == 0 {
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        String::from_utf8_lossy(&buf[..end]).to_string()
-    } else {
-        String::new()
-    }
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .unwrap_or_default()
 }
 
 impl Enricher for IdentityEnricher {
@@ -198,11 +198,13 @@ impl Enricher for CostEnricher {
             }
         }
 
-        // Emit cost_confidence tag after potential cost calculation
-        tags.push(Tag {
-            key: "cost_confidence".to_string(),
-            value: msg.cost_confidence.clone(),
-        });
+        // Emit cost_confidence tag only for messages with cost data (not user messages)
+        if msg.role == "assistant" {
+            tags.push(Tag {
+                key: "cost_confidence".to_string(),
+                value: msg.cost_confidence.clone(),
+            });
+        }
 
         tags
     }

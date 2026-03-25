@@ -84,7 +84,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             message_uuid TEXT NOT NULL,
             tool_name    TEXT NOT NULL,
-            FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
+            FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS tags (
@@ -93,7 +93,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             key          TEXT NOT NULL,
             value        TEXT NOT NULL,
             UNIQUE(message_uuid, key, value),
-            FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
+            FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS sync_state (
@@ -131,7 +131,7 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
             key          TEXT NOT NULL,
             value        TEXT NOT NULL,
             UNIQUE(message_uuid, key, value),
-            FOREIGN KEY (message_uuid) REFERENCES messages(uuid)
+            FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
         );
         ",
     )?;
@@ -326,6 +326,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id);
 
         -- hook_events
         CREATE INDEX IF NOT EXISTS idx_hook_events_conversation ON hook_events(conversation_id);
@@ -334,6 +335,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation ON hook_events(event, conversation_id);
         CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
         ",
     )?;

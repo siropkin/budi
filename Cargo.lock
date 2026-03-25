@@ -188,9 +188,7 @@ name = "budi-core"
 version = "6.0.0"
 dependencies = [
  "anyhow",
- "base64",
  "chrono",
- "libc",
  "rusqlite",
  "serde",
  "serde_json",

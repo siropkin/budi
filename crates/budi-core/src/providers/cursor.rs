@@ -156,8 +156,41 @@ struct CursorUsageEvent {
     model: String,
     input_tokens: u64,
     output_tokens: u64,
+    cache_creation_tokens: u64,
     cache_read_tokens: u64,
     total_cents: f64,
+}
+
+/// Decode a base64url-encoded string (no padding required).
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: [u8; 128] = {
+        let mut t = [255u8; 128];
+        let mut i = 0u8;
+        while i < 26 { t[(b'A' + i) as usize] = i; i += 1; }
+        i = 0;
+        while i < 26 { t[(b'a' + i) as usize] = 26 + i; i += 1; }
+        i = 0;
+        while i < 10 { t[(b'0' + i) as usize] = 52 + i; i += 1; }
+        t[b'+' as usize] = 62; t[b'-' as usize] = 62;
+        t[b'/' as usize] = 63; t[b'_' as usize] = 63;
+        t
+    };
+    let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut buf = [0u32; 4];
+        for (i, &b) in chunk.iter().enumerate() {
+            if b >= 128 { return None; }
+            let v = TABLE[b as usize];
+            if v == 255 { return None; }
+            buf[i] = v as u32;
+        }
+        let n = (buf[0] << 18) | (buf[1] << 12) | (buf[2] << 6) | buf[3];
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 { out.push((n >> 8) as u8); }
+        if chunk.len() > 3 { out.push(n as u8); }
+    }
+    Some(out)
 }
 
 /// Extract auth credentials from Cursor's state.vscdb ItemTable.
@@ -193,14 +226,7 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
     }
 
     let payload_b64 = parts[1];
-    // base64url → standard base64
-    let b64 = payload_b64.replace('-', "+").replace('_', "/");
-    let padded = match b64.len() % 4 {
-        2 => format!("{b64}=="),
-        3 => format!("{b64}="),
-        _ => b64,
-    };
-    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &padded).ok()?;
+    let decoded = base64url_decode(payload_b64)?;
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
 
     // `sub` is like "user_2xyz..." or "auth0|273223875" — extract the user ID part
@@ -271,6 +297,10 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .and_then(|t: &Value| t.get("outputTokens"))
             .and_then(|v: &Value| v.as_u64())
             .unwrap_or(0);
+        let cache_creation_tokens = token_usage
+            .and_then(|t: &Value| t.get("cacheCreationTokens"))
+            .and_then(|v: &Value| v.as_u64())
+            .unwrap_or(0);
         let cache_read_tokens = token_usage
             .and_then(|t: &Value| t.get("cacheReadTokens"))
             .and_then(|v: &Value| v.as_u64())
@@ -285,6 +315,7 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             model,
             input_tokens,
             output_tokens,
+            cache_creation_tokens,
             cache_read_tokens,
             total_cents,
         });
@@ -353,10 +384,12 @@ fn usage_events_to_messages(
     events
         .iter()
         .map(|ev| {
-            // Find matching session by timestamp
+            // Find matching session by timestamp — prefer the latest-started session
+            // when multiple sessions overlap (e.g. concurrent conversations).
             const CLOCK_SKEW_MS: i64 = 2000;
             let matched = sessions
                 .iter()
+                .rev()
                 .find(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS));
 
             let session_id = matched
@@ -382,7 +415,7 @@ fn usage_events_to_messages(
                 model: Some(ev.model.clone()),
                 input_tokens: ev.input_tokens,
                 output_tokens: ev.output_tokens,
-                cache_creation_tokens: 0,
+                cache_creation_tokens: ev.cache_creation_tokens,
                 cache_read_tokens: ev.cache_read_tokens,
                 git_branch: matched.and_then(|s| s.git_branch.clone()),
                 repo_id: matched.and_then(|s| s.repo_id.clone()),
@@ -410,7 +443,10 @@ fn sync_from_usage_api(
     let watermark_key = "cursor-api-usage";
     let watermark = analytics::get_sync_offset(conn, watermark_key)
         .ok()
-        .and_then(|v| if v > 0 { Some(v as i64) } else { None });
+        .and_then(|v| {
+            let ts = v as i64;
+            if ts > 0 { Some(ts) } else { None }
+        });
 
     let events = match fetch_usage_events(&auth, watermark) {
         Ok(e) => e,
@@ -628,7 +664,7 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            cost_confidence: "estimated".to_string(),
+            cost_confidence: "none".to_string(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -713,7 +749,7 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
             cache_read: 1.25,
         }
     // Cursor "Auto" / "composer" / "default" — uses cheapest routing
-    } else if m == "default" || m == "composer-1" || m.contains("auto") {
+    } else if m == "default" || m.starts_with("composer") || m.contains("auto") {
         ModelPricing {
             input: 1.25,
             output: 6.0,
@@ -985,6 +1021,7 @@ mod tests {
                 model: "composer-2-fast".to_string(),
                 input_tokens: 2958,
                 output_tokens: 1663,
+                cache_creation_tokens: 0,
                 cache_read_tokens: 48214,
                 total_cents: 1.68,
             },
@@ -993,6 +1030,7 @@ mod tests {
                 model: "claude-sonnet-4-6".to_string(),
                 input_tokens: 10000,
                 output_tokens: 5000,
+                cache_creation_tokens: 0,
                 cache_read_tokens: 0,
                 total_cents: 12.50,
             },
@@ -1039,6 +1077,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             input_tokens: 100,
             output_tokens: 50,
+            cache_creation_tokens: 0,
             cache_read_tokens: 0,
             total_cents: 0.5,
         }];
@@ -1058,6 +1097,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             input_tokens: 100,
             output_tokens: 50,
+            cache_creation_tokens: 0,
             cache_read_tokens: 0,
             total_cents: 0.5,
         }];

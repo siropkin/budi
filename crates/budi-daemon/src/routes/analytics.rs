@@ -23,7 +23,7 @@ pub struct SummaryParams {
 
 pub async fn analytics_summary(
     Query(params): Query<SummaryParams>,
-) -> Result<Json<analytics::UsageSummary>, (StatusCode, String)> {
+) -> Result<Json<analytics::UsageSummary>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -54,7 +54,7 @@ pub struct MessagesParams {
 
 pub async fn analytics_messages(
     Query(params): Query<MessagesParams>,
-) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, String)> {
+) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -87,7 +87,7 @@ pub struct ProjectsParams {
 
 pub async fn analytics_projects(
     Query(params): Query<ProjectsParams>,
-) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, String)> {
+) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -108,7 +108,7 @@ pub async fn analytics_projects(
 
 pub async fn analytics_models(
     Query(params): Query<DateRangeParams>,
-) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, String)> {
+) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -123,7 +123,7 @@ pub async fn analytics_models(
 
 pub async fn analytics_branches(
     Query(params): Query<DateRangeParams>,
-) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, String)> {
+) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -138,7 +138,7 @@ pub async fn analytics_branches(
 
 pub async fn analytics_cost(
     Query(params): Query<SummaryParams>,
-) -> Result<Json<cost::CostEstimate>, (StatusCode, String)> {
+) -> Result<Json<cost::CostEstimate>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -166,7 +166,7 @@ pub struct ActivityChartParams {
 
 pub async fn analytics_activity(
     Query(params): Query<ActivityChartParams>,
-) -> Result<Json<Vec<analytics::ActivityBucket>>, (StatusCode, String)> {
+) -> Result<Json<Vec<analytics::ActivityBucket>>, (StatusCode, Json<serde_json::Value>)> {
     let granularity = params.granularity.unwrap_or_else(|| "day".to_string());
     let tz_offset = params.tz_offset.unwrap_or(0);
     let result = tokio::task::spawn_blocking(move || {
@@ -188,7 +188,7 @@ pub async fn analytics_activity(
 
 pub async fn analytics_providers(
     Query(params): Query<DateRangeParams>,
-) -> Result<Json<Vec<analytics::ProviderStats>>, (StatusCode, String)> {
+) -> Result<Json<Vec<analytics::ProviderStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -201,7 +201,7 @@ pub async fn analytics_providers(
     Ok(Json(result))
 }
 
-pub async fn analytics_registered_providers() -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+pub async fn analytics_registered_providers() -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
     let providers = budi_core::provider::all_providers();
     let list: Vec<serde_json::Value> = providers
         .iter()
@@ -217,7 +217,7 @@ pub async fn analytics_registered_providers() -> Result<Json<Vec<serde_json::Val
 
 pub async fn analytics_statusline(
     Query(params): Query<analytics::StatuslineParams>,
-) -> Result<Json<analytics::StatuslineStats>, (StatusCode, String)> {
+) -> Result<Json<analytics::StatuslineStats>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -253,7 +253,7 @@ pub async fn analytics_statusline(
 
 pub async fn analytics_context_usage(
     Query(params): Query<DateRangeParams>,
-) -> Result<Json<analytics::ContextUsageStats>, (StatusCode, String)> {
+) -> Result<Json<analytics::ContextUsageStats>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -276,7 +276,7 @@ pub struct TagParams {
 
 pub async fn analytics_tags(
     Query(params): Query<TagParams>,
-) -> Result<Json<Vec<analytics::TagCost>>, (StatusCode, String)> {
+) -> Result<Json<Vec<analytics::TagCost>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -304,7 +304,7 @@ pub struct BranchDetailParams {
 pub async fn analytics_branch_detail(
     Path(branch): Path<String>,
     Query(params): Query<BranchDetailParams>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -320,7 +320,7 @@ pub async fn analytics_branch_detail(
     }
 }
 
-pub async fn analytics_provider_count() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+pub async fn analytics_provider_count() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -332,7 +332,7 @@ pub async fn analytics_provider_count() -> Result<Json<serde_json::Value>, (Stat
     Ok(Json(json!({ "count": result })))
 }
 
-pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let db_path = analytics::db_path()?;
         if !db_path.exists() {
@@ -349,7 +349,7 @@ pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (Stat
     Ok(Json(result))
 }
 
-pub async fn analytics_migrate() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+pub async fn analytics_migrate() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;

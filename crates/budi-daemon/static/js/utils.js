@@ -36,10 +36,6 @@ function fmtNum(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
   return String(n);
 }
-function fmtTokensHtml(tokens) {
-  const str = tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'K' : String(tokens);
-  return tokens > 2000 ? `<span style="color:var(--accent4)">${str}</span>` : str;
-}
 function fmtCost(n) {
   if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'K';
   if (n >= 100) return '$' + n.toFixed(0);
@@ -60,7 +56,6 @@ function fmtDuration(firstSeen, lastSeen) {
   if (mins < 60) return mins + 'm';
   return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
 }
-function durationMs(a, b) { if (!a || !b) return 0; return Math.max(0, new Date(b) - new Date(a)); }
 function fmtDate(iso) {
   if (!iso) return '--';
   const d = new Date(iso), now = new Date();
@@ -72,18 +67,7 @@ function fmtDate(iso) {
   if (diff === 1) return `Yesterday ${time}`;
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
 }
-function fmtDateFromMs(ms) {
-  if (!ms) return '--';
-  return fmtDate(new Date(ms).toISOString());
-}
-function filterBySearch(data, term, fieldsFn) {
-  if (!term) return data;
-  const lower = term.toLowerCase();
-  return data.filter(item => fieldsFn(item).some(f => (f || '').toLowerCase().includes(lower)));
-}
-
 function shortenDir(dir) { if (!dir) return '--'; return dir.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'); }
-function projectName(dir) { if (!dir) return '--'; const s = shortenDir(dir); return s.split('/').pop() || s; }
 function repoName(id) { if (!id) return '--'; return id.split('/').pop() || id; }
 
 function formatModelName(raw) {
@@ -172,14 +156,3 @@ function toolColor(name) { return TOOL_COLORS[name] || TOOL_COLORS.default; }
 const CHART_PALETTE = ['#58a6ff', '#3fb950', '#d2a8ff', '#f0883e', '#f778ba', '#ffd33d', '#79c0ff', '#a5d6ff', '#7ee787', '#ff9bce'];
 function paletteColor(i) { return CHART_PALETTE[i % CHART_PALETTE.length]; }
 
-function modelColor(name) {
-  const n = (name || '').toLowerCase();
-  if (n.includes('opus')) return '#d2a8ff';
-  if (n.includes('sonnet')) return '#58a6ff';
-  if (n.includes('haiku')) return '#3fb950';
-  if (n.includes('gpt')) return '#f0883e';
-  if (n.includes('gemini')) return '#ffd33d';
-  if (n.includes('o3') || n.includes('o1')) return '#f778ba';
-  if (n.includes('auto') || n.includes('composer')) return '#79c0ff';
-  return '#8b949e';
-}

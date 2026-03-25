@@ -51,7 +51,8 @@ pub fn ensure_daemon_running(repo_root: &Path, config: &BudiConfig) -> Result<()
             return Ok(());
         }
         anyhow::bail!(
-            "Daemon port is occupied but health endpoint is unavailable at {}.",
+            "Daemon port is occupied but health endpoint is unavailable at {}.\n\
+             Try `pkill -f budi-daemon` to kill stale processes, or check `budi doctor` for details.",
             config.daemon_base_url(),
         );
     }

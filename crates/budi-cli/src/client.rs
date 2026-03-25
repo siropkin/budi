@@ -36,10 +36,14 @@ impl DaemonClient {
                 .and_then(|cwd| config::find_repo_root(&cwd).ok());
             if let Some(ref root) = repo_root {
                 ensure_daemon_running(root, &config)
-                    .context("Failed to start budi daemon")?;
+                    .context("Failed to start budi daemon. Try `pkill -f budi-daemon` and retry, or run `budi doctor` to diagnose.")?;
             } else {
                 anyhow::bail!(
-                    "budi daemon is not running at {}. Run `budi init` to start it, or `budi doctor` to diagnose issues.",
+                    "budi daemon is not running at {}.\n\
+                     Possible fixes:\n\
+                     - Run `budi init` to set up budi\n\
+                     - Run `budi doctor` to diagnose issues\n\
+                     - Run from inside a git repository",
                     base_url
                 );
             }

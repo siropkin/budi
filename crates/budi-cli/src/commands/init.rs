@@ -28,10 +28,21 @@ pub fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
 
     println!();
-    println!(
-        "\x1b[1;36m  budi\x1b[0m initialized in {}",
-        repo_root.display()
-    );
+    // Check if already initialized (database exists)
+    let is_reinit = config::repo_paths(&repo_root)
+        .map(|p| p.data_dir.join("analytics.db").exists())
+        .unwrap_or(false);
+    if is_reinit {
+        println!(
+            "\x1b[1;36m  budi\x1b[0m re-initialized in {}",
+            repo_root.display()
+        );
+    } else {
+        println!(
+            "\x1b[1;36m  budi\x1b[0m initialized in {}",
+            repo_root.display()
+        );
+    }
     println!();
     println!(
         "  Data:      {}",
