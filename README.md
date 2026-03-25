@@ -16,7 +16,7 @@ budi is built on a pluggable provider architecture — each AI coding agent is a
 | Agent | Status | Tokens | Cost | Detection |
 |-------|--------|--------|------|-----------|
 | **Claude Code** | Supported | Per-message | Per-model pricing | `~/.claude/` JSONL transcripts |
-| **Cursor** | Supported | Per-session | Per-model pricing | `state.vscdb` composerData |
+| **Cursor** | Supported | Per-model | Per-model pricing | `state.vscdb` composerData |
 | **GitHub Copilot CLI** | Planned | | | `~/.copilot/` |
 | **Codex CLI** | Planned | | | `~/.codex/` |
 | **Cline** | Planned | | | VS Code globalStorage |
@@ -52,7 +52,6 @@ Budi reads Cursor's `state.vscdb` SQLite database — Cursor's internal store fo
 | **Tokens** | `contextUsagePercent × contextTokenLimit` | Session-level (78% of sessions) |
 | **Cost** | Estimated from tokens × model pricing | Per-model API rates |
 | **Models** | `modelConfig.modelName` (resolves "default" from cli-config) | 99% coverage |
-| **Lines changed** | `totalLinesAdded/Removed` | Per-session totals |
 | **Git branch** | `createdOnBranch` or `.git/HEAD` fallback | 59% coverage |
 
 Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Claude Code data in all views.
@@ -64,7 +63,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 - **Automatic** — data syncs every 30 seconds in the background, no workflow changes needed
 - **Per-repo tracking** — automatically identifies repos by git remote, merges worktrees and clones
 - **Cost attribution** — cost per branch, ticket (auto-extracted from branch names), team, and custom tags
-- **Session analytics** — token usage and cost per session
+- **Message-level analytics** — per-message token usage and cost attribution
 - **Multi-agent dashboard** — unified stats view across Claude Code, Cursor, and more
 - **Live status line** — cost stats in Claude Code, with customizable data slots and format templates
 - **Web dashboard** — analytics UI at `http://localhost:7878/dashboard`
@@ -75,7 +74,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 | | budi | ccusage | Claude `/cost` |
 |---|---|---|---|
 | Multi-agent support | **Yes** (Claude Code + Cursor) | Claude Code only | Claude Code only |
-| Cost history | **Per-session + daily** | Per-session | Current session |
+| Cost history | **Per-message + daily** | Per-session | Current session |
 | Web dashboard | **Yes** | No | No |
 | Status line | **Yes** (Claude Code + Starship) | No | No |
 | Per-repo breakdown | **Yes** | No | No |
@@ -214,7 +213,7 @@ budi statusline --format=custom    # custom format from ~/.config/budi/statuslin
 
 Run `budi open` to open the web UI in your browser, or click "budi" in the status line.
 
-The dashboard shows: cost cards, activity chart, agents breakdown, models (per-provider), projects, branches (cost per git branch), tickets (cost per ticket ID), and a sessions table with search and sorting.
+The dashboard shows: cost cards, activity chart, agents breakdown, models (per-provider), projects, branches (cost per git branch), tickets (cost per ticket ID), and a messages table with search and sorting.
 
 ## CLI commands
 
@@ -223,14 +222,12 @@ budi init                     # start daemon, install statusline, sync data
 budi doctor                   # check health: daemon, database, config
 budi open                     # open the web dashboard in the browser
 budi stats                    # usage summary with cost breakdown
-budi stats --sessions         # list sessions with stats
 budi stats --models           # model usage breakdown
 budi stats --projects         # repositories ranked by usage
 budi stats --branches         # branches ranked by cost
 budi stats --branch <name>    # cost for a specific branch
 budi stats --tag ticket_id    # cost per ticket (auto-extracted from branch names)
 budi stats --tag ticket_prefix # cost per team prefix (e.g. PAVA, SEN)
-budi stats --session <id>     # per-session detail
 budi stats --provider <name>  # filter by provider (e.g. claude_code, cursor)
 budi sync                     # sync all providers into the analytics database
 budi update                   # check for updates and install the latest version
@@ -241,12 +238,11 @@ All data commands support `--period today|week|month|all` and `--json` for scrip
 
 ```bash
 budi stats --period today --json          # pipe to jq, scripts, or dashboards
-budi stats --sessions --json | jq '.[0]'  # get latest session as JSON
 ```
 
 ## Tags & cost attribution
 
-Budi automatically tags every session with metadata extracted during ingestion:
+Budi automatically tags every message with metadata extracted during ingestion:
 
 | Tag | Source | Example |
 |-----|--------|---------|
@@ -303,8 +299,7 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/analytics/summary` | Cost and token totals |
-| GET | `/analytics/sessions` | Session list (paginated, searchable) |
-| GET | `/analytics/session/{id}` | Single session detail |
+| GET | `/analytics/messages` | Message list (paginated, searchable) |
 | GET | `/analytics/projects` | Repositories ranked by usage |
 | GET | `/analytics/branches` | Cost per git branch |
 | GET | `/analytics/branches/{branch}` | Cost for a specific branch |

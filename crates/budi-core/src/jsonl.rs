@@ -46,18 +46,6 @@ pub enum UserContent {
     Structured(Vec<Value>),
 }
 
-impl UserContent {
-    pub fn text_length(&self) -> usize {
-        match self {
-            UserContent::Text(s) => s.len(),
-            UserContent::Structured(parts) => parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .map(|s| s.len())
-                .sum(),
-        }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,10 +109,6 @@ pub struct ParsedMessage {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
-    pub has_thinking: bool,
-    pub stop_reason: Option<String>,
-    pub text_length: usize,
-    pub version: Option<String>,
     pub git_branch: Option<String>,
     /// Canonical repository identity, resolved from cwd during sync.
     pub repo_id: Option<String>,
@@ -136,17 +120,13 @@ pub struct ParsedMessage {
     pub context_tokens_used: Option<u64>,
     /// Context window token limit for this request.
     pub context_token_limit: Option<u64>,
-    /// Human-readable session title.
+    /// Human-readable session title (used by enrichers to produce tags, not stored as column).
     pub session_title: Option<String>,
-    /// Lines of code added in this session.
-    pub lines_added: Option<u64>,
-    /// Lines of code removed in this session.
-    pub lines_removed: Option<u64>,
     /// Parent message UUID (for subagent messages).
     pub parent_uuid: Option<String>,
-    /// User name (set by IdentityEnricher).
+    /// User name (used by enrichers to produce tags, not stored as column).
     pub user_name: Option<String>,
-    /// Machine name (set by IdentityEnricher).
+    /// Machine name (used by enrichers to produce tags, not stored as column).
     pub machine_name: Option<String>,
 }
 
@@ -169,10 +149,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            has_thinking: false,
-            stop_reason: None,
-            text_length: u.message.content.text_length(),
-            version: u.version,
             git_branch: u.git_branch,
             repo_id: None,
             provider: "claude_code".to_string(),
@@ -180,25 +156,12 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             context_tokens_used: None,
             context_token_limit: None,
             session_title: None,
-            lines_added: None,
-            lines_removed: None,
             parent_uuid: u.parent_uuid,
             user_name: None,
             machine_name: None,
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
-            let blocks = a.message.content.as_deref().unwrap_or(&[]);
-            let has_thinking = blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Thinking { .. }));
-            let text_length: usize = blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.len()),
-                    _ => None,
-                })
-                .sum();
             // Context tokens used = sum of all input-side tokens
             let context_tokens_used = usage.map(|u| u.total_input());
             Some(ParsedMessage {
@@ -214,10 +177,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                     .and_then(|u| u.cache_creation_input_tokens)
                     .unwrap_or(0),
                 cache_read_tokens: usage.and_then(|u| u.cache_read_input_tokens).unwrap_or(0),
-                has_thinking,
-                stop_reason: a.message.stop_reason,
-                text_length,
-                version: None,
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
@@ -225,8 +184,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 context_tokens_used,
                 context_token_limit: None,
                 session_title: None,
-                lines_added: None,
-                lines_removed: None,
                 parent_uuid: a.parent_uuid,
                 user_name: None,
                 machine_name: None,
@@ -272,8 +229,7 @@ mod tests {
         assert_eq!(msg.role, "user");
         assert_eq!(msg.uuid, "abc-123");
         assert_eq!(msg.session_id.as_deref(), Some("sess-1"));
-        assert_eq!(msg.text_length, 11);
-        assert_eq!(msg.version.as_deref(), Some("2.1.76"));
+        assert_eq!(msg.git_branch.as_deref(), Some("main"));
     }
 
     #[test]
@@ -285,16 +241,7 @@ mod tests {
         assert_eq!(msg.output_tokens, 50);
         assert_eq!(msg.cache_creation_tokens, 200);
         assert_eq!(msg.cache_read_tokens, 300);
-        assert_eq!(msg.stop_reason.as_deref(), Some("tool_use"));
-        assert_eq!(msg.text_length, 6);
         assert_eq!(msg.model.as_deref(), Some("claude-opus-4-6"));
-    }
-
-    #[test]
-    fn parse_thinking_block() {
-        let line = r#"{"parentUuid":"abc","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"msg_2","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"}],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":5}},"uuid":"ghi-789","timestamp":"2026-03-14T18:14:12.000Z","sessionId":"sess-1"}"#;
-        let msg = parse_line(line).unwrap();
-        assert!(msg.has_thinking);
     }
 
     #[test]

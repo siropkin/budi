@@ -41,9 +41,9 @@ function renderCards(s, cost) {
       <div class="sub">${fmtNum(totalIn)} input / ${fmtNum(s.total_output_tokens)} output</div>
     </div>
     <div class="card">
-      <div class="label">Sessions</div>
-      <div class="value">${fmtNum(s.total_sessions)}</div>
-      <div class="sub">${fmtNum(s.total_user_messages)} prompts / ${fmtNum(s.total_assistant_messages)} responses</div>
+      <div class="label">Messages</div>
+      <div class="value">${fmtNum(s.total_messages)}</div>
+      <div class="sub">${fmtNum(s.total_user_messages)} input / ${fmtNum(s.total_assistant_messages)} output</div>
     </div>
   </div>`;
 }
@@ -138,14 +138,4 @@ function renderSortableTable(id, cols, data, limit, sortCol, sortAsc, rowFn) {
   ${hasMore ? `<button class="show-more-btn" data-table="${id}">Show more (${data.length - limit} remaining)</button>` : ''}`;
 }
 
-/* ===== Sessions ===== */
-const sessionGetters = {
-  session_id: s => s.session_id,
-  repo_id: s => s.repo_id || '',
-  last_seen: s => s.last_seen || '',
-  duration: s => durationMs(s.first_seen, s.last_seen),
-  message_count: s => s.message_count,
-  tokens: s => s.input_tokens + s.output_tokens,
-  cost: s => (s.cost_cents || 0) / 100,
-};
 

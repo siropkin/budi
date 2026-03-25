@@ -152,9 +152,6 @@ mod tests {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                has_thinking INTEGER NOT NULL DEFAULT 0,
-                stop_reason TEXT,
-                text_length INTEGER NOT NULL DEFAULT 0,
                 cwd TEXT,
                 provider TEXT DEFAULT 'claude_code'
             );",

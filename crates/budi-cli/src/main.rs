@@ -39,9 +39,6 @@ enum Commands {
         /// Time period to show (default: today)
         #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
         period: StatsPeriod,
-        /// Show details for a specific session (ID or prefix)
-        #[arg(long)]
-        session: Option<String>,
         /// Show repositories ranked by cost
         #[arg(long, default_value_t = false)]
         projects: bool,
@@ -54,9 +51,6 @@ enum Commands {
         /// Show model usage breakdown
         #[arg(long, default_value_t = false)]
         models: bool,
-        /// List sessions with stats
-        #[arg(long, default_value_t = false)]
-        sessions: bool,
         /// Filter by provider (e.g. claude_code, cursor)
         #[arg(long)]
         provider: Option<String>,
@@ -130,17 +124,15 @@ fn main() -> Result<()> {
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
         Commands::Stats {
             period,
-            session,
             projects,
             branches,
             branch,
             models,
-            sessions,
             provider,
             tag,
             json,
         } => commands::stats::cmd_stats(
-            period, session, projects, branches, branch, models, sessions, provider, tag, json,
+            period, projects, branches, branch, models, provider, tag, json,
         ),
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::Open => commands::open::cmd_open(),

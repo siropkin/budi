@@ -23,11 +23,11 @@ function bindSearchHandlers() {
       sessionsSearchTerm = e.target.value;
       clearTimeout(sessionsSearchTimeout);
       sessionsSearchTimeout = setTimeout(async () => {
-        const result = await fetchSessions(DEFAULT_TABLE_ROWS, 0);
-        lastSessionData = result.sessions || [];
+        const result = await fetchMessages(DEFAULT_TABLE_ROWS, 0);
+        lastSessionData = result.messages || [];
         sessionTotalCount = result.total_count || 0;
         sessionShowCount = lastSessionData.length;
-        $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
+        $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
         bindTableHandlers();
       }, 300);
     });
@@ -46,11 +46,11 @@ function bindTableHandlers() {
       const col = th.dataset.col;
       if (sessionSortCol === col) sessionSortAsc = !sessionSortAsc;
       else { sessionSortCol = col; sessionSortAsc = col === 'session_id' || col === 'repo_id'; }
-      const result = await fetchSessions(DEFAULT_TABLE_ROWS, 0);
-      lastSessionData = result.sessions || [];
+      const result = await fetchMessages(DEFAULT_TABLE_ROWS, 0);
+      lastSessionData = result.messages || [];
       sessionTotalCount = result.total_count || 0;
       sessionShowCount = lastSessionData.length;
-      $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
+      $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
       bindTableHandlers();
     });
   });
@@ -59,11 +59,11 @@ function bindTableHandlers() {
       const table = btn.dataset.table;
       if (table === 'sessionsTable') {
         // Fetch next page from server and append
-        const result = await fetchSessions(DEFAULT_TABLE_ROWS, lastSessionData.length);
-        lastSessionData = lastSessionData.concat(result.sessions || []);
+        const result = await fetchMessages(DEFAULT_TABLE_ROWS, lastSessionData.length);
+        lastSessionData = lastSessionData.concat(result.messages || []);
         sessionTotalCount = result.total_count || sessionTotalCount;
         sessionShowCount = lastSessionData.length;
-        $('#sessionsContainer').innerHTML = renderSessionsSection(lastSessionData);
+        $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
       }
       bindTableHandlers();
     });

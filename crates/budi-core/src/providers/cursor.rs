@@ -230,8 +230,6 @@ struct ComposerSession {
     last_updated_at: Option<i64>, // Unix millis, used as watermark
     #[allow(dead_code)]
     is_agentic: bool,
-    lines_added: u64,
-    lines_removed: u64,
     /// Per-model usage data within this session.
     usage_entries: Vec<ComposerUsageEntry>,
     /// Context token counts from the session.
@@ -306,18 +304,6 @@ fn parse_composer_sessions(
             .get("isAgentic")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-
-        let lines_added = parsed
-            .get("linesAdded")
-            .or_else(|| parsed.get("totalLinesAdded"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
-        let lines_removed = parsed
-            .get("linesRemoved")
-            .or_else(|| parsed.get("totalLinesRemoved"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
 
         let context_token_limit = parsed
             .get("contextTokenLimit")
@@ -394,8 +380,6 @@ fn parse_composer_sessions(
             created_at,
             last_updated_at: last_updated,
             is_agentic,
-            lines_added,
-            lines_removed,
             usage_entries,
             context_tokens_used,
             context_token_limit,
@@ -497,10 +481,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         output_tokens: 0,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
-        has_thinking: false,
-        stop_reason: None,
-        text_length: 0,
-        version: None,
         git_branch: session.git_branch.clone(),
         repo_id: None,
         provider: "cursor".to_string(),
@@ -508,8 +488,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
         context_tokens_used: None,
         context_token_limit: None,
         session_title: session.name.clone(),
-        lines_added: Some(session.lines_added),
-        lines_removed: Some(session.lines_removed),
         parent_uuid: None,
         user_name: None,
         machine_name: None,
@@ -532,10 +510,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             output_tokens,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            has_thinking: false,
-            stop_reason: Some("end_turn".to_string()),
-            text_length: 0,
-            version: None,
             git_branch: session.git_branch.clone(),
             repo_id: None,
             provider: "cursor".to_string(),
@@ -543,8 +517,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             context_tokens_used: session.context_tokens_used,
             context_token_limit: session.context_token_limit,
             session_title: session.name.clone(),
-            lines_added: Some(session.lines_added),
-            lines_removed: Some(session.lines_removed),
             parent_uuid: None,
             user_name: None,
             machine_name: None,
@@ -575,10 +547,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             output_tokens,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            has_thinking: false,
-            stop_reason: Some("end_turn".to_string()),
-            text_length: 0,
-            version: None,
             git_branch: session.git_branch.clone(),
             repo_id: None,
             provider: "cursor".to_string(),
@@ -590,8 +558,6 @@ fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage>
             context_tokens_used: session.context_tokens_used,
             context_token_limit: session.context_token_limit,
             session_title: session.name.clone(),
-            lines_added: Some(session.lines_added),
-            lines_removed: Some(session.lines_removed),
             parent_uuid: None,
             user_name: None,
             machine_name: None,
@@ -715,7 +681,6 @@ fn file_mtime(path: &Path) -> DateTime<Utc> {
 #[derive(Debug, Deserialize)]
 struct CursorEntry {
     role: Option<String>,
-    message: Option<CursorMessage>,
     #[serde(rename = "type")]
     entry_type: Option<String>,
     model: Option<String>,
@@ -727,32 +692,6 @@ struct CursorEntry {
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     cwd: Option<String>,
-    #[serde(rename = "stopReason")]
-    stop_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CursorMessage {
-    content: Option<CursorContent>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum CursorContent {
-    Text(String),
-    Structured(Vec<Value>),
-}
-
-impl CursorContent {
-    fn text_length(&self) -> usize {
-        match self {
-            CursorContent::Text(s) => s.len(),
-            CursorContent::Structured(parts) => parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.len()))
-                .sum(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -798,8 +737,6 @@ fn parse_cursor_line(
     let entry: CursorEntry = serde_json::from_str(line).ok()?;
 
     let role = entry.role.as_deref().or(entry.entry_type.as_deref())?;
-    let content_ref = entry.message.as_ref().and_then(|m| m.content.as_ref());
-    let text_length = content_ref.map(|c| c.text_length()).unwrap_or(0);
 
     let timestamp = entry
         .timestamp
@@ -827,10 +764,6 @@ fn parse_cursor_line(
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            has_thinking: false,
-            stop_reason: None,
-            text_length,
-            version: None,
             git_branch: None,
             repo_id: None,
             provider: "cursor".to_string(),
@@ -838,8 +771,6 @@ fn parse_cursor_line(
             context_tokens_used: None,
             context_token_limit: None,
             session_title: None,
-            lines_added: None,
-            lines_removed: None,
             parent_uuid: None,
             user_name: None,
             machine_name: None,
@@ -857,10 +788,6 @@ fn parse_cursor_line(
                 output_tokens: usage.and_then(|u| u.output_tokens).unwrap_or(0),
                 cache_creation_tokens: usage.map(|u| u.cache_creation()).unwrap_or(0),
                 cache_read_tokens: usage.map(|u| u.cache_read()).unwrap_or(0),
-                has_thinking: false,
-                stop_reason: entry.stop_reason,
-                text_length,
-                version: None,
                 git_branch: None,
                 repo_id: None,
                 provider: "cursor".to_string(),
@@ -868,8 +795,6 @@ fn parse_cursor_line(
                 context_tokens_used: None,
                 context_token_limit: None,
                 session_title: None,
-                lines_added: None,
-                lines_removed: None,
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
@@ -1036,7 +961,6 @@ mod tests {
         assert_eq!(msg.session_id.as_deref(), Some("cursor-abc"));
         assert_eq!(msg.cwd.as_deref(), Some("/proj"));
         assert_eq!(msg.provider, "cursor");
-        assert_eq!(msg.text_length, 22);
         assert_eq!(msg.model, None);
         assert_eq!(msg.input_tokens, 0);
     }
@@ -1050,7 +974,6 @@ mod tests {
         assert_eq!(msg.uuid, "cursor-abc-1");
         assert_eq!(msg.model, None);
         assert_eq!(msg.input_tokens, 0);
-        assert_eq!(msg.text_length, 27);
     }
 
     #[test]
@@ -1160,8 +1083,6 @@ mod tests {
             created_at: Some("2026-03-20T10:00:00Z".parse().unwrap()),
             last_updated_at: Some(1742468400000),
             is_agentic: true,
-            lines_added: 45,
-            lines_removed: 12,
             usage_entries: vec![ComposerUsageEntry {
                 model: "claude-sonnet-4-6".to_string(),
                 cost_cents: 2.40,
@@ -1180,8 +1101,6 @@ mod tests {
         // User message
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].session_title.as_deref(), Some("Fix login bug"));
-        assert_eq!(msgs[0].lines_added, Some(45));
-        assert_eq!(msgs[0].lines_removed, Some(12));
 
         // Assistant message
         assert_eq!(msgs[1].role, "assistant");
@@ -1212,8 +1131,6 @@ mod tests {
             created_at: None,
             last_updated_at: None,
             is_agentic: false,
-            lines_added: 0,
-            lines_removed: 0,
             usage_entries: vec![],
             context_tokens_used: None,
             context_token_limit: None,
@@ -1312,8 +1229,6 @@ mod tests {
         let s = &sessions[0];
         assert_eq!(s.name.as_deref(), Some("Fix login bug"));
         assert_eq!(s.model_name.as_deref(), Some("claude-4-sonnet"));
-        assert_eq!(s.lines_added, 10);
-        assert_eq!(s.lines_removed, 3);
         assert!(s.is_agentic);
         // contextUsagePercent=25% of default 200K = 50,000 tokens
         assert_eq!(s.context_tokens_used, Some(50000));
@@ -1459,8 +1374,6 @@ mod tests {
             created_at: None,
             last_updated_at: None,
             is_agentic: false,
-            lines_added: 0,
-            lines_removed: 0,
             usage_entries: vec![],
             context_tokens_used: None,
             context_token_limit: None,

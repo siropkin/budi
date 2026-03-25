@@ -117,13 +117,35 @@ fn get_hostname() -> String {
 
 impl Enricher for IdentityEnricher {
     fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
-        if msg.user_name.is_none() && !self.user_name.is_empty() {
-            msg.user_name = Some(self.user_name.clone());
+        let mut tags = Vec::new();
+
+        // Produce user/machine tags (session-level dedup handled by Pipeline)
+        let user = msg.user_name.as_deref().unwrap_or(&self.user_name);
+        if !user.is_empty() {
+            tags.push(Tag {
+                key: "user".to_string(),
+                value: user.to_string(),
+            });
         }
-        if msg.machine_name.is_none() && !self.machine_name.is_empty() {
-            msg.machine_name = Some(self.machine_name.clone());
+        let machine = msg.machine_name.as_deref().unwrap_or(&self.machine_name);
+        if !machine.is_empty() {
+            tags.push(Tag {
+                key: "machine".to_string(),
+                value: machine.to_string(),
+            });
         }
-        Vec::new()
+
+        // Produce session_title tag if present
+        if let Some(ref title) = msg.session_title {
+            if !title.is_empty() {
+                tags.push(Tag {
+                    key: "session_title".to_string(),
+                    value: title.clone(),
+                });
+            }
+        }
+
+        tags
     }
 }
 
@@ -220,13 +242,17 @@ mod tests {
     use crate::pipeline::tests::test_msg;
 
     #[test]
-    fn identity_enricher_sets_fields() {
+    fn identity_enricher_produces_tags() {
         let mut enricher = IdentityEnricher::new();
         let mut msg = test_msg();
-        enricher.enrich(&mut msg);
-        // Should set user_name and machine_name (values depend on environment)
-        assert!(msg.user_name.is_some() || enricher.user_name.is_empty());
-        assert!(msg.machine_name.is_some() || enricher.machine_name.is_empty());
+        let tags = enricher.enrich(&mut msg);
+        // Should produce user and machine tags (values depend on environment)
+        if !enricher.user_name.is_empty() {
+            assert!(tags.iter().any(|t| t.key == "user"));
+        }
+        if !enricher.machine_name.is_empty() {
+            assert!(tags.iter().any(|t| t.key == "machine"));
+        }
     }
 
     #[test]

@@ -38,12 +38,10 @@ pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>
 
 pub fn cmd_stats(
     period: StatsPeriod,
-    session: Option<String>,
     projects: bool,
     branches: bool,
     branch: Option<String>,
     models: bool,
-    sessions: bool,
     provider: Option<String>,
     tag: Option<String>,
     json_output: bool,
@@ -54,25 +52,12 @@ pub fn cmd_stats(
         return cmd_stats_tags(&client, period, tag_filter, json_output);
     }
 
-    if let Some(ref sid) = session {
-        if json_output {
-            let detail = client.session_detail(sid)?;
-            println!("{}", serde_json::to_string_pretty(&detail)?);
-            return Ok(());
-        }
-        return cmd_stats_session(&client, sid);
-    }
-
     if let Some(ref br) = branch {
         return cmd_stats_branch_detail(&client, period, br, json_output);
     }
 
     if branches {
         return cmd_stats_branches(&client, period, json_output);
-    }
-
-    if sessions {
-        return cmd_stats_sessions(&client, period, json_output);
     }
 
     if models {
@@ -144,7 +129,6 @@ fn cmd_stats_summary_filtered(
         "  \x1b[1mMessages\x1b[0m     {} \x1b[90m({} user, {} assistant)\x1b[0m",
         summary.total_messages, summary.total_user_messages, summary.total_assistant_messages
     );
-    println!("  \x1b[1mSessions\x1b[0m     {}", summary.total_sessions);
     println!();
 
     let total_input = summary.total_input_tokens
@@ -211,21 +195,12 @@ fn cmd_stats_multi_agent(
         } else {
             ps.estimated_cost
         };
-        let lines_str = if ps.total_lines_added > 0 || ps.total_lines_removed > 0 {
-            format!(
-                "  +{}/\x1b[31m-{}\x1b[0m",
-                ps.total_lines_added, ps.total_lines_removed
-            )
-        } else {
-            String::new()
-        };
         println!(
-            "    \x1b[36m{:<14}\x1b[0m {:>3} sessions  {}  \x1b[33m{}\x1b[0m{}",
+            "    \x1b[36m{:<14}\x1b[0m {:>5} msgs  {}  \x1b[33m{}\x1b[0m",
             ps.display_name,
-            ps.session_count,
+            ps.message_count,
             format_tokens(total_tokens),
             format_cost(cost),
-            lines_str,
         );
     }
     println!();
@@ -235,8 +210,8 @@ fn cmd_stats_multi_agent(
     let summary = client.summary(since.as_deref(), until.as_deref(), None)?;
 
     println!(
-        "  \x1b[1mTotal\x1b[0m        {} messages, {} sessions",
-        summary.total_messages, summary.total_sessions
+        "  \x1b[1mTotal\x1b[0m        {} messages",
+        summary.total_messages
     );
 
     let total_input = summary.total_input_tokens
@@ -246,79 +221,6 @@ fn cmd_stats_multi_agent(
         "  \x1b[1mTokens\x1b[0m       {} in, {} out",
         format_tokens(total_input),
         format_tokens(summary.total_output_tokens),
-    );
-
-    println!();
-    Ok(())
-}
-
-fn cmd_stats_session(client: &DaemonClient, session_id: &str) -> Result<()> {
-    let detail = client.session_detail(session_id)?;
-    let Some(d) = detail else {
-        println!("Session not found: {}", session_id);
-        return Ok(());
-    };
-
-    println!();
-    let title = d
-        .session_title
-        .as_deref()
-        .unwrap_or(&d.session_id[..d.session_id.len().min(12)]);
-    println!("  \x1b[1;36m Session\x1b[0m \x1b[90m{}\x1b[0m", title);
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(40));
-
-    println!("  \x1b[1mProvider\x1b[0m  {}", d.provider);
-
-    if let Some(ref repo) = d.repo_id {
-        println!("  \x1b[1mRepo\x1b[0m      {}", repo);
-    } else if let Some(ref dir) = d.project_dir {
-        println!("  \x1b[1mProject\x1b[0m   {}", dir);
-    }
-    if let Some(ref branch) = d.git_branch {
-        println!("  \x1b[1mBranch\x1b[0m    {}", branch);
-    }
-    if let Some(ref ver) = d.version {
-        println!("  \x1b[1mClaude\x1b[0m    v{}", ver);
-    }
-    if d.lines_added > 0 || d.lines_removed > 0 {
-        println!(
-            "  \x1b[1mLines\x1b[0m     \x1b[32m+{}\x1b[0m/\x1b[31m-{}\x1b[0m",
-            d.lines_added, d.lines_removed
-        );
-    }
-    if d.cost_cents > 0.0 {
-        println!(
-            "  \x1b[1mCost\x1b[0m      \x1b[33m{}\x1b[0m",
-            format_cost_cents(d.cost_cents)
-        );
-    }
-    println!(
-        "  \x1b[1mStarted\x1b[0m   {}",
-        format_timestamp(&d.first_seen)
-    );
-    println!(
-        "  \x1b[1mLast msg\x1b[0m  {}",
-        format_timestamp(&d.last_seen)
-    );
-    println!();
-
-    let total_msgs = d.user_messages + d.assistant_messages;
-    println!(
-        "  \x1b[1mMessages\x1b[0m  {} \x1b[90m({} user, {} assistant)\x1b[0m",
-        total_msgs, d.user_messages, d.assistant_messages
-    );
-
-    let total_input = d.input_tokens + d.cache_creation_tokens + d.cache_read_tokens;
-    println!(
-        "  \x1b[1mInput\x1b[0m     {} \x1b[90m(direct: {}, cache w: {}, cache r: {})\x1b[0m",
-        format_tokens(total_input),
-        format_tokens(d.input_tokens),
-        format_tokens(d.cache_creation_tokens),
-        format_tokens(d.cache_read_tokens),
-    );
-    println!(
-        "  \x1b[1mOutput\x1b[0m    {}",
-        format_tokens(d.output_tokens)
     );
 
     println!();
@@ -521,85 +423,6 @@ fn cmd_stats_models(
     Ok(())
 }
 
-fn cmd_stats_sessions(
-    client: &DaemonClient,
-    period: StatsPeriod,
-    json_output: bool,
-) -> Result<()> {
-    let (since, until) = period_date_range(period);
-    let result = client.sessions(since.as_deref(), until.as_deref(), 100, 0)?;
-    let sessions = result.sessions;
-
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&sessions)?);
-        return Ok(());
-    }
-
-    let period_label = period_label(period);
-    println!();
-    println!(
-        "  \x1b[1;36m📋 Sessions\x1b[0m — \x1b[1m{}\x1b[0m  ({} total)",
-        period_label,
-        sessions.len()
-    );
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(60));
-
-    if sessions.is_empty() {
-        println!("  No sessions for this period.");
-        println!();
-        return Ok(());
-    }
-
-    for s in sessions.iter().take(20) {
-        let title = s
-            .session_title
-            .as_deref()
-            .unwrap_or(&s.session_id[..s.session_id.len().min(8)]);
-        let repo = s
-            .repo_id
-            .as_deref()
-            .map(|r| r.rsplit('/').next().unwrap_or(r))
-            .unwrap_or("");
-        let branch = s
-            .git_branch
-            .as_deref()
-            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
-            .unwrap_or("");
-        let cost_str = if s.cost_cents > 0.0 {
-            format_cost_cents(s.cost_cents)
-        } else {
-            "--".to_string()
-        };
-        let location = if !branch.is_empty() && !repo.is_empty() {
-            format!("{} / {}", repo, branch)
-        } else if !repo.is_empty() {
-            repo.to_string()
-        } else {
-            branch.to_string()
-        };
-        // Truncate title and location for compact display
-        let title_trunc: String = title.chars().take(20).collect();
-        let loc_trunc: String = location.chars().take(30).collect();
-        println!(
-            "    {}  \x1b[36m{:<20}\x1b[0m  \x1b[33m{:>8}\x1b[0m  \x1b[90m{}\x1b[0m",
-            format_timestamp(&s.last_seen),
-            title_trunc,
-            cost_str,
-            loc_trunc,
-        );
-    }
-
-    if sessions.len() > 20 {
-        println!(
-            "    \x1b[90m… and {} more (use --json for full list)\x1b[0m",
-            sessions.len() - 20
-        );
-    }
-
-    println!();
-    Ok(())
-}
-
 // ─── Formatting Utilities ────────────────────────────────────────────────────
 
 pub fn format_tokens(n: u64) -> String {
@@ -693,13 +516,3 @@ fn cmd_stats_tags(
     Ok(())
 }
 
-pub fn format_timestamp(ts: &str) -> String {
-    // Try to parse as RFC 3339, fall back to raw string.
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|dt| {
-            dt.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|_| ts.to_string())
-}

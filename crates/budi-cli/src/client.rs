@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    BranchCost, ModelUsage, PaginatedSessions, ProviderStats, RepoUsage, SessionDetail,
+    BranchCost, ModelUsage, ProviderStats, RepoUsage,
     TagCost, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
@@ -149,51 +149,6 @@ impl DaemonClient {
             .context("Failed to connect to budi daemon")?
             .error_for_status()
             .context("Cost request failed")?;
-        Ok(resp.json()?)
-    }
-
-    pub fn session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/analytics/session/{}",
-                self.base_url, session_id
-            ))
-            .send()
-            .context("Failed to connect to budi daemon")?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let resp = resp
-            .error_for_status()
-            .context("Session detail request failed")?;
-        Ok(Some(resp.json()?))
-    }
-
-    pub fn sessions(
-        &self,
-        since: Option<&str>,
-        until: Option<&str>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<PaginatedSessions> {
-        let mut params: Vec<(&str, String)> = Vec::new();
-        if let Some(s) = since {
-            params.push(("since", s.to_string()));
-        }
-        if let Some(u) = until {
-            params.push(("until", u.to_string()));
-        }
-        params.push(("limit", limit.to_string()));
-        params.push(("offset", offset.to_string()));
-        let resp = self
-            .client
-            .get(format!("{}/analytics/sessions", self.base_url))
-            .query(&params)
-            .send()
-            .context("Failed to connect to budi daemon")?
-            .error_for_status()
-            .context("Sessions request failed")?;
         Ok(resp.json()?)
     }
 

@@ -1,8 +1,8 @@
-async function fetchSessions(limit, offset) {
+async function fetchMessages(limit, offset) {
   const range = dateRange(currentPeriod);
   const params = { ...range, sort_by: sessionSortCol, sort_asc: sessionSortAsc, limit, offset };
   if (sessionsSearchTerm) params.search = sessionsSearchTerm;
-  const result = await fetch('/analytics/sessions' + qs(params)).then(r => r.json()).catch(() => ({sessions:[],total_count:0}));
+  const result = await fetch('/analytics/messages' + qs(params)).then(r => r.json()).catch(() => ({messages:[],total_count:0}));
   return result;
 }
 
@@ -25,7 +25,7 @@ async function loadStatsData(signal) {
   const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
   const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, branches, tickets] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(r => r.json()),
-    fetch('/analytics/sessions' + sessionsQ, opts).then(r => r.json()).catch(() => ({sessions:[],total_count:0})),
+    fetch('/analytics/messages' + sessionsQ, opts).then(r => r.json()).catch(() => ({messages:[],total_count:0})),
     fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
     fetch('/analytics/cost' + q, opts).then(r => r.json()),
     fetch('/analytics/models' + q, opts).then(r => r.json()),
@@ -36,7 +36,7 @@ async function loadStatsData(signal) {
     fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=ticket_id&limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()).catch(() => []),
   ]);
 
-  const sessions = sessionsResult.sessions || [];
+  const sessions = sessionsResult.messages || [];
   sessionTotalCount = sessionsResult.total_count || 0;
   statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, branches, tickets };
   lastSessionData = sessions;

@@ -1,39 +1,27 @@
-function renderSessionsSection(sessions) {
-  // Sessions are already sorted, filtered, and paginated server-side
+function renderMessagesSection(messages) {
   const multiProvider = registeredProviders.length > 1;
   const cols = [
-    { key: 'last_seen', label: 'Last Active' },
-    { key: 'session_id', label: 'Session' },
+    { key: 'timestamp', label: 'Time' },
     ...(multiProvider ? [{ key: 'provider', label: 'Agent' }] : []),
+    { key: 'model', label: 'Model' },
     { key: 'repo_id', label: 'Repo' },
-    { key: 'git_branch', label: 'Branch' },
-    { key: 'ticket', label: 'Ticket' },
-    { key: 'duration', label: 'Duration', right: true },
-    { key: 'message_count', label: 'Messages', right: true },
     { key: 'tokens', label: 'Tokens', right: true },
     { key: 'cost', label: 'Cost', right: true },
   ];
-  if (!sessions.length) return '<div class="empty">No sessions for this period</div>';
+  if (!messages.length) return '<div class="empty">No messages for this period</div>';
   const arrow = col => col === sessionSortCol ? `<span class="sort-arrow">${sessionSortAsc ? '\u25b2' : '\u25bc'}</span>` : '';
-  const hasMore = sessionTotalCount > sessions.length;
-  const remaining = sessionTotalCount - sessions.length;
-  const rowFn = s => {
-    const totalTok = s.input_tokens + s.output_tokens;
-    const title = s.session_title || s.session_id.slice(0, 8);
-    const costVal = (s.cost_cents || 0) / 100;
-    const provDisplay = (registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider;
+  const hasMore = sessionTotalCount > messages.length;
+  const remaining = sessionTotalCount - messages.length;
+  const rowFn = m => {
+    const totalTok = m.input_tokens + m.output_tokens;
+    const costVal = (m.cost_cents || 0) / 100;
+    const provDisplay = (registeredProviders.find(rp => rp.name === m.provider) || {}).display_name || m.provider;
     const provCol = multiProvider ? `<td>${esc(provDisplay)}</td>` : '';
-    const branch = (s.git_branch || '').replace(/^refs\/heads\//, '');
-    const tickets = (s.ticket_ids || []).join(', ');
     return `<tr>
-      <td>${esc(fmtDate(s.last_seen))}</td>
-      <td title="${esc(s.session_id)}">${esc(title)}</td>
+      <td>${esc(fmtDate(m.timestamp))}</td>
       ${provCol}
-      <td class="dir" title="${esc(s.repo_id || s.project_dir || '')}">${esc(repoName(s.repo_id) || shortenDir(s.project_dir))}</td>
-      <td class="dir" title="${esc(s.git_branch || '')}">${esc(branch)}</td>
-      <td>${esc(tickets)}</td>
-      <td class="right">${fmtDuration(s.first_seen, s.last_seen)}</td>
-      <td class="right">${fmtNum(s.message_count)}</td>
+      <td>${esc(m.model || '--')}</td>
+      <td class="dir" title="${esc(m.repo_id || '')}">${esc(repoName(m.repo_id) || '--')}</td>
       <td class="right">${fmtNum(totalTok)}</td>
       <td class="right">${fmtCost(costVal)}</td>
     </tr>`;
@@ -44,7 +32,7 @@ function renderSessionsSection(sessions) {
     <thead><tr>${cols.map(c =>
       `<th data-col="${c.key}"${c.right ? ' class="right"' : ''}>${c.label}${arrow(c.key)}</th>`
     ).join('')}</tr></thead>
-    <tbody>${sessions.map(rowFn).join('')}</tbody>
+    <tbody>${messages.map(rowFn).join('')}</tbody>
   </table>
   </div>
   ${hasMore ? `<button class="show-more-btn" data-table="sessionsTable">Show more (${remaining} remaining)</button>` : ''}`;
@@ -121,9 +109,9 @@ function renderStatsView(content) {
       </div>
     </div>
     <div class="panel section-mb">
-      <h2>Sessions</h2>
-      <input type="text" id="sessionsSearch" class="search-input" placeholder="Search sessions..." value="${esc(sessionsSearchTerm)}" style="margin-bottom:12px">
-      <div id="sessionsContainer">${renderSessionsSection(sessions)}</div>
+      <h2>Messages</h2>
+      <input type="text" id="sessionsSearch" class="search-input" placeholder="Search messages..." value="${esc(sessionsSearchTerm)}" style="margin-bottom:12px">
+      <div id="sessionsContainer">${renderMessagesSection(sessions)}</div>
     </div>
   `;
 }

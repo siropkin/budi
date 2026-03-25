@@ -36,7 +36,7 @@ pub async fn analytics_summary(
 }
 
 #[derive(serde::Deserialize)]
-pub struct SessionsParams {
+pub struct MessagesParams {
     since: Option<String>,
     until: Option<String>,
     search: Option<String>,
@@ -46,15 +46,15 @@ pub struct SessionsParams {
     offset: Option<usize>,
 }
 
-pub async fn analytics_sessions(
-    Query(params): Query<SessionsParams>,
-) -> Result<Json<analytics::PaginatedSessions>, (StatusCode, String)> {
+pub async fn analytics_messages(
+    Query(params): Query<MessagesParams>,
+) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_list(
+        analytics::message_list(
             &conn,
-            &analytics::SessionListParams {
+            &analytics::MessageListParams {
                 since: params.since.as_deref(),
                 until: params.until.as_deref(),
                 search: params.search.as_deref(),
@@ -70,24 +70,6 @@ pub async fn analytics_sessions(
     .map_err(internal_error)?;
 
     Ok(Json(result))
-}
-
-pub async fn analytics_session_detail(
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::session_detail(&conn, &id)
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    match result {
-        Some(detail) => Ok(Json(detail).into_response()),
-        None => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
-    }
 }
 
 #[derive(serde::Deserialize)]

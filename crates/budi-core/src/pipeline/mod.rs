@@ -40,7 +40,7 @@ impl Pipeline {
         // Track (session_id, key, value) to avoid duplicate session-level tags.
         let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
         let session_level_keys: &[&str] =
-            &["ticket_id", "ticket_prefix", "branch", "repo"];
+            &["ticket_id", "ticket_prefix", "branch", "repo", "session_title", "user", "machine"];
 
         for msg in messages.iter_mut() {
             normalize(msg);
@@ -271,10 +271,6 @@ mod tests {
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            has_thinking: false,
-            stop_reason: None,
-            text_length: 0,
-            version: None,
             git_branch: None,
             repo_id: None,
             provider: "claude_code".to_string(),
@@ -282,8 +278,6 @@ mod tests {
             context_tokens_used: None,
             context_token_limit: None,
             session_title: None,
-            lines_added: None,
-            lines_removed: None,
             parent_uuid: None,
             user_name: None,
             machine_name: None,
