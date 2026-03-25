@@ -155,14 +155,14 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             git_branch: u.git_branch,
             repo_id: None,
             provider: "claude_code".to_string(),
-            cost_cents: Some(0.0),
+            cost_cents: None,
             context_tokens_used: None,
             context_token_limit: None,
             session_title: None,
             parent_uuid: u.parent_uuid,
             user_name: None,
             machine_name: None,
-            cost_confidence: "exact".to_string(),
+            cost_confidence: "estimated".to_string(),
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();

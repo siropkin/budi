@@ -9,6 +9,12 @@ use serde_json::json;
 use super::internal_error;
 
 #[derive(serde::Deserialize)]
+pub struct DateRangeParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 pub struct SummaryParams {
     pub since: Option<String>,
     pub until: Option<String>,
@@ -73,14 +79,14 @@ pub async fn analytics_messages(
 }
 
 #[derive(serde::Deserialize)]
-pub struct CwdParams {
+pub struct ProjectsParams {
     since: Option<String>,
     until: Option<String>,
     limit: Option<usize>,
 }
 
 pub async fn analytics_projects(
-    Query(params): Query<CwdParams>,
+    Query(params): Query<ProjectsParams>,
 ) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, String)> {
     let limit = params.limit.unwrap_or(20);
     let result = tokio::task::spawn_blocking(move || {
@@ -101,7 +107,7 @@ pub async fn analytics_projects(
 }
 
 pub async fn analytics_models(
-    Query(params): Query<SummaryParams>,
+    Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -116,7 +122,7 @@ pub async fn analytics_models(
 }
 
 pub async fn analytics_branches(
-    Query(params): Query<SummaryParams>,
+    Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -181,7 +187,7 @@ pub async fn analytics_activity(
 }
 
 pub async fn analytics_providers(
-    Query(params): Query<SummaryParams>,
+    Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::ProviderStats>>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -195,7 +201,7 @@ pub async fn analytics_providers(
     Ok(Json(result))
 }
 
-pub async fn analytics_registered_providers() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+pub async fn analytics_registered_providers() -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let providers = budi_core::provider::all_providers();
     let list: Vec<serde_json::Value> = providers
         .iter()
@@ -206,7 +212,7 @@ pub async fn analytics_registered_providers() -> Result<Json<serde_json::Value>,
             })
         })
         .collect();
-    Ok(Json(json!(list)))
+    Ok(Json(list))
 }
 
 pub async fn analytics_statusline(
@@ -246,7 +252,7 @@ pub async fn analytics_statusline(
 }
 
 pub async fn analytics_context_usage(
-    Query(params): Query<SummaryParams>,
+    Query(params): Query<DateRangeParams>,
 ) -> Result<Json<analytics::ContextUsageStats>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;

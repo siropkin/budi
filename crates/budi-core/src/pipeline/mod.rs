@@ -56,12 +56,15 @@ impl Pipeline {
 
         // Propagate git_branch, repo_id, cwd from user messages to subsequent
         // assistant messages in the same session (JSONL only has gitBranch on user entries).
+        // Uses temporal propagation: each message inherits from the most recent
+        // preceding message in the same session that has the field set.
         let mut session_branch: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut session_repo: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut session_cwd: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for msg in messages.iter_mut() {
             if let Some(ref sid) = msg.session_id {
-                // Store latest values from any message that has them
+                // If this message has the field, update the running value
+                // If not, inherit from the most recent preceding message
                 if let Some(ref b) = msg.git_branch {
                     session_branch.insert(sid.clone(), b.clone());
                 } else if let Some(b) = session_branch.get(sid) {

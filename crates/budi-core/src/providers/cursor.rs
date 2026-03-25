@@ -366,8 +366,12 @@ fn usage_events_to_messages(
             let timestamp = DateTime::from_timestamp_millis(ev.timestamp_ms)
                 .unwrap_or_else(Utc::now);
 
-            // Deterministic UUID from timestamp + model
-            let uuid = format!("cursor-api-{}-{}", ev.timestamp_ms, ev.model);
+            // Deterministic UUID from timestamp + model + tokens (avoids collision
+            // when two requests share the same millisecond and model)
+            let uuid = format!(
+                "cursor-api-{}-{}-{}",
+                ev.timestamp_ms, ev.model, ev.input_tokens + ev.output_tokens
+            );
 
             ParsedMessage {
                 uuid,
@@ -1059,6 +1063,6 @@ mod tests {
         }];
 
         let msgs = usage_events_to_messages(&events, &[]);
-        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o");
+        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-150");
     }
 }

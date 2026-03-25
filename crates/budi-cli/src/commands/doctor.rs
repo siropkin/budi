@@ -44,7 +44,8 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 }
             }
             Err(e) => {
-                println!("  x daemon start failed: {e}");
+                doctor_check("daemon start", false, None);
+                println!("    {e}");
                 issues.push(format!("Daemon start error: {e}"));
             }
         }

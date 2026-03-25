@@ -178,12 +178,6 @@ impl Enricher for CostEnricher {
             });
         }
 
-        // Emit cost_confidence tag
-        tags.push(Tag {
-            key: "cost_confidence".to_string(),
-            value: msg.cost_confidence.clone(),
-        });
-
         // Calculate cost if not already set (skip if API provided exact cost)
         if msg.cost_cents.is_none() && msg.role == "assistant" {
             let model = msg.model.as_deref().unwrap_or("unknown");
@@ -199,9 +193,16 @@ impl Enricher for CostEnricher {
                 + msg.cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
                 + msg.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
             if cost > 0.0 {
-                msg.cost_cents = Some((cost * 100.0 * 100.0).round() / 100.0);
+                msg.cost_cents = Some((cost * 100.0).round());
+                msg.cost_confidence = "estimated".to_string();
             }
         }
+
+        // Emit cost_confidence tag after potential cost calculation
+        tags.push(Tag {
+            key: "cost_confidence".to_string(),
+            value: msg.cost_confidence.clone(),
+        });
 
         tags
     }
@@ -361,6 +362,10 @@ mod tests {
         msg.output_tokens = 100_000;
         let tags = enricher.enrich(&mut msg);
         assert!(msg.cost_cents.is_some());
+        // Cost was calculated → confidence should be "estimated"
+        assert_eq!(msg.cost_confidence, "estimated");
+        // cost_confidence tag should reflect the final value
+        assert!(tags.iter().any(|t| t.key == "cost_confidence" && t.value == "estimated"));
         // Should have provider and model tags
         assert!(tags.iter().any(|t| t.key == "provider"));
         assert!(tags.iter().any(|t| t.key == "model"));

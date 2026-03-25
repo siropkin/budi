@@ -395,13 +395,15 @@ pub fn load_session_meta(conn: &Connection) -> Result<std::collections::HashMap<
         }
     }
 
-    // Load dominant tool per conversation from hook_events
+    // Load dominant tool per conversation from hook_events using window function
     let mut tool_stmt = conn.prepare(
-        "SELECT conversation_id, tool_name, COUNT(*) as cnt
-         FROM hook_events
-         WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND conversation_id IS NOT NULL
-         GROUP BY conversation_id, tool_name
-         ORDER BY conversation_id, cnt DESC",
+        "SELECT conversation_id, tool_name FROM (
+             SELECT conversation_id, tool_name, COUNT(*) as cnt,
+                    ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY COUNT(*) DESC) as rn
+             FROM hook_events
+             WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND conversation_id IS NOT NULL
+             GROUP BY conversation_id, tool_name
+         ) WHERE rn = 1",
     )?;
 
     let tool_rows = tool_stmt.query_map([], |row| {
@@ -411,14 +413,10 @@ pub fn load_session_meta(conn: &Connection) -> Result<std::collections::HashMap<
         ))
     })?;
 
-    // For each conversation, the first row (highest count) is the dominant tool
-    let mut seen_conversations = std::collections::HashSet::new();
     for row in tool_rows {
         if let Ok((conv_id, tool)) = row {
-            if seen_conversations.insert(conv_id.clone()) {
-                if let Some(meta) = map.get_mut(&conv_id) {
-                    meta.dominant_tool = Some(tool);
-                }
+            if let Some(meta) = map.get_mut(&conv_id) {
+                meta.dominant_tool = Some(tool);
             }
         }
     }

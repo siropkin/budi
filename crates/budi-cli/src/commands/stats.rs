@@ -59,8 +59,7 @@ pub fn cmd_stats(
         .filter(|&&x| x)
         .count();
     if exclusive_count > 1 {
-        eprintln!("Error: --projects, --branches, --branch, --models, and --tag are mutually exclusive.");
-        std::process::exit(1);
+        anyhow::bail!("--projects, --branches, --branch, --models, and --tag are mutually exclusive");
     }
 
     let client = DaemonClient::connect()?;

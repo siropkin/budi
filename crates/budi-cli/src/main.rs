@@ -60,8 +60,8 @@ enum Commands {
         /// Output format: text (default) or json
         #[arg(long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
-        /// Output as JSON (alias for --format json)
-        #[arg(long, default_value_t = false, hide = true)]
+        /// Shorthand for --format json
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     /// Sync recent transcripts (last 7 days)
@@ -72,10 +72,10 @@ enum Commands {
     Open,
     /// Update budi to the latest version
     Update,
-    /// Run database migration (usually runs automatically with sync/update)
+    /// Run database migration explicitly (usually automatic with sync/update)
     #[command(hide = true)]
     Migrate,
-    /// Receive hook events from Claude Code / Cursor (reads JSON from stdin)
+    /// Receive hook events from Claude Code / Cursor (reads JSON from stdin, fire-and-forget)
     #[command(hide = true)]
     Hook {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

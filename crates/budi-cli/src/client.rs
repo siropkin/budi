@@ -104,7 +104,9 @@ impl DaemonClient {
             .client
             .get(format!("{}/analytics/schema-version", self.base_url))
             .send()
-            .context("Failed to connect to budi daemon")?;
+            .context("Failed to connect to budi daemon")?
+            .error_for_status()
+            .context("Schema version request failed")?;
         Ok(resp.json()?)
     }
 
