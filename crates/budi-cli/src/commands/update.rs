@@ -60,6 +60,9 @@ pub fn cmd_update() -> Result<()> {
         anyhow::bail!("Installer exited with {}", status);
     }
 
+    // Clean up legacy hooks from settings.json
+    crate::commands::statusline::remove_legacy_hooks();
+
     // Restart daemon with new version
     println!("Restarting daemon...");
     let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();

@@ -258,6 +258,119 @@ pub fn cmd_statusline_install() -> Result<()> {
     Ok(())
 }
 
+/// Remove legacy budi hooks from ~/.claude/settings.json.
+/// Old budi versions installed hooks that call `budi hook ...` which no longer exists.
+pub fn remove_legacy_hooks() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
+    if !settings_path.exists() {
+        return;
+    }
+    let Ok(raw) = fs::read_to_string(&settings_path) else {
+        return;
+    };
+    let Ok(mut settings) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+
+    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return;
+    };
+
+    let mut changed = false;
+    let event_keys: Vec<String> = hooks.keys().cloned().collect();
+
+    for key in &event_keys {
+        if let Some(arr) = hooks.get_mut(key).and_then(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|entry| {
+                let cmd = entry
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                !cmd.contains("budi")
+            });
+            if arr.len() != before {
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return;
+    }
+
+    // Remove empty event arrays
+    let empty_keys: Vec<String> = hooks
+        .iter()
+        .filter(|(_, v)| v.as_array().is_some_and(|a| a.is_empty()))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &empty_keys {
+        hooks.remove(key);
+    }
+
+    // Remove empty hooks object
+    if hooks.is_empty() {
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("hooks");
+    }
+
+    if let Ok(out) = serde_json::to_string_pretty(&settings) {
+        let _ = fs::write(&settings_path, out);
+    }
+}
+
+/// Testable version that operates on a Value directly. Returns true if modified.
+#[cfg(test)]
+fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
+    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return false;
+    };
+
+    let mut changed = false;
+    let event_keys: Vec<String> = hooks.keys().cloned().collect();
+
+    for key in &event_keys {
+        if let Some(arr) = hooks.get_mut(key).and_then(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|entry| {
+                let cmd = entry
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                !cmd.contains("budi")
+            });
+            if arr.len() != before {
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return false;
+    }
+
+    let empty_keys: Vec<String> = hooks
+        .iter()
+        .filter(|(_, v)| v.as_array().is_some_and(|a| a.is_empty()))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &empty_keys {
+        hooks.remove(key);
+    }
+
+    if hooks.is_empty() {
+        settings.as_object_mut().unwrap().remove("hooks");
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +437,48 @@ mod tests {
         assert_eq!(vals.get("branch").unwrap(), "$12.50");
         assert_eq!(vals.get("provider").unwrap(), "claude_code");
         assert!(!vals.contains_key("session")); // not in response
+    }
+
+    #[test]
+    fn remove_legacy_hooks_removes_budi_entries() {
+        let mut settings = json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"type": "command", "command": "budi hook user-prompt-submit"}
+                ],
+                "PostToolUse": [
+                    {"type": "command", "command": "budi hook post-tool-use"}
+                ]
+            },
+            "statusLine": {"type": "command", "command": "budi statusline"}
+        });
+        assert!(remove_budi_hooks_from_value(&mut settings));
+        // hooks object removed entirely since all entries were budi
+        assert!(settings.get("hooks").is_none());
+        // statusLine untouched
+        assert!(settings.get("statusLine").is_some());
+    }
+
+    #[test]
+    fn remove_legacy_hooks_preserves_non_budi() {
+        let mut settings = json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"type": "command", "command": "budi hook user-prompt-submit"},
+                    {"type": "command", "command": "other-tool do-something"}
+                ]
+            }
+        });
+        assert!(remove_budi_hooks_from_value(&mut settings));
+        let hooks = settings.get("hooks").unwrap();
+        let arr = hooks.get("UserPromptSubmit").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["command"], "other-tool do-something");
+    }
+
+    #[test]
+    fn remove_legacy_hooks_noop_without_hooks() {
+        let mut settings = json!({"statusLine": {"type": "command"}});
+        assert!(!remove_budi_hooks_from_value(&mut settings));
     }
 }

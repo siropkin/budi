@@ -76,6 +76,12 @@ enum Commands {
     /// Run database migration (usually runs automatically with sync/update)
     #[command(hide = true)]
     Migrate,
+    /// Deprecated no-op (kept for backwards compatibility with old hooks)
+    #[command(hide = true)]
+    Hook {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        _args: Vec<String>,
+    },
     /// Print a compact status line (reads stdin, outputs one line)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -153,6 +159,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Hook { .. } => Ok(()),
         Commands::Statusline { install, format } => {
             if install {
                 commands::statusline::cmd_statusline_install()

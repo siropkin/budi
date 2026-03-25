@@ -14,6 +14,7 @@ pub fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
     config::ensure_repo_layout(&repo_root)?;
     config::save(&repo_root, &config)?;
 
+    super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
 
     if !no_daemon {
