@@ -76,6 +76,18 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    pub fn history(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!("{}/history", self.base_url))
+            .timeout(std::time::Duration::from_secs(600)) // History can take minutes
+            .send()
+            .context("Failed to connect to budi daemon")?
+            .error_for_status()
+            .context("History sync request failed")?;
+        Ok(resp.json()?)
+    }
+
     pub fn migrate(&self) -> Result<Value> {
         let resp = self
             .client

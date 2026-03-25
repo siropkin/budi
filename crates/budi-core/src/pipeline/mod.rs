@@ -20,8 +20,13 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Create the default pipeline with all standard enrichers.
-    pub fn default_pipeline(tags_config: Option<crate::config::TagsConfig>) -> Self {
+    /// `session_cache` is pre-loaded from the sessions/hook_events tables.
+    pub fn default_pipeline(
+        tags_config: Option<crate::config::TagsConfig>,
+        session_cache: std::collections::HashMap<String, crate::hooks::SessionMeta>,
+    ) -> Self {
         let enrichers: Vec<Box<dyn Enricher>> = vec![
+            Box::new(enrichers::HookEnricher::new(session_cache)),
             Box::new(enrichers::IdentityEnricher::new()),
             Box::new(enrichers::GitEnricher::new()),
             Box::new(enrichers::CostEnricher),
@@ -39,8 +44,37 @@ impl Pipeline {
         let mut all_tags = Vec::with_capacity(messages.len());
         // Track (session_id, key, value) to avoid duplicate session-level tags.
         let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
-        let session_level_keys: &[&str] =
-            &["ticket_id", "ticket_prefix", "branch", "repo", "session_title", "user", "machine"];
+        let session_level_keys: &[&str] = &[
+            "ticket_id", "ticket_prefix", "branch", "repo", "session_title", "user", "machine",
+            "composer_mode", "permission_mode", "activity", "user_email", "duration", "dominant_tool",
+            "cost_confidence",
+        ];
+
+        // Propagate git_branch, repo_id, cwd from user messages to subsequent
+        // assistant messages in the same session (JSONL only has gitBranch on user entries).
+        let mut session_branch: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut session_repo: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut session_cwd: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for msg in messages.iter_mut() {
+            if let Some(ref sid) = msg.session_id {
+                // Store latest values from any message that has them
+                if let Some(ref b) = msg.git_branch {
+                    session_branch.insert(sid.clone(), b.clone());
+                } else if let Some(b) = session_branch.get(sid) {
+                    msg.git_branch = Some(b.clone());
+                }
+                if let Some(ref r) = msg.repo_id {
+                    session_repo.insert(sid.clone(), r.clone());
+                } else if let Some(r) = session_repo.get(sid) {
+                    msg.repo_id = Some(r.clone());
+                }
+                if let Some(ref c) = msg.cwd {
+                    session_cwd.insert(sid.clone(), c.clone());
+                } else if let Some(c) = session_cwd.get(sid) {
+                    msg.cwd = Some(c.clone());
+                }
+            }
+        }
 
         for msg in messages.iter_mut() {
             normalize(msg);
@@ -281,6 +315,7 @@ mod tests {
             parent_uuid: None,
             user_name: None,
             machine_name: None,
+            cost_confidence: "exact".to_string(),
         }
     }
 }

@@ -61,8 +61,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// Sync transcripts into the analytics database
+    /// Sync recent transcripts (last 7 days)
     Sync,
+    /// Load full transcript history (all time — may take a while)
+    History,
     /// Open the budi dashboard in the browser
     Open,
     /// Update budi to the latest version
@@ -70,7 +72,7 @@ enum Commands {
     /// Run database migration (usually runs automatically with sync/update)
     #[command(hide = true)]
     Migrate,
-    /// Deprecated no-op (kept for backwards compatibility with old hooks)
+    /// Receive hook events from Claude Code / Cursor (reads JSON from stdin)
     #[command(hide = true)]
     Hook {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -135,6 +137,7 @@ fn main() -> Result<()> {
             period, projects, branches, branch, models, provider, tag, json,
         ),
         Commands::Sync => commands::sync::cmd_sync(),
+        Commands::History => commands::sync::cmd_history(),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update => commands::update::cmd_update(),
         Commands::Migrate => {
@@ -151,7 +154,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Hook { .. } => Ok(()),
+        Commands::Hook { .. } => commands::hook::cmd_hook(),
         Commands::Statusline { install, format } => {
             if install {
                 commands::statusline::cmd_statusline_install()

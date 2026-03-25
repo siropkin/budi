@@ -15,8 +15,8 @@ budi is built on a pluggable provider architecture — each AI coding agent is a
 
 | Agent | Status | Tokens | Cost | Detection |
 |-------|--------|--------|------|-----------|
-| **Claude Code** | Supported | Per-message | Per-model pricing | `~/.claude/` JSONL transcripts |
-| **Cursor** | Supported | Per-model | Per-model pricing | `state.vscdb` composerData |
+| **Claude Code** | Supported | Per-message | Per-model pricing | JSONL transcripts + hooks |
+| **Cursor** | Supported | Per-request | Exact from API | Usage API + hooks |
 | **GitHub Copilot CLI** | Planned | | | `~/.copilot/` |
 | **Codex CLI** | Planned | | | `~/.codex/` |
 | **Cline** | Planned | | | VS Code globalStorage |
@@ -41,20 +41,35 @@ Budi has a pluggable **provider** architecture. Each AI coding agent is a provid
 
 ### Claude Code
 
-Budi reads Claude Code's JSONL transcript files under `~/.claude/projects/`. Each conversation turn is a line in the transcript with full token usage (input, output, cache read/write), model name, timestamps, and session metadata. The daemon syncs these files every 30 seconds.
+Budi reads Claude Code's JSONL transcript files under `~/.claude/projects/`. Each conversation turn is a line in the transcript with full token usage (input, output, cache read/write), model name, timestamps, and session metadata. The daemon syncs these files every 30 seconds. Additionally, budi installs hooks that capture real-time events: session lifecycle, tool usage durations, context pressure, and prompt classification.
 
 ### Cursor
 
-Budi reads Cursor's `state.vscdb` SQLite database — Cursor's internal store for session data. This provides token estimates, per-model usage, lines changed, and git branch context. No proxy or API interception needed.
+Budi fetches exact per-request token usage and cost from Cursor's Usage API. Authentication is extracted automatically from Cursor's local `state.vscdb` database — no manual token setup needed. Each API event includes exact `inputTokens`, `outputTokens`, `cacheReadTokens`, and `totalCents`. Events are correlated to hook sessions for git branch, repo, and workspace attribution. JSONL agent transcripts serve as a fallback when the API is unavailable.
+
+### Hooks
+
+Both Claude Code and Cursor support lifecycle hooks that budi uses for real-time event capture. Hooks are installed automatically by `budi init` and provide:
+
+| Data | Claude Code | Cursor |
+|------|-------------|--------|
+| Session start/end | SessionStart, SessionEnd | sessionStart, sessionEnd |
+| Tool usage + duration | PostToolUse | postToolUse |
+| Context pressure | PreCompact | preCompact |
+| Subagent tracking | SubagentStop | subagentStop |
+| Prompt classification | UserPromptSubmit | — |
+| File modifications | — | afterFileEdit |
+
+Hook data is stored in a `hook_events` table and used to generate additional tags (activity type, session duration, dominant tool, composer mode).
 
 | Data | Source | Quality |
 |------|--------|---------|
-| **Tokens** | `contextUsagePercent × contextTokenLimit` | Session-level (78% of sessions) |
-| **Cost** | Estimated from tokens × model pricing | Per-model API rates |
-| **Models** | `modelConfig.modelName` (resolves "default" from cli-config) | 99% coverage |
-| **Git branch** | `createdOnBranch` or `.git/HEAD` fallback | 59% coverage |
+| **Tokens** | Usage API (`inputTokens`, `outputTokens`, `cacheReadTokens`) | Exact per-request |
+| **Cost** | Usage API (`totalCents`) | Exact from Cursor billing |
+| **Models** | Usage API (`model` field) | 100% coverage |
+| **Git branch** | Hook sessions (`workspace_root` → `.git/HEAD`) | From session context |
 
-Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Claude Code data in all views.
+Cursor is auto-detected. Run `budi sync` and Cursor data appears alongside Claude Code in all views.
 
 ## Features
 
@@ -68,6 +83,7 @@ Cursor is auto-detected. Run `budi sync` and Cursor sessions appear alongside Cl
 - **Live status line** — cost stats in Claude Code, with customizable data slots and format templates
 - **Web dashboard** — analytics UI at `http://localhost:7878/dashboard`
 - **Tags system** — flexible tagging with auto-detected tags (repo, branch, ticket, model) and custom rules via `~/.config/budi/tags.toml`
+- **Hooks integration** — real-time event capture from Claude Code and Cursor hooks for session lifecycle, tool usage, and prompt classification
 
 ## How budi compares
 
@@ -118,7 +134,7 @@ cd /path/to/your/repo
 budi init
 ```
 
-This starts the daemon, installs the status line, and syncs existing transcripts. Data syncs automatically every 30 seconds — no hooks or configuration needed.
+This starts the daemon, installs the status line, sets up hooks for Claude Code and Cursor, and syncs existing transcripts. Data syncs automatically every 30 seconds.
 
 **Step 3 — Use your AI coding agent normally.** Budi tracks your sessions in the background.
 
@@ -229,7 +245,8 @@ budi stats --branch <name>    # cost for a specific branch
 budi stats --tag ticket_id    # cost per ticket (auto-extracted from branch names)
 budi stats --tag ticket_prefix # cost per team prefix (e.g. PAVA, SEN)
 budi stats --provider <name>  # filter by provider (e.g. claude_code, cursor)
-budi sync                     # sync all providers into the analytics database
+budi sync                     # sync recent transcripts (last 7 days)
+budi history                  # load full transcript history (all time)
 budi update                   # check for updates and install the latest version
 budi --version                # print version information
 ```
@@ -252,6 +269,12 @@ Budi automatically tags every message with metadata extracted during ingestion:
 | `branch` | Git branch name | `feature/PAVA-2057-auth` |
 | `ticket_id` | Extracted from branch (`[A-Z]+-\d+`) | `PAVA-2057` |
 | `ticket_prefix` | Ticket prefix | `PAVA` |
+| `activity` | Prompt classification (hooks) | `feature`, `bugfix`, `refactor`, `question` |
+| `composer_mode` | Cursor session mode (hooks) | `agent`, `ask`, `edit` |
+| `permission_mode` | Claude Code mode (hooks) | `default`, `auto`, `plan` |
+| `duration` | Session duration bucket (hooks) | `short`, `medium`, `long` |
+| `dominant_tool` | Most-used tool in session (hooks) | `Bash`, `Edit`, `Read` |
+| `user_email` | User email from hooks | `user@example.com` |
 
 ### Custom tag rules
 
@@ -291,8 +314,10 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
-| POST | `/sync` | Trigger sync (supports `migrate` param) |
+| POST | `/sync` | Sync recent data (last 7 days) |
+| POST | `/history` | Load full transcript history (all time) |
 | POST | `/migrate` | Run database schema migration |
+| POST | `/hooks/ingest` | Receive hook events from Claude Code / Cursor |
 
 ### Analytics
 
@@ -311,6 +336,8 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | GET | `/analytics/activity` | Token activity over time (bucketed) |
 | GET | `/analytics/context-usage` | Context window stats |
 | GET | `/analytics/tags` | Cost breakdown by tag |
+| GET | `/analytics/sessions` | Session list with lifecycle metadata |
+| GET | `/analytics/tools` | Tool usage frequency and duration |
 | GET | `/analytics/statusline` | Day/week/month/session/branch/project costs |
 | GET | `/analytics/schema-version` | Current and target schema version |
 
@@ -325,13 +352,16 @@ Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
                          │              │                    ▲
 ┌──────────┐    HTTP     │  - 30s sync  │    Pipeline       │
 │ Dashboard│ ──────────▶ │  - analytics │ ──────────────────┘
-└──────────┘             └──────────────┘    Extract → Normalize
-                               ▲                 → Enrich → Load
-                               │
-┌──────────┐   JSONL     │              ┌──────────┐  state.vscdb
-│ Claude   │ ────────────┘              │ Cursor   │ ────────────▶ Provider sync
-│ Code     │  (transcripts)             └──────────┘    (read-only)
-└──────────┘
+└──────────┘             │  - hooks     │    Extract → Normalize
+                         └──────────────┘      → Enrich → Load
+                            ▲   ▲   ▲
+                 JSONL ─────┘   │   └───── Cursor API
+               (transcripts)    │       (usage events)
+                                │
+┌──────────┐  hooks    ┌──────────┐  hooks
+│ Claude   │ ──────────│ budi hook│──────── Cursor
+│ Code     │  (stdin)  │  (CLI)   │ (stdin)
+└──────────┘           └──────────┘
 ```
 
 The daemon is the single source of truth — the CLI never opens the database directly.

@@ -128,6 +128,9 @@ pub struct ParsedMessage {
     pub user_name: Option<String>,
     /// Machine name (used by enrichers to produce tags, not stored as column).
     pub machine_name: Option<String>,
+    /// Confidence level: "exact" (tokens from source), "exact_cost" (cost from API, tokens estimated),
+    /// "estimated" (both calculated from heuristics).
+    pub cost_confidence: String,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -159,6 +162,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             parent_uuid: u.parent_uuid,
             user_name: None,
             machine_name: None,
+            cost_confidence: "exact".to_string(),
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
@@ -187,6 +191,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 parent_uuid: a.parent_uuid,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             })
         }
         TranscriptEntry::Other => None,

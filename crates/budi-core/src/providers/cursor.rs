@@ -1,10 +1,10 @@
 //! Cursor provider — implements the Provider trait for Cursor AI editor.
 //!
-//! Primary data source: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
-//! — a SQLite database containing composerData sessions with per-model cost, request counts,
-//! context token usage, timestamps, lines changed, model names, and session titles.
+//! Primary data source: Cursor Usage API (`/api/dashboard/get-filtered-usage-events`)
+//! — returns exact per-request tokens and cost. Auth token extracted from state.vscdb.
 //!
-//! Fallback: JSONL agent transcripts under `~/.cursor/projects/*/agent-transcripts/`.
+//! Legacy fallback: composerData from state.vscdb (will be removed).
+//! Secondary fallback: JSONL agent transcripts under `~/.cursor/projects/*/agent-transcripts/`.
 
 use std::path::{Path, PathBuf};
 
@@ -17,20 +17,6 @@ use serde_json::Value;
 use crate::analytics;
 use crate::jsonl::ParsedMessage;
 use crate::provider::{DiscoveredFile, ModelPricing, Provider};
-
-/// Resolve the Cursor default model from ~/.cursor/cli-config.json.
-/// Returns None if the file doesn't exist or can't be parsed.
-fn resolve_default_model() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = PathBuf::from(home).join(".cursor/cli-config.json");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let parsed: Value = serde_json::from_str(&raw).ok()?;
-    parsed
-        .get("model")
-        .and_then(|m| m.get("modelId"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
 
 /// The Cursor provider.
 pub struct CursorProvider;
@@ -96,25 +82,11 @@ impl Provider for CursorProvider {
         conn: &mut Connection,
         pipeline: &mut crate::pipeline::Pipeline,
     ) -> Option<Result<(usize, usize)>> {
-        let paths = all_state_vscdb_paths();
-        if paths.is_empty() {
-            return None; // Fall back to JSONL
+        // Sync from Cursor Usage API (exact per-request tokens and cost)
+        match sync_from_usage_api(conn, pipeline) {
+            Some(result) => Some(result),
+            None => None, // No auth available — fall back to JSONL
         }
-        let mut total_sessions = 0;
-        let mut total_messages = 0;
-        for path in &paths {
-            match sync_from_state_vscdb(conn, path, pipeline) {
-                Ok((s, m)) => {
-                    total_sessions += s;
-                    total_messages += m;
-                }
-                Err(e) => {
-                    tracing::warn!("Cursor sync failed for {}: {}", path.display(), e);
-                }
-            }
-        }
-
-        Some(Ok((total_sessions, total_messages)))
     }
 }
 
@@ -168,278 +140,286 @@ fn scan_workspace_dbs(ws_dir: &Path, paths: &mut Vec<PathBuf>) {
 }
 
 // ---------------------------------------------------------------------------
-// state.vscdb sync — composerData sessions with rich analytics
+// Cursor Usage API — exact per-request tokens and cost
 // ---------------------------------------------------------------------------
 
-/// Sync from Cursor's state.vscdb SQLite database.
-/// Reads composerData and bubbleId entries from the cursorDiskKV table.
-fn sync_from_state_vscdb(
-    budi_conn: &mut Connection,
-    vscdb_path: &Path,
-    pipeline: &mut crate::pipeline::Pipeline,
-) -> Result<(usize, usize)> {
-    // Open state.vscdb read-only (Cursor may be running with WAL mode)
-    let vscdb = Connection::open_with_flags(
-        vscdb_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("Failed to open {}", vscdb_path.display()))?;
-
-    // Get watermark for incremental sync
-    let watermark_key = format!("cursor-vscdb:{}", vscdb_path.display());
-    let last_watermark = analytics::get_sync_offset(budi_conn, &watermark_key).unwrap_or(0) as i64;
-
-    let mut total_messages = 0usize;
-    let mut total_sessions = 0usize;
-
-    // Parse composerData entries (rich session data with cost, model, lines)
-    let (sessions, new_watermark) = parse_composer_sessions(&vscdb, last_watermark)?;
-
-    for session in &sessions {
-        let mut messages = composer_session_to_messages(session);
-        if !messages.is_empty() {
-            let tags = pipeline.process(&mut messages);
-            let count = analytics::ingest_messages(budi_conn, &messages, Some(&tags))?;
-            if count > 0 {
-                total_sessions += 1;
-                total_messages += count;
-            }
-        }
-    }
-
-    // Note: bubbleId entries have token counts but no timestamps, so they
-    // can't be properly time-bucketed. composerData already provides cost,
-    // model, lines, and context data — which is what matters for analytics.
-
-    // Save the watermark
-    let final_watermark = new_watermark;
-    if final_watermark > last_watermark {
-        analytics::set_sync_offset(budi_conn, &watermark_key, final_watermark as usize)?;
-    }
-
-    Ok((total_sessions, total_messages))
+/// Auth credentials extracted from Cursor's state.vscdb.
+struct CursorAuth {
+    user_id: String,
+    jwt: String,
 }
 
-/// A parsed composer session from state.vscdb.
+/// A single usage event from the Cursor API.
 #[derive(Debug)]
-struct ComposerSession {
-    key: String,
-    name: Option<String>,
-    created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
-    last_updated_at: Option<i64>, // Unix millis, used as watermark
-    #[allow(dead_code)]
-    is_agentic: bool,
-    /// Per-model usage data within this session.
-    usage_entries: Vec<ComposerUsageEntry>,
-    /// Context token counts from the session.
-    context_tokens_used: Option<u64>,
-    context_token_limit: Option<u64>,
-    /// Model name from modelConfig (fallback when usageData is empty).
-    model_name: Option<String>,
-    /// Git branch from `createdOnBranch` or resolved from workspace .git/HEAD.
-    git_branch: Option<String>,
-    /// Workspace folder path, extracted from file URIs in the session.
-    cwd: Option<String>,
-}
-
-#[derive(Debug)]
-struct ComposerUsageEntry {
+struct CursorUsageEvent {
+    timestamp_ms: i64,
     model: String,
-    cost_cents: f64,
-    #[allow(dead_code)]
-    num_requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    total_cents: f64,
 }
 
-fn parse_composer_sessions(
-    vscdb: &Connection,
-    since_watermark: i64,
-) -> Result<(Vec<ComposerSession>, i64)> {
-    let mut sessions = Vec::new();
-    let mut max_watermark = since_watermark;
-
-    // Resolve "default" model name once for the entire sync
-    let default_model = resolve_default_model();
-
-    // Query all composerData:* keys from cursorDiskKV
-    let mut stmt =
-        vscdb.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+/// Extract auth credentials from Cursor's state.vscdb ItemTable.
+fn extract_cursor_auth() -> Option<CursorAuth> {
+    let paths = all_state_vscdb_paths();
+    // Only global state.vscdb has ItemTable with auth
+    let global_path = paths.into_iter().find(|p| {
+        p.to_string_lossy().contains("globalStorage")
     })?;
 
-    for row in rows {
-        let (key, value) = match row {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+    let vscdb = Connection::open_with_flags(
+        &global_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ).ok()?;
 
-        let parsed: Value = match serde_json::from_str(&value) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    let jwt: String = vscdb
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
 
-        // Check watermark — skip sessions we've already processed
-        let last_updated = parsed.get("lastUpdatedAt").and_then(|v| v.as_i64());
-        if let Some(ts) = last_updated {
-            if ts <= since_watermark {
-                continue;
-            }
-            max_watermark = max_watermark.max(ts);
-        }
-
-        let name = parsed
-            .get("name")
-            .or_else(|| parsed.get("title"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let created_at = parsed
-            .get("createdAt")
-            .and_then(|v| v.as_i64())
-            .and_then(DateTime::from_timestamp_millis);
-
-        let is_agentic = parsed
-            .get("isAgentic")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let context_token_limit = parsed
-            .get("contextTokenLimit")
-            .or_else(|| parsed.get("maxContextTokens"))
-            .and_then(|v| v.as_u64());
-
-        // Try contextTokensUsed first, then estimate from contextUsagePercent
-        let context_tokens_used = parsed
-            .get("contextTokensUsed")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                let pct = parsed.get("contextUsagePercent").and_then(|v| v.as_f64())?;
-                let limit = context_token_limit.unwrap_or(200_000); // default 200K
-                Some((pct / 100.0 * limit as f64) as u64)
-            });
-
-        let raw_model = parsed
-            .get("modelConfig")
-            .and_then(|v| v.get("modelName"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // Resolve "default" to the actual configured model
-        let model_name = match raw_model.as_deref() {
-            Some("default") | None => default_model.clone().or(raw_model),
-            _ => raw_model,
-        };
-
-        // Parse usageData — per-model cost breakdown
-        let mut usage_entries = Vec::new();
-        if let Some(usage_data) = parsed.get("usageData")
-            && let Some(obj) = usage_data.as_object()
-        {
-            for (model, model_data) in obj {
-                let cost = model_data
-                    .get("costInCents")
-                    .or_else(|| model_data.get("cost"))
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-
-                let requests = model_data
-                    .get("numRequests")
-                    .or_else(|| model_data.get("requestCount"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1);
-
-                if cost > 0.0 || requests > 0 {
-                    usage_entries.push(ComposerUsageEntry {
-                        model: model.clone(),
-                        cost_cents: cost,
-                        num_requests: requests,
-                    });
-                }
-            }
-        }
-
-        // Extract git branch — prefer createdOnBranch (stored by Cursor), fall
-        // back to reading .git/HEAD from the workspace folder (pure file read).
-        let created_on_branch = parsed
-            .get("createdOnBranch")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        // Extract workspace folder from file URIs in the session.
-        let cwd = extract_folder_from_file_uris(&parsed);
-
-        let git_branch = created_on_branch.or_else(|| {
-            cwd.as_deref().and_then(resolve_git_branch_from_head)
-        });
-
-        sessions.push(ComposerSession {
-            key,
-            name,
-            created_at,
-            last_updated_at: last_updated,
-            is_agentic,
-            usage_entries,
-            context_tokens_used,
-            context_token_limit,
-            model_name,
-            git_branch,
-            cwd,
-        });
+    if jwt.is_empty() {
+        return None;
     }
 
-    Ok((sessions, max_watermark))
-}
-
-/// Extract a workspace folder path from file URIs in composerData.
-/// Checks `allAttachedFileCodeChunksUris` (string URIs) and
-/// `newlyCreatedFiles` (objects with `uri.fsPath`).
-fn extract_folder_from_file_uris(parsed: &Value) -> Option<String> {
-    // Try allAttachedFileCodeChunksUris first (array of "file:///..." strings)
-    if let Some(uris) = parsed.get("allAttachedFileCodeChunksUris").and_then(|v| v.as_array()) {
-        for uri in uris {
-            if let Some(path) = uri.as_str().and_then(file_uri_to_path) {
-                return find_git_root(&path);
-            }
-        }
+    // Decode JWT payload to extract user_id from `sub` field.
+    // JWT is header.payload.signature — we need the payload (base64url).
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
     }
 
-    // Try newlyCreatedFiles (array of objects with uri.fsPath)
-    if let Some(files) = parsed.get("newlyCreatedFiles").and_then(|v| v.as_array()) {
-        for file in files {
-            if let Some(fs_path) = file
-                .get("uri")
-                .and_then(|u| u.get("fsPath"))
-                .and_then(|v| v.as_str())
-            {
-                return find_git_root(&PathBuf::from(fs_path));
-            }
-        }
-    }
-
-    None
-}
-
-/// Convert a `file:///path` URI to a PathBuf.
-fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://").map(PathBuf::from)
-}
-
-/// Walk up from a file path to find the nearest directory containing `.git`.
-fn find_git_root(path: &Path) -> Option<String> {
-    let mut dir = if path.is_file() || !path.exists() {
-        path.parent()?
-    } else {
-        path
+    let payload_b64 = parts[1];
+    // base64url → standard base64
+    let b64 = payload_b64.replace('-', "+").replace('_', "/");
+    let padded = match b64.len() % 4 {
+        2 => format!("{b64}=="),
+        3 => format!("{b64}="),
+        _ => b64,
     };
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir.to_string_lossy().to_string());
-        }
-        dir = dir.parent()?;
-    }
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &padded).ok()?;
+    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+
+    // `sub` is like "user_2xyz..." or "auth0|273223875" — extract the user ID part
+    let sub = payload.get("sub")?.as_str()?;
+    let user_id = sub.split('|').last().unwrap_or(sub).to_string();
+
+    Some(CursorAuth { user_id, jwt })
 }
+
+/// Fetch usage events from Cursor's API since a timestamp watermark.
+fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<CursorUsageEvent>> {
+    let cookie = format!(
+        "WorkosCursorSessionToken={}%3A%3A{}",
+        auth.user_id, auth.jwt
+    );
+
+    let agent = ureq::agent();
+    let mut response = agent
+        .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+        .header("Cookie", &cookie)
+        .header("Origin", "https://cursor.com")
+        .header("Referer", "https://cursor.com/dashboard")
+        .send_json(serde_json::json!({}))?;
+
+    let body: Value = response.body_mut().read_json()?;
+
+    let events_arr = body
+        .get("usageEventsDisplay")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let since = since_ms.unwrap_or(0);
+    let mut events: Vec<CursorUsageEvent> = Vec::new();
+
+    for ev in &events_arr {
+        let ts_str = ev.get("timestamp").and_then(|v| v.as_str()).unwrap_or("0");
+        let ts: i64 = ts_str.parse().unwrap_or(0);
+
+        if ts <= since {
+            continue;
+        }
+
+        let model = ev
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let token_usage = ev.get("tokenUsage");
+        let input_tokens = token_usage
+            .and_then(|t: &Value| t.get("inputTokens"))
+            .and_then(|v: &Value| v.as_u64())
+            .unwrap_or(0);
+        let output_tokens = token_usage
+            .and_then(|t: &Value| t.get("outputTokens"))
+            .and_then(|v: &Value| v.as_u64())
+            .unwrap_or(0);
+        let cache_read_tokens = token_usage
+            .and_then(|t: &Value| t.get("cacheReadTokens"))
+            .and_then(|v: &Value| v.as_u64())
+            .unwrap_or(0);
+        let total_cents = token_usage
+            .and_then(|t: &Value| t.get("totalCents"))
+            .and_then(|v: &Value| v.as_f64())
+            .unwrap_or(0.0);
+
+        events.push(CursorUsageEvent {
+            timestamp_ms: ts,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            total_cents,
+        });
+    }
+
+    // Sort by timestamp ascending
+    events.sort_by_key(|e| e.timestamp_ms);
+
+    Ok(events)
+}
+
+/// Session context for correlating API events to hook sessions.
+struct SessionContext {
+    start_ms: i64,
+    end_ms: i64, // i64::MAX if session still open
+    conversation_id: String,
+    workspace_root: Option<String>,
+    repo_id: Option<String>,
+    git_branch: Option<String>,
+}
+
+/// Load session contexts from the sessions table.
+fn load_session_contexts(conn: &Connection) -> Vec<SessionContext> {
+    let mut stmt = match conn.prepare(
+        "SELECT conversation_id, started_at, ended_at, workspace_root, repo_id, git_branch
+         FROM sessions WHERE provider = 'cursor'
+         ORDER BY started_at ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    stmt.query_map([], |row| {
+        let cid: String = row.get(0)?;
+        let started: String = row.get(1)?;
+        let ended: Option<String> = row.get(2)?;
+
+        let start_ms = started
+            .parse::<DateTime<Utc>>()
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0);
+        let end_ms = ended
+            .and_then(|e| e.parse::<DateTime<Utc>>().ok())
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(i64::MAX);
+
+        Ok(SessionContext {
+            start_ms,
+            end_ms,
+            conversation_id: cid,
+            workspace_root: row.get(3)?,
+            repo_id: row.get(4)?,
+            git_branch: row.get(5)?,
+        })
+    })
+    .ok()
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Convert API usage events into ParsedMessages, correlating with hook sessions.
+fn usage_events_to_messages(
+    events: &[CursorUsageEvent],
+    sessions: &[SessionContext],
+) -> Vec<ParsedMessage> {
+    events
+        .iter()
+        .map(|ev| {
+            // Find matching session by timestamp
+            let matched = sessions
+                .iter()
+                .find(|s| ev.timestamp_ms >= s.start_ms && ev.timestamp_ms <= s.end_ms);
+
+            let session_id = matched
+                .map(|s| s.conversation_id.clone())
+                .unwrap_or_else(|| "cursor-api-orphan".to_string());
+
+            let timestamp = DateTime::from_timestamp_millis(ev.timestamp_ms)
+                .unwrap_or_else(Utc::now);
+
+            // Deterministic UUID from timestamp + model
+            let uuid = format!("cursor-api-{}-{}", ev.timestamp_ms, ev.model);
+
+            ParsedMessage {
+                uuid,
+                session_id: Some(session_id),
+                timestamp,
+                cwd: matched.and_then(|s| s.workspace_root.clone()),
+                role: "assistant".to_string(),
+                model: Some(ev.model.clone()),
+                input_tokens: ev.input_tokens,
+                output_tokens: ev.output_tokens,
+                cache_creation_tokens: 0,
+                cache_read_tokens: ev.cache_read_tokens,
+                git_branch: matched.and_then(|s| s.git_branch.clone()),
+                repo_id: matched.and_then(|s| s.repo_id.clone()),
+                provider: "cursor".to_string(),
+                cost_cents: Some(ev.total_cents),
+                context_tokens_used: None,
+                context_token_limit: None,
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "exact".to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Sync from Cursor's Usage API (exact per-request tokens and cost).
+fn sync_from_usage_api(
+    conn: &mut Connection,
+    pipeline: &mut crate::pipeline::Pipeline,
+) -> Option<Result<(usize, usize)>> {
+    let auth = extract_cursor_auth()?;
+
+    let watermark_key = "cursor-api-usage";
+    let watermark = analytics::get_sync_offset(conn, watermark_key)
+        .ok()
+        .and_then(|v| if v > 0 { Some(v as i64) } else { None });
+
+    let events = match fetch_usage_events(&auth, watermark) {
+        Ok(e) => e,
+        Err(e) => return Some(Err(e)),
+    };
+
+    if events.is_empty() {
+        return Some(Ok((0, 0)));
+    }
+
+    let sessions = load_session_contexts(conn);
+    let mut messages = usage_events_to_messages(&events, &sessions);
+    let tags = pipeline.process(&mut messages);
+    let count = match analytics::ingest_messages(conn, &messages, Some(&tags)) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+
+    // Update watermark to latest event timestamp
+    if let Some(last) = events.last() {
+        let _ = analytics::set_sync_offset(conn, watermark_key, last.timestamp_ms as usize);
+    }
+
+    Some(Ok((1, count)))
+}
+
 
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.
 /// Returns `None` for detached HEAD or if the file can't be read.
@@ -452,151 +432,8 @@ pub fn resolve_git_branch_from_head(dir: &str) -> Option<String> {
         .map(|b| b.to_string())
 }
 
-/// Convert a ComposerSession into ParsedMessages for ingestion.
-fn composer_session_to_messages(session: &ComposerSession) -> Vec<ParsedMessage> {
-    let mut messages = Vec::new();
-
-    let session_id = format!(
-        "cursor-composer-{}",
-        session.key.replace("composerData:", "")
-    );
-    let timestamp = session
-        .created_at
-        .or_else(|| {
-            session
-                .last_updated_at
-                .map(|ms| chrono::DateTime::from_timestamp_millis(ms).unwrap_or_else(Utc::now))
-        })
-        .unwrap_or_else(Utc::now);
-
-    // Create a user message for the session
-    messages.push(ParsedMessage {
-        uuid: format!("{}-user", session_id),
-        session_id: Some(session_id.clone()),
-        timestamp,
-        cwd: session.cwd.clone(),
-        role: "user".to_string(),
-        model: None,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-        git_branch: session.git_branch.clone(),
-        repo_id: None,
-        provider: "cursor".to_string(),
-        cost_cents: None,
-        context_tokens_used: None,
-        context_token_limit: None,
-        session_title: session.name.clone(),
-        parent_uuid: None,
-        user_name: None,
-        machine_name: None,
-    });
-
-    // Create an assistant message per model used in the session
-    for (i, usage) in session.usage_entries.iter().enumerate() {
-        // Reverse-calculate approximate tokens from cost and pricing
-        let pricing = cursor_pricing_for_model(&usage.model);
-        let (input_tokens, output_tokens) = estimate_tokens_from_cost(usage.cost_cents, &pricing);
-
-        messages.push(ParsedMessage {
-            uuid: format!("{}-assistant-{}", session_id, i),
-            session_id: Some(session_id.clone()),
-            timestamp,
-            cwd: session.cwd.clone(),
-            role: "assistant".to_string(),
-            model: Some(usage.model.clone()),
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            git_branch: session.git_branch.clone(),
-            repo_id: None,
-            provider: "cursor".to_string(),
-            cost_cents: Some(usage.cost_cents),
-            context_tokens_used: session.context_tokens_used,
-            context_token_limit: session.context_token_limit,
-            session_title: session.name.clone(),
-            parent_uuid: None,
-            user_name: None,
-            machine_name: None,
-        });
-    }
-
-    // If no usage entries but session exists, use contextTokensUsed as input_tokens fallback
-    if session.usage_entries.is_empty() {
-        let input_tokens = session.context_tokens_used.unwrap_or(0);
-        // Estimate output as ~25% of input (typical coding ratio)
-        let output_tokens = input_tokens / 4;
-
-        // Estimate cost from tokens using provider pricing
-        let model = session.model_name.as_deref().unwrap_or("unknown");
-        let pricing = cursor_pricing_for_model(model);
-        let cost = input_tokens as f64 * pricing.input / 1_000_000.0
-            + output_tokens as f64 * pricing.output / 1_000_000.0;
-        let cost_cents = (cost * 100.0 * 100.0).round() / 100.0; // cents with 2 decimal places
-
-        messages.push(ParsedMessage {
-            uuid: format!("{}-assistant-0", session_id),
-            session_id: Some(session_id.clone()),
-            timestamp,
-            cwd: session.cwd.clone(),
-            role: "assistant".to_string(),
-            model: session.model_name.clone(),
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            git_branch: session.git_branch.clone(),
-            repo_id: None,
-            provider: "cursor".to_string(),
-            cost_cents: if cost_cents > 0.0 {
-                Some(cost_cents)
-            } else {
-                None
-            },
-            context_tokens_used: session.context_tokens_used,
-            context_token_limit: session.context_token_limit,
-            session_title: session.name.clone(),
-            parent_uuid: None,
-            user_name: None,
-            machine_name: None,
-        });
-    }
-
-    messages
-}
-
-/// Rough estimate of tokens from cost in cents using model pricing.
-/// Assumes a 3:1 input:output ratio (typical for coding).
-fn estimate_tokens_from_cost(cost_cents: f64, pricing: &ModelPricing) -> (u64, u64) {
-    if cost_cents <= 0.0 {
-        return (0, 0);
-    }
-    let cost_dollars = cost_cents / 100.0;
-    // Assume 75% input, 25% output by cost
-    let input_cost = cost_dollars * 0.75;
-    let output_cost = cost_dollars * 0.25;
-    let input_tokens = if pricing.input > 0.0 {
-        (input_cost * 1_000_000.0 / pricing.input) as u64
-    } else {
-        0
-    };
-    let output_tokens = if pricing.output > 0.0 {
-        (output_cost * 1_000_000.0 / pricing.output) as u64
-    } else {
-        0
-    };
-    (input_tokens, output_tokens)
-}
-
-// Note: bubbleId entries contain per-message content but lack timestamps and
-// have zero token counts in practice. composerData already provides all the
-// aggregated analytics we need (cost, model, lines, context). Bubble parsing
-// was removed to avoid timestamp issues (all bubbles would get Utc::now()).
-
 // ---------------------------------------------------------------------------
-// JSONL fallback helpers (kept for when state.vscdb is unavailable)
+// JSONL fallback helpers
 // ---------------------------------------------------------------------------
 
 fn cursor_home() -> Result<PathBuf> {
@@ -774,6 +611,7 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
+            cost_confidence: "exact".to_string(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -798,6 +636,7 @@ fn parse_cursor_line(
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             })
         }
         _ => None,
@@ -1073,191 +912,8 @@ mod tests {
         assert_eq!(p.output, 1.10);
     }
 
-    // --- state.vscdb parsing tests ---
+    // --- git branch tests ---
 
-    #[test]
-    fn composer_session_to_messages_with_usage() {
-        let session = ComposerSession {
-            key: "composerData:test-uuid-123".to_string(),
-            name: Some("Fix login bug".to_string()),
-            created_at: Some("2026-03-20T10:00:00Z".parse().unwrap()),
-            last_updated_at: Some(1742468400000),
-            is_agentic: true,
-            usage_entries: vec![ComposerUsageEntry {
-                model: "claude-sonnet-4-6".to_string(),
-                cost_cents: 2.40,
-                num_requests: 3,
-            }],
-            context_tokens_used: Some(50000),
-            context_token_limit: Some(200000),
-            model_name: Some("claude-sonnet-4-6".to_string()),
-            git_branch: Some("feature/PAVA-123-fix-login".to_string()),
-            cwd: Some("/projects/webapp".to_string()),
-        };
-
-        let msgs = composer_session_to_messages(&session);
-        assert_eq!(msgs.len(), 2); // 1 user + 1 assistant (1 model)
-
-        // User message
-        assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[0].session_title.as_deref(), Some("Fix login bug"));
-
-        // Assistant message
-        assert_eq!(msgs[1].role, "assistant");
-        assert_eq!(msgs[1].model.as_deref(), Some("claude-sonnet-4-6"));
-        assert_eq!(msgs[1].cost_cents, Some(2.40));
-        assert_eq!(msgs[1].context_tokens_used, Some(50000));
-        assert_eq!(msgs[1].context_token_limit, Some(200000));
-        assert!(msgs[1].input_tokens > 0); // Reverse-calculated from cost
-
-        // Git branch and cwd flow through to all messages
-        assert_eq!(
-            msgs[0].git_branch.as_deref(),
-            Some("feature/PAVA-123-fix-login")
-        );
-        assert_eq!(msgs[0].cwd.as_deref(), Some("/projects/webapp"));
-        assert_eq!(
-            msgs[1].git_branch.as_deref(),
-            Some("feature/PAVA-123-fix-login")
-        );
-        assert_eq!(msgs[1].cwd.as_deref(), Some("/projects/webapp"));
-    }
-
-    #[test]
-    fn composer_session_to_messages_no_usage() {
-        let session = ComposerSession {
-            key: "composerData:empty-session".to_string(),
-            name: None,
-            created_at: None,
-            last_updated_at: None,
-            is_agentic: false,
-            usage_entries: vec![],
-            context_tokens_used: None,
-            context_token_limit: None,
-            model_name: None,
-            git_branch: None,
-            cwd: None,
-        };
-
-        let msgs = composer_session_to_messages(&session);
-        assert_eq!(msgs.len(), 2); // 1 user + 1 minimal assistant
-        assert_eq!(msgs[1].cost_cents, None);
-    }
-
-    #[test]
-    fn estimate_tokens_from_cost_basic() {
-        let pricing = ModelPricing {
-            input: 3.0,
-            output: 15.0,
-            cache_write: 3.75,
-            cache_read: 0.30,
-        };
-        let (inp, outp) = estimate_tokens_from_cost(100.0, &pricing); // $1.00
-        assert!(inp > 0);
-        assert!(outp > 0);
-        // Verify the cost adds up approximately
-        let recalc = inp as f64 * 3.0 / 1_000_000.0 + outp as f64 * 15.0 / 1_000_000.0;
-        assert!((recalc - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn estimate_tokens_zero_cost() {
-        let pricing = cursor_pricing_for_model("gpt-4o");
-        let (inp, outp) = estimate_tokens_from_cost(0.0, &pricing);
-        assert_eq!(inp, 0);
-        assert_eq!(outp, 0);
-    }
-
-    #[test]
-    fn parse_composer_sessions_from_vscdb() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .unwrap();
-
-        // Insert a mock composerData entry with contextTokensUsed
-        let data = serde_json::json!({
-            "allComposers": [{
-                "composerId": "test-id-1",
-                "createdAt": 1742468400000i64,
-                "lastUpdatedAt": 1742472000000i64,
-                "name": "Fix login bug",
-                "totalLinesAdded": 10,
-                "totalLinesRemoved": 3,
-                "isArchived": false,
-                "type": 1
-            }],
-            "selectedComposerIds": [],
-            "lastFocusedComposerIds": []
-        });
-        conn.execute(
-            "INSERT INTO cursorDiskKV (key, value) VALUES ('composer.composerData', ?1)",
-            [data.to_string()],
-        )
-        .unwrap();
-
-        // Insert the actual composerData for the session with contextUsagePercent fallback
-        let session_data = serde_json::json!({
-            "_v": 11,
-            "composerId": "test-id-1",
-            "name": "Fix login bug",
-            "modelConfig": { "modelName": "claude-4-sonnet" },
-            "contextUsagePercent": 25.0,
-            "usageData": {},
-            "fullConversationHeadersOnly": [{"type": 1, "bubbleId": "b1"}, {"type": 2, "bubbleId": "b2"}],
-            "conversationState": "",
-            "status": "completed",
-            "createdAt": 1742468400000i64,
-            "lastUpdatedAt": 1742472000000i64,
-            "totalLinesAdded": 10,
-            "totalLinesRemoved": 3,
-            "isArchived": false,
-            "isAgentic": true,
-            "createdOnBranch": "feature/PAVA-42-login-fix",
-        });
-        conn.execute(
-            "INSERT INTO cursorDiskKV (key, value) VALUES ('composerData:test-id-1', ?1)",
-            [session_data.to_string()],
-        )
-        .unwrap();
-
-        let (sessions, watermark) = parse_composer_sessions(&conn, 0).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert!(watermark > 0);
-
-        let s = &sessions[0];
-        assert_eq!(s.name.as_deref(), Some("Fix login bug"));
-        assert_eq!(s.model_name.as_deref(), Some("claude-4-sonnet"));
-        assert!(s.is_agentic);
-        // contextUsagePercent=25% of default 200K = 50,000 tokens
-        assert_eq!(s.context_tokens_used, Some(50000));
-        // createdOnBranch is extracted
-        assert_eq!(
-            s.git_branch.as_deref(),
-            Some("feature/PAVA-42-login-fix")
-        );
-
-        // Verify messages are generated correctly
-        let msgs = composer_session_to_messages(s);
-        assert_eq!(msgs.len(), 2); // user + assistant
-        assert_eq!(msgs[1].model.as_deref(), Some("claude-4-sonnet"));
-        assert_eq!(msgs[1].input_tokens, 50000);
-        assert!(msgs[1].cost_cents.is_some());
-        // Branch flows through to messages
-        assert_eq!(
-            msgs[0].git_branch.as_deref(),
-            Some("feature/PAVA-42-login-fix")
-        );
-        assert_eq!(
-            msgs[1].git_branch.as_deref(),
-            Some("feature/PAVA-42-login-fix")
-        );
-    }
-
-    // --- git branch / folder extraction tests ---
-
-    /// Create a temp dir with a unique name for testing.
     fn make_test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("budi-test-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1301,89 +957,94 @@ mod tests {
         assert!(branch.is_none());
     }
 
+    // --- Usage API tests ---
+
     #[test]
-    fn file_uri_to_path_strips_prefix() {
-        let p = file_uri_to_path("file:///Users/me/project/src/main.rs");
-        assert_eq!(p.unwrap(), PathBuf::from("/Users/me/project/src/main.rs"));
+    fn usage_events_to_messages_basic() {
+        let events = vec![
+            CursorUsageEvent {
+                timestamp_ms: 1774455909363,
+                model: "composer-2-fast".to_string(),
+                input_tokens: 2958,
+                output_tokens: 1663,
+                cache_read_tokens: 48214,
+                total_cents: 1.68,
+            },
+            CursorUsageEvent {
+                timestamp_ms: 1774455910000,
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 10000,
+                output_tokens: 5000,
+                cache_read_tokens: 0,
+                total_cents: 12.50,
+            },
+        ];
+
+        let session_ranges = vec![SessionContext {
+            start_ms: 1774455900000,
+            end_ms: 1774455920000,
+            conversation_id: "session-abc".to_string(),
+            workspace_root: Some("/projects/webapp".to_string()),
+            repo_id: Some("github.com/acme/webapp".to_string()),
+            git_branch: Some("feature/PROJ-42-fix".to_string()),
+        }];
+
+        let msgs = usage_events_to_messages(&events, &session_ranges);
+        assert_eq!(msgs.len(), 2);
+
+        // First event
+        assert_eq!(msgs[0].model.as_deref(), Some("composer-2-fast"));
+        assert_eq!(msgs[0].input_tokens, 2958);
+        assert_eq!(msgs[0].output_tokens, 1663);
+        assert_eq!(msgs[0].cache_read_tokens, 48214);
+        assert_eq!(msgs[0].cost_cents, Some(1.68));
+        assert_eq!(msgs[0].cost_confidence, "exact");
+        assert_eq!(msgs[0].session_id.as_deref(), Some("session-abc"));
+        assert_eq!(msgs[0].provider, "cursor");
+        assert_eq!(msgs[0].role, "assistant");
+        // Session context flows through to message
+        assert_eq!(msgs[0].cwd.as_deref(), Some("/projects/webapp"));
+        assert_eq!(msgs[0].repo_id.as_deref(), Some("github.com/acme/webapp"));
+        assert_eq!(msgs[0].git_branch.as_deref(), Some("feature/PROJ-42-fix"));
+
+        // Second event
+        assert_eq!(msgs[1].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(msgs[1].cost_cents, Some(12.50));
+        assert_eq!(msgs[1].session_id.as_deref(), Some("session-abc"));
+        assert_eq!(msgs[1].git_branch.as_deref(), Some("feature/PROJ-42-fix"));
     }
 
     #[test]
-    fn file_uri_to_path_rejects_non_file_uri() {
-        assert!(file_uri_to_path("https://example.com").is_none());
+    fn usage_events_orphan_when_no_session_match() {
+        let events = vec![CursorUsageEvent {
+            timestamp_ms: 1774455909363,
+            model: "gpt-4o".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            total_cents: 0.5,
+        }];
+
+        // No sessions at all
+        let msgs = usage_events_to_messages(&events, &[]);
+        assert_eq!(msgs[0].session_id.as_deref(), Some("cursor-api-orphan"));
+        assert!(msgs[0].cwd.is_none());
+        assert!(msgs[0].repo_id.is_none());
+        assert!(msgs[0].git_branch.is_none());
     }
 
     #[test]
-    fn find_git_root_walks_up() {
-        let dir = make_test_dir("git-root");
-        let git_dir = dir.join(".git");
-        std::fs::create_dir(&git_dir).unwrap();
-        let nested = dir.join("src/components");
-        std::fs::create_dir_all(&nested).unwrap();
+    fn usage_events_deterministic_uuid() {
+        let events = vec![CursorUsageEvent {
+            timestamp_ms: 1774455909363,
+            model: "gpt-4o".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            total_cents: 0.5,
+        }];
 
-        let root = find_git_root(&nested.join("App.tsx"));
-        assert_eq!(root.as_deref(), Some(dir.to_str().unwrap()));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn extract_folder_from_attached_uris() {
-        let dir = make_test_dir("attached-uris");
-        let git_dir = dir.join(".git");
-        std::fs::create_dir(&git_dir).unwrap();
-        let src = dir.join("src");
-        std::fs::create_dir(&src).unwrap();
-
-        let uri = format!("file://{}/src/main.rs", dir.display());
-        let parsed = serde_json::json!({
-            "allAttachedFileCodeChunksUris": [uri],
-        });
-
-        let folder = extract_folder_from_file_uris(&parsed);
-        assert_eq!(folder.as_deref(), Some(dir.to_str().unwrap()));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn extract_folder_from_newly_created_files() {
-        let dir = make_test_dir("newly-created");
-        let git_dir = dir.join(".git");
-        std::fs::create_dir(&git_dir).unwrap();
-        let src = dir.join("src");
-        std::fs::create_dir(&src).unwrap();
-
-        let fs_path = format!("{}/src/new.rs", dir.display());
-        let parsed = serde_json::json!({
-            "newlyCreatedFiles": [{"uri": {"fsPath": fs_path}}],
-        });
-
-        let folder = extract_folder_from_file_uris(&parsed);
-        assert_eq!(folder.as_deref(), Some(dir.to_str().unwrap()));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn created_on_branch_preferred_over_head_fallback() {
-        // When createdOnBranch is present, it should be used even if
-        // we could also read .git/HEAD from the cwd
-        let session = ComposerSession {
-            key: "composerData:branch-test".to_string(),
-            name: None,
-            created_at: None,
-            last_updated_at: None,
-            is_agentic: false,
-            usage_entries: vec![],
-            context_tokens_used: None,
-            context_token_limit: None,
-            model_name: None,
-            git_branch: Some("main".to_string()),
-            cwd: Some("/some/project".to_string()),
-        };
-
-        let msgs = composer_session_to_messages(&session);
-        assert_eq!(msgs[0].git_branch.as_deref(), Some("main"));
-        assert_eq!(msgs[0].cwd.as_deref(), Some("/some/project"));
+        let msgs = usage_events_to_messages(&events, &[]);
+        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o");
     }
 }

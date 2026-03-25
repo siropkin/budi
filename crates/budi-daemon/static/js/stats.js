@@ -77,14 +77,74 @@ function renderBarChart(items, labelFn, valueFn, colorFn, emptyMsg, formatFn) {
 }
 
 /* ===== Render: Activity Chart (period-aware) ===== */
-function renderActivityChart(chartData) {
-  if (!chartData || !chartData.length) return `<div class="empty">No activity data yet</div>`;
+function localDateStr(d) {
+  // Format as YYYY-MM-DD in local timezone (not UTC)
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
-  const maxTotal = Math.max(...chartData.map(d => (d.input_tokens || 0) + (d.output_tokens || 0)), 1);
+function fillActivityBuckets(chartData) {
+  const dataMap = {};
+  if (chartData) for (const b of chartData) dataMap[b.label] = b;
+  const empty = { message_count: 0, input_tokens: 0, output_tokens: 0, cost_cents: 0, tool_call_count: 0 };
+
+  const gran = granularityForPeriod(currentPeriod);
+  const now = new Date();
+  const y = now.getFullYear(), mo = now.getMonth(), day = now.getDate();
+  const buckets = [];
+
+  if (gran === 'hour') {
+    for (let h = 0; h < 24; h++) {
+      const label = String(h).padStart(2, '0') + ':00';
+      buckets.push(dataMap[label] || { label, ...empty });
+    }
+  } else if (gran === 'day') {
+    // Compute start in local time (same logic as dateRange)
+    let start, end;
+    if (currentPeriod === 'week') {
+      const dow = now.getDay();
+      const mondayOffset = dow === 0 ? 6 : dow - 1;
+      start = new Date(y, mo, day - mondayOffset);
+      end = new Date(start);
+      end.setDate(end.getDate() + 6); // Monday to Sunday
+    } else if (currentPeriod === 'month') {
+      start = new Date(y, mo, 1);
+      end = new Date(y, mo + 1, 0); // Last day of month
+    } else {
+      start = new Date(y, mo, day);
+      end = now;
+    }
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const label = localDateStr(d);
+      buckets.push(dataMap[label] || { label, ...empty });
+    }
+  } else if (gran === 'month') {
+    const labels = Object.keys(dataMap).sort();
+    if (labels.length) {
+      const [sy, sm] = labels[0].split('-').map(Number);
+      let cy = sy, cm = sm;
+      while (cy < now.getFullYear() || (cy === now.getFullYear() && cm <= now.getMonth() + 1)) {
+        const label = String(cy) + '-' + String(cm).padStart(2, '0');
+        buckets.push(dataMap[label] || { label, ...empty });
+        cm++;
+        if (cm > 12) { cm = 1; cy++; }
+      }
+    }
+  }
+  return buckets.length ? buckets : (chartData || []);
+}
+
+function renderActivityChart(chartData) {
+  const filledData = fillActivityBuckets(chartData);
+  if (!filledData.length) return `<div class="empty">No activity data yet</div>`;
+
+  const maxTotal = Math.max(...filledData.map(d => (d.input_tokens || 0) + (d.output_tokens || 0)), 1);
 
   let bars = '';
   let labels = '';
-  for (const bucket of chartData) {
+  for (const bucket of filledData) {
     const inp = bucket.input_tokens || 0;
     const outp = bucket.output_tokens || 0;
     const inH = (inp / maxTotal) * 100;

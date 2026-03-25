@@ -4,6 +4,7 @@ use anyhow::Result;
 use budi_core::config;
 
 pub mod doctor;
+pub mod hook;
 pub mod init;
 pub mod open;
 pub mod stats;

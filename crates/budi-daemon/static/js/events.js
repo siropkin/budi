@@ -7,11 +7,40 @@ async function render() {
     renderStatsView(content);
     bindAllHandlers();
   } catch (err) {
-    content.innerHTML = `<div class="empty">
-      Failed to load analytics.<br>
-      <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
-    </div>`;
+    content.innerHTML = renderError(err);
+    bindErrorHandlers();
   }
+}
+
+function renderError(err) {
+  const detail = err && err.message ? err.message : '';
+  return `<div class="error-state">
+    <div class="error-icon">!</div>
+    <div class="error-title">Failed to load analytics</div>
+    <div class="error-detail">${detail ? esc(detail) : 'Could not connect to budi-daemon.'}</div>
+    <div class="error-actions">
+      <button class="btn btn-primary" id="retryBtn">Retry</button>
+      <button class="btn btn-secondary" id="syncBtn">Sync Data</button>
+    </div>
+    <div class="error-hint">Or run <code>budi sync</code> in your terminal</div>
+  </div>`;
+}
+
+function bindErrorHandlers() {
+  const retryBtn = $('#retryBtn');
+  if (retryBtn) retryBtn.addEventListener('click', () => render());
+  const syncBtn = $('#syncBtn');
+  if (syncBtn) syncBtn.addEventListener('click', async () => {
+    syncBtn.textContent = 'Syncing...';
+    syncBtn.disabled = true;
+    try {
+      await fetch('/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"migrate":true}' });
+      render();
+    } catch (_) {
+      syncBtn.textContent = 'Sync failed';
+      setTimeout(() => { syncBtn.textContent = 'Sync Data'; syncBtn.disabled = false; }, 2000);
+    }
+  });
 }
 
 function bindSearchHandlers() {
@@ -87,10 +116,8 @@ async function switchAndReload() {
     bindAllHandlers();
   } catch (err) {
     if (abort.signal.aborted) return;
-    content.innerHTML = `<div class="empty">
-      Failed to load analytics.<br>
-      <span style="font-size:0.85rem;color:var(--text-muted)">Is budi-daemon running? Try: <code>budi sync</code> first.</span>
-    </div>`;
+    content.innerHTML = renderError(err);
+    bindErrorHandlers();
   }
 }
 

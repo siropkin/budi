@@ -107,8 +107,8 @@ pub fn ingest_messages(
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               cwd, repo_id, provider,
               cost_cents, context_tokens_used, context_token_limit,
-              parent_uuid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              parent_uuid, git_branch, cost_confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -126,6 +126,8 @@ pub fn ingest_messages(
                 ctx_used,
                 ctx_limit,
                 msg.parent_uuid,
+                msg.git_branch,
+                msg.cost_confidence,
             ],
         )?;
 
@@ -159,14 +161,16 @@ pub fn db_path() -> Result<PathBuf> {
 /// Clears the tags table and re-populates it.
 pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
     let tags_config = crate::config::load_tags_config();
-    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
+    let session_cache = crate::hooks::load_session_meta(conn).unwrap_or_default();
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
 
     // Read all messages
     let mut parsed: Vec<crate::jsonl::ParsedMessage> = {
         let mut stmt = conn.prepare(
             "SELECT m.uuid, m.session_id, m.timestamp, m.cwd, m.role, m.model,
                     m.input_tokens, m.output_tokens, m.cache_creation_tokens, m.cache_read_tokens,
-                    m.provider, m.cost_cents, m.repo_id, m.parent_uuid
+                    m.provider, m.cost_cents, m.repo_id, m.parent_uuid,
+                    COALESCE(m.cost_confidence, 'exact')
              FROM messages m",
         )?;
         stmt.query_map([], |row| {
@@ -197,6 +201,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
                 parent_uuid: row.get(13)?,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: row.get::<_, String>(14)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -251,23 +256,48 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
                 count += 1;
             }
         }
+        // Also update the denormalized git_branch column
+        if let Some(ref branch) = msg.git_branch {
+            tx.execute(
+                "UPDATE messages SET git_branch = ?2 WHERE uuid = ?1",
+                params![msg.uuid, branch],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(count)
 }
 
-/// Run a full incremental sync: discover JSONL files, parse new content, ingest.
-/// Iterates all available providers, discovering and parsing their files.
-/// Returns (files_synced, messages_ingested).
+/// Quick sync: only files modified in the last 7 days.
+/// Used by `budi sync` and the daemon's 30s auto-sync.
 pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
+    sync_with_max_age(conn, Some(7))
+}
+
+/// Full history sync: process ALL transcript files regardless of age.
+/// Used by `budi history` — may take minutes on large histories.
+pub fn sync_history(conn: &mut Connection) -> Result<(usize, usize)> {
+    sync_with_max_age(conn, None)
+}
+
+/// Internal sync implementation with optional max_age filter.
+/// When `max_age_days` is Some(N), only files modified in the last N days are processed.
+/// When None, all files are processed.
+fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result<(usize, usize)> {
     let providers = crate::provider::available_providers();
     let tags_config = crate::config::load_tags_config();
-    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
+    let session_cache = crate::hooks::load_session_meta(conn).unwrap_or_default();
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
     let mut total_files = 0;
     let mut total_messages = 0;
 
+    let cutoff = max_age_days.map(|days| {
+        std::time::SystemTime::now()
+            - std::time::Duration::from_secs(days * 86400)
+    });
+
     for provider in &providers {
-        // Try direct sync first (e.g. Cursor state.vscdb).
+        // Try direct sync first (e.g. Cursor Usage API).
         if let Some(result) = provider.sync_direct(conn, &mut pipeline) {
             let (files, messages) = result?;
             total_files += files;
@@ -279,6 +309,18 @@ pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
 
         for discovered in &files {
             let file_path = &discovered.path;
+
+            // Skip files older than cutoff (if set)
+            if let Some(cutoff_time) = cutoff {
+                let mtime = file_path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if mtime < cutoff_time {
+                    continue; // Too old for quick sync
+                }
+            }
+
             let path_str = file_path.display().to_string();
             let offset = get_sync_offset(conn, &path_str)?;
 
@@ -315,7 +357,8 @@ pub fn sync_one_file(conn: &mut Connection, file_path: &Path) -> Result<usize> {
     use crate::provider::Provider;
     let provider = crate::providers::claude_code::ClaudeCodeProvider;
     let tags_config = crate::config::load_tags_config();
-    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
+    let session_cache = crate::hooks::load_session_meta(conn).unwrap_or_default();
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
     let path_str = file_path.display().to_string();
     let offset = get_sync_offset(conn, &path_str)?;
 
@@ -452,6 +495,8 @@ pub struct MessageRow {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_cents: f64,
+    pub cost_confidence: String,
+    pub git_branch: Option<String>,
 }
 
 /// Paginated message list result.
@@ -514,10 +559,24 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let sql = format!(
         "SELECT uuid, timestamp, role, model,
                 COALESCE(provider, 'claude_code'),
-                repo_id,
+                COALESCE(repo_id, (
+                    SELECT m2.repo_id FROM messages m2
+                    WHERE m2.session_id = messages.session_id
+                      AND m2.repo_id IS NOT NULL
+                      AND m2.timestamp <= messages.timestamp
+                    ORDER BY m2.timestamp DESC LIMIT 1
+                )),
                 input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0)
+                COALESCE(cost_cents, 0.0),
+                COALESCE(cost_confidence, 'exact'),
+                COALESCE(git_branch, (
+                    SELECT m2.git_branch FROM messages m2
+                    WHERE m2.session_id = messages.session_id
+                      AND m2.git_branch IS NOT NULL
+                      AND m2.timestamp <= messages.timestamp
+                    ORDER BY m2.timestamp DESC LIMIT 1
+                ))
          FROM messages
          {}
          ORDER BY {} {}
@@ -540,6 +599,8 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 cache_creation_tokens: row.get(8)?,
                 cache_read_tokens: row.get(9)?,
                 cost_cents: row.get(10)?,
+                cost_confidence: row.get(11)?,
+                git_branch: row.get(12)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -591,8 +652,8 @@ pub fn repo_usage(
          FROM messages
          WHERE {}
          GROUP BY repo_id
-         HAVING (inp + outp) > 0
-         ORDER BY (inp + outp) DESC
+         HAVING cost > 0 OR (inp + outp) > 0
+         ORDER BY cost DESC
          LIMIT ?{}",
         conditions.join(" AND "),
         limit_idx
@@ -837,76 +898,53 @@ pub struct BranchCost {
     pub cost_cents: f64,
 }
 
-/// Query cost grouped by branch+repo. Joins branch tags with messages directly,
-/// filtering by date on message timestamps. Groups by (branch, repo_id) so
-/// branches with the same name in different repos are kept separate.
+/// Query cost grouped by branch+repo using the denormalized git_branch column.
+/// Groups by (git_branch, repo_id) so branches with the same name in different repos
+/// are kept separate.
 pub fn branch_cost(
     conn: &Connection,
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<BranchCost>> {
+    let mut conditions = vec![
+        "git_branch IS NOT NULL".to_string(),
+        "git_branch != ''".to_string(),
+    ];
     let mut param_values: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+
     if let Some(s) = since {
+        idx += 1;
+        conditions.push(format!("timestamp >= ?{idx}"));
         param_values.push(s.to_string());
     }
     if let Some(u) = until {
+        idx += 1;
+        conditions.push(format!("timestamp < ?{idx}"));
         param_values.push(u.to_string());
     }
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
 
-    // Build date filter for session cost subquery
-    let mut date_where = String::new();
-    {
-        let mut conds = Vec::new();
-        let mut idx = 0;
-        if since.is_some() {
-            idx += 1;
-            conds.push(format!("timestamp >= ?{}", idx));
-        }
-        if until.is_some() {
-            idx += 1;
-            conds.push(format!("timestamp < ?{}", idx));
-        }
-        if !conds.is_empty() {
-            date_where = format!("WHERE {}", conds.join(" AND "));
-        }
-    }
-
-    // Pre-compute branch counts and session costs, then join — no correlated subqueries.
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let sql = format!(
-        "SELECT bs.branch, COALESCE(bs.repo_id, '') as repo,
-                COUNT(*) as sess,
-                0 as cnt,
-                0 as inp, 0 as outp, 0 as cache_r, 0 as cache_c,
-                COALESCE(SUM(sc.session_cost / bc.branch_count), 0.0) as cost
-         FROM (
-             SELECT DISTINCT t.value as branch, tm.session_id,
-                    tm.repo_id
-             FROM tags t
-             JOIN messages tm ON t.message_uuid = tm.uuid
-             WHERE t.key = 'branch'
-         ) bs
-         JOIN (
-             SELECT tm.session_id, COUNT(DISTINCT t.value) as branch_count
-             FROM tags t
-             JOIN messages tm ON t.message_uuid = tm.uuid
-             WHERE t.key = 'branch'
-             GROUP BY tm.session_id
-         ) bc ON bc.session_id = bs.session_id
-         JOIN (
-             SELECT session_id, COALESCE(SUM(cost_cents), 0.0) as session_cost
-             FROM messages
-             {date_where}
-             GROUP BY session_id
-         ) sc ON sc.session_id = bs.session_id
-         GROUP BY bs.branch, bs.repo_id
+        "SELECT git_branch, COALESCE(repo_id, '') as repo,
+                COUNT(DISTINCT session_id) as sess,
+                COUNT(*) as cnt,
+                COALESCE(SUM(input_tokens), 0) as inp,
+                COALESCE(SUM(output_tokens), 0) as outp,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_r,
+                COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
+                COALESCE(SUM(cost_cents), 0.0) as cost
+         FROM messages
+         {where_clause}
+         GROUP BY git_branch, repo_id
          ORDER BY cost DESC
          LIMIT 20",
     );
 
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let mut rows: Vec<BranchCost> = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -925,7 +963,7 @@ pub fn branch_cost(
         .filter_map(|r| r.ok())
         .collect();
 
-    // Add "untagged" entry for messages not in any branch-tagged session
+    // Add "untagged" entry for messages not in any branch
     let tagged_cost: f64 = rows.iter().map(|r| r.cost_cents).sum();
     let (total_where, total_params) = date_filter(since, until, "WHERE", 0);
     let total_refs: Vec<&dyn rusqlite::types::ToSql> = total_params
@@ -1602,7 +1640,8 @@ mod tests {
                 }
             })
             .collect();
-        assert!(!tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"hook_events".to_string()));
         assert!(tables.contains(&"messages".to_string()));
         assert!(tables.contains(&"tool_usage".to_string()));
         assert!(tables.contains(&"sync_state".to_string()));
@@ -1633,6 +1672,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1655,6 +1695,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
         ];
 
@@ -1702,6 +1743,7 @@ mod tests {
             parent_uuid: None,
             user_name: None,
             machine_name: None,
+            cost_confidence: "exact".to_string(),
         };
         // CostEnricher is the single source of truth for cost_cents
         CostEnricher.enrich(&mut msg);
@@ -1756,6 +1798,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -1778,6 +1821,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
         ];
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1817,6 +1861,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1843,6 +1888,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -1867,6 +1913,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
         ]
     }
@@ -1941,6 +1988,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -1965,6 +2013,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -1990,6 +2039,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
         ]
     }
@@ -2088,6 +2138,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "cc-a1".to_string(),
@@ -2112,6 +2163,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
         ];
 
@@ -2140,6 +2192,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
             ParsedMessage {
                 uuid: "cu-a1".to_string(),
@@ -2164,6 +2217,7 @@ mod tests {
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
+                cost_confidence: "exact".to_string(),
             },
         ];
 

@@ -259,7 +259,8 @@ pub fn cmd_statusline_install() -> Result<()> {
 }
 
 /// Remove legacy budi hooks from ~/.claude/settings.json.
-/// Old budi versions installed hooks that call `budi hook ...` which no longer exists.
+/// Old budi versions installed hooks that call `budi hook <subcommand>` (with arguments).
+/// Preserves new-style hooks that use just `budi hook` (no arguments).
 pub fn remove_legacy_hooks() {
     let Ok(home) = std::env::var("HOME") else {
         return;
@@ -275,49 +276,8 @@ pub fn remove_legacy_hooks() {
         return;
     };
 
-    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+    if !remove_legacy_budi_hooks_from_value(&mut settings) {
         return;
-    };
-
-    let mut changed = false;
-    let event_keys: Vec<String> = hooks.keys().cloned().collect();
-
-    for key in &event_keys {
-        if let Some(arr) = hooks.get_mut(key).and_then(|v| v.as_array_mut()) {
-            let before = arr.len();
-            arr.retain(|entry| {
-                let cmd = entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
-                !cmd.contains("budi")
-            });
-            if arr.len() != before {
-                changed = true;
-            }
-        }
-    }
-
-    if !changed {
-        return;
-    }
-
-    // Remove empty event arrays
-    let empty_keys: Vec<String> = hooks
-        .iter()
-        .filter(|(_, v)| v.as_array().is_some_and(|a| a.is_empty()))
-        .map(|(k, _)| k.clone())
-        .collect();
-    for key in &empty_keys {
-        hooks.remove(key);
-    }
-
-    // Remove empty hooks object
-    if hooks.is_empty() {
-        settings
-            .as_object_mut()
-            .unwrap()
-            .remove("hooks");
     }
 
     if let Ok(out) = serde_json::to_string_pretty(&settings) {
@@ -325,9 +285,9 @@ pub fn remove_legacy_hooks() {
     }
 }
 
-/// Testable version that operates on a Value directly. Returns true if modified.
-#[cfg(test)]
-fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
+/// Remove old-style budi hooks (with subcommand args) from a settings Value.
+/// Returns true if any changes were made.
+fn remove_legacy_budi_hooks_from_value(settings: &mut Value) -> bool {
     let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return false;
     };
@@ -343,7 +303,9 @@ fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
                     .get("command")
                     .and_then(|c| c.as_str())
                     .unwrap_or("");
-                !cmd.contains("budi")
+                // Remove old-style: "budi hook user-prompt-submit", "budi hook stop", etc.
+                // Keep new-style: "budi hook" (exactly, no trailing args)
+                !is_legacy_budi_hook(cmd)
             });
             if arr.len() != before {
                 changed = true;
@@ -355,6 +317,7 @@ fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
         return false;
     }
 
+    // Remove empty event arrays
     let empty_keys: Vec<String> = hooks
         .iter()
         .filter(|(_, v)| v.as_array().is_some_and(|a| a.is_empty()))
@@ -369,6 +332,24 @@ fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
     }
 
     true
+}
+
+/// Check if a command string is an old-style budi hook (with subcommand arguments).
+fn is_legacy_budi_hook(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    // Old style: "budi hook <something>" — has args after "budi hook"
+    if trimmed.starts_with("budi hook ") || trimmed.starts_with("budi hook\t") {
+        let after = trimmed.strip_prefix("budi hook").unwrap().trim();
+        !after.is_empty()
+    } else {
+        false
+    }
+}
+
+/// Testable alias for `remove_legacy_budi_hooks_from_value`.
+#[cfg(test)]
+fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
+    remove_legacy_budi_hooks_from_value(settings)
 }
 
 #[cfg(test)]
@@ -480,5 +461,35 @@ mod tests {
     fn remove_legacy_hooks_noop_without_hooks() {
         let mut settings = json!({"statusLine": {"type": "command"}});
         assert!(!remove_budi_hooks_from_value(&mut settings));
+    }
+
+    #[test]
+    fn remove_legacy_hooks_preserves_new_style_budi_hook() {
+        let mut settings = json!({
+            "hooks": {
+                "PostToolUse": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "budi hook", "async": true}]}
+                ],
+                "UserPromptSubmit": [
+                    {"type": "command", "command": "budi hook user-prompt-submit"}
+                ]
+            }
+        });
+        assert!(remove_budi_hooks_from_value(&mut settings));
+        let hooks = settings.get("hooks").unwrap();
+        // PostToolUse with new-style "budi hook" should be preserved
+        let arr = hooks.get("PostToolUse").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        // UserPromptSubmit with old-style should be removed
+        assert!(hooks.get("UserPromptSubmit").is_none());
+    }
+
+    #[test]
+    fn is_legacy_budi_hook_detection() {
+        assert!(is_legacy_budi_hook("budi hook user-prompt-submit"));
+        assert!(is_legacy_budi_hook("budi hook post-tool-use"));
+        assert!(!is_legacy_budi_hook("budi hook"));
+        assert!(!is_legacy_budi_hook("budi statusline"));
+        assert!(!is_legacy_budi_hook("other-tool do-something"));
     }
 }

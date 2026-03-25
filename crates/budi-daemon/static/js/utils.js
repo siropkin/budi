@@ -150,6 +150,19 @@ function formatModelName(raw) {
 
 
 
+function fmtDurationMs(ms) {
+  if (ms == null) return '';
+  if (ms >= 120000) return Math.floor(ms / 60000) + 'm ' + Math.floor((ms % 60000) / 1000) + 's';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return ms + 'ms';
+}
+function fmtToolCalls(_, item) {
+  const count = item.call_count || 0;
+  const avg = item.avg_duration_ms;
+  if (avg != null && avg > 0) return fmtNum(count) + ' calls \u00b7 ' + fmtDurationMs(avg) + ' avg';
+  return fmtNum(count) + ' calls';
+}
+
 const TOOL_COLORS = {
   Read: '#58a6ff', Edit: '#3fb950', Write: '#d2a8ff', Bash: '#f0883e',
   Grep: '#f778ba', Glob: '#79c0ff', Agent: '#ffd33d', default: '#8b949e'

@@ -23,21 +23,26 @@ async function loadStatsData(signal) {
   const opts = signal ? { signal } : {};
 
   const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
-  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, branches, tickets] = await Promise.all([
-    fetch('/analytics/summary' + q, opts).then(r => r.json()),
-    fetch('/analytics/messages' + sessionsQ, opts).then(r => r.json()).catch(() => ({messages:[],total_count:0})),
-    fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()),
-    fetch('/analytics/cost' + q, opts).then(r => r.json()),
-    fetch('/analytics/models' + q, opts).then(r => r.json()),
-    fetch('/analytics/activity' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(r => r.json()),
-    fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(r => r.json()).catch(() => []),
-    fetch('/analytics/context-usage' + q, opts).then(r => r.json()).catch(() => ({avg_usage_pct:0,max_usage_pct:0,sessions_over_80_pct:0,total_sessions_with_data:0})),
-    fetch('/analytics/branches' + q, opts).then(r => r.json()).catch(() => []),
-    fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=ticket_id&limit=' + DEFAULT_CHART_ROWS, opts).then(r => r.json()).catch(() => []),
+  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
+  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, contextUsage, branches, tickets, tools, mcp] = await Promise.all([
+    fetch('/analytics/summary' + q, opts).then(ok),
+    fetch('/analytics/messages' + sessionsQ, opts).then(ok).catch(() => ({messages:[],total_count:0})),
+    fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/cost' + q, opts).then(ok),
+    fetch('/analytics/models' + q, opts).then(ok).catch(() => []),
+    fetch('/analytics/activity' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(ok).catch(() => []),
+    fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(ok).catch(() => []),
+    fetch('/analytics/context-usage' + q, opts).then(ok).catch(() => ({avg_usage_pct:0,max_usage_pct:0,sessions_over_80_pct:0,total_sessions_with_data:0})),
+    fetch('/analytics/branches' + q, opts).then(ok).catch(() => []),
+    fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=ticket_id&limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/tools' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/mcp' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
   ]);
 
   const sessions = sessionsResult.messages || [];
   sessionTotalCount = sessionsResult.total_count || 0;
+  toolsData = tools;
+  mcpData = mcp;
   statsData = { summary, sessions, cwds, cost, models, activityChart, contextUsage, branches, tickets };
   lastSessionData = sessions;
   providersData = providers;

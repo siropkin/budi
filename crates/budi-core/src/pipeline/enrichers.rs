@@ -1,9 +1,11 @@
-//! Pipeline enrichers: Git, Identity, Cost, Tag.
+//! Pipeline enrichers: Git, Identity, Cost, Tag, Hook.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::analytics::Tag;
 use crate::config::TagsConfig;
+use crate::hooks::SessionMeta;
 use crate::jsonl::ParsedMessage;
 use crate::pipeline::{Enricher, extract_ticket_id, glob_match};
 use crate::repo_id::RepoIdCache;
@@ -173,7 +175,13 @@ impl Enricher for CostEnricher {
             });
         }
 
-        // Calculate cost if not already set
+        // Emit cost_confidence tag
+        tags.push(Tag {
+            key: "cost_confidence".to_string(),
+            value: msg.cost_confidence.clone(),
+        });
+
+        // Calculate cost if not already set (skip if API provided exact cost)
         if msg.cost_cents.is_none() && msg.role == "assistant" {
             let model = msg.model.as_deref().unwrap_or("unknown");
             let pricing = match msg.provider.as_str() {
@@ -232,6 +240,87 @@ impl Enricher for TagEnricher {
                 });
             }
         }
+        tags
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HookEnricher — produces tags from session metadata (hooks + sessions table)
+// ---------------------------------------------------------------------------
+
+pub struct HookEnricher {
+    session_cache: HashMap<String, SessionMeta>,
+}
+
+impl HookEnricher {
+    /// Create a new HookEnricher with pre-loaded session metadata.
+    pub fn new(session_cache: HashMap<String, SessionMeta>) -> Self {
+        Self { session_cache }
+    }
+
+    /// Create an empty HookEnricher (no hook data available yet).
+    pub fn empty() -> Self {
+        Self {
+            session_cache: HashMap::new(),
+        }
+    }
+}
+
+impl Enricher for HookEnricher {
+    fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
+        let mut tags = Vec::new();
+
+        let Some(ref session_id) = msg.session_id else {
+            return tags;
+        };
+        let Some(meta) = self.session_cache.get(session_id) else {
+            return tags;
+        };
+
+        if let Some(ref mode) = meta.composer_mode {
+            tags.push(Tag {
+                key: "composer_mode".to_string(),
+                value: mode.clone(),
+            });
+        }
+        if let Some(ref mode) = meta.permission_mode {
+            tags.push(Tag {
+                key: "permission_mode".to_string(),
+                value: mode.clone(),
+            });
+        }
+        if let Some(ref category) = meta.prompt_category {
+            tags.push(Tag {
+                key: "activity".to_string(),
+                value: category.clone(),
+            });
+        }
+        if let Some(ref email) = meta.user_email {
+            tags.push(Tag {
+                key: "user_email".to_string(),
+                value: email.clone(),
+            });
+        }
+        if let Some(ms) = meta.duration_ms {
+            let bucket = if ms < 300_000 {
+                "short"
+            } else if ms < 1_800_000 {
+                "medium"
+            } else {
+                "long"
+            };
+            tags.push(Tag {
+                key: "duration".to_string(),
+                value: bucket.to_string(),
+            });
+        }
+        if let Some(ref tool) = meta.dominant_tool {
+            tags.push(Tag {
+                key: "dominant_tool".to_string(),
+                value: tool.clone(),
+            });
+        }
+
         tags
     }
 }

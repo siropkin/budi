@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -52,7 +52,9 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
                 cost_cents             REAL,
                 context_tokens_used    INTEGER,
                 context_token_limit    INTEGER,
-                parent_uuid            TEXT
+                parent_uuid            TEXT,
+                git_branch             TEXT,
+                cost_confidence        TEXT DEFAULT 'exact'
             );
 
             CREATE TABLE IF NOT EXISTS tool_usage (
@@ -83,12 +85,14 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             CREATE INDEX IF NOT EXISTS idx_messages_repo ON messages(repo_id);
             CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider);
             CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uuid);
+            CREATE INDEX IF NOT EXISTS idx_messages_branch ON messages(git_branch);
             CREATE INDEX IF NOT EXISTS idx_tool_usage_message ON tool_usage(message_uuid);
             CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name);
             CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
             ",
         )?;
+        create_sessions_and_hook_events(conn)?;
         needs_tag_backfill = true;
     }
 
@@ -277,7 +281,122 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
         needs_tag_backfill = true;
     }
 
+    if version >= 1 && version < 7 {
+        // v7: Add sessions and hook_events tables for hooks integration.
+        create_sessions_and_hook_events(conn)?;
+
+        // Backfill sessions from existing messages.
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO sessions (conversation_id, provider, started_at, model)
+            SELECT
+                m.session_id,
+                m.provider,
+                MIN(m.timestamp),
+                (SELECT m2.model FROM messages m2
+                 WHERE m2.session_id = m.session_id AND m2.role = 'assistant' AND m2.model IS NOT NULL
+                 ORDER BY m2.timestamp ASC LIMIT 1)
+            FROM messages m
+            WHERE m.session_id IS NOT NULL
+            GROUP BY m.session_id, m.provider;
+            ",
+        )?;
+    }
+
+    if version >= 1 && version < 8 {
+        // v8: Add git_branch column to messages (denormalized from tags for fast queries).
+        // Add repo_id + git_branch to sessions, mcp_server to hook_events.
+        conn.execute_batch(
+            "
+            ALTER TABLE messages ADD COLUMN git_branch TEXT;
+            UPDATE messages SET git_branch = (
+                SELECT t.value FROM tags t
+                WHERE t.message_uuid = messages.uuid AND t.key = 'branch'
+                LIMIT 1
+            ) WHERE git_branch IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_messages_branch ON messages(git_branch);
+
+            ALTER TABLE sessions ADD COLUMN repo_id TEXT;
+            ALTER TABLE sessions ADD COLUMN git_branch TEXT;
+
+            ALTER TABLE hook_events ADD COLUMN mcp_server TEXT;
+            ",
+        )?;
+    }
+
+    if version >= 1 && version < 9 {
+        // v9: Add cost_confidence column to messages.
+        conn.execute_batch(
+            "
+            ALTER TABLE messages ADD COLUMN cost_confidence TEXT DEFAULT 'exact';
+
+            -- Backfill: Claude Code messages are exact (tokens from JSONL).
+            UPDATE messages SET cost_confidence = 'exact' WHERE provider != 'cursor';
+            -- Cursor messages with cost from composerData are exact_cost (cost known, tokens estimated).
+            UPDATE messages SET cost_confidence = 'exact_cost'
+              WHERE provider = 'cursor' AND cost_cents IS NOT NULL AND cost_cents > 0;
+            -- Cursor messages without cost are estimated.
+            UPDATE messages SET cost_confidence = 'estimated'
+              WHERE provider = 'cursor' AND (cost_cents IS NULL OR cost_cents = 0);
+            ",
+        )?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(needs_tag_backfill)
+}
+
+/// Create sessions and hook_events tables (used by both fresh install and v6→v7 migration).
+fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS sessions (
+            conversation_id    TEXT PRIMARY KEY,
+            provider           TEXT NOT NULL DEFAULT 'claude_code',
+            started_at         TEXT,
+            ended_at           TEXT,
+            duration_ms        INTEGER,
+            composer_mode      TEXT,
+            permission_mode    TEXT,
+            user_email         TEXT,
+            workspace_root     TEXT,
+            end_reason         TEXT,
+            prompt_category    TEXT,
+            model              TEXT,
+            raw_json           TEXT,
+            repo_id            TEXT,
+            git_branch         TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS hook_events (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider            TEXT NOT NULL,
+            event               TEXT NOT NULL,
+            conversation_id     TEXT,
+            timestamp           TEXT NOT NULL,
+            model               TEXT,
+            tool_name           TEXT,
+            tool_duration_ms    INTEGER,
+            context_tokens      INTEGER,
+            context_window_size INTEGER,
+            context_usage_pct   REAL,
+            message_count       INTEGER,
+            subagent_type       TEXT,
+            tool_call_count     INTEGER,
+            loop_count          INTEGER,
+            files_json          TEXT,
+            raw_json            TEXT,
+            mcp_server          TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_conversation ON hook_events(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_timestamp ON hook_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
+        ",
+    )?;
+    Ok(())
 }

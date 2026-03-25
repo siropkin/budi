@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use budi_core::config;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
 
@@ -16,6 +16,7 @@ pub fn cmd_init(repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
 
     super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
+    install_hooks();
 
     if !no_daemon {
         ensure_daemon_running(&repo_root, &config)?;
@@ -107,5 +108,189 @@ fn install_statusline_if_missing() {
 
     if let Ok(()) = super::statusline::cmd_statusline_install() {
         eprintln!("Status line: installed in {}", settings_path.display());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hook installation
+// ---------------------------------------------------------------------------
+
+/// The budi hook command string — same for all hook events.
+const BUDI_HOOK_CMD: &str = "budi hook";
+
+/// Install budi hooks for Claude Code and Cursor.
+/// Merges with existing hooks — never overwrites non-budi entries.
+fn install_hooks() {
+    install_claude_code_hooks();
+    install_cursor_hooks();
+}
+
+/// Install hooks into ~/.claude/settings.json.
+/// Uses Claude Code's nested format: hooks → EventName → [{ matcher, hooks: [{ type, command }] }]
+fn install_claude_code_hooks() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let settings_path = PathBuf::from(&home).join(super::statusline::CLAUDE_USER_SETTINGS);
+
+    let mut settings = if settings_path.exists() {
+        fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    if !settings.is_object() {
+        settings = json!({});
+    }
+
+    let hooks = settings
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
+
+    let cc_events = [
+        "SessionStart",
+        "SessionEnd",
+        "PostToolUse",
+        "SubagentStop",
+        "PreCompact",
+        "Stop",
+        "UserPromptSubmit",
+    ];
+
+    let budi_hook_entry = json!({
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": BUDI_HOOK_CMD,
+            "async": true
+        }]
+    });
+
+    let mut changed = false;
+    for event in &cc_events {
+        let event_arr = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry(*event)
+            .or_insert_with(|| json!([]));
+        if !event_arr.is_array() {
+            *event_arr = json!([]);
+        }
+
+        // Check if budi hook already installed for this event
+        let already_installed = event_arr.as_array().unwrap().iter().any(|entry| {
+            // Check nested hooks array format
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|arr| {
+                    arr.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
+                    })
+                })
+                .unwrap_or(false)
+        });
+
+        if !already_installed {
+            event_arr.as_array_mut().unwrap().push(budi_hook_entry.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Ok(out) = serde_json::to_string_pretty(&settings) {
+            if fs::write(&settings_path, out).is_ok() {
+                eprintln!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
+            }
+        }
+    }
+}
+
+/// Install hooks into ~/.cursor/hooks.json.
+/// Uses Cursor's flat format: hooks → eventName → [{ command, type }]
+fn install_cursor_hooks() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let hooks_path = PathBuf::from(&home).join(".cursor/hooks.json");
+
+    // Ensure directory exists
+    if let Some(parent) = hooks_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let mut config = if hooks_path.exists() {
+        fs::read_to_string(&hooks_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({"version": 1, "hooks": {}}))
+    } else {
+        json!({"version": 1, "hooks": {}})
+    };
+
+    if config.get("version").is_none() {
+        config["version"] = json!(1);
+    }
+    if config.get("hooks").is_none() || !config["hooks"].is_object() {
+        config["hooks"] = json!({});
+    }
+
+    let cursor_events = [
+        "sessionStart",
+        "sessionEnd",
+        "postToolUse",
+        "subagentStop",
+        "preCompact",
+        "stop",
+        "afterFileEdit",
+    ];
+
+    let budi_hook_entry = json!({
+        "command": BUDI_HOOK_CMD,
+        "type": "command"
+    });
+
+    let mut changed = false;
+    let hooks = config.get_mut("hooks").unwrap();
+
+    for event in &cursor_events {
+        let event_arr = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry(*event)
+            .or_insert_with(|| json!([]));
+        if !event_arr.is_array() {
+            *event_arr = json!([]);
+        }
+
+        // Check if already installed
+        let already_installed = event_arr.as_array().unwrap().iter().any(|entry| {
+            entry
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
+        });
+
+        if !already_installed {
+            event_arr.as_array_mut().unwrap().push(budi_hook_entry.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Ok(out) = serde_json::to_string_pretty(&config) {
+            if fs::write(&hooks_path, out).is_ok() {
+                eprintln!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
+            }
+        }
     }
 }

@@ -19,9 +19,24 @@ pub fn init_auto_sync() -> Result<(usize, usize)> {
 pub fn cmd_sync() -> Result<()> {
     let client = DaemonClient::connect()?;
 
-    println!("Syncing transcripts...");
+    println!("Syncing recent transcripts...");
     let result = client.sync(true)?;
 
+    print_sync_result(&result);
+    Ok(())
+}
+
+pub fn cmd_history() -> Result<()> {
+    let client = DaemonClient::connect()?;
+
+    println!("Loading full transcript history (this may take a while)...");
+    let result = client.history()?;
+
+    print_sync_result(&result);
+    Ok(())
+}
+
+fn print_sync_result(result: &serde_json::Value) {
     let files_synced = result
         .get("files_synced")
         .and_then(|v| v.as_u64())
@@ -39,6 +54,4 @@ pub fn cmd_sync() -> Result<()> {
             messages_ingested, files_synced
         );
     }
-
-    Ok(())
 }

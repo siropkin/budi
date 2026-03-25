@@ -8,7 +8,7 @@ const DEFAULT_CHART_ROWS = 15;
 
 // Session table state (server-side paginated)
 let lastSessionData = [];
-let sessionSortCol = 'last_seen';
+let sessionSortCol = 'timestamp';
 let sessionSortAsc = false;
 let sessionShowCount = DEFAULT_TABLE_ROWS;
 let sessionTotalCount = 0;
@@ -23,6 +23,8 @@ let registeredProviders = [];
 // Cached data
 let dataLoaded = false;
 let statsData = null;
+let toolsData = [];
+let mcpData = [];
 // Cached render intermediates for stats view
 let cachedSortedModels = [];
 let cachedActivityChartTitle = '';

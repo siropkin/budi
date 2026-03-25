@@ -1,10 +1,17 @@
+function extractTicketId(branch) {
+  if (!branch) return '';
+  const m = branch.match(/([a-zA-Z]{2,})-(\d+)/);
+  return m ? (m[1] + '-' + m[2]).toUpperCase() : '';
+}
+
 function renderMessagesSection(messages) {
   const multiProvider = registeredProviders.length > 1;
   const cols = [
     { key: 'timestamp', label: 'Time' },
-    ...(multiProvider ? [{ key: 'provider', label: 'Agent' }] : []),
     { key: 'model', label: 'Model' },
     { key: 'repo_id', label: 'Repo' },
+    { key: 'git_branch', label: 'Branch' },
+    { key: 'ticket', label: 'Ticket' },
     { key: 'tokens', label: 'Tokens', right: true },
     { key: 'cost', label: 'Cost', right: true },
   ];
@@ -15,15 +22,24 @@ function renderMessagesSection(messages) {
   const rowFn = m => {
     const totalTok = m.input_tokens + m.output_tokens;
     const costVal = (m.cost_cents || 0) / 100;
+    const isEstimated = m.cost_confidence && m.cost_confidence !== 'exact';
+    const costDisplay = isEstimated ? `~${fmtCost(costVal)}` : fmtCost(costVal);
+    const costClass = isEstimated ? 'right muted' : 'right';
     const provDisplay = (registeredProviders.find(rp => rp.name === m.provider) || {}).display_name || m.provider;
-    const provCol = multiProvider ? `<td>${esc(provDisplay)}</td>` : '';
+    const modelLabel = multiProvider
+      ? provDisplay + ' / ' + formatModelName(m.model || 'unknown')
+      : formatModelName(m.model || 'unknown');
+    const branch = m.git_branch ? m.git_branch.replace(/^refs\/heads\//, '') : '';
+    const shortBranch = branch.length > 30 ? branch.slice(0, 27) + '...' : branch;
+    const ticket = extractTicketId(branch);
     return `<tr>
       <td>${esc(fmtDate(m.timestamp))}</td>
-      ${provCol}
-      <td>${esc(m.model || '--')}</td>
+      <td title="${esc(m.model || '')}">${esc(modelLabel)}</td>
       <td class="dir" title="${esc(m.repo_id || '')}">${esc(repoName(m.repo_id) || '--')}</td>
+      <td class="dir" title="${esc(branch)}">${esc(shortBranch || '--')}</td>
+      <td>${esc(ticket || '--')}</td>
       <td class="right">${fmtNum(totalTok)}</td>
-      <td class="right">${fmtCost(costVal)}</td>
+      <td class="${costClass}">${costDisplay}</td>
     </tr>`;
   };
   return `
@@ -84,7 +100,7 @@ function renderStatsView(content) {
         )}
       </div>
       <div class="panel">
-        <h2>Branches${ccOnlyLabel()}</h2>
+        <h2>Branches</h2>
         ${renderBarChart((branches || []).slice(0, DEFAULT_CHART_ROWS),
           (b, full) => {
             const branch = b.git_branch.replace(/^refs\/heads\//, '');
@@ -98,7 +114,7 @@ function renderStatsView(content) {
         )}
       </div>
       <div class="panel">
-        <h2>Tickets${ccOnlyLabel()}</h2>
+        <h2>Tickets</h2>
         ${renderBarChart((tickets || []).slice(0, DEFAULT_CHART_ROWS),
           t => t.value,
           t => t.cost_cents,
@@ -108,6 +124,28 @@ function renderStatsView(content) {
         )}
       </div>
     </div>
+    ${(toolsData.length || mcpData.length) ? `<div class="grid-2 section-mb">
+      <div class="panel">
+        <h2>Tools</h2>
+        ${renderBarChart(toolsData.slice(0, DEFAULT_CHART_ROWS),
+          t => t.tool_name,
+          t => t.call_count,
+          (t, i) => toolColor(t.tool_name),
+          'No tool data for this period',
+          fmtToolCalls
+        )}
+      </div>
+      <div class="panel">
+        <h2>MCP Servers</h2>
+        ${renderBarChart(mcpData.slice(0, DEFAULT_CHART_ROWS),
+          m => m.mcp_server,
+          m => m.call_count,
+          (m, i) => paletteColor(i),
+          'No MCP data for this period',
+          fmtToolCalls
+        )}
+      </div>
+    </div>` : ''}
     <div class="panel section-mb">
       <h2>Messages</h2>
       <input type="text" id="sessionsSearch" class="search-input" placeholder="Search messages..." value="${esc(sessionsSearchTerm)}" style="margin-bottom:12px">

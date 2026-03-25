@@ -90,9 +90,13 @@ a:hover { text-decoration: underline; }
   max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
 }
 .sortable-table .right { text-align: right; }
+.sortable-table .muted { color: var(--text-muted); }
+#sessionsTable th:nth-child(1), #sessionsTable td:nth-child(1) { width: 120px; }
+#sessionsTable th:last-child, #sessionsTable td:last-child { width: 70px; }
+#sessionsTable th:nth-last-child(2), #sessionsTable td:nth-last-child(2) { width: 70px; }
 .table-scroll { overflow-x: auto; }
 
-.empty { text-align: center; color: var(--text-muted); padding: 32px; display: flex; align-items: center; justify-content: center; min-height: 120px; }
+.empty { color: var(--text-muted); padding: 12px 0; font-size: 0.82rem; }
 .loading { text-align: center; color: var(--text-muted); padding: 48px; }
 .loading::after {
   content: ''; display: inline-block; width: 18px; height: 18px;
@@ -100,6 +104,32 @@ a:hover { text-decoration: underline; }
   border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 8px; vertical-align: middle;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.error-state {
+  text-align: center; padding: 64px 24px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.error-icon {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: rgba(248, 81, 73, 0.1); border: 1px solid rgba(248, 81, 73, 0.3);
+  color: var(--danger); font-size: 1.5rem; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.error-title { font-size: 1.1rem; font-weight: 600; color: var(--text); }
+.error-detail { font-size: 0.85rem; color: var(--text-muted); max-width: 400px; }
+.error-actions { display: flex; gap: 8px; margin-top: 8px; }
+.error-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+.error-hint code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; }
+
+.btn {
+  padding: 8px 20px; border-radius: 6px; border: 1px solid var(--border);
+  font-size: 0.85rem; font-weight: 500; cursor: pointer; transition: all 0.15s;
+}
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn-primary:hover:not(:disabled) { opacity: 0.9; }
+.btn-secondary { background: var(--surface); color: var(--text-muted); }
+.btn-secondary:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
 
 
 
