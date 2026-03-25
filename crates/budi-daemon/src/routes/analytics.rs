@@ -195,7 +195,7 @@ pub async fn analytics_providers(
     Ok(Json(result))
 }
 
-pub async fn analytics_registered_providers() -> Json<serde_json::Value> {
+pub async fn analytics_registered_providers() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let providers = budi_core::provider::all_providers();
     let list: Vec<serde_json::Value> = providers
         .iter()
@@ -206,7 +206,7 @@ pub async fn analytics_registered_providers() -> Json<serde_json::Value> {
             })
         })
         .collect();
-    Json(json!(list))
+    Ok(Json(json!(list)))
 }
 
 pub async fn analytics_statusline(
@@ -326,22 +326,21 @@ pub async fn analytics_provider_count() -> Result<Json<serde_json::Value>, (Stat
     Ok(Json(json!({ "count": result })))
 }
 
-pub async fn analytics_schema_version() -> Json<serde_json::Value> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path().ok()?;
+pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let db_path = analytics::db_path()?;
         if !db_path.exists() {
-            return Some(json!({ "current": 0, "target": budi_core::migration::SCHEMA_VERSION, "exists": false }));
+            return Ok(json!({ "current": 0, "target": budi_core::migration::SCHEMA_VERSION, "exists": false }));
         }
-        let conn = analytics::open_db(&db_path).ok()?;
+        let conn = analytics::open_db(&db_path)?;
         let current = budi_core::migration::current_version(&conn);
         let target = budi_core::migration::SCHEMA_VERSION;
-        Some(json!({ "current": current, "target": target, "exists": true }))
+        Ok(json!({ "current": current, "target": target, "exists": true }))
     })
     .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| json!({ "current": 0, "target": budi_core::migration::SCHEMA_VERSION, "exists": false }));
-    Json(result)
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
 }
 
 pub async fn analytics_migrate() -> Result<Json<serde_json::Value>, (StatusCode, String)> {

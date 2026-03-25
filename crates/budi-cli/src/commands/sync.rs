@@ -1,3 +1,6 @@
+use std::io::Write;
+use std::time::Instant;
+
 use anyhow::Result;
 
 use crate::client::DaemonClient;
@@ -19,8 +22,11 @@ pub fn init_auto_sync() -> Result<(usize, usize)> {
 pub fn cmd_sync() -> Result<()> {
     let client = DaemonClient::connect()?;
 
-    println!("Syncing recent transcripts...");
+    print!("Syncing recent transcripts...");
+    let _ = std::io::stdout().flush();
+    let start = Instant::now();
     let result = client.sync(true)?;
+    println!(" done in {:.1}s", start.elapsed().as_secs_f64());
 
     print_sync_result(&result);
     Ok(())
@@ -29,8 +35,11 @@ pub fn cmd_sync() -> Result<()> {
 pub fn cmd_history() -> Result<()> {
     let client = DaemonClient::connect()?;
 
-    println!("Loading full transcript history (this may take a while)...");
+    print!("Loading full transcript history (this may take a while)...");
+    let _ = std::io::stdout().flush();
+    let start = Instant::now();
     let result = client.history()?;
+    println!(" done in {:.1}s", start.elapsed().as_secs_f64());
 
     print_sync_result(&result);
     Ok(())

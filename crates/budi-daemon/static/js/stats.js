@@ -1,10 +1,3 @@
-function hasProvider(name) {
-  return providersData.some(p => p.provider === name);
-}
-function ccOnlyLabel() {
-  return registeredProviders.length > 1 ? ' <span style="font-size:0.7rem;font-weight:normal;color:var(--text-muted)">(Claude Code only)</span>' : '';
-}
-
 const providerColors = {
   claude_code: '#f0883e',
   cursor: '#58a6ff',

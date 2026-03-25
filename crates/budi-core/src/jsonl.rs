@@ -155,7 +155,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             git_branch: u.git_branch,
             repo_id: None,
             provider: "claude_code".to_string(),
-            cost_cents: None,
+            cost_cents: Some(0.0),
             context_tokens_used: None,
             context_token_limit: None,
             session_title: None,

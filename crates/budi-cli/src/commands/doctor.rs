@@ -73,6 +73,33 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    // Check hooks installation
+    let home = std::env::var("HOME").unwrap_or_default();
+    let claude_settings = format!("{}/.claude/settings.json", home);
+    let cursor_hooks = format!("{}/.cursor/hooks.json", home);
+
+    let claude_ok = std::fs::read_to_string(&claude_settings)
+        .map(|s| s.contains("budi hook"))
+        .unwrap_or(false);
+    let cursor_ok = std::fs::read_to_string(&cursor_hooks)
+        .map(|s| s.contains("budi hook"))
+        .unwrap_or(false);
+
+    if claude_ok || cursor_ok {
+        let sources: Vec<&str> = [
+            claude_ok.then_some("Claude Code"),
+            cursor_ok.then_some("Cursor"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        println!("  [ok] hooks: {}", sources.join(", "));
+    } else {
+        println!("  [!!] hooks: no hooks found");
+        println!("    Run `budi init` to install hooks");
+        issues.push("No hooks installed. Run `budi init` to set up hooks.".into());
+    }
+
     println!();
     if issues.is_empty() {
         println!("All checks passed.");

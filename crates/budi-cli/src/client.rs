@@ -39,7 +39,7 @@ impl DaemonClient {
                     .context("Failed to start budi daemon")?;
             } else {
                 anyhow::bail!(
-                    "budi daemon is not running at {}. Start it with `budi init` in a repo.",
+                    "budi daemon is not running at {}. Run `budi init` to start it, or `budi doctor` to diagnose issues.",
                     base_url
                 );
             }

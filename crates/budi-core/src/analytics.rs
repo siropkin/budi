@@ -557,27 +557,16 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |r| r.get(0))?;
 
     let sql = format!(
-        "SELECT uuid, timestamp, role, model,
-                COALESCE(provider, 'claude_code'),
-                COALESCE(repo_id, (
-                    SELECT m2.repo_id FROM messages m2
-                    WHERE m2.session_id = messages.session_id
-                      AND m2.repo_id IS NOT NULL
-                      AND m2.timestamp <= messages.timestamp
-                    ORDER BY m2.timestamp DESC LIMIT 1
-                )),
-                input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0),
-                COALESCE(cost_confidence, 'exact'),
-                COALESCE(git_branch, (
-                    SELECT m2.git_branch FROM messages m2
-                    WHERE m2.session_id = messages.session_id
-                      AND m2.git_branch IS NOT NULL
-                      AND m2.timestamp <= messages.timestamp
-                    ORDER BY m2.timestamp DESC LIMIT 1
-                ))
+        "SELECT messages.uuid, messages.timestamp, messages.role, messages.model,
+                COALESCE(messages.provider, 'claude_code'),
+                COALESCE(messages.repo_id, s.repo_id),
+                messages.input_tokens, messages.output_tokens,
+                messages.cache_creation_tokens, messages.cache_read_tokens,
+                COALESCE(messages.cost_cents, 0.0),
+                COALESCE(messages.cost_confidence, 'exact'),
+                COALESCE(messages.git_branch, s.git_branch)
          FROM messages
+         LEFT JOIN sessions s ON s.conversation_id = messages.session_id
          {}
          ORDER BY {} {}
          LIMIT {} OFFSET {}",
@@ -936,7 +925,7 @@ pub fn branch_cost(
                 COALESCE(SUM(cost_cents), 0.0) as cost
          FROM messages
          {where_clause}
-         GROUP BY git_branch, repo_id
+         GROUP BY git_branch, COALESCE(repo_id, '')
          ORDER BY cost DESC
          LIMIT 20",
     );
@@ -1074,31 +1063,26 @@ pub fn tag_stats(
         }
     }
 
-    // Pre-compute value counts per (key, session) and session costs, then join.
-    // No correlated subqueries — all aggregation is done upfront.
+    // Use CTEs with window functions to scan tags+messages only once.
     let sql = format!(
-        "SELECT ts.key, ts.value,
-                COUNT(*) as session_count,
-                COALESCE(SUM(sc.session_cost / vc.value_count), 0.0) as total_cost_cents
-         FROM (
-             SELECT DISTINCT t.key, t.value, tm.session_id
+        "WITH tag_sessions AS (
+             SELECT DISTINCT t.key, t.value, tm.session_id,
+                    COUNT(DISTINCT t.value) OVER (PARTITION BY t.key, tm.session_id) as value_count
              FROM tags t
              JOIN messages tm ON t.message_uuid = tm.uuid
              {tag_where}
-         ) ts
-         JOIN (
-             SELECT t.key, tm.session_id, COUNT(DISTINCT t.value) as value_count
-             FROM tags t
-             JOIN messages tm ON t.message_uuid = tm.uuid
-             {tag_where}
-             GROUP BY t.key, tm.session_id
-         ) vc ON vc.key = ts.key AND vc.session_id = ts.session_id
-         JOIN (
+         ),
+         session_costs AS (
              SELECT session_id, COALESCE(SUM(cost_cents), 0.0) as session_cost
              FROM messages
              {date_where}
              GROUP BY session_id
-         ) sc ON sc.session_id = ts.session_id
+         )
+         SELECT ts.key, ts.value,
+                COUNT(DISTINCT ts.session_id) as session_count,
+                COALESCE(SUM(sc.session_cost / ts.value_count), 0.0) as total_cost_cents
+         FROM tag_sessions ts
+         JOIN session_costs sc ON sc.session_id = ts.session_id
          GROUP BY ts.key, ts.value
          ORDER BY total_cost_cents DESC
          LIMIT ?{limit_idx}",
@@ -1183,15 +1167,15 @@ pub fn model_usage(
         "SELECT model as m,
                 COALESCE(provider, 'claude_code') as p,
                 COUNT(*) as cnt,
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(input_tokens), 0) as total_input,
+                COALESCE(SUM(output_tokens), 0) as total_output,
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cost_cents), 0.0)
          FROM messages
          {} {} role = 'assistant' AND model IS NOT NULL AND model != '' AND model NOT LIKE '<%'
          GROUP BY m, p
-         ORDER BY (COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0)) DESC",
+         ORDER BY (total_input + total_output) DESC",
         where_clause,
         if where_clause.is_empty() {
             "WHERE"

@@ -38,6 +38,9 @@ impl Enricher for GitEnricher {
 
         // Resolve repo_id from cwd
         if msg.repo_id.is_none() {
+            if msg.cwd.is_none() {
+                tracing::debug!("GitEnricher: no cwd for message {}, skipping repo resolution", msg.uuid);
+            }
             if let Some(ref cwd) = msg.cwd {
                 let repo_id = self.repo_cache.resolve(Path::new(cwd));
                 msg.repo_id = Some(repo_id.clone());
@@ -184,6 +187,9 @@ impl Enricher for CostEnricher {
         // Calculate cost if not already set (skip if API provided exact cost)
         if msg.cost_cents.is_none() && msg.role == "assistant" {
             let model = msg.model.as_deref().unwrap_or("unknown");
+            if model == "unknown" {
+                tracing::debug!("CostEnricher: model is 'unknown' for message {}, cost estimate may be inaccurate", msg.uuid);
+            }
             let pricing = match msg.provider.as_str() {
                 "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
                 _ => crate::providers::claude_code::claude_pricing_for_model(model),
@@ -274,6 +280,7 @@ impl Enricher for HookEnricher {
             return tags;
         };
         let Some(meta) = self.session_cache.get(session_id) else {
+            tracing::debug!("HookEnricher: session '{}' not found in cache", session_id);
             return tags;
         };
 

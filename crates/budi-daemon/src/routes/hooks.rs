@@ -104,6 +104,14 @@ pub async fn analytics_history(
 
 // ---------------------------------------------------------------------------
 // Hook event ingestion
+//
+// This endpoint opens its own SQLite connection via `open_db`, which is safe
+// to run concurrently with the background sync.  SQLite in WAL mode allows
+// concurrent readers, and write serialization is handled by SQLite's internal
+// locking (SQLITE_BUSY with a timeout configured via `busy_timeout`).  The
+// `syncing` AtomicBool only guards against *duplicate* long-running syncs;
+// hook ingestion writes are small and fast, so the SQLite-level lock is
+// sufficient to prevent data corruption.
 // ---------------------------------------------------------------------------
 
 pub async fn hooks_ingest(

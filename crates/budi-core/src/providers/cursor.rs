@@ -204,6 +204,18 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
 
     // `sub` is like "user_2xyz..." or "auth0|273223875" — extract the user ID part
+    // Check JWT expiry
+    if let Some(exp) = payload.get("exp").and_then(|v| v.as_i64()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if now > exp {
+            tracing::warn!("Cursor auth token expired. Re-authenticate in Cursor to restore usage sync.");
+            return None;
+        }
+    }
+
     let sub = payload.get("sub")?.as_str()?;
     let user_id = sub.split('|').last().unwrap_or(sub).to_string();
 
@@ -342,9 +354,10 @@ fn usage_events_to_messages(
         .iter()
         .map(|ev| {
             // Find matching session by timestamp
+            const CLOCK_SKEW_MS: i64 = 2000;
             let matched = sessions
                 .iter()
-                .find(|s| ev.timestamp_ms >= s.start_ms && ev.timestamp_ms <= s.end_ms);
+                .find(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS));
 
             let session_id = matched
                 .map(|s| s.conversation_id.clone())
@@ -611,7 +624,7 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            cost_confidence: "exact".to_string(),
+            cost_confidence: "estimated".to_string(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -636,7 +649,7 @@ fn parse_cursor_line(
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
-                cost_confidence: "exact".to_string(),
+                cost_confidence: "estimated".to_string(),
             })
         }
         _ => None,
@@ -775,6 +788,7 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
         }
     } else {
         // Unknown model — use GPT-4o pricing as reasonable default
+        tracing::warn!("Unknown Cursor model '{}', using GPT-4o default pricing", model);
         ModelPricing {
             input: 2.50,
             output: 10.0,

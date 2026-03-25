@@ -47,8 +47,12 @@ impl Pipeline {
         let session_level_keys: &[&str] = &[
             "ticket_id", "ticket_prefix", "branch", "repo", "session_title", "user", "machine",
             "composer_mode", "permission_mode", "activity", "user_email", "duration", "dominant_tool",
-            "cost_confidence",
         ];
+
+        // Sort by (session_id, timestamp) to handle out-of-order batches.
+        messages.sort_by(|a, b| {
+            a.session_id.cmp(&b.session_id).then(a.timestamp.cmp(&b.timestamp))
+        });
 
         // Propagate git_branch, repo_id, cwd from user messages to subsequent
         // assistant messages in the same session (JSONL only has gitBranch on user entries).

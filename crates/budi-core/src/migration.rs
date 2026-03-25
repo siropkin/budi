@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -90,6 +90,7 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
             CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name);
             CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
+            CREATE INDEX IF NOT EXISTS idx_messages_cwd ON messages(cwd);
             ",
         )?;
         create_sessions_and_hook_events(conn)?;
@@ -342,6 +343,22 @@ pub fn migrate(conn: &Connection) -> Result<bool> {
         )?;
     }
 
+    if version >= 1 && version < 10 {
+        // v10: Add missing indexes, drop unused index, fix Cursor cost_confidence backfill.
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_messages_cwd ON messages(cwd);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
+            DROP INDEX IF EXISTS idx_sessions_title;
+
+            -- Fix v8→v9 migration: Cursor JSONL fallback messages were marked 'exact'
+            -- but have no cost data. They should be 'estimated'.
+            UPDATE messages SET cost_confidence = 'estimated'
+              WHERE provider = 'cursor' AND cost_confidence = 'exact' AND cost_cents IS NULL;
+            ",
+        )?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(needs_tag_backfill)
@@ -396,6 +413,7 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_hook_events_timestamp ON hook_events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);
         CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
         ",
     )?;
     Ok(())

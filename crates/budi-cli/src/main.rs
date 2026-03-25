@@ -54,11 +54,14 @@ enum Commands {
         /// Filter by provider (e.g. claude_code, cursor)
         #[arg(long)]
         provider: Option<String>,
-        /// Show cost breakdown by tag (e.g. --tag ticket_id or --tag team=platform)
+        /// Show cost breakdown by tag key (e.g. --tag ticket_id, --tag branch)
         #[arg(long)]
         tag: Option<String>,
-        /// Output as JSON
-        #[arg(long, default_value_t = false)]
+        /// Output format: text (default) or json
+        #[arg(long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
+        /// Output as JSON (alias for --format json)
+        #[arg(long, default_value_t = false, hide = true)]
         json: bool,
     },
     /// Sync recent transcripts (last 7 days)
@@ -98,6 +101,12 @@ pub enum StatsPeriod {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+pub enum StatsFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum StatuslineFormat {
     /// ANSI colors + OSC 8 hyperlinks (for Claude Code statusline)
     Claude,
@@ -132,10 +141,14 @@ fn main() -> Result<()> {
             models,
             provider,
             tag,
+            format,
             json,
-        } => commands::stats::cmd_stats(
-            period, projects, branches, branch, models, provider, tag, json,
-        ),
+        } => {
+            let json_output = json || matches!(format, StatsFormat::Json);
+            commands::stats::cmd_stats(
+                period, projects, branches, branch, models, provider, tag, json_output,
+            )
+        }
         Commands::Sync => commands::sync::cmd_sync(),
         Commands::History => commands::sync::cmd_history(),
         Commands::Open => commands::open::cmd_open(),
