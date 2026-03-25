@@ -620,7 +620,7 @@ pub fn repo_usage(
     limit: usize,
 ) -> Result<Vec<RepoUsage>> {
     // Build parameterized date filter. Limit param index starts after date params.
-    let mut conditions = vec!["repo_id IS NOT NULL".to_string()];
+    let mut conditions = vec!["repo_id IS NOT NULL".to_string(), "role = 'assistant'".to_string()];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(s) = since {
         param_values.push(Box::new(s.to_string()));
@@ -681,8 +681,9 @@ pub fn repo_usage(
     let total_cost: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {}",
-                total_where
+                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {} {} role = 'assistant'",
+                total_where,
+                if total_where.is_empty() { "WHERE" } else { "AND" }
             ),
             total_refs.as_slice(),
             |r| r.get(0),
@@ -725,7 +726,7 @@ pub fn cache_stats(
 
     let (total_input, cache_read, cache_creation): (u64, u64, u64) = conn.query_row(
         &format!(
-            "SELECT COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0),
+            "SELECT COALESCE(SUM(input_tokens + cache_read_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0),
                     COALESCE(SUM(cache_creation_tokens), 0)
              FROM messages {}",
@@ -898,6 +899,7 @@ pub fn branch_cost(
     let mut conditions = vec![
         "git_branch IS NOT NULL".to_string(),
         "git_branch != ''".to_string(),
+        "role = 'assistant'".to_string(),
     ];
     let mut param_values: Vec<String> = Vec::new();
     let mut idx = 0usize;
@@ -962,8 +964,9 @@ pub fn branch_cost(
     let total_cost: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {}",
-                total_where
+                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {} {} role = 'assistant'",
+                total_where,
+                if total_where.is_empty() { "WHERE" } else { "AND" }
             ),
             total_refs.as_slice(),
             |r| r.get(0),
@@ -1063,6 +1066,12 @@ pub fn tag_stats(
         }
     }
 
+    let role_filter = if date_where.is_empty() {
+        "WHERE role = 'assistant'"
+    } else {
+        "AND role = 'assistant'"
+    };
+
     // Use CTEs with window functions to scan tags+messages only once.
     let sql = format!(
         "WITH tag_sessions AS (
@@ -1075,7 +1084,7 @@ pub fn tag_stats(
          session_costs AS (
              SELECT session_id, COALESCE(SUM(cost_cents), 0.0) as session_cost
              FROM messages
-             {date_where}
+             {date_where} {role_filter}
              GROUP BY session_id
          )
          SELECT ts.key, ts.value,
@@ -1117,8 +1126,9 @@ pub fn tag_stats(
         let total_cost: f64 = conn
             .query_row(
                 &format!(
-                    "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {}",
-                    total_where
+                    "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {} {} role = 'assistant'",
+                    total_where,
+                    if total_where.is_empty() { "WHERE" } else { "AND" }
                 ),
                 total_refs.as_slice(),
                 |r| r.get(0),
@@ -1217,8 +1227,9 @@ pub fn model_usage(
     let total_cost: f64 = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {}",
-                total_where
+                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {} {} role = 'assistant'",
+                total_where,
+                if total_where.is_empty() { "WHERE" } else { "AND" }
             ),
             total_refs.as_slice(),
             |r| r.get(0),
@@ -1299,16 +1310,12 @@ pub fn statusline_stats(
             / 100.0
     });
 
-    // Branch cost: total cost for sessions with a specific branch tag
+    // Branch cost: total cost for messages on a specific branch
     let branch_cost = params.branch.as_ref().map(|branch| {
         conn.query_row(
             "SELECT COALESCE(SUM(m.cost_cents), 0.0) \
              FROM messages m \
-             WHERE m.session_id IN ( \
-                 SELECT DISTINCT tm.session_id FROM tags t \
-                 JOIN messages tm ON t.message_uuid = tm.uuid \
-                 WHERE t.key = 'branch' AND t.value = ?1 \
-             )",
+             WHERE m.git_branch = ?1",
             [branch],
             |r| r.get::<_, f64>(0),
         )
@@ -1930,19 +1937,22 @@ mod tests {
     fn repo_usage_groups_by_repo_id() {
         let mut conn = test_db();
         let mut msgs = sample_messages();
-        // Assign repo_ids
+        // Assign repo_ids — only assistant messages count for cost aggregation
         msgs[0].repo_id = Some("project-a".to_string());
         msgs[1].repo_id = Some("project-a".to_string());
         msgs[2].repo_id = Some("project-b".to_string());
-        // Give project-b's user message some tokens so it appears in results
+        // Make project-b's message an assistant with tokens so it appears in results
+        msgs[2].role = "assistant".to_string();
+        msgs[2].model = Some("claude-opus-4-6".to_string());
         msgs[2].input_tokens = 50;
+        msgs[2].cost_cents = Some(0.5);
         ingest_messages(&mut conn, &msgs, None).unwrap();
 
         let repos = repo_usage(&conn, None, None, 10).unwrap();
         assert_eq!(repos.len(), 2);
-        // project-a has more tokens, project-b has some.
+        // project-a has more cost, project-b has some.
         assert_eq!(repos[0].repo_id, "project-a");
-        assert_eq!(repos[0].message_count, 2);
+        assert_eq!(repos[0].message_count, 1); // only assistant msg
         assert_eq!(repos[1].repo_id, "project-b");
         assert_eq!(repos[1].message_count, 1);
     }
@@ -2034,11 +2044,12 @@ mod tests {
         ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
 
         let cs = cache_stats(&conn, None, None).unwrap();
-        // total_input = (500+0+200) + (300+100+150) + (50000+0+0) = 51250
-        assert_eq!(cs.total_input_tokens, 51250);
+        // total_input = (500+200) + (300+150) + (50000+0) = 51150
+        // cache_creation_tokens excluded from denominator — they are new cache writes, not hits/misses
+        assert_eq!(cs.total_input_tokens, 51150);
         // cache_read = 200 + 150 + 0 = 350
         assert_eq!(cs.total_cache_read_tokens, 350);
-        assert!((cs.hit_rate - 350.0 / 51250.0).abs() < 0.001);
+        assert!((cs.hit_rate - 350.0 / 51150.0).abs() < 0.001);
     }
 
     #[test]

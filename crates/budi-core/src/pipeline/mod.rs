@@ -93,7 +93,8 @@ impl Pipeline {
                         let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
                         let key = (dedup_id, tag.key.clone(), tag.value.clone());
                         if !seen_session_tags.insert(key) {
-                            continue; // Already emitted for this session/message
+                            tracing::trace!("pipeline: skipping duplicate session tag {}={}", tag.key, tag.value);
+                            continue;
                         }
                     }
                     msg_tags.push(tag);

@@ -219,6 +219,10 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
           WHERE provider = 'cursor' AND (cost_cents IS NULL OR cost_cents = 0);
         UPDATE messages SET cost_confidence = 'exact_cost'
           WHERE provider = 'cursor' AND cost_cents IS NOT NULL AND cost_cents > 0;
+        UPDATE messages SET cost_confidence = 'estimated'
+          WHERE provider != 'cursor' AND role = 'assistant';
+        UPDATE messages SET cost_confidence = 'estimated'
+          WHERE role = 'user';
         ",
     )?;
 
@@ -313,6 +317,8 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider);
         CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uuid);
         CREATE INDEX IF NOT EXISTS idx_messages_branch ON messages(git_branch);
+        CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_ts ON messages(role, timestamp);
         CREATE INDEX IF NOT EXISTS idx_messages_cwd ON messages(cwd);
 
         -- tool_usage

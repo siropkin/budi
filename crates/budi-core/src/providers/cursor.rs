@@ -237,7 +237,7 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if now > exp {
-            tracing::warn!("Cursor auth token expired. Re-authenticate in Cursor to restore usage sync.");
+            tracing::warn!("Cursor auth token expired (exp={}). Re-authenticate in Cursor to restore exact cost tracking.", exp);
             return None;
         }
     }
@@ -261,7 +261,8 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
         .header("Cookie", &cookie)
         .header("Origin", "https://cursor.com")
         .header("Referer", "https://cursor.com/dashboard")
-        .send_json(serde_json::json!({}))?;
+        .send_json(serde_json::json!({}))
+        .context("Cursor Usage API request failed (possible Cloudflare block or auth issue)")?;
 
     let body: Value = response.body_mut().read_json()?;
 
@@ -384,17 +385,16 @@ fn usage_events_to_messages(
     events
         .iter()
         .map(|ev| {
-            // Find matching session by timestamp — prefer the latest-started session
-            // when multiple sessions overlap (e.g. concurrent conversations).
+            // Find matching session by timestamp — prefer the session with the
+            // tightest time window when multiple sessions overlap.
             const CLOCK_SKEW_MS: i64 = 2000;
             let matched = sessions
                 .iter()
-                .rev()
-                .find(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS));
+                .filter(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS))
+                .min_by_key(|s| s.end_ms - s.start_ms);
 
             let session_id = matched
-                .map(|s| s.conversation_id.clone())
-                .unwrap_or_else(|| "cursor-api-orphan".to_string());
+                .map(|s| s.conversation_id.clone());
 
             let timestamp = DateTime::from_timestamp_millis(ev.timestamp_ms)
                 .unwrap_or_else(Utc::now);
@@ -408,7 +408,7 @@ fn usage_events_to_messages(
 
             ParsedMessage {
                 uuid,
-                session_id: Some(session_id),
+                session_id,
                 timestamp,
                 cwd: matched.and_then(|s| s.workspace_root.clone()),
                 role: "assistant".to_string(),
@@ -664,7 +664,7 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            cost_confidence: "none".to_string(),
+            cost_confidence: "estimated".to_string(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -1084,7 +1084,7 @@ mod tests {
 
         // No sessions at all
         let msgs = usage_events_to_messages(&events, &[]);
-        assert_eq!(msgs[0].session_id.as_deref(), Some("cursor-api-orphan"));
+        assert_eq!(msgs[0].session_id, None);
         assert!(msgs[0].cwd.is_none());
         assert!(msgs[0].repo_id.is_none());
         assert!(msgs[0].git_branch.is_none());

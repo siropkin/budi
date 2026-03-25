@@ -35,7 +35,7 @@ impl DaemonClient {
                 .ok()
                 .and_then(|cwd| config::find_repo_root(&cwd).ok());
             ensure_daemon_running(repo_root.as_deref(), &config)
-                .context("Failed to start budi daemon. Try `pkill -f budi-daemon` and retry, or run `budi doctor` to diagnose.")?;
+                .context("Failed to start budi daemon. Try `pkill -f budi-daemon` and retry, or run `budi doctor` to diagnose.\nLogs: ~/.local/share/budi/daemon.log")?;
         }
 
         let client = Client::builder()

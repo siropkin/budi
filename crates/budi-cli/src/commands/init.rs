@@ -256,6 +256,8 @@ fn install_claude_code_hooks() {
                 eprintln!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
             }
         }
+    } else {
+        eprintln!("  Hooks: Claude Code hooks already installed");
     }
 }
 
@@ -336,5 +338,7 @@ fn install_cursor_hooks() {
                 eprintln!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
             }
         }
+    } else {
+        eprintln!("  Hooks: Cursor hooks already installed");
     }
 }

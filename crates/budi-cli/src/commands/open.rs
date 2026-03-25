@@ -4,6 +4,9 @@ use anyhow::Result;
 use budi_core::config;
 
 pub fn cmd_open() -> Result<()> {
+    // Ensure daemon is running before opening browser
+    let _ = crate::client::DaemonClient::connect();
+
     let url = format!(
         "http://{}:{}/dashboard",
         config::DEFAULT_DAEMON_HOST,
