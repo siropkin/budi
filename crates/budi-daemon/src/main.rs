@@ -89,6 +89,10 @@ async fn main() -> Result<()> {
         Commands::Serve { host, port } => (host, port),
     };
 
+    // Kill any existing budi-daemon on the same port so a fresh binary can
+    // take over without manual intervention (e.g. after `cargo build && cp`).
+    kill_existing_daemon(port);
+
     let app_state = AppState {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -136,6 +140,47 @@ async fn main() -> Result<()> {
     tracing::info!("budi-daemon listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Kill any existing budi-daemon process listening on the given port.
+/// This allows a new binary to take over seamlessly after an upgrade.
+fn kill_existing_daemon(port: u16) {
+    use std::process::Command;
+
+    // Find PIDs listening on this port
+    let Ok(output) = Command::new("lsof")
+        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let my_pid = std::process::id();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(pid) = line.trim().parse::<u32>().ok() else {
+            continue;
+        };
+        if pid == my_pid {
+            continue;
+        }
+        // Verify it's actually a budi-daemon process
+        let Ok(ps) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+        else {
+            continue;
+        };
+        let cmd = String::from_utf8_lossy(&ps.stdout);
+        if cmd.contains("budi-daemon") {
+            tracing::info!("Killing old budi-daemon (pid {pid})");
+            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+            // Brief wait for graceful shutdown
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
 }
 
 #[cfg(test)]

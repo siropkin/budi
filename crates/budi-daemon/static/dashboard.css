@@ -96,7 +96,7 @@ a:hover { text-decoration: underline; }
 #sessionsTable th:nth-last-child(2), #sessionsTable td:nth-last-child(2) { width: 70px; }
 .table-scroll { overflow-x: auto; }
 
-.empty { color: var(--text-muted); padding: 12px 0; font-size: 0.82rem; }
+.empty { color: var(--text-muted); font-size: 0.82rem; }
 .loading { text-align: center; color: var(--text-muted); padding: 48px; }
 .loading::after {
   content: ''; display: inline-block; width: 18px; height: 18px;
