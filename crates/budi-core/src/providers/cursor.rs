@@ -79,10 +79,7 @@ impl Provider for CursorProvider {
         pipeline: &mut crate::pipeline::Pipeline,
     ) -> Option<Result<(usize, usize)>> {
         // Sync from Cursor Usage API (exact per-request tokens and cost)
-        match sync_from_usage_api(conn, pipeline) {
-            Some(result) => Some(result),
-            None => None, // No auth available — fall back to JSONL
-        }
+        sync_from_usage_api(conn, pipeline)
     }
 }
 
@@ -268,7 +265,7 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
     }
 
     let sub = payload.get("sub")?.as_str()?;
-    let user_id = sub.split('|').last().unwrap_or(sub).to_string();
+    let user_id = sub.split('|').next_back().unwrap_or(sub).to_string();
 
     Some(CursorAuth { user_id, jwt })
 }

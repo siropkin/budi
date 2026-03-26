@@ -69,7 +69,7 @@ pub fn cmd_init(
     let underline = super::ansi("\x1b[4m");
     let reset = super::ansi("\x1b[0m");
 
-    let is_reinit = repo_root.as_ref().map_or(false, |root| {
+    let is_reinit = repo_root.as_ref().is_some_and(|root| {
         config::repo_paths(root)
             .map(|p| p.data_dir.join("analytics.db").exists())
             .unwrap_or(false)

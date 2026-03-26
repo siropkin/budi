@@ -84,8 +84,8 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
 
     // Database schema check (via daemon if healthy, otherwise check file existence)
     if daemon_health(&config) {
-        if let Ok(client) = crate::client::DaemonClient::connect() {
-            if let Ok(sv) = client.schema_version() {
+        if let Ok(client) = crate::client::DaemonClient::connect()
+            && let Ok(sv) = client.schema_version() {
                 let exists = sv.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
                 let current = sv.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
                 let target = sv.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -105,7 +105,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                     ));
                 }
             }
-        }
     } else {
         // Daemon is down — check if the database file at least exists
         if let Ok(db_path) = budi_core::analytics::db_path() {

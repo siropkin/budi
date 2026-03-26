@@ -394,11 +394,10 @@ pub fn load_session_meta(
     })?;
 
     for row in tool_rows {
-        if let Ok((conv_id, tool)) = row {
-            if let Some(meta) = map.get_mut(&conv_id) {
+        if let Ok((conv_id, tool)) = row
+            && let Some(meta) = map.get_mut(&conv_id) {
                 meta.dominant_tool = Some(tool);
             }
-        }
     }
 
     Ok(map)

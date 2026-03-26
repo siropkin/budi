@@ -128,17 +128,14 @@ pub async fn hooks_ingest(
         let tx = conn.transaction()?;
 
         // If prompt submission, classify and update session
-        if matches!(event.event.as_str(), "user_prompt_submit") {
-            if let Some(prompt) = payload
+        if matches!(event.event.as_str(), "user_prompt_submit")
+            && let Some(prompt) = payload
                 .get("user_prompt")
                 .or_else(|| payload.get("prompt"))
                 .and_then(|v| v.as_str())
-            {
-                if let Some(category) = budi_core::hooks::classify_prompt(prompt) {
+                && let Some(category) = budi_core::hooks::classify_prompt(prompt) {
                     let _ = budi_core::hooks::update_session_category(&tx, &event, &category);
                 }
-            }
-        }
 
         budi_core::hooks::upsert_session(&tx, &event)?;
         budi_core::hooks::ingest_hook_event(&tx, &event)?;

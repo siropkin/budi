@@ -279,14 +279,13 @@ pub fn remove_legacy_hooks() {
         return;
     }
 
-    if let Ok(out) = serde_json::to_string_pretty(&settings) {
-        if fs::write(&settings_path, &out).is_ok() {
+    if let Ok(out) = serde_json::to_string_pretty(&settings)
+        && fs::write(&settings_path, &out).is_ok() {
             eprintln!(
                 "  Cleaned up legacy budi hooks from {}",
                 settings_path.display()
             );
         }
-    }
 }
 
 /// Remove old-style budi hooks (with subcommand args) from a settings Value.

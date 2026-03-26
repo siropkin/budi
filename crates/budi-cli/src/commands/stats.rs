@@ -38,6 +38,7 @@ pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_stats(
     period: StatsPeriod,
     projects: bool,
