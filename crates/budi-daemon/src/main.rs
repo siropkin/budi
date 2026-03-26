@@ -61,7 +61,6 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route("/analytics/schema-version", get(a::analytics_schema_version))
         .route("/migrate", post(a::analytics_migrate))
-        .route("/analytics/sessions", get(h::analytics_sessions))
         .route("/analytics/tools", get(h::analytics_tools))
         .route("/analytics/mcp", get(h::analytics_mcp))
         .route("/hooks/ingest", post(h::hooks_ingest))

@@ -302,13 +302,15 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .and_then(|t: &Value| t.get("cacheReadTokens"))
             .and_then(|v: &Value| v.as_u64())
             .unwrap_or(0);
+        // Cursor Usage API returns cost in US cents (confirmed by API response analysis:
+        // typical values are 0.5–5.0 for individual requests). Maps directly to cost_cents.
         let total_cents = token_usage
             .and_then(|t: &Value| t.get("totalCents"))
             .and_then(|v: &Value| v.as_f64())
             .unwrap_or(0.0);
 
         if total_cents > 100.0 {
-            tracing::warn!("Cursor API totalCents={total_cents} unusually high — verify cents vs dollars");
+            tracing::warn!("Cursor API totalCents={total_cents} unusually high for a single request");
         }
 
         events.push(CursorUsageEvent {

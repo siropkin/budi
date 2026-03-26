@@ -188,18 +188,19 @@ impl Enricher for CostEnricher {
                 + msg.output_tokens as f64 * pricing.output / 1_000_000.0
                 + msg.cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
                 + msg.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
-            if cost > 0.0 {
-                msg.cost_cents = Some((cost * 100.0).round());
-                // Cost calculated from tokens × pricing is always "estimated"
-                msg.cost_confidence = "estimated".to_string();
-            } else {
-                // Zero cost with zero tokens: confidence is "estimated" (no data)
-                msg.cost_confidence = "estimated".to_string();
-            }
+            // Always set cost_cents for assistant messages (Some(0.0) for zero-cost)
+            // so they are distinguishable from NULL (unknown cost) in queries.
+            msg.cost_cents = Some((cost * 100.0).round());
+            msg.cost_confidence = "estimated".to_string();
         }
 
-        // Emit cost_confidence tag only for messages with cost data (not user messages)
-        if msg.role == "assistant" {
+        // Ensure cost_confidence is always set for assistant messages
+        if msg.role == "assistant" && msg.cost_confidence.is_empty() {
+            msg.cost_confidence = "estimated".to_string();
+        }
+
+        // Emit cost_confidence tag for assistant messages that have cost data
+        if msg.role == "assistant" && msg.cost_cents.is_some() {
             tags.push(Tag {
                 key: "cost_confidence".to_string(),
                 value: msg.cost_confidence.clone(),

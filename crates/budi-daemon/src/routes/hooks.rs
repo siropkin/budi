@@ -162,26 +162,6 @@ pub struct ListParams {
     pub limit: Option<usize>,
 }
 
-pub async fn analytics_sessions(
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<budi_core::hooks::SessionStats>>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = budi_core::analytics::db_path()?;
-        let conn = budi_core::analytics::open_db(&db_path)?;
-        budi_core::hooks::query_sessions(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            params.limit.unwrap_or(50),
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}
-
 pub async fn analytics_tools(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {

@@ -1,5 +1,7 @@
 //! `budi hook` — receive hook events from Claude Code and Cursor via stdin,
 //! POST them to the daemon. Fire-and-forget: never errors or slows the host editor.
+//!
+//! Set BUDI_HOOK_DEBUG=1 to log failures to ~/.local/share/budi/hook-debug.log.
 
 use std::io::Read;
 
@@ -15,16 +17,35 @@ pub fn cmd_hook() -> anyhow::Result<()> {
     let base_url = load_daemon_url();
     let url = format!("{base_url}/hooks/ingest");
 
-    // Fire-and-forget with a short timeout. Silent on all errors.
+    // Fire-and-forget with a short timeout. Silent on all errors unless debug mode.
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build();
-    if let Ok(client) = client {
-        let _ = client
+    let result = match client {
+        Ok(client) => client
             .post(&url)
             .header("Content-Type", "application/json")
             .body(input)
-            .send();
+            .send()
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+
+    // Debug logging: set BUDI_HOOK_DEBUG=1 to diagnose hook delivery issues
+    if let Err(ref err) = result
+        && std::env::var("BUDI_HOOK_DEBUG").is_ok_and(|v| v == "1")
+    {
+        if let Ok(log_dir) = config::budi_home_dir() {
+            let log_path = log_dir.join("hook-debug.log");
+            let ts = chrono::Utc::now().to_rfc3339();
+            let line = format!("[{ts}] hook POST to {url} failed: {err}\n");
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        }
     }
 
     Ok(())

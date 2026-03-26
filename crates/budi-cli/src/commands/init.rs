@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use budi_core::config;
 use serde_json::{Value, json};
 
@@ -182,23 +182,24 @@ const BUDI_HOOK_CMD: &str = "budi hook";
 /// Install budi hooks for Claude Code and Cursor.
 /// Merges with existing hooks — never overwrites non-budi entries.
 fn install_hooks() {
-    install_claude_code_hooks();
-    install_cursor_hooks();
+    if let Err(e) = install_claude_code_hooks() {
+        eprintln!("  Hooks: failed to install Claude Code hooks: {e}");
+    }
+    if let Err(e) = install_cursor_hooks() {
+        eprintln!("  Hooks: failed to install Cursor hooks: {e}");
+    }
 }
 
 /// Install hooks into ~/.claude/settings.json.
 /// Uses Claude Code's nested format: hooks → EventName → [{ matcher, hooks: [{ type, command }] }]
-fn install_claude_code_hooks() {
-    let Ok(home) = std::env::var("HOME") else {
-        return;
-    };
+fn install_claude_code_hooks() -> Result<()> {
+    let home = std::env::var("HOME").context("HOME not set")?;
     let settings_path = PathBuf::from(&home).join(super::statusline::CLAUDE_USER_SETTINGS);
 
     let mut settings = if settings_path.exists() {
-        fs::read_to_string(&settings_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .unwrap_or_else(|| json!({}))
+        let raw = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}))
     } else {
         json!({})
     };
@@ -206,11 +207,10 @@ fn install_claude_code_hooks() {
         settings = json!({});
     }
 
-    let hooks = settings
+    let hooks_obj = settings
         .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
+        .expect("settings is guaranteed to be object above");
+    let hooks = hooks_obj.entry("hooks").or_insert_with(|| json!({}));
     if !hooks.is_object() {
         *hooks = json!({});
     }
@@ -236,23 +236,22 @@ fn install_claude_code_hooks() {
 
     let mut changed = false;
     for event in &cc_events {
-        let event_arr = hooks
+        let hooks_map = hooks
             .as_object_mut()
-            .unwrap()
-            .entry(*event)
-            .or_insert_with(|| json!([]));
+            .expect("hooks is guaranteed to be object above");
+        let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
         if !event_arr.is_array() {
             *event_arr = json!([]);
         }
 
         // Check if budi hook already installed for this event
-        let already_installed = event_arr.as_array().unwrap().iter().any(|entry| {
-            // Check nested hooks array format
+        let arr = event_arr.as_array().expect("event_arr is guaranteed to be array above");
+        let already_installed = arr.iter().any(|entry| {
             entry
                 .get("hooks")
                 .and_then(|h| h.as_array())
-                .map(|arr| {
-                    arr.iter().any(|h| {
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
                         h.get("command")
                             .and_then(|c| c.as_str())
                             .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
@@ -262,40 +261,38 @@ fn install_claude_code_hooks() {
         });
 
         if !already_installed {
-            event_arr.as_array_mut().unwrap().push(budi_hook_entry.clone());
+            event_arr.as_array_mut().expect("checked above").push(budi_hook_entry.clone());
             changed = true;
         }
     }
 
     if changed {
-        if let Ok(out) = serde_json::to_string_pretty(&settings) {
-            if fs::write(&settings_path, out).is_ok() {
-                println!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
-            }
-        }
+        let out = serde_json::to_string_pretty(&settings)?;
+        fs::write(&settings_path, out)
+            .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+        println!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
     } else {
         println!("  Hooks: Claude Code hooks already installed");
     }
+    Ok(())
 }
 
 /// Install hooks into ~/.cursor/hooks.json.
 /// Uses Cursor's flat format: hooks → eventName → [{ command, type }]
-fn install_cursor_hooks() {
-    let Ok(home) = std::env::var("HOME") else {
-        return;
-    };
+fn install_cursor_hooks() -> Result<()> {
+    let home = std::env::var("HOME").context("HOME not set")?;
     let hooks_path = PathBuf::from(&home).join(".cursor/hooks.json");
 
     // Ensure directory exists
     if let Some(parent) = hooks_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
     let mut config = if hooks_path.exists() {
-        fs::read_to_string(&hooks_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .unwrap_or_else(|| json!({"version": 1, "hooks": {}}))
+        let raw = fs::read_to_string(&hooks_path)
+            .with_context(|| format!("Failed to read {}", hooks_path.display()))?;
+        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"version": 1, "hooks": {}}))
     } else {
         json!({"version": 1, "hooks": {}})
     };
@@ -323,20 +320,17 @@ fn install_cursor_hooks() {
     });
 
     let mut changed = false;
-    let hooks = config.get_mut("hooks").unwrap();
+    let hooks = config.get_mut("hooks").expect("hooks key guaranteed above");
 
     for event in &cursor_events {
-        let event_arr = hooks
-            .as_object_mut()
-            .unwrap()
-            .entry(*event)
-            .or_insert_with(|| json!([]));
+        let hooks_map = hooks.as_object_mut().expect("hooks is guaranteed to be object above");
+        let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
         if !event_arr.is_array() {
             *event_arr = json!([]);
         }
 
-        // Check if already installed
-        let already_installed = event_arr.as_array().unwrap().iter().any(|entry| {
+        let arr = event_arr.as_array().expect("event_arr is guaranteed to be array above");
+        let already_installed = arr.iter().any(|entry| {
             entry
                 .get("command")
                 .and_then(|c| c.as_str())
@@ -344,18 +338,18 @@ fn install_cursor_hooks() {
         });
 
         if !already_installed {
-            event_arr.as_array_mut().unwrap().push(budi_hook_entry.clone());
+            event_arr.as_array_mut().expect("checked above").push(budi_hook_entry.clone());
             changed = true;
         }
     }
 
     if changed {
-        if let Ok(out) = serde_json::to_string_pretty(&config) {
-            if fs::write(&hooks_path, out).is_ok() {
-                println!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
-            }
-        }
+        let out = serde_json::to_string_pretty(&config)?;
+        fs::write(&hooks_path, out)
+            .with_context(|| format!("Failed to write {}", hooks_path.display()))?;
+        println!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
     } else {
         println!("  Hooks: Cursor hooks already installed");
     }
+    Ok(())
 }

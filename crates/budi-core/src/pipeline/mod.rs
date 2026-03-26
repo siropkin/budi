@@ -43,15 +43,16 @@ impl Pipeline {
 
     /// Process a batch of messages through all enrichers.
     /// Returns a parallel Vec of tags for each message.
-    /// Session-level tags (ticket_id, ticket_prefix, branch, repo) are
+    /// Session-level tags (ticket_id, ticket_prefix, repo, etc.) are
     /// deduplicated: only emitted for the first message in each session.
     pub fn process(&mut self, messages: &mut [ParsedMessage]) -> Vec<Vec<Tag>> {
         use std::collections::HashSet;
         let mut all_tags = Vec::with_capacity(messages.len());
         // Track (session_id, key, value) to avoid duplicate session-level tags.
         let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
+        // Note: "branch" is stored as a column on messages, not emitted as a tag.
         let session_level_keys: &[&str] = &[
-            "ticket_id", "ticket_prefix", "branch", "repo", "session_title", "user", "machine",
+            "ticket_id", "ticket_prefix", "repo", "session_title", "user", "machine",
             "composer_mode", "permission_mode", "activity", "user_email", "duration", "dominant_tool",
         ];
 
@@ -68,28 +69,30 @@ impl Pipeline {
         let mut session_repo: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut session_cwd: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for msg in messages.iter_mut() {
-            if let Some(ref sid) = msg.session_id {
-                // If this message has the field, update the running value
-                // If not, inherit from the most recent preceding message
-                if let Some(ref b) = msg.git_branch {
-                    if !b.is_empty() {
-                        session_branch.insert(sid.clone(), b.clone());
-                    }
-                } else if let Some(b) = session_branch.get(sid) {
-                    msg.git_branch = Some(b.clone());
+            // Use session_id for grouping, or a sentinel for unsessionized messages
+            // so they can still inherit from preceding messages in the same batch.
+            let key = msg.session_id.clone().unwrap_or_else(|| "__nosession__".to_string());
+
+            // If this message has the field, update the running value
+            // If not, inherit from the most recent preceding message
+            if let Some(ref b) = msg.git_branch {
+                if !b.is_empty() {
+                    session_branch.insert(key.clone(), b.clone());
                 }
-                if let Some(ref r) = msg.repo_id {
-                    if !r.is_empty() {
-                        session_repo.insert(sid.clone(), r.clone());
-                    }
-                } else if let Some(r) = session_repo.get(sid) {
-                    msg.repo_id = Some(r.clone());
+            } else if let Some(b) = session_branch.get(&key) {
+                msg.git_branch = Some(b.clone());
+            }
+            if let Some(ref r) = msg.repo_id {
+                if !r.is_empty() {
+                    session_repo.insert(key.clone(), r.clone());
                 }
-                if let Some(ref c) = msg.cwd {
-                    session_cwd.insert(sid.clone(), c.clone());
-                } else if let Some(c) = session_cwd.get(sid) {
-                    msg.cwd = Some(c.clone());
-                }
+            } else if let Some(r) = session_repo.get(&key) {
+                msg.repo_id = Some(r.clone());
+            }
+            if let Some(ref c) = msg.cwd {
+                session_cwd.insert(key.clone(), c.clone());
+            } else if let Some(c) = session_cwd.get(&key) {
+                msg.cwd = Some(c.clone());
             }
         }
 
@@ -331,7 +334,7 @@ mod tests {
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            cost_confidence: "exact".to_string(),
+            cost_confidence: "estimated".to_string(),
         }
     }
 }

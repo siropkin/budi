@@ -215,14 +215,12 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
     )?;
 
     // Step 5: Backfill cost_confidence for existing data.
+    // All pre-v7 data used heuristic estimation (composerData or token-based).
+    // The Cursor Usage API (exact data) was only added in v7+.
     conn.execute_batch(
         "
         UPDATE messages SET cost_confidence = 'estimated'
-          WHERE provider = 'cursor' AND (cost_cents IS NULL OR cost_cents = 0);
-        UPDATE messages SET cost_confidence = 'exact'
-          WHERE provider = 'cursor' AND cost_cents IS NOT NULL AND cost_cents > 0;
-        UPDATE messages SET cost_confidence = 'estimated'
-          WHERE provider != 'cursor' AND role = 'assistant';
+          WHERE role = 'assistant';
         UPDATE messages SET cost_confidence = 'estimated'
           WHERE role = 'user';
         ",
@@ -264,10 +262,9 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
 
 /// Create sessions and hook_events tables.
 ///
-/// Note: `repo_id` and `git_branch` are denormalized on both `messages` (canonical)
-/// and `sessions` (derived from hooks). Messages are the source of truth for cost
-/// queries; sessions provide metadata context. Do not update `sessions.git_branch`
-/// without re-enriching the corresponding messages.
+/// Note: `repo_id` and `git_branch` are denormalized on both `messages` (canonical
+/// for cost queries) and `sessions` (derived from hooks for metadata context).
+/// Messages are the source of truth for cost queries.
 fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -326,8 +323,6 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_uuid);
         CREATE INDEX IF NOT EXISTS idx_messages_branch ON messages(git_branch);
         CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
-        CREATE INDEX IF NOT EXISTS idx_messages_role_ts ON messages(role, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_messages_cwd ON messages(cwd);
 
         -- tool_usage
         CREATE INDEX IF NOT EXISTS idx_tool_usage_message ON tool_usage(message_uuid);
@@ -341,6 +336,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_ts_cost ON messages(timestamp, cost_cents);
         CREATE INDEX IF NOT EXISTS idx_messages_role_ts_cost ON messages(role, timestamp, cost_cents);
         CREATE INDEX IF NOT EXISTS idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_branch_ts ON messages(role, git_branch, timestamp);
 
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
@@ -355,6 +351,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation ON hook_events(event, conversation_id);
         CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation_ts ON hook_events(event, conversation_id, timestamp);
         ",
     )?;
     Ok(())

@@ -151,8 +151,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         for issue in &issues {
             println!("  - {issue}");
         }
-        eprintln!("{} issue(s) found", issues.len());
-        std::process::exit(1);
+        anyhow::bail!("{} issue(s) found", issues.len());
     }
     Ok(())
 }

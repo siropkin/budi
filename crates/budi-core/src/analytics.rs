@@ -187,7 +187,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
             "SELECT m.uuid, m.session_id, m.timestamp, m.cwd, m.role, m.model,
                     m.input_tokens, m.output_tokens, m.cache_creation_tokens, m.cache_read_tokens,
                     m.provider, m.cost_cents, m.repo_id, m.parent_uuid,
-                    COALESCE(m.cost_confidence, 'exact'), m.git_branch
+                    COALESCE(m.cost_confidence, 'estimated'), m.git_branch
              FROM messages m",
         )?;
         stmt.query_map([], |row| {
@@ -256,7 +256,10 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
 
     let all_tags = pipeline.process(&mut parsed);
 
-    // Clear and re-insert tags
+    // Clear and re-insert tags atomically. Safe under concurrent hook_ingest
+    // because: (1) this runs in a single transaction, (2) SQLite serializes
+    // writers via busy_timeout, (3) session_cache was loaded above so the
+    // pipeline recreates all hook-derived tags from the sessions table.
     let tx = conn.transaction()?;
     tx.execute_batch("DELETE FROM tags")?;
     let mut count = 0usize;
@@ -590,7 +593,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 messages.input_tokens, messages.output_tokens,
                 messages.cache_creation_tokens, messages.cache_read_tokens,
                 COALESCE(messages.cost_cents, 0.0),
-                COALESCE(messages.cost_confidence, 'exact'),
+                COALESCE(messages.cost_confidence, 'estimated'),
                 COALESCE(messages.git_branch, s.git_branch)
          FROM messages
          LEFT JOIN sessions s ON s.conversation_id = messages.session_id
