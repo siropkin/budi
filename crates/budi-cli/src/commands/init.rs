@@ -89,7 +89,7 @@ pub fn cmd_init(
     }
 
     // Fresh install: full history sync (users won't run `budi sync --all` manually).
-    // Re-init: quick 7-day sync (fast, data already exists).
+    // Re-init: quick 30-day sync (fast, data already exists).
     let sync_result = if no_sync {
         Ok((0, 0))
     } else if is_reinit {
@@ -158,7 +158,7 @@ pub fn cmd_init(
     println!("    2. Run `budi stats` to see your spending");
     if is_reinit {
         println!(
-            "    3. Run `budi sync --all` to load full history {dim}(only last 7 days were synced){reset}"
+            "    3. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
         );
     }
     println!();

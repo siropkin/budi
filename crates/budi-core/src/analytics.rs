@@ -166,10 +166,10 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(home_dir.join("analytics.db"))
 }
 
-/// Quick sync: only files modified in the last 7 days.
+/// Quick sync: only files modified in the last 30 days.
 /// Used by `budi sync` and the daemon's 30s auto-sync.
 pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
-    sync_with_max_age(conn, Some(7))
+    sync_with_max_age(conn, Some(30))
 }
 
 /// Full history sync: process ALL transcript files regardless of age.
