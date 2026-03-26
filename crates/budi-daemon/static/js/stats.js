@@ -1,7 +1,7 @@
 function agentBarData() {
   return registeredProviders.map(rp => {
     const stats = providersData.find(p => p.provider === rp.name);
-    const cost_cents = stats ? (stats.total_cost_cents > 0 ? stats.total_cost_cents : stats.estimated_cost * 100) : 0;
+    const cost_cents = stats ? (stats.total_cost_cents != null ? stats.total_cost_cents : stats.estimated_cost * 100) : 0;
     return {
       provider: rp.name,
       display_name: rp.display_name,
@@ -21,7 +21,7 @@ function renderCards(s, cost) {
     <div class="card">
       <div class="label">Est. Cost</div>
       <div class="value cost-value">${fmtCost(cost.total_cost)}</div>
-      <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input / ${fmtCost(cost.output_cost)} output</div>
+      <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input+cache / ${fmtCost(cost.output_cost)} output</div>
     </div>
     <div class="card">
       <div class="label">Tokens</div>

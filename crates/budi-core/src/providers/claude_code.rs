@@ -150,6 +150,10 @@ pub fn claude_pricing_for_model(model: &str) -> ModelPricing {
         }
     } else {
         // Unknown model — use sonnet pricing as a reasonable default
+        tracing::warn!(
+            "Unknown Claude model '{}', using Sonnet default pricing",
+            model
+        );
         ModelPricing {
             input: 3.0,
             output: 15.0,

@@ -63,7 +63,7 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/schema-version",
             get(a::analytics_schema_version),
         )
-        .route("/migrate", post(a::analytics_migrate))
+        .route("/analytics/migrate", post(a::analytics_migrate))
         .route("/analytics/tools", get(h::analytics_tools))
         .route("/analytics/mcp", get(h::analytics_mcp))
         .route("/hooks/ingest", post(h::hooks_ingest))
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
     let app = build_router(app_state);
 
     // Database migration is handled by the CLI before daemon starts (budi init/update).
-    // The /migrate endpoint exists for manual use but auto-sync does NOT trigger migration.
+    // The /analytics/migrate endpoint exists for manual use but auto-sync does NOT trigger migration.
 
     // Auto-sync transcripts every 30 seconds to keep analytics fresh.
     tokio::spawn(async move {
@@ -129,7 +129,9 @@ async fn main() -> Result<()> {
                         tracing::warn!("Database needs migration. Skipping auto-sync.");
                         return None;
                     }
-                    analytics::sync_all(&mut conn).ok()
+                    analytics::sync_all(&mut conn)
+                        .ok()
+                        .map(|(f, m, _warnings)| (f, m))
                 })();
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
                 result

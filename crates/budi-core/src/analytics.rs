@@ -4,7 +4,6 @@
 //! files across all providers. Supports incremental ingestion via sync state
 //! tracking (byte offset per file).
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -167,157 +166,32 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(home_dir.join("analytics.db"))
 }
 
-/// Regenerate all tags from existing messages using the current pipeline enrichers.
-/// Reads existing tags to populate ParsedMessage fields (git_branch, session_title,
-/// user_name, machine_name) so enrichers can reproduce them.
-/// Clears the tags table and re-populates it.
-pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
-    let tags_config = crate::config::load_tags_config();
-
-    // Start transaction early so that session_cache and message reads are consistent
-    // (prevents stale reads if concurrent hook writes arrive between the two queries).
-    let tx = conn.transaction()?;
-
-    let session_cache = crate::hooks::load_session_meta(&tx, None).unwrap_or_default();
-    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
-
-    // Read all messages
-    let mut parsed: Vec<crate::jsonl::ParsedMessage> = {
-        let mut stmt = tx.prepare(
-            "SELECT m.uuid, m.session_id, m.timestamp, m.cwd, m.role, m.model,
-                    m.input_tokens, m.output_tokens, m.cache_creation_tokens, m.cache_read_tokens,
-                    m.provider, m.cost_cents, m.repo_id, m.parent_uuid,
-                    COALESCE(m.cost_confidence, 'estimated'), m.git_branch
-             FROM messages m",
-        )?;
-        stmt.query_map([], |row| {
-            let uuid: String = row.get(0)?;
-            Ok(crate::jsonl::ParsedMessage {
-                uuid,
-                session_id: row.get(1)?,
-                timestamp: row
-                    .get::<_, String>(2)?
-                    .parse()
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-                cwd: row.get(3)?,
-                role: row.get(4)?,
-                model: row.get(5)?,
-                input_tokens: row.get::<_, i64>(6)? as u64,
-                output_tokens: row.get::<_, i64>(7)? as u64,
-                cache_creation_tokens: row.get::<_, i64>(8)? as u64,
-                cache_read_tokens: row.get::<_, i64>(9)? as u64,
-                git_branch: row.get(15)?,
-                repo_id: row.get(12)?,
-                provider: row.get::<_, String>(10)?,
-                cost_cents: row.get(11)?,
-                session_title: None,
-                parent_uuid: row.get(13)?,
-                user_name: None,
-                machine_name: None,
-                cost_confidence: row.get::<_, String>(14)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect()
-    }; // stmt dropped here
-
-    // Populate fields from existing tags so enrichers can reproduce session-level tags
-    // (git_branch is read from the messages column above, not from tags)
-    {
-        let mut tag_stmt = tx.prepare(
-            "SELECT message_uuid, key, value FROM tags WHERE key IN ('session_title', 'user', 'machine')",
-        )?;
-        let tag_rows: Vec<(String, String, String)> = tag_stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut tag_map: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for (uuid, key, value) in tag_rows {
-            tag_map.entry(uuid).or_default().push((key, value));
-        }
-
-        for msg in &mut parsed {
-            if let Some(tags) = tag_map.get(&msg.uuid) {
-                for (key, value) in tags {
-                    match key.as_str() {
-                        "session_title" => msg.session_title = Some(value.clone()),
-                        "user" => msg.user_name = Some(value.clone()),
-                        "machine" => msg.machine_name = Some(value.clone()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    let all_tags = pipeline.process(&mut parsed);
-
-    // Clear and re-insert tags atomically within the same transaction that
-    // loaded session_cache and messages (prevents stale reads).
-    tx.execute_batch("DELETE FROM tags")?;
-    let mut count = 0usize;
-    // Collect (uuid, branch) pairs for batch git_branch update
-    let mut branch_updates: Vec<(String, String)> = Vec::new();
-    for (i, msg) in parsed.iter().enumerate() {
-        if let Some(msg_tags) = all_tags.get(i) {
-            for tag in msg_tags {
-                tx.execute(
-                    "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
-                    params![msg.uuid, tag.key, tag.value],
-                )?;
-                if tx.changes() > 0 {
-                    count += 1;
-                }
-            }
-        }
-        // Collect git_branch updates for batch processing
-        if let Some(ref branch) = msg.git_branch {
-            branch_updates.push((msg.uuid.clone(), branch.clone()));
-        }
-        // Update cost_confidence if pipeline changed it
-        if msg.role == "assistant" {
-            tx.execute(
-                "UPDATE messages SET cost_confidence = ?2 WHERE uuid = ?1 AND cost_confidence != ?2",
-                params![msg.uuid, msg.cost_confidence],
-            )?;
-        }
-    }
-    // Batch update git_branch using parameterized queries
-    {
-        let mut update_stmt = tx.prepare(
-            "UPDATE messages SET git_branch = ?2 WHERE uuid = ?1 AND (git_branch IS NULL OR git_branch != ?2)"
-        )?;
-        for (uuid, branch) in &branch_updates {
-            update_stmt.execute(params![uuid, branch])?;
-        }
-    }
-    tx.commit()?;
-    Ok(count)
-}
-
 /// Quick sync: only files modified in the last 7 days.
 /// Used by `budi sync` and the daemon's 30s auto-sync.
-pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize)> {
+pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
     sync_with_max_age(conn, Some(7))
 }
 
 /// Full history sync: process ALL transcript files regardless of age.
 /// Used by `budi history` — may take minutes on large histories.
-pub fn sync_history(conn: &mut Connection) -> Result<(usize, usize)> {
+pub fn sync_history(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
     sync_with_max_age(conn, None)
 }
 
 /// Internal sync implementation with optional max_age filter.
 /// When `max_age_days` is Some(N), only files modified in the last N days are processed.
 /// When None, all files are processed.
-fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result<(usize, usize)> {
+fn sync_with_max_age(
+    conn: &mut Connection,
+    max_age_days: Option<u64>,
+) -> Result<(usize, usize, Vec<String>)> {
     let providers = crate::provider::available_providers();
     let tags_config = crate::config::load_tags_config();
     let session_cache = crate::hooks::load_session_meta(conn, max_age_days).unwrap_or_default();
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
     let mut total_files = 0;
     let mut total_messages = 0;
+    let mut warnings: Vec<String> = Vec::new();
 
     let cutoff = max_age_days
         .map(|days| std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86400));
@@ -326,9 +200,10 @@ fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result
         // Try direct sync first (e.g. Cursor Usage API).
         if let Some(result) = provider.sync_direct(conn, &mut pipeline) {
             match result {
-                Ok((files, messages)) => {
+                Ok((files, messages, w)) => {
                     total_files += files;
                     total_messages += messages;
+                    warnings.extend(w);
                     continue;
                 }
                 Err(e) => {
@@ -385,7 +260,7 @@ fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result
         }
     }
 
-    Ok((total_files, total_messages))
+    Ok((total_files, total_messages, warnings))
 }
 
 /// Summary statistics for display.
@@ -398,36 +273,6 @@ pub struct UsageSummary {
     pub total_output_tokens: u64,
     pub total_cache_creation_tokens: u64,
     pub total_cache_read_tokens: u64,
-}
-
-/// Total assistant cost across all messages for a date range.
-/// Used by multiple functions to compute "(untagged)" cost.
-fn total_assistant_cost(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<f64> {
-    let (total_where, total_params) = date_filter(since, until, "WHERE");
-    let total_refs: Vec<&dyn rusqlite::types::ToSql> = total_params
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-    let total_cost: f64 = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {} {} role = 'assistant'",
-                total_where,
-                if total_where.is_empty() {
-                    "WHERE"
-                } else {
-                    "AND"
-                }
-            ),
-            total_refs.as_slice(),
-            |r| r.get(0),
-        )
-        .unwrap_or(0.0);
-    Ok(total_cost)
 }
 
 /// Build a parameterized date filter clause and its bind values.
@@ -655,10 +500,8 @@ pub fn repo_usage(
     limit: usize,
 ) -> Result<Vec<RepoUsage>> {
     // Build parameterized date filter. Limit param index starts after date params.
-    let mut conditions = vec![
-        "repo_id IS NOT NULL".to_string(),
-        "role = 'assistant'".to_string(),
-    ];
+    // Single-query approach: COALESCE NULL repo_id into "(untagged)"
+    let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(s) = since {
         param_values.push(Box::new(s.to_string()));
@@ -672,13 +515,15 @@ pub fn repo_usage(
     let limit_idx = param_values.len();
 
     let sql = format!(
-        "SELECT repo_id, MIN(cwd) as display_path, COUNT(*) as cnt,
+        "SELECT COALESCE(repo_id, '(untagged)') as repo,
+                COALESCE(MIN(cwd), '(untagged)') as display_path,
+                COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp,
                 COALESCE(SUM(cost_cents), 0.0) as cost
          FROM messages
          WHERE {}
-         GROUP BY repo_id
+         GROUP BY repo
          HAVING cost > 0 OR (inp + outp) > 0
          ORDER BY cost DESC
          LIMIT ?{}",
@@ -689,7 +534,7 @@ pub fn repo_usage(
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
         param_values.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows: Vec<RepoUsage> = stmt
+    let rows: Vec<RepoUsage> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(RepoUsage {
                 repo_id: row.get(0)?,
@@ -708,21 +553,6 @@ pub fn repo_usage(
             }
         })
         .collect();
-
-    // Add "(untagged)" for messages without repo_id
-    let tagged_cost: f64 = rows.iter().map(|r| r.cost_cents).sum();
-    let total_cost = total_assistant_cost(conn, since, until).unwrap_or(0.0);
-    let untagged = total_cost - tagged_cost;
-    if untagged > 0.01 {
-        rows.push(RepoUsage {
-            repo_id: "(untagged)".to_string(),
-            display_path: "(untagged)".to_string(),
-            message_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost_cents: untagged,
-        });
-    }
 
     Ok(rows)
 }
@@ -882,11 +712,7 @@ pub fn branch_cost(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<BranchCost>> {
-    let mut conditions = vec![
-        "git_branch IS NOT NULL".to_string(),
-        "git_branch != ''".to_string(),
-        "role = 'assistant'".to_string(),
-    ];
+    let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     let mut idx = 0usize;
 
@@ -902,8 +728,10 @@ pub fn branch_cost(
     }
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    // Single-query approach: COALESCE NULL/empty branches into "(untagged)"
     let sql = format!(
-        "SELECT git_branch, COALESCE(repo_id, '') as repo,
+        "SELECT COALESCE(NULLIF(git_branch, ''), '(untagged)') as branch,
+                COALESCE(repo_id, '') as repo,
                 COUNT(DISTINCT session_id) as sess,
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
@@ -913,7 +741,7 @@ pub fn branch_cost(
                 COALESCE(SUM(cost_cents), 0.0) as cost
          FROM messages
          {where_clause}
-         GROUP BY git_branch, COALESCE(repo_id, '')
+         GROUP BY branch, repo
          ORDER BY cost DESC
          LIMIT 50",
     );
@@ -923,7 +751,7 @@ pub fn branch_cost(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows: Vec<BranchCost> = stmt
+    let rows: Vec<BranchCost> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(BranchCost {
                 git_branch: row.get(0)?,
@@ -939,33 +767,6 @@ pub fn branch_cost(
         })?
         .filter_map(|r| r.ok())
         .collect();
-
-    // Add "untagged" entry for messages not in any branch
-    let tagged_cost: f64 = rows.iter().map(|r| r.cost_cents).sum();
-    let total_cost = total_assistant_cost(conn, since, until).unwrap_or(0.0);
-    let untagged = total_cost - tagged_cost;
-    if untagged < -0.01 {
-        tracing::warn!(
-            "branch_cost: untagged cost is negative ({:.4}), tagged={:.4} > total={:.4} — data inconsistency",
-            untagged,
-            tagged_cost,
-            total_cost
-        );
-    }
-    let untagged = untagged.max(0.0);
-    if untagged > 0.01 {
-        rows.push(BranchCost {
-            git_branch: "(untagged)".to_string(),
-            repo_id: String::new(),
-            session_count: 0,
-            message_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            cost_cents: untagged,
-        });
-    }
 
     Ok(rows)
 }
@@ -1120,6 +921,47 @@ pub fn tag_stats(
         "AND role = 'assistant'"
     };
 
+    // Build the untagged UNION clause for single-key queries.
+    // This computes untagged cost in the same query instead of a separate total_assistant_cost() call.
+    let untagged_union = if let Some(k) = tag_key {
+        // Build date conditions for the untagged subquery using the same param indices
+        let mut untagged_date_parts = Vec::new();
+        {
+            let mut uidx = 0usize;
+            if tag_key.is_some() {
+                uidx += 1; // skip tag_key param
+            }
+            if since.is_some() {
+                uidx += 1;
+                untagged_date_parts.push(format!("m.timestamp >= ?{uidx}"));
+            }
+            if until.is_some() {
+                uidx += 1;
+                untagged_date_parts.push(format!("m.timestamp < ?{uidx}"));
+            }
+        }
+        let untagged_date_filter = if untagged_date_parts.is_empty() {
+            String::new()
+        } else {
+            format!("AND {}", untagged_date_parts.join(" AND "))
+        };
+        format!(
+            "UNION ALL
+             SELECT '{k}' as key, '(untagged)' as value, 0 as session_count,
+                    COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
+             FROM messages m
+             WHERE m.role = 'assistant' {untagged_date_filter}
+               AND m.session_id NOT IN (
+                   SELECT DISTINCT tm2.session_id
+                   FROM tags t2
+                   JOIN messages tm2 ON t2.message_uuid = tm2.uuid
+                   WHERE t2.key = ?1
+               )"
+        )
+    } else {
+        String::new()
+    };
+
     // Use CTEs with window functions to scan tags+messages only once.
     let sql = format!(
         "WITH tag_sessions AS (
@@ -1134,13 +976,17 @@ pub fn tag_stats(
              FROM messages
              {date_where} {role_filter}
              GROUP BY session_id
+         ),
+         tagged_results AS (
+             SELECT ts.key, ts.value,
+                    COUNT(DISTINCT ts.session_id) as session_count,
+                    COALESCE(SUM(sc.session_cost / ts.value_count), 0.0) as total_cost_cents
+             FROM tag_sessions ts
+             JOIN session_costs sc ON sc.session_id = ts.session_id
+             GROUP BY ts.key, ts.value
          )
-         SELECT ts.key, ts.value,
-                COUNT(DISTINCT ts.session_id) as session_count,
-                COALESCE(SUM(sc.session_cost / ts.value_count), 0.0) as total_cost_cents
-         FROM tag_sessions ts
-         JOIN session_costs sc ON sc.session_id = ts.session_id
-         GROUP BY ts.key, ts.value
+         SELECT key, value, session_count, total_cost_cents FROM tagged_results
+         {untagged_union}
          ORDER BY total_cost_cents DESC
          LIMIT ?{limit_idx}",
     );
@@ -1151,7 +997,7 @@ pub fn tag_stats(
         .collect();
 
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows: Vec<TagCost> = stmt
+    let rows: Vec<TagCost> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(TagCost {
                 key: row.get(0)?,
@@ -1162,21 +1008,6 @@ pub fn tag_stats(
         })?
         .filter_map(|r| r.ok())
         .collect();
-
-    // Add "(untagged)" entry for cost not attributed to any tag of this key
-    if tag_key.is_some() {
-        let tagged_cost: f64 = rows.iter().map(|r| r.cost_cents).sum();
-        let total_cost = total_assistant_cost(conn, since, until).unwrap_or(0.0);
-        let untagged = total_cost - tagged_cost;
-        if untagged > 0.01 {
-            rows.push(TagCost {
-                key: tag_key.unwrap_or("").to_string(),
-                value: "(untagged)".to_string(),
-                session_count: 0,
-                cost_cents: untagged,
-            });
-        }
-    }
 
     Ok(rows)
 }
@@ -1206,9 +1037,11 @@ pub fn model_usage(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
+    // Single-query approach: COALESCE NULL/empty/template models into "(untagged)"
     let sql = format!(
-        "SELECT model as m,
-                provider as p,
+        "SELECT CASE WHEN model IS NULL OR model = '' OR model LIKE '<%' THEN '(untagged)'
+                     ELSE model END as m,
+                COALESCE(provider, '') as p,
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as total_input,
                 COALESCE(SUM(output_tokens), 0) as total_output,
@@ -1216,7 +1049,7 @@ pub fn model_usage(
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cost_cents), 0.0)
          FROM messages
-         {} {} role = 'assistant' AND model IS NOT NULL AND model != '' AND model NOT LIKE '<%'
+         {} {} role = 'assistant'
          GROUP BY m, p
          ORDER BY 8 DESC",
         where_clause,
@@ -1228,7 +1061,7 @@ pub fn model_usage(
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows: Vec<ModelUsage> = stmt
+    let rows: Vec<ModelUsage> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(ModelUsage {
                 model: row.get(0)?,
@@ -1249,23 +1082,6 @@ pub fn model_usage(
             }
         })
         .collect();
-
-    // Add "(untagged)" for messages without a model (user messages)
-    let tagged_cost: f64 = rows.iter().map(|r| r.cost_cents).sum();
-    let total_cost = total_assistant_cost(conn, since, until).unwrap_or(0.0);
-    let untagged = total_cost - tagged_cost;
-    if untagged > 0.01 {
-        rows.push(ModelUsage {
-            model: "(untagged)".to_string(),
-            provider: String::new(),
-            message_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            cost_cents: untagged,
-        });
-    }
 
     Ok(rows)
 }

@@ -99,7 +99,7 @@ impl DaemonClient {
     pub fn migrate(&self) -> Result<Value> {
         let resp = self
             .client
-            .post(format!("{}/migrate", self.base_url))
+            .post(format!("{}/analytics/migrate", self.base_url))
             .timeout(std::time::Duration::from_secs(600))
             .send()
             .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;

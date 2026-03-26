@@ -10,7 +10,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -63,6 +63,53 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_messages_role_cwd ON messages(role, cwd);
             CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
             CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
+            ",
+        )?;
+        conn.pragma_update(None, "user_version", 8u32)?;
+    }
+
+    // ── v8 → v9: drop unused hook_events columns, add sessions index ──
+    if version <= 8 && current_version(conn) == 8 {
+        // SQLite doesn't support DROP COLUMN before 3.35.0, and even then
+        // it has restrictions.  Safest approach: recreate the table.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS hook_events_new (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider            TEXT NOT NULL,
+                event               TEXT NOT NULL,
+                conversation_id     TEXT,
+                timestamp           TEXT NOT NULL,
+                model               TEXT,
+                tool_name           TEXT,
+                tool_duration_ms    INTEGER,
+                tool_call_count     INTEGER,
+                raw_json            TEXT,
+                mcp_server          TEXT
+            );
+            INSERT INTO hook_events_new (id, provider, event, conversation_id, timestamp, model,
+                tool_name, tool_duration_ms, tool_call_count, raw_json, mcp_server)
+                SELECT id, provider, event, conversation_id, timestamp, model,
+                       tool_name, tool_duration_ms, tool_call_count, raw_json, mcp_server
+                FROM hook_events;
+            DROP TABLE hook_events;
+            ALTER TABLE hook_events_new RENAME TO hook_events;
+
+            -- Recreate indexes on hook_events
+            CREATE INDEX IF NOT EXISTS idx_hook_events_conversation ON hook_events(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_timestamp ON hook_events(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation ON hook_events(event, conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation_ts ON hook_events(event, conversation_id, timestamp);
+
+            -- Add missing sessions index
+            CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
             ",
         )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -173,14 +220,7 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
             model               TEXT,
             tool_name           TEXT,
             tool_duration_ms    INTEGER,
-            context_tokens      INTEGER,
-            context_window_size INTEGER,
-            context_usage_pct   REAL,
-            message_count       INTEGER,
-            subagent_type       TEXT,
             tool_call_count     INTEGER,
-            loop_count          INTEGER,
-            files_json          TEXT,
             raw_json            TEXT,
             mcp_server          TEXT
         );
@@ -218,6 +258,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_role_cwd ON messages(role, cwd);
 
         -- sessions
+        CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 

@@ -129,8 +129,8 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     let claude_settings = format!("{}/.claude/settings.json", home);
     let cursor_hooks = format!("{}/.cursor/hooks.json", home);
 
-    let claude_ok = validate_claude_hooks(&claude_settings);
-    let cursor_ok = validate_cursor_hooks(&cursor_hooks);
+    let (claude_ok, claude_missing) = validate_claude_hooks(&claude_settings);
+    let (cursor_ok, cursor_missing) = validate_cursor_hooks(&cursor_hooks);
 
     if claude_ok || cursor_ok {
         let sources: Vec<&str> = [
@@ -141,6 +141,30 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         .flatten()
         .collect();
         println!("  {green}\u{2713}{reset} hooks: {}", sources.join(", "));
+
+        // Report partial issues for providers that have hooks but are incomplete
+        if !claude_ok && !claude_missing.is_empty() && claude_missing[0] != "file not readable" {
+            let yellow = super::ansi("\x1b[33m");
+            println!(
+                "  {yellow}!{reset} Claude Code hooks: missing events: {}",
+                claude_missing.join(", ")
+            );
+            issues.push(format!(
+                "Claude Code hooks missing events: {}. Run `budi init` to fix.",
+                claude_missing.join(", ")
+            ));
+        }
+        if !cursor_ok && !cursor_missing.is_empty() && cursor_missing[0] != "file not readable" {
+            let yellow = super::ansi("\x1b[33m");
+            println!(
+                "  {yellow}!{reset} Cursor hooks: missing events: {}",
+                cursor_missing.join(", ")
+            );
+            issues.push(format!(
+                "Cursor hooks missing events: {}. Run `budi init` to fix.",
+                cursor_missing.join(", ")
+            ));
+        }
     } else {
         println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
         println!("    Run `budi init` to install hooks");
@@ -184,24 +208,47 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Validate Claude Code hooks: check that budi hook entries exist in the correct nested format.
-fn validate_claude_hooks(path: &str) -> bool {
+/// All expected Claude Code hook events.
+const CC_EXPECTED_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "PostToolUse",
+    "SubagentStop",
+    "PreCompact",
+    "Stop",
+    "UserPromptSubmit",
+];
+
+/// All expected Cursor hook events.
+const CURSOR_EXPECTED_EVENTS: &[&str] = &[
+    "sessionStart",
+    "sessionEnd",
+    "postToolUse",
+    "subagentStop",
+    "preCompact",
+    "stop",
+    "afterFileEdit",
+];
+
+/// Validate Claude Code hooks: check all expected events have a budi hook with type "command".
+/// Returns (ok, missing_events) — ok is true only when all events are correctly configured.
+fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return (false, vec!["file not readable".into()]),
     };
     let settings: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return (false, vec!["invalid JSON".into()]),
     };
     let hooks = match settings.get("hooks").and_then(|v| v.as_object()) {
         Some(h) => h,
-        None => return false,
+        None => return (false, vec!["no hooks key".into()]),
     };
-    // Check at least SessionStart and PostToolUse have budi hook
-    let required = ["SessionStart", "PostToolUse"];
-    required.iter().all(|event| {
-        hooks
+
+    let mut missing = Vec::new();
+    for event in CC_EXPECTED_EVENTS {
+        let ok = hooks
             .get(*event)
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -209,49 +256,70 @@ fn validate_claude_hooks(path: &str) -> bool {
                     entry
                         .get("hooks")
                         .and_then(|h| h.as_array())
-                        .map(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command")
+                        .map(|inner| {
+                            inner.iter().any(|h| {
+                                let is_cmd_type = h
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .is_some_and(|t| t == "command");
+                                let has_budi = h
+                                    .get("command")
                                     .and_then(|c| c.as_str())
-                                    .is_some_and(is_budi_hook_cmd)
+                                    .is_some_and(is_budi_hook_cmd);
+                                is_cmd_type && has_budi
                             })
                         })
                         .unwrap_or(false)
                 })
             })
-            .unwrap_or(false)
-    })
+            .unwrap_or(false);
+        if !ok {
+            missing.push((*event).to_string());
+        }
+    }
+    (missing.is_empty(), missing)
 }
 
-/// Validate Cursor hooks: check that budi hook entries exist in the flat format.
-fn validate_cursor_hooks(path: &str) -> bool {
+/// Validate Cursor hooks: check all expected events have a budi hook with type "command".
+/// Returns (ok, missing_events) — ok is true only when all events are correctly configured.
+fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return (false, vec!["file not readable".into()]),
     };
     let config: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return (false, vec!["invalid JSON".into()]),
     };
     let hooks = match config.get("hooks").and_then(|v| v.as_object()) {
         Some(h) => h,
-        None => return false,
+        None => return (false, vec!["no hooks key".into()]),
     };
-    let required = ["sessionStart", "postToolUse"];
-    required.iter().all(|event| {
-        hooks
+
+    let mut missing = Vec::new();
+    for event in CURSOR_EXPECTED_EVENTS {
+        let ok = hooks
             .get(*event)
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter().any(|entry| {
-                    entry
+                    let is_cmd_type = entry
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t == "command");
+                    let has_budi = entry
                         .get("command")
                         .and_then(|c| c.as_str())
-                        .is_some_and(is_budi_hook_cmd)
+                        .is_some_and(is_budi_hook_cmd);
+                    is_cmd_type && has_budi
                 })
             })
-            .unwrap_or(false)
-    })
+            .unwrap_or(false);
+        if !ok {
+            missing.push((*event).to_string());
+        }
+    }
+    (missing.is_empty(), missing)
 }
 
 /// Match any variant of the budi hook command (with or without `|| true` wrapper).

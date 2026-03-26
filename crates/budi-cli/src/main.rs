@@ -64,7 +64,7 @@ enum Commands {
         /// Filter by provider (e.g. claude_code, cursor)
         #[arg(long)]
         provider: Option<String>,
-        /// Show cost breakdown by tag key (e.g. --tag ticket_id, --tag branch)
+        /// Show cost breakdown by tag key (e.g. --tag ticket_id, --tag activity)
         #[arg(long)]
         tag: Option<String>,
         /// Output format: text (default) or json
@@ -153,7 +153,14 @@ fn main() -> Result<()> {
             no_daemon,
             no_open,
             no_sync,
-        } => commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync),
+        } => {
+            let had_warnings =
+                commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
+            if had_warnings {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
         Commands::Stats {
             period,

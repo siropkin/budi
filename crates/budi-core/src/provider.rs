@@ -39,14 +39,14 @@ pub trait Provider: Send + Sync {
     ) -> Result<(Vec<crate::jsonl::ParsedMessage>, usize)>;
 
     /// Direct sync from a structured data source (e.g. SQLite database).
-    /// Returns Some((files_synced, messages_ingested)) if this provider uses
+    /// Returns Some((files_synced, messages_ingested, warnings)) if this provider uses
     /// direct sync instead of file-based discovery. Returns None to fall back
     /// to discover_files() + parse_file().
     fn sync_direct(
         &self,
         _conn: &mut Connection,
         _pipeline: &mut crate::pipeline::Pipeline,
-    ) -> Option<Result<(usize, usize)>> {
+    ) -> Option<Result<(usize, usize, Vec<String>)>> {
         None
     }
 }

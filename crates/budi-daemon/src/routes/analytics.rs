@@ -43,13 +43,13 @@ pub async fn analytics_summary(
 
 #[derive(serde::Deserialize)]
 pub struct MessagesParams {
-    since: Option<String>,
-    until: Option<String>,
-    search: Option<String>,
-    sort_by: Option<String>,
-    sort_asc: Option<bool>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub search: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_asc: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 const VALID_SORT_BY: &[&str] = &["timestamp", "cost", "model", "tokens", "provider"];
@@ -91,9 +91,9 @@ pub async fn analytics_messages(
 
 #[derive(serde::Deserialize)]
 pub struct ProjectsParams {
-    since: Option<String>,
-    until: Option<String>,
-    limit: Option<usize>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<usize>,
 }
 
 pub async fn analytics_projects(
@@ -169,10 +169,10 @@ pub async fn analytics_cost(
 
 #[derive(serde::Deserialize)]
 pub struct ActivityChartParams {
-    since: Option<String>,
-    until: Option<String>,
-    granularity: Option<String>,
-    tz_offset: Option<i32>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub granularity: Option<String>,
+    pub tz_offset: Option<i32>,
 }
 
 pub async fn analytics_activity(
@@ -265,10 +265,10 @@ pub async fn analytics_statusline(
 
 #[derive(serde::Deserialize)]
 pub struct TagParams {
-    since: Option<String>,
-    until: Option<String>,
-    key: Option<String>,
-    limit: Option<usize>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub key: Option<String>,
+    pub limit: Option<usize>,
 }
 
 pub async fn analytics_tags(
@@ -294,8 +294,8 @@ pub async fn analytics_tags(
 
 #[derive(serde::Deserialize)]
 pub struct BranchDetailParams {
-    since: Option<String>,
-    until: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
 }
 
 pub async fn analytics_branch_detail(

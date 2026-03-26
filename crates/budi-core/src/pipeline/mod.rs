@@ -89,6 +89,7 @@ impl Pipeline {
             let key = msg
                 .session_id
                 .clone()
+                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "__nosession__".to_string());
 
             // If this message has the field, update the running value

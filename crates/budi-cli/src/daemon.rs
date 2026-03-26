@@ -68,9 +68,10 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
         if restart_unhealthy_daemon_listener(repo_root, config)? {
             return Ok(());
         }
+        let log_excerpt = daemon_log_tail(repo_root);
         anyhow::bail!(
             "Daemon port is occupied but health endpoint is unavailable at {}.\n\
-             Try `pkill -f budi-daemon` to kill stale processes, or check `budi doctor` for details.",
+             Try `pkill -f budi-daemon` to kill stale processes, or check `budi doctor` for details.{log_excerpt}",
             config.daemon_base_url(),
         );
     }
@@ -84,11 +85,9 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
     ) {
         return Ok(());
     }
-    let log_hint = daemon_log_path(repo_root)
-        .map(|p| format!("\nCheck daemon log: {}", p.display()))
-        .unwrap_or_default();
+    let log_excerpt = daemon_log_tail(repo_root);
     anyhow::bail!(
-        "Daemon failed to become healthy at {}.{log_hint}",
+        "Daemon failed to become healthy at {}.{log_excerpt}",
         config.daemon_base_url()
     );
 }
@@ -271,6 +270,31 @@ fn daemon_log_path(repo_root: Option<&Path>) -> Option<PathBuf> {
             .ok()
             .map(|home| home.join("logs").join("daemon.log"))
     }
+}
+
+/// Read the last ~10 lines of daemon.log and format them for inclusion in error messages.
+fn daemon_log_tail(repo_root: Option<&Path>) -> String {
+    let Some(log_path) = daemon_log_path(repo_root) else {
+        return String::new();
+    };
+    let content = match fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(_) => return format!("\nCheck daemon log: {}", log_path.display()),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let tail: Vec<&str> = if lines.len() > 10 {
+        lines[lines.len() - 10..].to_vec()
+    } else {
+        lines
+    };
+    if tail.is_empty() {
+        return format!("\nDaemon log is empty: {}", log_path.display());
+    }
+    format!(
+        "\nDaemon log ({}):\n{}",
+        log_path.display(),
+        tail.join("\n")
+    )
 }
 
 fn spawn_daemon_process(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {

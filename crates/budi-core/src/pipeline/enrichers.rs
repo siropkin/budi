@@ -192,6 +192,12 @@ impl Enricher for CostEnricher {
                     msg.uuid
                 );
             }
+            if msg.provider != "cursor" && msg.provider != "claude_code" {
+                tracing::warn!(
+                    "CostEnricher: unknown provider '{}', using claude_code pricing",
+                    msg.provider
+                );
+            }
             let pricing = match msg.provider.as_str() {
                 "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
                 _ => crate::providers::claude_code::claude_pricing_for_model(model),

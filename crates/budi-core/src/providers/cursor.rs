@@ -77,7 +77,7 @@ impl Provider for CursorProvider {
         &self,
         conn: &mut Connection,
         pipeline: &mut crate::pipeline::Pipeline,
-    ) -> Option<Result<(usize, usize)>> {
+    ) -> Option<Result<(usize, usize, Vec<String>)>> {
         // Sync from Cursor Usage API (exact per-request tokens and cost)
         sync_from_usage_api(conn, pipeline)
     }
@@ -206,44 +206,79 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Result of auth extraction: credentials (if valid) plus any warnings.
+struct CursorAuthResult {
+    auth: Option<CursorAuth>,
+    warnings: Vec<String>,
+}
+
 /// Extract auth credentials from Cursor's state.vscdb ItemTable.
-fn extract_cursor_auth() -> Option<CursorAuth> {
+fn extract_cursor_auth() -> CursorAuthResult {
+    let mut warnings = Vec::new();
+
     let paths = all_state_vscdb_paths();
     // Only global state.vscdb has ItemTable with auth
-    let global_path = paths
+    let Some(global_path) = paths
         .into_iter()
-        .find(|p| p.to_string_lossy().contains("globalStorage"))?;
+        .find(|p| p.to_string_lossy().contains("globalStorage"))
+    else {
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
+    };
 
-    let vscdb = Connection::open_with_flags(
+    let Ok(vscdb) = Connection::open_with_flags(
         &global_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
+    ) else {
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
+    };
 
-    let jwt: String = vscdb
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
+    let Ok(jwt) = vscdb.query_row(
+        "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
+    };
 
     if jwt.is_empty() {
-        return None;
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
     }
 
     // Decode JWT payload to extract user_id from `sub` field.
     // JWT is header.payload.signature — we need the payload (base64url).
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() < 2 {
-        return None;
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
     }
 
-    let payload_b64 = parts[1];
-    let decoded = base64url_decode(payload_b64)?;
-    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let Some(decoded) = base64url_decode(parts[1]) else {
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&decoded) else {
+        return CursorAuthResult {
+            auth: None,
+            warnings,
+        };
+    };
 
-    // `sub` is like "user_2xyz..." or "auth0|273223875" — extract the user ID part
     // Check JWT expiry — `exp` is assumed to be in seconds (standard JWT).
     // If it looks like milliseconds (> 1_700_000_000_000), convert first.
     if let Some(raw_exp) = payload.get("exp").and_then(|v| v.as_i64()) {
@@ -257,18 +292,31 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if now > exp {
-            tracing::warn!(
-                "Cursor auth token expired (exp={}). Re-authenticate in Cursor to restore exact cost tracking.",
-                exp
-            );
-            return None;
+            let msg = "Cursor auth token expired. Re-authenticate in Cursor to restore exact cost tracking.";
+            tracing::warn!("{}", msg);
+            warnings.push(msg.to_string());
+            return CursorAuthResult {
+                auth: None,
+                warnings,
+            };
         }
     }
 
-    let sub = payload.get("sub")?.as_str()?;
+    let sub = match payload.get("sub").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            return CursorAuthResult {
+                auth: None,
+                warnings,
+            }
+        }
+    };
     let user_id = sub.split('|').next_back().unwrap_or(sub).to_string();
 
-    Some(CursorAuth { user_id, jwt })
+    CursorAuthResult {
+        auth: Some(CursorAuth { user_id, jwt }),
+        warnings,
+    }
 }
 
 /// Fetch usage events from Cursor's API since a timestamp watermark.
@@ -345,8 +393,8 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .is_some_and(|k| k.eq_ignore_ascii_case("included"));
 
         let total_cents = match total_cents_raw {
-            // Subscription plans: totalCents=0 means "included", not "free"
-            Some(c) if c == 0.0 && is_subscription => None,
+            // Subscription plans: totalCents=0 means "included in plan" — exact $0 cost
+            Some(c) if c == 0.0 && is_subscription => Some(0.0),
             Some(c) if c < 0.0 => {
                 tracing::warn!("Cursor API totalCents={c} is negative, clamping to 0.0");
                 Some(0.0)
@@ -521,8 +569,22 @@ fn usage_events_to_messages(
 fn sync_from_usage_api(
     conn: &mut Connection,
     pipeline: &mut crate::pipeline::Pipeline,
-) -> Option<Result<(usize, usize)>> {
-    let auth = extract_cursor_auth()?;
+) -> Option<Result<(usize, usize, Vec<String>)>> {
+    let auth_result = extract_cursor_auth();
+    let warnings = auth_result.warnings;
+
+    let auth = match auth_result.auth {
+        Some(a) => a,
+        None => {
+            // No valid auth — return warnings (e.g. JWT expired) but no error.
+            // Fall back to file-based sync by returning None when there are no warnings,
+            // or return success with 0 counts + warnings if we have something to report.
+            if warnings.is_empty() {
+                return None;
+            }
+            return Some(Ok((0, 0, warnings)));
+        }
+    };
 
     let watermark_key = "cursor-api-usage";
     let watermark = analytics::get_sync_offset(conn, watermark_key)
@@ -538,7 +600,7 @@ fn sync_from_usage_api(
     };
 
     if events.is_empty() {
-        return Some(Ok((0, 0)));
+        return Some(Ok((0, 0, warnings)));
     }
 
     let sessions = load_session_contexts(conn);
@@ -554,7 +616,7 @@ fn sync_from_usage_api(
         let _ = analytics::set_sync_offset(conn, watermark_key, last.timestamp_ms as usize);
     }
 
-    Some(Ok((1, count)))
+    Some(Ok((1, count, warnings)))
 }
 
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.

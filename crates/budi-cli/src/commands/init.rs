@@ -8,13 +8,15 @@ use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
 
+/// Run `budi init`. Returns `Ok(true)` if setup completed but with hook warnings
+/// (caller should exit 1), `Ok(false)` on full success.
 pub fn cmd_init(
     local: bool,
     repo_root: Option<PathBuf>,
     no_daemon: bool,
     no_open: bool,
     no_sync: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let repo_root = if local || repo_root.is_some() {
         let root = super::try_resolve_repo_root(repo_root);
         if root.is_none() {
@@ -45,7 +47,8 @@ pub fn cmd_init(
     install_statusline_if_missing();
 
     let hook_warnings = install_hooks();
-    if !hook_warnings.is_empty() {
+    let had_hook_warnings = !hook_warnings.is_empty();
+    if had_hook_warnings {
         eprintln!("  Warning: hook installation had issues:");
         for w in &hook_warnings {
             eprintln!("    - {w}");
@@ -135,7 +138,7 @@ pub fn cmd_init(
         open_url_in_browser(&dashboard_url);
     }
 
-    Ok(())
+    Ok(had_hook_warnings)
 }
 
 pub fn open_url_in_browser(url: &str) {

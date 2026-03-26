@@ -24,6 +24,7 @@ pub fn init_full_sync() -> Result<(usize, usize)> {
         "  Sync: done in {bold}{:.1}s{reset} ({} messages from {} files)",
         elapsed, msgs, files
     );
+    print_sync_warnings(&result);
     Ok((files, msgs))
 }
 
@@ -37,6 +38,7 @@ pub fn cmd_sync() -> Result<()> {
     println!(" done in {:.1}s", start.elapsed().as_secs_f64());
 
     print_sync_result(&result);
+    print_sync_warnings(&result);
     Ok(())
 }
 
@@ -67,7 +69,20 @@ pub fn cmd_history() -> Result<()> {
         "{green}✓{reset} {bold}{}{reset} messages from {bold}{}{reset} files.",
         msgs, files
     );
+    print_sync_warnings(&result);
     Ok(())
+}
+
+fn print_sync_warnings(result: &serde_json::Value) {
+    if let Some(warnings) = result.get("warnings").and_then(|v| v.as_array()) {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        for w in warnings {
+            if let Some(msg) = w.as_str() {
+                eprintln!("{yellow}Warning:{reset} {}", msg);
+            }
+        }
+    }
 }
 
 fn print_sync_result(result: &serde_json::Value) {

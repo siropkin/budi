@@ -50,10 +50,12 @@ pub async fn analytics_sync(
                 }
                 c
             };
-            let (files_synced, messages_ingested) = budi_core::analytics::sync_all(&mut conn)?;
+            let (files_synced, messages_ingested, warnings) =
+                budi_core::analytics::sync_all(&mut conn)?;
             Ok(json!({
                 "files_synced": files_synced,
                 "messages_ingested": messages_ingested,
+                "warnings": warnings,
             }))
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -88,10 +90,12 @@ pub async fn analytics_history(
         let r = (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
-            let (files_synced, messages_ingested) = budi_core::analytics::sync_history(&mut conn)?;
+            let (files_synced, messages_ingested, warnings) =
+                budi_core::analytics::sync_history(&mut conn)?;
             Ok(json!({
                 "files_synced": files_synced,
                 "messages_ingested": messages_ingested,
+                "warnings": warnings,
             }))
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
