@@ -315,6 +315,19 @@ mod tests {
         }
     }
 
+    /// Verify Opus 4.6 1M context variant has same pricing as base Opus 4.6.
+    /// Claude Code currently uses "claude-opus-4-6[1m]" model ID which maps to
+    /// "claude-opus-4-6" in JSONL — verify our matcher handles both.
+    #[test]
+    fn pricing_opus_4_6_1m_context() {
+        // The JSONL strips "[1m]" — but if it ever appears, verify it still matches
+        let p = claude_pricing_for_model("claude-opus-4-6");
+        let p1m = claude_pricing_for_model("claude-opus-4-6[1m]");
+        // Both should contain "opus-4-6" and match the same pricing
+        assert_eq!(p.input, p1m.input);
+        assert_eq!(p.output, p1m.output);
+    }
+
     /// Verify cache read pricing is 0.1x base input.
     #[test]
     fn cache_read_is_0_1x_base_input() {

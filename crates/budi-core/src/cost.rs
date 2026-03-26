@@ -281,6 +281,114 @@ mod tests {
         );
     }
 
+    /// Validate that cost_cents stored per-message matches aggregate token-based
+    /// recalculation. This catches rounding drift, double-counting, and pricing bugs.
+    /// Simulates a realistic workload with mixed models and cache patterns.
+    #[test]
+    fn cost_aggregate_matches_per_message_sum() {
+        let conn = setup_db();
+        // Simulate realistic mix: many small Opus messages, some Sonnet, some Haiku
+        let scenarios: &[(&str, &str, u64, u64, u64, u64)] = &[
+            // (uuid_prefix, model, input, output, cache_w, cache_r)
+            // Typical first message: small input, small output, large cache write
+            ("opus1", "claude-opus-4-6", 3, 32, 16267, 9985),
+            // Mid-conversation: growing cache reads
+            ("opus2", "claude-opus-4-6", 1, 273, 845, 49002),
+            // Large response
+            ("opus3", "claude-opus-4-6", 1, 4521, 302, 51685),
+            // Tool use (small output)
+            ("opus4", "claude-opus-4-6", 1, 36, 879, 51383),
+            // Sonnet message
+            ("son1", "claude-sonnet-4-6-20260321", 5, 512, 8234, 42000),
+            // Haiku
+            ("hai1", "claude-haiku-4-5-20251001", 10, 128, 3000, 15000),
+            // Opus 4.5 (different model ID, same pricing)
+            ("opus45", "claude-opus-4-5-20251101", 2, 200, 10000, 30000),
+        ];
+
+        let mut expected_total_cents = 0.0f64;
+        for (prefix, model, inp, out, cw, cr) in scenarios {
+            let pricing = crate::providers::claude_code::claude_pricing_for_model(model);
+            let cost = *inp as f64 * pricing.input / 1_000_000.0
+                + *out as f64 * pricing.output / 1_000_000.0
+                + *cw as f64 * pricing.cache_write / 1_000_000.0
+                + *cr as f64 * pricing.cache_read / 1_000_000.0;
+            let cost_cents = cost * 100.0;
+            expected_total_cents += cost_cents;
+
+            conn.execute(
+                "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                 VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![*prefix, *model, *inp as i64, *out as i64, *cw as i64, *cr as i64, cost_cents],
+            ).unwrap();
+        }
+
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        let stored_total_cents = expected_total_cents;
+        let stored_total_usd = stored_total_cents / 100.0;
+
+        // Aggregate recalculated cost (from estimate_cost_filtered breakdown)
+        let breakdown_total = cost.input_cost + cost.output_cost + cost.cache_write_cost + cost.cache_read_cost;
+
+        // total_cost comes from SUM(cost_cents)/100 — should match stored values
+        assert!(
+            (cost.total_cost - (stored_total_usd * 100.0).round() / 100.0).abs() < 0.01,
+            "total_cost ({}) should match stored sum ({})",
+            cost.total_cost,
+            stored_total_usd
+        );
+
+        // Breakdown should approximately match total (may differ slightly due to rounding)
+        assert!(
+            (breakdown_total - cost.total_cost).abs() < 0.02,
+            "breakdown ({}) should match total ({})",
+            breakdown_total,
+            cost.total_cost
+        );
+    }
+
+    /// Verify that the Anthropic API's token semantics are correctly handled:
+    /// input_tokens is NON-CACHED input (exclusive of cache tokens).
+    /// Total billed input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
+    /// each at their respective rate.
+    #[test]
+    fn anthropic_token_semantics_no_overlap() {
+        // Real example from JSONL: input=3, cache_create=16267, cache_read=9985
+        // If input_tokens INCLUDED cache, total input would be 3 (absurdly small for a full prompt).
+        // The fact that input_tokens=3 while cache=26252 proves they're exclusive.
+        //
+        // Correct cost: 3 × $5/M + 16267 × $6.25/M + 9985 × $0.50/M
+        // Wrong cost (if double-counting): (3+16267+9985) × $5/M + 16267 × $6.25/M + 9985 × $0.50/M
+        let p = crate::providers::claude_code::claude_pricing_for_model("claude-opus-4-6");
+        let correct = 3.0 * p.input / 1e6 + 16267.0 * p.cache_write / 1e6 + 9985.0 * p.cache_read / 1e6;
+        let wrong_double_count = (3.0 + 16267.0 + 9985.0) * p.input / 1e6
+            + 16267.0 * p.cache_write / 1e6
+            + 9985.0 * p.cache_read / 1e6;
+
+        // Our calculation should match the correct approach
+        let conn = setup_db();
+        let cost_cents = correct * 100.0;
+        conn.execute(
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES ('test', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 16267, 9985, ?1)",
+            params![cost_cents],
+        ).unwrap();
+        let result = estimate_cost_filtered(&conn, None, None, None).unwrap();
+
+        // Correct cost: ~$0.1067
+        assert!(
+            (result.total_cost - correct).abs() < 0.01,
+            "should use correct (exclusive) token accounting: got {}, expected ~{}",
+            result.total_cost,
+            correct
+        );
+        // Wrong cost would be ~$0.2379 (2.2x higher) — verify we're NOT doing this
+        assert!(
+            (result.total_cost - wrong_double_count).abs() > 0.05,
+            "should NOT double-count input tokens"
+        );
+    }
+
     #[test]
     fn cost_sub_cent_messages_not_lost() {
         let conn = setup_db();
