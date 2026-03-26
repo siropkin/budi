@@ -151,7 +151,8 @@ struct CursorUsageEvent {
     output_tokens: u64,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
-    total_cents: f64,
+    /// None when cost is not provided (e.g. subscription "Included" plan).
+    total_cents: Option<f64>,
 }
 
 /// Decode a base64url-encoded string (no padding required).
@@ -320,34 +321,57 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .and_then(|t: &Value| t.get("outputTokens"))
             .and_then(|v: &Value| v.as_u64())
             .unwrap_or(0);
+        // API field is "cacheWriteTokens" (maps to our cache_creation concept)
         let cache_creation_tokens = token_usage
-            .and_then(|t: &Value| t.get("cacheCreationTokens"))
+            .and_then(|t: &Value| t.get("cacheWriteTokens"))
             .and_then(|v: &Value| v.as_u64())
             .unwrap_or(0);
         let cache_read_tokens = token_usage
             .and_then(|t: &Value| t.get("cacheReadTokens"))
             .and_then(|v: &Value| v.as_u64())
             .unwrap_or(0);
-        // Cursor Usage API returns cost in US cents (confirmed by API response analysis:
-        // typical values are 0.5–5.0 for individual requests). Maps directly to cost_cents.
-        let mut total_cents = token_usage
-            .and_then(|t: &Value| t.get("totalCents"))
-            .and_then(|v: &Value| v.as_f64())
-            .unwrap_or(0.0);
 
-        if total_cents < 0.0 {
-            tracing::warn!("Cursor API totalCents={total_cents} is negative, clamping to 0.0");
-            total_cents = 0.0;
-        } else if total_cents > 100_000.0 {
-            tracing::warn!(
-                "Cursor API totalCents={total_cents} exceeds $1000 — skipping event as likely corrupt"
-            );
+        // Cursor Usage API returns cost in US cents for pay-per-use plans.
+        // Subscription ("Included") plans return null or 0 — we treat both as None
+        // so CostEnricher can estimate cost from tokens instead of assuming $0.
+        let total_cents_raw = token_usage
+            .and_then(|t: &Value| t.get("totalCents"))
+            .and_then(|v: &Value| v.as_f64());
+
+        // Detect subscription plan: kind="included" means no per-request billing
+        let is_subscription = ev
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .is_some_and(|k| k.eq_ignore_ascii_case("included"));
+
+        let total_cents = match total_cents_raw {
+            // Subscription plans: totalCents=0 means "included", not "free"
+            Some(c) if c == 0.0 && is_subscription => None,
+            Some(c) if c < 0.0 => {
+                tracing::warn!("Cursor API totalCents={c} is negative, clamping to 0.0");
+                Some(0.0)
+            }
+            Some(c) if c > 100_000.0 => {
+                tracing::warn!(
+                    "Cursor API totalCents={c} exceeds $1000 — skipping event as likely corrupt"
+                );
+                continue;
+            }
+            Some(c) if c > 5000.0 => {
+                let dollars = c / 100.0;
+                tracing::warn!(
+                    "Cursor API totalCents={c} unusually high for a single request (>${dollars:.0} dollars)"
+                );
+                Some(c)
+            }
+            Some(c) => Some(c),
+            None => None, // no cost data — subscription or missing field
+        };
+
+        let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
+        if total_tokens == 0 && total_cents.is_none() {
+            // No token or cost data — skip (JSONL fallback is primary)
             continue;
-        } else if total_cents > 5000.0 {
-            let dollars = total_cents / 100.0;
-            tracing::warn!(
-                "Cursor API totalCents={total_cents} unusually high for a single request (>${dollars:.0} dollars)"
-            );
         }
 
         events.push(CursorUsageEvent {
@@ -478,12 +502,16 @@ fn usage_events_to_messages(
                 git_branch: matched.and_then(|s| s.git_branch.clone()),
                 repo_id: matched.and_then(|s| s.repo_id.clone()),
                 provider: "cursor".to_string(),
-                cost_cents: Some(ev.total_cents),
+                cost_cents: ev.total_cents,
                 session_title: None,
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
-                cost_confidence: "exact".to_string(),
+                cost_confidence: if ev.total_cents.is_some() {
+                    "exact".to_string()
+                } else {
+                    "estimated".to_string()
+                },
             }
         })
         .collect()
@@ -787,35 +815,98 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 }
 
 /// Cursor model pricing lookup.
-/// Prices are per MTok (million tokens), matching actual API rates that Cursor
-/// bills against credit pools.
+/// Prices are per MTok (million tokens), sourced from https://cursor.com/docs/models
+/// Last updated: 2026-03-26
 pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
     if model.is_empty() {
-        tracing::warn!("Cursor model is empty, using GPT-4o default pricing");
+        tracing::warn!("Cursor model is empty, using Composer 2 default pricing");
         return ModelPricing {
-            input: 2.50,
-            output: 10.0,
-            cache_write: 2.50,
-            cache_read: 1.25,
+            input: 0.50,
+            output: 2.50,
+            cache_write: 0.50,
+            cache_read: 0.20,
         };
     }
     let m = model.to_lowercase();
-    // GPT-5.x models
-    if m.contains("gpt-5") {
+
+    // --- Cursor native models ---
+    // Composer 2 (latest, cheapest)
+    if m.contains("composer-2") || m.contains("composer_2") {
+        ModelPricing {
+            input: 0.50,
+            output: 2.50,
+            cache_write: 0.50,
+            cache_read: 0.20,
+        }
+    // Composer 1.5
+    } else if m.contains("composer-1.5") || m.contains("composer_1.5") {
+        ModelPricing {
+            input: 3.50,
+            output: 17.50,
+            cache_write: 3.50,
+            cache_read: 0.35,
+        }
+    // Composer 1 / generic "composer" / "auto" / "default"
+    } else if m == "default" || m.starts_with("composer") || m.contains("auto") {
+        ModelPricing {
+            input: 1.25,
+            output: 10.0,
+            cache_write: 1.25,
+            cache_read: 0.125,
+        }
+
+    // --- OpenAI GPT-5.x models ---
+    } else if m.contains("gpt-5.4") && m.contains("nano") {
+        ModelPricing {
+            input: 0.20,
+            output: 1.25,
+            cache_write: 0.20,
+            cache_read: 0.02,
+        }
+    } else if m.contains("gpt-5.4") && m.contains("mini") {
+        ModelPricing {
+            input: 0.75,
+            output: 4.50,
+            cache_write: 0.75,
+            cache_read: 0.075,
+        }
+    } else if m.contains("gpt-5.4") {
         ModelPricing {
             input: 2.50,
             output: 15.0,
             cache_write: 2.50,
-            cache_read: 1.25,
-        }
-    // Cursor "Auto" / "composer" / "default" — uses cheapest routing
-    } else if m == "default" || m.starts_with("composer") || m.contains("auto") {
-        ModelPricing {
-            input: 1.25,
-            output: 6.0,
-            cache_write: 1.25,
             cache_read: 0.25,
         }
+    } else if m.contains("gpt-5.2") || m.contains("gpt-5.3") {
+        ModelPricing {
+            input: 1.75,
+            output: 14.0,
+            cache_write: 1.75,
+            cache_read: 0.175,
+        }
+    } else if m.contains("gpt-5") && m.contains("mini") {
+        ModelPricing {
+            input: 0.25,
+            output: 2.0,
+            cache_write: 0.25,
+            cache_read: 0.025,
+        }
+    } else if m.contains("gpt-5") && m.contains("fast") {
+        ModelPricing {
+            input: 2.50,
+            output: 20.0,
+            cache_write: 2.50,
+            cache_read: 0.25,
+        }
+    } else if m.contains("gpt-5") {
+        ModelPricing {
+            input: 1.25,
+            output: 10.0,
+            cache_write: 1.25,
+            cache_read: 0.125,
+        }
+
+    // --- OpenAI GPT-4.x models ---
     } else if m.contains("gpt-4o-mini") {
         ModelPricing {
             input: 0.15,
@@ -837,20 +928,31 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
             cache_write: 30.0,
             cache_read: 15.0,
         }
-    } else if m.contains("o1-mini") || m.contains("o3-mini") {
+
+    // --- OpenAI reasoning models ---
+    } else if m.contains("o3-mini") || m.contains("o1-mini") {
         ModelPricing {
             input: 1.10,
             output: 4.40,
             cache_write: 1.10,
             cache_read: 0.55,
         }
-    } else if m.contains("o1") || m.contains("o3") {
+    } else if m.contains("o3") {
         ModelPricing {
-            input: 10.0,
-            output: 40.0,
-            cache_write: 10.0,
-            cache_read: 5.0,
+            input: 2.0,
+            output: 8.0,
+            cache_write: 2.0,
+            cache_read: 0.20,
         }
+    } else if m.contains("o1") {
+        ModelPricing {
+            input: 15.0,
+            output: 60.0,
+            cache_write: 15.0,
+            cache_read: 7.50,
+        }
+
+    // --- Anthropic models ---
     } else if m.contains("opus") {
         ModelPricing {
             input: 5.0,
@@ -872,13 +974,44 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
             cache_write: 1.25,
             cache_read: 0.10,
         }
+
+    // --- Google models ---
+    } else if m.contains("gemini") && m.contains("flash") {
+        // Gemini 3 Flash / 2.5 Flash — use 3 Flash pricing
+        ModelPricing {
+            input: 0.50,
+            output: 3.0,
+            cache_write: 0.50,
+            cache_read: 0.05,
+        }
     } else if m.contains("gemini") {
+        // Gemini Pro (3 Pro, 3.1 Pro)
         ModelPricing {
             input: 2.0,
             output: 12.0,
             cache_write: 2.0,
-            cache_read: 0.50,
+            cache_read: 0.20,
         }
+
+    // --- xAI ---
+    } else if m.contains("grok") {
+        ModelPricing {
+            input: 2.0,
+            output: 6.0,
+            cache_write: 2.0,
+            cache_read: 0.20,
+        }
+
+    // --- Moonshot ---
+    } else if m.contains("kimi") {
+        ModelPricing {
+            input: 0.60,
+            output: 3.0,
+            cache_write: 0.60,
+            cache_read: 0.10,
+        }
+
+    // --- DeepSeek ---
     } else if m.contains("deepseek") {
         ModelPricing {
             input: 0.27,
@@ -886,17 +1019,18 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
             cache_write: 0.27,
             cache_read: 0.07,
         }
+
     } else {
-        // Unknown model — use GPT-4o pricing as reasonable default
+        // Unknown model — use Composer 2 pricing as default (most common Cursor model)
         tracing::warn!(
-            "Unknown Cursor model '{}', using GPT-4o default pricing",
+            "Unknown Cursor model '{}', using Composer 2 default pricing",
             model
         );
         ModelPricing {
-            input: 2.50,
-            output: 10.0,
-            cache_write: 2.50,
-            cache_read: 1.25,
+            input: 0.50,
+            output: 2.50,
+            cache_write: 0.50,
+            cache_read: 0.20,
         }
     }
 }
@@ -1003,10 +1137,39 @@ mod tests {
     }
 
     #[test]
+    fn cursor_pricing_composer_2() {
+        let p = cursor_pricing_for_model("composer-2");
+        assert_eq!(p.input, 0.50);
+        assert_eq!(p.output, 2.50);
+        assert_eq!(p.cache_read, 0.20);
+        // "composer-2-fast" also matches composer-2
+        let p2 = cursor_pricing_for_model("composer-2-fast");
+        assert_eq!(p2.input, 0.50);
+    }
+
+    #[test]
+    fn cursor_pricing_gpt5() {
+        let p = cursor_pricing_for_model("gpt-5");
+        assert_eq!(p.input, 1.25);
+        assert_eq!(p.output, 10.0);
+        // GPT-5.4
+        let p2 = cursor_pricing_for_model("gpt-5.4");
+        assert_eq!(p2.input, 2.50);
+        assert_eq!(p2.output, 15.0);
+    }
+
+    #[test]
     fn cursor_pricing_gpt4o() {
         let p = cursor_pricing_for_model("gpt-4o");
         assert_eq!(p.input, 2.50);
         assert_eq!(p.output, 10.0);
+    }
+
+    #[test]
+    fn cursor_pricing_o3() {
+        let p = cursor_pricing_for_model("o3");
+        assert_eq!(p.input, 2.0);
+        assert_eq!(p.output, 8.0);
     }
 
     #[test]
@@ -1017,9 +1180,10 @@ mod tests {
     }
 
     #[test]
-    fn cursor_pricing_unknown_defaults_to_gpt4o() {
+    fn cursor_pricing_unknown_defaults_to_composer2() {
         let p = cursor_pricing_for_model("some-new-model");
-        assert_eq!(p.input, 2.50);
+        assert_eq!(p.input, 0.50);
+        assert_eq!(p.output, 2.50);
     }
 
     #[test]
@@ -1027,6 +1191,20 @@ mod tests {
         let p = cursor_pricing_for_model("deepseek-v3");
         assert_eq!(p.input, 0.27);
         assert_eq!(p.output, 1.10);
+    }
+
+    #[test]
+    fn cursor_pricing_gemini_flash() {
+        let p = cursor_pricing_for_model("gemini-3-flash");
+        assert_eq!(p.input, 0.50);
+        assert_eq!(p.output, 3.0);
+    }
+
+    #[test]
+    fn cursor_pricing_grok() {
+        let p = cursor_pricing_for_model("grok-4.20");
+        assert_eq!(p.input, 2.0);
+        assert_eq!(p.output, 6.0);
     }
 
     // --- git branch tests ---
@@ -1086,7 +1264,7 @@ mod tests {
                 output_tokens: 1663,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 48214,
-                total_cents: 1.68,
+                total_cents: Some(1.68),
             },
             CursorUsageEvent {
                 timestamp_ms: 1774455910000,
@@ -1095,7 +1273,7 @@ mod tests {
                 output_tokens: 5000,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
-                total_cents: 12.50,
+                total_cents: Some(12.50),
             },
         ];
 
@@ -1142,7 +1320,7 @@ mod tests {
             output_tokens: 50,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            total_cents: 0.5,
+            total_cents: Some(0.5),
         }];
 
         // No sessions at all
@@ -1162,10 +1340,33 @@ mod tests {
             output_tokens: 50,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            total_cents: 0.5,
+            total_cents: Some(0.5),
         }];
 
         let msgs = usage_events_to_messages(&events, &[]);
         assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-100-50-0-0");
+    }
+
+    #[test]
+    fn usage_events_subscription_no_cost() {
+        // Subscription ("Included") plan: tokens present but no cost
+        let events = vec![CursorUsageEvent {
+            timestamp_ms: 1774455909363,
+            model: "composer-2".to_string(),
+            input_tokens: 22770,
+            output_tokens: 6509,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 236544,
+            total_cents: None,
+        }];
+
+        let msgs = usage_events_to_messages(&events, &[]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].input_tokens, 22770);
+        assert_eq!(msgs[0].output_tokens, 6509);
+        assert_eq!(msgs[0].cache_read_tokens, 236544);
+        // cost_cents is None so CostEnricher will estimate
+        assert_eq!(msgs[0].cost_cents, None);
+        assert_eq!(msgs[0].cost_confidence, "estimated");
     }
 }
