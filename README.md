@@ -8,8 +8,7 @@
 **Local-first cost analytics for AI coding agents.** See where your tokens and money go across Claude Code, Cursor, and more.
 
 ```bash
-brew install siropkin/budi/budi
-budi init
+brew install siropkin/budi/budi && budi init
 ```
 
 No cloud. No uploads. Everything stays on your machine.
@@ -42,11 +41,8 @@ Use Homebrew if you have it. Otherwise use the shell script (macOS/Linux) or Pow
 **Homebrew (macOS / Linux):** requires [Homebrew](https://brew.sh/)
 
 ```bash
-brew install siropkin/budi/budi
-budi init    # required: starts daemon, installs hooks, syncs data
+brew install siropkin/budi/budi && budi init
 ```
-
-Note: after `brew upgrade budi`, always run `budi init` to restart the daemon and re-install hooks.
 
 **Shell script (macOS / Linux):** requires `curl` and `tar` (glibc-based systems only; Alpine/musl users should build from source)
 
@@ -114,8 +110,7 @@ shell = ["sh"]
 **Homebrew:**
 
 ```bash
-brew upgrade budi
-budi init    # required: restarts daemon, re-installs hooks
+brew upgrade budi && budi init
 ```
 
 **Shell script / Windows / from source:**
@@ -140,7 +135,7 @@ budi stats --branches         # branches ranked by cost
 budi stats --branch <name>    # cost for a specific branch
 budi stats --tag ticket_id    # cost per ticket
 budi stats --tag ticket_prefix # cost per team prefix
-budi sync                     # sync recent data (last 7 days)
+budi sync                     # sync recent data (last 30 days)
 budi sync --all               # load full history (all time)
 budi update                   # check for updates (detects Homebrew)
 budi update --version 7.1.0  # update to a specific version
