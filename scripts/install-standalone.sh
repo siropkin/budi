@@ -41,9 +41,11 @@ main() {
   command -v curl >/dev/null 2>&1 || fail "curl is required"
   command -v tar >/dev/null 2>&1 || fail "tar is required"
 
-  # Warn if budi is already installed via Homebrew
-  if command -v brew >/dev/null 2>&1 && brew list budi >/dev/null 2>&1; then
-    log "WARNING: budi is already installed via Homebrew."
+  # Warn if budi is already installed via Homebrew (check binary path, fast).
+  local existing_budi
+  existing_budi="$(command -v budi 2>/dev/null || true)"
+  if [ -n "$existing_budi" ] && case "$existing_budi" in */Cellar/*|*/homebrew/*|*/Homebrew/*) true;; *) false;; esac; then
+    log "WARNING: budi is already installed via Homebrew at $existing_budi."
     log "This will install a second copy in $BIN_DIR."
     log "Consider using 'brew upgrade budi' instead."
     log ""
@@ -103,6 +105,16 @@ main() {
     local current_shell="${SHELL:-}"
     case "$current_shell" in
       */zsh)  shell_profile="$HOME/.zshrc" ;;
+      */fish)
+        # Fish uses a different syntax — handle separately.
+        local fish_config="$HOME/.config/fish/config.fish"
+        if ! grep -qF "$BIN_DIR" "$fish_config" 2>/dev/null; then
+          mkdir -p "$(dirname "$fish_config")"
+          printf '\n# Added by budi installer\nfish_add_path %s\n' "$BIN_DIR" >> "$fish_config"
+          log "Added $BIN_DIR to PATH in $fish_config"
+          log "Restart your terminal or run: source $fish_config"
+        fi
+        ;;
       */bash)
         if [ -f "$HOME/.bashrc" ]; then
           shell_profile="$HOME/.bashrc"
@@ -125,6 +137,8 @@ main() {
         log "Added $BIN_DIR to PATH in $shell_profile"
         log "Restart your terminal or run: source $shell_profile"
       fi
+    elif case "$current_shell" in */fish) true;; *) false;; esac; then
+      : # Already handled above.
     else
       log ""
       log "NOTE: $BIN_DIR is not in your PATH."
@@ -133,13 +147,23 @@ main() {
     fi
   fi
 
+  # Ensure BIN_DIR is in PATH for the current shell so budi init works.
+  export PATH="$BIN_DIR:$PATH"
+
   log ""
   log "Installed budi $tag ($target)"
   log ""
-  log "Get started:"
-  log "  budi init         # start daemon, install statusline, sync data"
-  log "  budi doctor      # verify everything is working"
-  log "  budi stats       # view usage analytics"
+
+  # Auto-run budi init for a seamless setup experience.
+  log "Running budi init..."
+  log ""
+  if "$BIN_DIR/budi" init; then
+    log ""
+    log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+  else
+    log ""
+    log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+  fi
 }
 
 main

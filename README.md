@@ -37,39 +37,42 @@ No cloud. No uploads. Everything stays on your machine.
 
 ## Install
 
+Use Homebrew if you have it. Otherwise use the shell script (macOS/Linux) or PowerShell script (Windows). Build from source only if you want to contribute.
+
 **Homebrew (macOS / Linux):** requires [Homebrew](https://brew.sh/)
 
 ```bash
 brew install siropkin/budi/budi
-budi init
+budi init    # required: starts daemon, installs hooks, syncs data
 ```
 
 **Shell script (macOS / Linux):** requires `curl` and `tar`
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash
-budi init
 ```
 
 **Windows (PowerShell):** requires PowerShell 5.1+
 
 ```powershell
 irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex
-budi init
 ```
 
 **From source:** requires [Rust toolchain](https://rustup.rs/) — clones the repo and builds release binaries
 
 ```bash
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
-budi init
 ```
 
 **Or paste this into your AI coding agent:**
 
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
-`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after running `budi init` to activate hooks and the status line.
+The shell script, PowerShell script, and from-source installers automatically run `budi init` after installation. Homebrew users need to run `budi init` manually.
+
+`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks and the status line. The daemon uses port 7878 — make sure it's available.
+
+To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
 Run `budi doctor` to verify everything is set up correctly.
 
@@ -108,14 +111,14 @@ shell = ["sh"]
 
 ```bash
 brew upgrade budi
-budi init        # restart daemon + re-sync
+budi init    # required: restarts daemon with new version, re-installs hooks
 ```
 
 **Shell script / Windows / from source:**
 
 ```bash
-budi update              # downloads latest release and restarts daemon
-budi update --version 7.1.0  # update to a specific version
+budi update                      # downloads latest release, migrates DB, restarts daemon
+budi update --version 7.1.0     # update to a specific version
 ```
 
 **Restart Claude Code and Cursor** after updating to pick up any changes.
@@ -297,14 +300,18 @@ brew uninstall budi
 
 # Shell script (macOS / Linux):
 rm ~/.local/bin/budi ~/.local/bin/budi-daemon
+# or use the full uninstall script:
+curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/uninstall.sh | bash
 
 # Windows (PowerShell):
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\budi"
+irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/uninstall-standalone.ps1 | iex
 ```
 
 Options: `--keep-data` to preserve the analytics database and config, `--yes` to skip confirmation.
 
-**Exit codes:** `budi init` returns 0 on success, 2 on partial success (init completed but hooks had warnings), 1 on hard error.
+## Exit codes
+
+`budi init` returns 0 on success, 2 on partial success (init completed but hooks had warnings), 1 on hard error.
 
 ## License
 

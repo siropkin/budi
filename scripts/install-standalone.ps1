@@ -83,10 +83,18 @@ try {
     Log ""
     Log "Installed: $ver"
     Log ""
-    Log "Get started:"
-    Log "  budi init         # start daemon, install statusline, sync data"
-    Log "  budi doctor      # verify everything is working"
-    Log "  budi stats       # view usage analytics"
+
+    # Auto-run budi init for a seamless setup experience.
+    Log "Running budi init..."
+    Log ""
+    & $budiExe init
+    if ($LASTEXITCODE -eq 0) {
+        Log ""
+        Log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+    } else {
+        Log ""
+        Log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+    }
 } finally {
     if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
