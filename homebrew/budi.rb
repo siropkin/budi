@@ -37,11 +37,9 @@ class Budi < Formula
 
   def caveats
     <<~EOS
-      To get started, run:
+      Get started:
         budi init
-        budi doctor     # verify everything is working
 
-      This starts the daemon, installs hooks, and syncs your data.
       Restart Claude Code and Cursor to activate hooks and the status line.
     EOS
   end
