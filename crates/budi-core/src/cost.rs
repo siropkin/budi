@@ -31,7 +31,7 @@ pub fn estimate_cost_filtered(
     until: Option<&str>,
     provider: Option<&str>,
 ) -> Result<CostEstimate> {
-    let mut conditions = Vec::new();
+    let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = since {
         param_values.push(s.to_string());
