@@ -101,8 +101,13 @@ async fn main() -> Result<()> {
     let sync_flag = app_state.syncing.clone();
     let app = build_router(app_state);
 
-    // Database migration is handled by the CLI before daemon starts (budi init/update).
-    // The /analytics/migrate endpoint exists for manual use but auto-sync does NOT trigger migration.
+    // Ensure the database exists and schema is up-to-date.
+    // This makes the daemon self-sufficient — it doesn't require `budi init` to have run first.
+    if let Ok(db_path) = analytics::db_path()
+        && let Err(e) = analytics::open_db_with_migration(&db_path)
+    {
+        tracing::warn!("Failed to initialize database: {e}");
+    }
 
     // Auto-sync transcripts every 30 seconds to keep analytics fresh.
     tokio::spawn(async move {

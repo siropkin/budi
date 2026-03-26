@@ -14,15 +14,20 @@ async function render() {
 
 function renderError(err) {
   const detail = err && err.message ? err.message : '';
+  const isConnectionError = !detail || detail.includes('Failed to fetch') || detail.includes('NetworkError');
+  const title = isConnectionError ? 'Cannot reach budi-daemon' : 'Failed to load analytics';
+  const hint = isConnectionError
+    ? 'Run <code>budi init</code> to start the daemon'
+    : 'Run <code>budi init</code> to set up, or <code>budi sync</code> to refresh data';
   return `<div class="error-state">
     <div class="error-icon">!</div>
-    <div class="error-title">Failed to load analytics</div>
-    <div class="error-detail">${detail ? esc(detail) : 'Could not connect to budi-daemon.'}</div>
+    <div class="error-title">${title}</div>
+    <div class="error-detail">${detail ? esc(detail) : ''}</div>
     <div class="error-actions">
       <button class="btn btn-primary" id="retryBtn">Retry</button>
       <button class="btn btn-secondary" id="syncBtn">Sync Data</button>
     </div>
-    <div class="error-hint">Or run <code>budi sync</code> in your terminal</div>
+    <div class="error-hint">${hint}</div>
   </div>`;
 }
 
