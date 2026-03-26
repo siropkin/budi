@@ -91,7 +91,7 @@ enum Commands {
         #[arg(long)]
         keep_data: bool,
     },
-    /// Run database migration explicitly (usually automatic with sync/update)
+    /// Run database migration explicitly (usually automatic with init/update)
     #[command(hide = true)]
     Migrate,
     /// Receive hook events from Claude Code / Cursor (reads JSON from stdin, fire-and-forget)

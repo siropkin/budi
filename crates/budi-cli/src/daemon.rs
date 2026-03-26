@@ -37,7 +37,21 @@ pub fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> boo
 
 pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
     if daemon_health(config) {
-        return Ok(());
+        // Daemon is running — but check if it's the same version as this CLI.
+        // A version mismatch (e.g. after `brew upgrade`) means the old daemon
+        // has old code (migrations, endpoints) and must be replaced.
+        if !daemon_version_matches(config) {
+            tracing::info!("Daemon version mismatch — restarting with current binary");
+            // Kill ALL budi-daemon processes to avoid DB lock conflicts.
+            // SIGTERM first, wait, then SIGKILL stragglers.
+            let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
+            if !wait_for_port_release(config, 40, Duration::from_millis(150)) {
+                let _ = Command::new("pkill").args(["-9", "-f", "budi-daemon"]).status();
+                let _ = wait_for_port_release(config, 20, Duration::from_millis(150));
+            }
+        } else {
+            return Ok(());
+        }
     }
 
     if daemon_port_is_listening(config) {
@@ -75,6 +89,26 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
         "Daemon failed to become healthy at {}.{log_hint}",
         config.daemon_base_url()
     );
+}
+
+/// Check if the running daemon reports the same version as this CLI binary.
+fn daemon_version_matches(config: &BudiConfig) -> bool {
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let Ok(client) = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS)) else {
+        return false;
+    };
+    let url = format!("{}/health", config.daemon_base_url());
+    let Ok(resp) = client.get(url).send() else {
+        return false;
+    };
+    let Ok(json) = resp.json::<serde_json::Value>() else {
+        return false;
+    };
+    match json.get("version").and_then(|v| v.as_str()) {
+        Some(daemon_version) => daemon_version == cli_version,
+        // Old daemons don't report version — treat as mismatch
+        None => false,
+    }
 }
 
 fn wait_for_daemon_health(

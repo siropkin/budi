@@ -83,6 +83,20 @@ pub fn cmd_update(yes: bool) -> Result<()> {
     // Clean up legacy hooks from settings.json
     crate::commands::statusline::remove_legacy_hooks();
 
+    // Run database migration before restarting daemon — migration in a
+    // standalone process is fast vs slow inside the daemon's Tokio runtime.
+    println!("Running database migration...");
+    if let Ok(db_path) = budi_core::analytics::db_path() {
+        if db_path.exists() && budi_core::migration::needs_migration_at(&db_path) {
+            match budi_core::analytics::open_db_with_migration(&db_path) {
+                Ok(_) => println!("{green}✓{reset} Database migrated."),
+                Err(e) => println!("{yellow}!{reset} Migration warning: {}", e),
+            }
+        } else {
+            println!("{green}✓{reset} Database up to date.");
+        }
+    }
+
     // Restart daemon with new version
     println!("Restarting daemon...");
     let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
@@ -97,13 +111,6 @@ pub fn cmd_update(yes: bool) -> Result<()> {
             None => config::BudiConfig::default(),
         };
         let _ = ensure_daemon_running(repo_root.as_deref(), &config);
-    }
-
-    // Run database migration after updating binary (via daemon)
-    println!("Running database migration...");
-    match crate::client::DaemonClient::connect().and_then(|c| c.migrate()) {
-        Ok(_) => println!("{green}✓{reset} Database migrated."),
-        Err(e) => println!("{yellow}!{reset} Migration warning: {}", e),
     }
 
     // Verify installed version

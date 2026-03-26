@@ -53,18 +53,27 @@ pub fn cmd_init(
         eprintln!("  Run `budi doctor` to diagnose.");
     }
 
+    // Ensure database schema is ready BEFORE starting daemon.
+    // On fresh install: creates tables. On upgrade: drops old schema, recreates.
+    if let Ok(db_path) = budi_core::analytics::db_path() {
+        match budi_core::analytics::open_db_with_migration(&db_path) {
+            Ok(_) => {}
+            Err(e) => eprintln!("  Database: schema setup failed: {e}"),
+        }
+    }
+
     if !no_daemon {
         println!("  Daemon: starting...");
         ensure_daemon_running(repo_root.as_deref(), &config)?;
         println!("  Daemon: running on {}", config.daemon_base_url());
     }
 
-    // Auto-sync existing transcripts on first run
+    // Always sync full history — users won't run `budi sync --all` manually.
     let sync_result = if no_sync {
         Ok((0, 0))
     } else {
-        println!("  Sync: scanning transcripts (this may take a moment)...");
-        super::sync::init_auto_sync()
+        println!("  Sync: scanning transcripts (this may take a few minutes)...");
+        super::sync::init_full_sync()
     };
 
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());

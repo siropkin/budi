@@ -93,20 +93,15 @@ async fn main() -> Result<()> {
     // take over without manual intervention (e.g. after `cargo build && cp`).
     kill_existing_daemon(port);
 
-    // Ensure database exists and schema is up to date.
-    if let Ok(db_path) = analytics::db_path() {
-        match analytics::open_db_with_migration(&db_path) {
-            Ok(_) => tracing::debug!("Database ready at {}", db_path.display()),
-            Err(e) => tracing::warn!("Database migration failed: {e}"),
-        }
-    }
-
     let app_state = AppState {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let sync_flag = app_state.syncing.clone();
     let app = build_router(app_state);
+
+    // Database migration is handled by the CLI before daemon starts (budi init/update).
+    // The /migrate endpoint exists for manual use but auto-sync does NOT trigger migration.
 
     // Auto-sync transcripts every 30 seconds to keep analytics fresh.
     tokio::spawn(async move {
@@ -217,7 +212,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json, serde_json::json!({ "ok": true }));
+        assert_eq!(json["ok"], true);
+        assert!(json["version"].is_string(), "health should include version");
     }
 
     #[tokio::test]

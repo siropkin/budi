@@ -101,7 +101,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                     current, target
                 );
                 issues.push(format!(
-                    "Database needs migration (v{} → v{}). Run `budi sync` or `budi update`.",
+                    "Database needs migration (v{} → v{}). Run `budi init` or `budi update`.",
                     current, target
                 ));
             }

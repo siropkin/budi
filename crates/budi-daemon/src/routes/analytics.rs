@@ -332,7 +332,7 @@ pub async fn analytics_schema_version()
         let conn = analytics::open_db(&db_path)?;
         let current = budi_core::migration::current_version(&conn);
         let target = budi_core::migration::SCHEMA_VERSION;
-        Ok(json!({ "current": current, "target": target, "exists": true }))
+        Ok(json!({ "current": current, "target": target, "exists": true, "needs_migration": current < target }))
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

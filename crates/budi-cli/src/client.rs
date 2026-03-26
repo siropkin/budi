@@ -67,12 +67,18 @@ impl DaemonClient {
     // ─── Sync & Migration ────────────────────────────────────────────
 
     pub fn sync(&self, migrate: bool) -> Result<Value> {
+        let timeout = if migrate { 600 } else { 60 };
+        self.sync_with_params(migrate, timeout)
+    }
+
+    fn sync_with_params(&self, migrate: bool, timeout_secs: u64) -> Result<Value> {
         let resp = self
             .client
             .post(format!("{}/sync", self.base_url))
             .json(&serde_json::json!({
                 "migrate": migrate,
             }))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .send()
             .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
         let resp = check_response(resp)?;
@@ -94,6 +100,7 @@ impl DaemonClient {
         let resp = self
             .client
             .post(format!("{}/migrate", self.base_url))
+            .timeout(std::time::Duration::from_secs(600))
             .send()
             .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
         let resp = check_response(resp)?;

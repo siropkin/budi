@@ -7,7 +7,7 @@ use super::internal_error;
 use crate::AppState;
 
 pub async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true }))
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
 
 #[derive(serde::Deserialize, Default)]

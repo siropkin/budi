@@ -23,35 +23,55 @@ pub fn needs_migration(conn: &Connection) -> bool {
     current_version(conn) < SCHEMA_VERSION
 }
 
+/// Check if a database file needs migration without keeping the connection open.
+pub fn needs_migration_at(db_path: &std::path::Path) -> bool {
+    Connection::open(db_path)
+        .map(|conn| needs_migration(&conn))
+        .unwrap_or(false)
+}
+
 /// Run all pending migrations up to SCHEMA_VERSION.
-/// Returns true if tags need backfilling (when tag-related schema changed).
-pub fn migrate(conn: &Connection) -> Result<bool> {
+pub fn migrate(conn: &Connection) -> Result<()> {
     let version = current_version(conn);
-    let mut needs_tag_backfill = false;
 
     if version >= SCHEMA_VERSION {
-        return Ok(false);
+        return Ok(());
     }
-
-    // Disable FK checks during migration (table rebuilds may temporarily
-    // violate constraints before the replacement table is in place).
-    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
 
     if version == 0 {
         // ── Fresh install ──────────────────────────────────────────────
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
         create_current_schema(conn)?;
-        needs_tag_backfill = true;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     } else if version <= 6 {
         // ── Upgrade from v6.0.0 release (user_version 1–6) ────────────
-        upgrade_from_v6(conn)?;
-        needs_tag_backfill = true;
+        // The JSONL transcript files are the source of truth — just drop and
+        // recreate the schema. A fresh sync rebuilds everything in ~60s, which
+        // is faster and simpler than migrating 400k+ rows in-place.
+        drop_all_tables(conn)?;
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        create_current_schema(conn)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     }
 
     // Future migrations go here as: if version < N { ... }
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-    Ok(needs_tag_backfill)
+    Ok(())
+}
+
+/// Drop all user tables so the schema can be recreated from scratch.
+fn drop_all_tables(conn: &Connection) -> Result<()> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
+        .query_map([], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for table in tables {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table}\";"))?;
+    }
+    Ok(())
 }
 
 // ── Fresh install schema ───────────────────────────────────────────────
@@ -105,171 +125,6 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
     )?;
     create_sessions_and_hook_events(conn)?;
     create_indexes(conn)?;
-    Ok(())
-}
-
-// ── Upgrade from v6.0.0 ───────────────────────────────────────────────
-//
-// v6.0.0 schema (user_version 1–6):
-//   sessions: session_id, project_dir, first_seen, last_seen, version,
-//             git_branch, repo_id, provider, session_title, interaction_mode,
-//             lines_added, lines_removed, user_name, machine_name
-//   messages: uuid, session_id, role, timestamp, model, input_tokens,
-//             output_tokens, cache_creation_tokens, cache_read_tokens,
-//             has_thinking, stop_reason, text_length, cwd, repo_id, provider,
-//             cost_cents, context_tokens_used, context_token_limit, interaction_mode
-//   tool_usage: id, message_uuid, tool_name
-//   sync_state: file_path, byte_offset, last_synced
-
-fn upgrade_from_v6(conn: &Connection) -> Result<()> {
-    // Step 1: Create tags table.
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS tags (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_uuid TEXT NOT NULL,
-            key          TEXT NOT NULL,
-            value        TEXT NOT NULL,
-            UNIQUE(message_uuid, key, value),
-            FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
-        );
-        ",
-    )?;
-
-    // Step 2: Migrate useful session metadata to tags on first message of each session.
-    // Columns may not exist if the DB was created by a different schema variant, so check first.
-    let session_cols: Vec<String> = conn
-        .prepare("PRAGMA table_info(sessions)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    if session_cols.contains(&"session_title".to_string()) {
-        let _ = conn.execute_batch(
-            "
-            WITH first_msgs AS (
-                SELECT session_id, MIN(timestamp) as min_ts FROM messages GROUP BY session_id
-            )
-            INSERT OR IGNORE INTO tags (message_uuid, key, value)
-            SELECT m.uuid, 'session_title', s.session_title
-            FROM sessions s
-            JOIN first_msgs fm ON fm.session_id = s.session_id
-            JOIN messages m ON m.session_id = s.session_id AND m.timestamp = fm.min_ts
-            WHERE s.session_title IS NOT NULL AND s.session_title != '';
-            ",
-        );
-    }
-
-    if session_cols.contains(&"git_branch".to_string()) {
-        let _ = conn.execute_batch(
-            "
-            WITH first_msgs AS (
-                SELECT session_id, MIN(timestamp) as min_ts FROM messages GROUP BY session_id
-            )
-            INSERT OR IGNORE INTO tags (message_uuid, key, value)
-            SELECT m.uuid, 'branch', s.git_branch
-            FROM sessions s
-            JOIN first_msgs fm ON fm.session_id = s.session_id
-            JOIN messages m ON m.session_id = s.session_id AND m.timestamp = fm.min_ts
-            WHERE s.git_branch IS NOT NULL AND s.git_branch != '';
-            ",
-        );
-    }
-
-    // Step 3: Rebuild messages table — drop old columns, add new ones.
-    conn.execute_batch(
-        "
-        CREATE TABLE messages_new (
-            uuid                   TEXT PRIMARY KEY,
-            session_id             TEXT,
-            role                   TEXT NOT NULL,
-            timestamp              TEXT NOT NULL,
-            model                  TEXT,
-            input_tokens           INTEGER NOT NULL DEFAULT 0,
-            output_tokens          INTEGER NOT NULL DEFAULT 0,
-            cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
-            cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
-            cwd                    TEXT,
-            repo_id                TEXT,
-            provider               TEXT DEFAULT 'claude_code',
-            cost_cents             REAL,
-            context_tokens_used    INTEGER,
-            context_token_limit    INTEGER,
-            parent_uuid            TEXT,
-            git_branch             TEXT,
-            cost_confidence        TEXT DEFAULT 'estimated'
-        );
-        INSERT INTO messages_new (
-            uuid, session_id, role, timestamp, model,
-            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cwd, repo_id, provider, cost_cents,
-            context_tokens_used, context_token_limit
-        )
-        SELECT
-            uuid, session_id, role, timestamp, model,
-            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cwd, repo_id, provider, cost_cents,
-            context_tokens_used, context_token_limit
-        FROM messages;
-        DROP TABLE messages;
-        ALTER TABLE messages_new RENAME TO messages;
-        ",
-    )?;
-
-    // Step 4: Backfill git_branch from session tags we just created.
-    conn.execute_batch(
-        "
-        UPDATE messages SET git_branch = (
-            SELECT t.value FROM tags t
-            WHERE t.message_uuid = messages.uuid AND t.key = 'branch'
-            LIMIT 1
-        ) WHERE git_branch IS NULL;
-
-        DELETE FROM tags WHERE key = 'branch';
-        ",
-    )?;
-
-    // Step 5: Backfill cost_confidence for existing data.
-    // All pre-v7 data used heuristic estimation (composerData or token-based).
-    // The Cursor Usage API (exact data) was only added in v7+.
-    conn.execute_batch(
-        "
-        UPDATE messages SET cost_confidence = 'estimated'
-          WHERE role = 'assistant';
-        UPDATE messages SET cost_confidence = 'estimated'
-          WHERE role = 'user';
-        ",
-    )?;
-
-    // Step 6: Drop old sessions table, create new sessions + hook_events.
-    conn.execute_batch("DROP TABLE IF EXISTS sessions;")?;
-    create_sessions_and_hook_events(conn)?;
-
-    // Step 7: Backfill new sessions from existing messages.
-    conn.execute_batch(
-        "
-        INSERT OR IGNORE INTO sessions (conversation_id, provider, started_at, model)
-        SELECT
-            m.session_id,
-            m.provider,
-            MIN(m.timestamp),
-            (SELECT m2.model FROM messages m2
-             WHERE m2.session_id = m.session_id AND m2.role = 'assistant' AND m2.model IS NOT NULL
-             ORDER BY m2.timestamp ASC LIMIT 1)
-        FROM messages m
-        WHERE m.session_id IS NOT NULL
-        GROUP BY m.session_id, m.provider;
-        ",
-    )?;
-
-    // Step 8: Drop legacy tables, create indexes.
-    conn.execute_batch("DROP TABLE IF EXISTS commits;")?;
-    create_indexes(conn)?;
-
-    // Step 9: Reset sync_state to force full re-sync (pipeline enrichers will
-    // populate tags properly on re-ingestion).
-    conn.execute_batch("DELETE FROM sync_state;")?;
-
     Ok(())
 }
 

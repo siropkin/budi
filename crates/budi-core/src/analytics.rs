@@ -33,16 +33,10 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
 }
 
 /// Open the analytics database and run pending migrations.
-/// Used by `budi sync`, `budi update`, and `budi migrate`.
-/// Automatically backfills tags if the migration created the tags table.
+/// Used by `budi init`, `budi update`, and `budi migrate`.
 pub fn open_db_with_migration(db_path: &Path) -> Result<Connection> {
-    let mut conn = open_db(db_path)?;
-    let needs_tag_backfill = crate::migration::migrate(&conn)?;
-    if needs_tag_backfill {
-        tracing::info!("Backfilling tags after migration...");
-        let count = backfill_tags(&mut conn)?;
-        tracing::info!("Backfilled {} tags.", count);
-    }
+    let conn = open_db(db_path)?;
+    crate::migration::migrate(&conn)?;
     Ok(conn)
 }
 

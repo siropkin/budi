@@ -5,10 +5,10 @@ use anyhow::Result;
 
 use crate::client::DaemonClient;
 
-pub fn init_auto_sync() -> Result<(usize, usize)> {
+pub fn init_full_sync() -> Result<(usize, usize)> {
     let client = DaemonClient::connect()?;
     let start = std::time::Instant::now();
-    let result = client.sync(true)?;
+    let result = client.history()?;
     let elapsed = start.elapsed().as_secs_f64();
     let files = result
         .get("files_synced")
