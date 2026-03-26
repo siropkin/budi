@@ -30,7 +30,8 @@ pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>
             (Some(since), None)
         }
         StatsPeriod::Month => {
-            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                .expect("valid first-of-month date");
             let since = first.format("%Y-%m-%dT00:00:00").to_string();
             (Some(since), None)
         }
@@ -49,6 +50,18 @@ pub fn cmd_stats(
     tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
+    // Validate --provider early with a helpful error message
+    const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor"];
+    if let Some(ref p) = provider {
+        if !KNOWN_PROVIDERS.contains(&p.as_str()) {
+            anyhow::bail!(
+                "Unknown provider '{}'. Available providers: {}",
+                p,
+                KNOWN_PROVIDERS.join(", ")
+            );
+        }
+    }
+
     let client = DaemonClient::connect().context(
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
     )?;

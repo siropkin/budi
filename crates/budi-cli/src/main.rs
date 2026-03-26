@@ -22,7 +22,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Set up budi (starts daemon, installs status line, syncs existing data)
+    /// Set up budi (starts daemon, installs status line, syncs existing data).
+    /// Exit codes: 0 = success, 1 = error, 2 = success with warnings
     Init {
         /// Initialize for the current git repo only (default: global)
         #[arg(long)]
@@ -44,7 +45,20 @@ enum Commands {
         repo_root: Option<PathBuf>,
     },
     /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --models, or --tag)
-    #[command(group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "models", "tag"])))]
+    #[command(
+        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "models", "tag"])),
+        after_help = "\
+Examples:
+  budi stats                       Today's cost summary (default)
+  budi stats -p week               This week's summary
+  budi stats -p month --models     Model breakdown for the month
+  budi stats --branches            Branches ranked by cost (today)
+  budi stats --branch main         Cost details for a specific branch
+  budi stats --projects -p all     All-time project costs
+  budi stats --tag activity        Cost by activity type
+  budi stats --provider cursor     Filter to Cursor only
+  budi stats --format json         JSON output for scripting"
+    )]
     Stats {
         /// Time period to show (default: today)
         #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]

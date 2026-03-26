@@ -498,7 +498,7 @@ fn usage_events_to_messages(
         .map(|ev| {
             // Find matching session by timestamp — prefer strict containment,
             // fall back to clock-skew window with closest-timestamp tiebreak.
-            const CLOCK_SKEW_MS: i64 = 2000;
+            const CLOCK_SKEW_MS: i64 = 5000;
             let strict_match = sessions
                 .iter()
                 .filter(|s| ev.timestamp_ms >= s.start_ms && ev.timestamp_ms <= s.end_ms)
@@ -619,11 +619,13 @@ fn sync_from_usage_api(
         Err(e) => return Some(Err(e)),
     };
 
-    // Update watermark to latest event timestamp
+    // Update watermark to latest event timestamp.
+    // Note: cast to usize is safe on 64-bit targets (macOS/Linux). Budi does not support 32-bit.
     if let Some(last) = events.last() {
         let _ = analytics::set_sync_offset(conn, watermark_key, last.timestamp_ms as usize);
     }
 
+    // api_calls=1 (single batch request to the Usage API)
     Some(Ok((1, count, warnings)))
 }
 

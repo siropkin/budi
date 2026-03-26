@@ -117,6 +117,48 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    // Database file existence and readability check
+    if let Ok(db_path) = budi_core::analytics::db_path() {
+        if db_path.exists() {
+            match std::fs::File::open(&db_path) {
+                Ok(_) => {
+                    println!("  {green}\u{2713}{reset} database file: readable at {}", db_path.display());
+                }
+                Err(e) => {
+                    println!("  {red}\u{2717}{reset} database file: not readable at {} ({e})", db_path.display());
+                    issues.push(format!("Database file is not readable: {e}"));
+                }
+            }
+        } else {
+            println!("  {dim}-{reset} database file: not yet created at {}", db_path.display());
+        }
+    }
+
+    // Disk space check (warn if < 100MB available)
+    {
+        let check_path = budi_core::analytics::db_path()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .or_else(|| budi_core::config::budi_home_dir().ok());
+        if let Some(ref dir) = check_path {
+            match check_available_disk_mb(dir) {
+                Some(mb) if mb < 100 => {
+                    let yellow = super::ansi("\x1b[33m");
+                    println!(
+                        "  {yellow}!{reset} disk space: {mb} MB available (< 100 MB)"
+                    );
+                    issues.push(format!("Low disk space: only {mb} MB available"));
+                }
+                Some(mb) => {
+                    println!("  {green}\u{2713}{reset} disk space: {mb} MB available");
+                }
+                None => {
+                    println!("  {dim}-{reset} disk space: could not determine");
+                }
+            }
+        }
+    }
+
     // Database schema check (via daemon if healthy, otherwise check file existence)
     if daemon_health(&config) {
         if let Ok(client) = crate::client::DaemonClient::connect()
@@ -166,6 +208,32 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     let claude_settings = format!("{}/.claude/settings.json", home);
     let cursor_hooks = format!("{}/.cursor/hooks.json", home);
 
+    // Validate hook JSON syntax before deeper checks
+    if Path::new(&claude_settings).exists() {
+        match std::fs::read_to_string(&claude_settings).and_then(|raw| {
+            serde_json::from_str::<serde_json::Value>(&raw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        }) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}", claude_settings);
+                issues.push(format!("Claude Code settings has invalid JSON: {e}. Fix or delete the file."));
+            }
+        }
+    }
+    if Path::new(&cursor_hooks).exists() {
+        match std::fs::read_to_string(&cursor_hooks).and_then(|raw| {
+            serde_json::from_str::<serde_json::Value>(&raw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        }) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}", cursor_hooks);
+                issues.push(format!("Cursor hooks has invalid JSON: {e}. Fix or delete the file."));
+            }
+        }
+    }
+
     let (claude_ok, claude_missing) = validate_claude_hooks(&claude_settings);
     let cursor_dir_exists = Path::new(&format!("{home}/.cursor")).is_dir();
     let (cursor_ok, cursor_missing) = if cursor_dir_exists {
@@ -213,7 +281,14 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     } else {
         println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
         println!("    Run `budi init` to install hooks");
+        println!("    Tip: set BUDI_HOOK_DEBUG=1 to log hook failures to ~/.local/share/budi/hook-debug.log");
         issues.push("No hooks installed. Run `budi init` to set up hooks.".into());
+    }
+
+    // Print hook debug hint if any hook-related issues were found
+    if !claude_ok || (cursor_dir_exists && !cursor_ok) {
+        println!();
+        println!("  {dim}Tip: set BUDI_HOOK_DEBUG=1 to log hook delivery failures to ~/.local/share/budi/hook-debug.log{reset}");
     }
 
     // Check transcript directories exist
@@ -386,4 +461,21 @@ fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
     } else {
         println!("  {c}{mark}{reset} {label}");
     }
+}
+
+/// Check available disk space in MB using `df`. Returns None if unable to determine.
+fn check_available_disk_mb(path: &Path) -> Option<u64> {
+    let output = std::process::Command::new("df")
+        .arg("-k")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // df -k output: second line, fourth column is available KB
+    let line = stdout.lines().nth(1)?;
+    let available_kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(available_kb / 1024)
 }

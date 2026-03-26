@@ -1,7 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use budi_core::{analytics, cost};
 use chrono::Datelike;
 use serde_json::json;
@@ -213,16 +212,20 @@ pub async fn analytics_providers(
     Ok(Json(result))
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct ProviderInfo {
+    name: String,
+    display_name: String,
+}
+
 pub async fn analytics_registered_providers()
--> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
+-> Result<Json<Vec<ProviderInfo>>, (StatusCode, Json<serde_json::Value>)> {
     let providers = budi_core::provider::all_providers();
-    let list: Vec<serde_json::Value> = providers
+    let list: Vec<ProviderInfo> = providers
         .iter()
-        .map(|p| {
-            json!({
-                "name": p.name(),
-                "display_name": p.display_name(),
-            })
+        .map(|p| ProviderInfo {
+            name: p.name().to_string(),
+            display_name: p.display_name().to_string(),
         })
         .collect();
     Ok(Json(list))
@@ -302,7 +305,7 @@ pub struct BranchDetailParams {
 pub async fn analytics_branch_detail(
     Path(branch): Path<String>,
     Query(params): Query<BranchDetailParams>,
-) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<analytics::BranchCost>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -318,8 +321,8 @@ pub async fn analytics_branch_detail(
     .map_err(internal_error)?;
 
     match result {
-        Some(detail) => Ok(Json(detail).into_response()),
-        None => Ok(not_found("branch not found").into_response()),
+        Some(detail) => Ok(Json(detail)),
+        None => Err(not_found("branch not found")),
     }
 }
 

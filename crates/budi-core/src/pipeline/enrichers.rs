@@ -212,9 +212,13 @@ impl Enricher for CostEnricher {
             msg.cost_confidence = "estimated".to_string();
         }
 
-        // Ensure cost_confidence is always set for assistant messages
-        // Only apply fallback if cost_confidence is not already set (preserves API-provided values)
+        // Ensure cost_confidence is always set for assistant messages.
+        // Only apply fallback if cost_confidence is not already set (preserves API-provided values).
         if msg.role == "assistant" && msg.cost_cents.is_some() && msg.cost_confidence.is_empty() {
+            tracing::warn!(
+                "CostEnricher: cost_cents is set but cost_confidence is empty for message {}; falling back to 'estimated'",
+                msg.uuid
+            );
             msg.cost_confidence = "estimated".to_string();
         }
 

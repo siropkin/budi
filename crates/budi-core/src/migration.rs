@@ -10,7 +10,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -126,6 +126,24 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
             ",
         )?;
+        conn.pragma_update(None, "user_version", 9u32)?;
+    }
+
+    // ── v9 → v10: drop tool_usage table, add missing indexes ────────────
+    if current_version(conn) == 9 {
+        conn.execute_batch(
+            "
+            DROP TABLE IF EXISTS tool_usage;
+
+            -- New message indexes
+            CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);
+            CREATE INDEX IF NOT EXISTS idx_messages_cwd_role ON messages(cwd, role);
+            CREATE INDEX IF NOT EXISTS idx_messages_session_role_cost ON messages(session_id, role, cost_cents);
+
+            -- New tag index
+            CREATE INDEX IF NOT EXISTS idx_tags_msg_key_val ON tags(message_uuid, key, value);
+            ",
+        )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
 
@@ -167,13 +185,6 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             parent_uuid            TEXT,
             git_branch             TEXT,
             cost_confidence        TEXT DEFAULT 'estimated'
-        );
-
-        CREATE TABLE IF NOT EXISTS tool_usage (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_uuid TEXT NOT NULL,
-            tool_name    TEXT NOT NULL,
-            FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS tags (
@@ -256,13 +267,10 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_branch ON messages(git_branch);
         CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 
-        -- tool_usage
-        CREATE INDEX IF NOT EXISTS idx_tool_usage_message ON tool_usage(message_uuid);
-        CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name);
-
         -- tags
         CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
         CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
+        CREATE INDEX IF NOT EXISTS idx_tags_msg_key_val ON tags(message_uuid, key, value);
 
         -- messages (covering indexes for cost queries)
         CREATE INDEX IF NOT EXISTS idx_messages_ts_cost ON messages(timestamp, cost_cents);
@@ -270,6 +278,9 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents);
         CREATE INDEX IF NOT EXISTS idx_messages_role_branch_ts ON messages(role, git_branch, timestamp);
         CREATE INDEX IF NOT EXISTS idx_messages_role_cwd ON messages(role, cwd);
+        CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);
+        CREATE INDEX IF NOT EXISTS idx_messages_cwd_role ON messages(cwd, role);
+        CREATE INDEX IF NOT EXISTS idx_messages_session_role_cost ON messages(session_id, role, cost_cents);
 
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
@@ -327,7 +338,6 @@ mod tests {
         conn.execute_batch("SELECT count(*) FROM sessions").unwrap();
         conn.execute_batch("SELECT count(*) FROM hook_events").unwrap();
         conn.execute_batch("SELECT count(*) FROM tags").unwrap();
-        conn.execute_batch("SELECT count(*) FROM tool_usage").unwrap();
         conn.execute_batch("SELECT count(*) FROM sync_state").unwrap();
 
         // Verify old table was dropped

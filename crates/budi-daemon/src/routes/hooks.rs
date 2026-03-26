@@ -1,5 +1,4 @@
 use axum::Json;
-use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -7,8 +6,15 @@ use serde_json::{Value, json};
 use super::internal_error;
 use crate::AppState;
 
-pub async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
+pub async fn health() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    Ok(Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })))
+}
+
+pub async fn sync_status(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let syncing = state.syncing.load(std::sync::atomic::Ordering::Relaxed);
+    Json(json!({ "syncing": syncing }))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -19,18 +25,9 @@ pub struct SyncParams {
 
 pub async fn analytics_sync(
     State(state): State<AppState>,
-    body: Bytes,
+    body: Option<Json<SyncParams>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let params: SyncParams = if body.is_empty() {
-        SyncParams::default()
-    } else {
-        serde_json::from_slice(&body).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "ok": false, "error": format!("invalid JSON: {e}") })),
-            )
-        })?
-    };
+    let params = body.map(|Json(p)| p).unwrap_or_default();
     if state
         .syncing
         .compare_exchange(
@@ -133,8 +130,15 @@ pub async fn analytics_history(
 // ---------------------------------------------------------------------------
 
 pub async fn hooks_ingest(
+    State(state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.syncing.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false, "error": "Sync in progress, try again shortly" })),
+        ));
+    }
     tokio::task::spawn_blocking(move || {
         let event = budi_core::hooks::parse_hook_event(&payload)?;
 

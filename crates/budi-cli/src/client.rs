@@ -16,6 +16,21 @@ use serde_json::Value;
 
 use crate::daemon::{daemon_health, ensure_daemon_running};
 
+/// Produce a user-friendly error message based on the kind of reqwest error.
+fn describe_send_error(e: reqwest::Error) -> anyhow::Error {
+    if e.is_connect() {
+        anyhow::anyhow!(
+            "Daemon is not running. Start it with `budi sync` or `budi init`"
+        )
+    } else if e.is_timeout() {
+        anyhow::anyhow!(
+            "Daemon timed out. For large syncs, this is normal — try again in a moment"
+        )
+    } else {
+        anyhow::anyhow!("Cannot reach daemon: {e}. Run `budi doctor` to diagnose")
+    }
+}
+
 /// Check the response status and return a descriptive error for non-success codes.
 fn check_response(resp: Response) -> Result<Response> {
     let status = resp.status();
@@ -83,7 +98,7 @@ impl DaemonClient {
             }))
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -94,7 +109,7 @@ impl DaemonClient {
             .post(format!("{}/sync/all", self.base_url))
             .timeout(std::time::Duration::from_secs(600)) // History can take minutes
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -105,7 +120,7 @@ impl DaemonClient {
             .post(format!("{}/analytics/migrate", self.base_url))
             .timeout(std::time::Duration::from_secs(600))
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -115,7 +130,7 @@ impl DaemonClient {
             .client
             .get(format!("{}/analytics/schema-version", self.base_url))
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -143,7 +158,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/summary", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -169,7 +184,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/cost", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -193,7 +208,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/projects", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -211,7 +226,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/branches", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -234,7 +249,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/branches/{}", self.base_url, branch))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         // 404 means branch not found — return None instead of error
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -260,7 +275,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/models", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -288,7 +303,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/tags", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
@@ -310,7 +325,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/providers", self.base_url))
             .query(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+            .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }

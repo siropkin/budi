@@ -612,57 +612,14 @@ pub fn activity_chart(
         "AND role = 'assistant'"
     };
 
-    // Merge message stats and tool call count in a single query using LEFT JOIN.
-    // Build tool subquery expressions with explicit m.timestamp column reference
-    // (avoid fragile string replacement of "timestamp" → "m.timestamp").
-    let tz_adjust_m = if tz_offset_min != 0 {
-        format!(
-            "datetime(m.timestamp, '{}{:02}:{:02}')",
-            sign,
-            hours.abs(),
-            mins
-        )
-    } else {
-        "m.timestamp".to_string()
-    };
-    let tool_group = match granularity {
-        "hour" => format!("strftime('%H:00', {})", tz_adjust_m),
-        "month" => format!("strftime('%Y-%m', {})", tz_adjust_m),
-        _ => format!("date({})", tz_adjust_m),
-    };
-    let mut tool_where_parts: Vec<String> = Vec::new();
-    {
-        let mut tidx = 1;
-        if since.is_some() {
-            tool_where_parts.push(format!("m.timestamp >= ?{tidx}"));
-            tidx += 1;
-        }
-        if until.is_some() {
-            tool_where_parts.push(format!("m.timestamp < ?{tidx}"));
-        }
-    }
-    tool_where_parts.push("m.role = 'assistant'".to_string());
-    let tool_where = format!("WHERE {}", tool_where_parts.join(" AND "));
-
     let sql = format!(
-        "SELECT msg.bucket, msg.cnt, msg.inp, msg.outp, msg.cost,
-                COALESCE(tc.tool_cnt, 0)
-         FROM (
-             SELECT {group_expr} as bucket, COUNT(*) as cnt,
-                    COALESCE(SUM(input_tokens), 0) as inp,
-                    COALESCE(SUM(output_tokens), 0) as outp,
-                    COALESCE(SUM(cost_cents), 0.0) as cost
-             FROM messages {where_clause} {role_clause}
-             GROUP BY bucket
-         ) msg
-         LEFT JOIN (
-             SELECT {tool_group} as bucket, COUNT(*) as tool_cnt
-             FROM tool_usage tu
-             JOIN messages m ON tu.message_uuid = m.uuid
-             {tool_where}
-             GROUP BY bucket
-         ) tc ON tc.bucket = msg.bucket
-         ORDER BY msg.bucket",
+        "SELECT {group_expr} as bucket, COUNT(*) as cnt,
+                COALESCE(SUM(input_tokens), 0) as inp,
+                COALESCE(SUM(output_tokens), 0) as outp,
+                COALESCE(SUM(cost_cents), 0.0) as cost
+         FROM messages {where_clause} {role_clause}
+         GROUP BY bucket
+         ORDER BY bucket",
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -674,7 +631,7 @@ pub fn activity_chart(
                 input_tokens: row.get(2)?,
                 output_tokens: row.get(3)?,
                 cost_cents: row.get(4)?,
-                tool_call_count: row.get(5)?,
+                tool_call_count: 0,
             })
         })?
         .filter_map(|r| match r {
@@ -952,11 +909,11 @@ pub fn tag_stats(
                     COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
              FROM messages m
              WHERE m.role = 'assistant' {untagged_date_filter}
-               AND m.session_id NOT IN (
-                   SELECT DISTINCT tm2.session_id
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM tags t2
                    JOIN messages tm2 ON t2.message_uuid = tm2.uuid
-                   WHERE t2.key = ?1
+                   WHERE t2.key = ?1 AND tm2.session_id = m.session_id
                )"
         )
     } else {
@@ -1040,7 +997,7 @@ pub fn model_usage(
 
     // Single-query approach: COALESCE NULL/empty/template models into "(untagged)"
     let sql = format!(
-        "SELECT CASE WHEN model IS NULL OR model = '' OR model LIKE '<%' THEN '(untagged)'
+        "SELECT CASE WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '(untagged)'
                      ELSE model END as m,
                 COALESCE(provider, '') as p,
                 COUNT(*) as cnt,
@@ -1447,7 +1404,6 @@ mod tests {
         assert!(tables.contains(&"sessions".to_string()));
         assert!(tables.contains(&"hook_events".to_string()));
         assert!(tables.contains(&"messages".to_string()));
-        assert!(tables.contains(&"tool_usage".to_string()));
         assert!(tables.contains(&"sync_state".to_string()));
     }
 

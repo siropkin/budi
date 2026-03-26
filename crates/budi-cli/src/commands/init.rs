@@ -314,7 +314,7 @@ fn install_claude_code_hooks() -> Result<()> {
             changed = true;
         }
 
-        // Check if the safe budi hook is already installed
+        // Check if a budi hook is already installed (normalize: strip whitespace, match core command)
         let already_installed = arr_mut.iter().any(|entry| {
             entry
                 .get("hooks")
@@ -323,7 +323,7 @@ fn install_claude_code_hooks() -> Result<()> {
                     hooks.iter().any(|h| {
                         h.get("command")
                             .and_then(|c| c.as_str())
-                            .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
+                            .is_some_and(|c| c.trim().contains("budi hook"))
                     })
                 })
                 .unwrap_or(false)
@@ -416,11 +416,12 @@ fn install_cursor_hooks() -> Result<()> {
             changed = true;
         }
 
+        // Normalize: strip whitespace, match core command to avoid duplicates
         let already_installed = arr_mut.iter().any(|entry| {
             entry
                 .get("command")
                 .and_then(|c| c.as_str())
-                .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
+                .is_some_and(|c| c.trim().contains("budi hook"))
         });
 
         if !already_installed {

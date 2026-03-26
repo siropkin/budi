@@ -134,6 +134,16 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     };
 
     if !status.success() {
+        // Installer failed — try to restart the daemon so the old version keeps working
+        eprintln!("Installer failed. Attempting to restart daemon with current binaries...");
+        let repo_root = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| config::find_repo_root(&cwd).ok());
+        let cfg = match &repo_root {
+            Some(root) => config::load_or_default(root).unwrap_or_default(),
+            None => config::BudiConfig::default(),
+        };
+        let _ = ensure_daemon_running(repo_root.as_deref(), &cfg);
         anyhow::bail!("Installer exited with {}", status);
     }
 

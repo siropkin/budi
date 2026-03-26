@@ -27,7 +27,15 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     if !home.is_empty() {
         print!("Removing Claude Code hooks... ");
         match remove_claude_code_hooks(&home) {
-            Ok(true) => println!("{green}✓{reset} removed"),
+            Ok(true) => {
+                // Verify removal by re-reading the file
+                let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
+                if verify_no_budi_hooks_cc(&settings_path) {
+                    println!("{green}✓{reset} removed (verified)");
+                } else {
+                    println!("{yellow}✓{reset} removed but some budi hooks may remain — check {}", settings_path.display());
+                }
+            }
             Ok(false) => println!("none found"),
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
@@ -35,7 +43,14 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
         // 3. Remove hooks from Cursor
         print!("Removing Cursor hooks... ");
         match remove_cursor_hooks(&home) {
-            Ok(true) => println!("{green}✓{reset} removed"),
+            Ok(true) => {
+                let hooks_path = PathBuf::from(&home).join(".cursor/hooks.json");
+                if verify_no_budi_hooks_cursor(&hooks_path) {
+                    println!("{green}✓{reset} removed (verified)");
+                } else {
+                    println!("{yellow}✓{reset} removed but some budi hooks may remain — check {}", hooks_path.display());
+                }
+            }
             Ok(false) => println!("none found"),
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
@@ -272,4 +287,40 @@ fn is_budi_hook_entry_cursor(entry: &Value) -> bool {
 fn is_budi_cmd(cmd: &str) -> bool {
     let trimmed = cmd.trim();
     trimmed == "budi hook" || trimmed.starts_with("budi hook ")
+}
+
+/// Re-read Claude Code settings and confirm no budi hooks remain.
+fn verify_no_budi_hooks_cc(path: &PathBuf) -> bool {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return true; // file gone = hooks gone
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&raw) else {
+        return true;
+    };
+    let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) else {
+        return true;
+    };
+    !hooks.values().any(|arr| {
+        arr.as_array()
+            .map(|a| a.iter().any(|e| is_budi_hook_entry_cc(e)))
+            .unwrap_or(false)
+    })
+}
+
+/// Re-read Cursor hooks and confirm no budi hooks remain.
+fn verify_no_budi_hooks_cursor(path: &PathBuf) -> bool {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&raw) else {
+        return true;
+    };
+    let Some(hooks) = config.get("hooks").and_then(|h| h.as_object()) else {
+        return true;
+    };
+    !hooks.values().any(|arr| {
+        arr.as_array()
+            .map(|a| a.iter().any(|e| is_budi_hook_entry_cursor(e)))
+            .unwrap_or(false)
+    })
 }

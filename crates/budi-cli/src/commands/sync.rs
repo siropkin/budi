@@ -118,14 +118,16 @@ fn print_sync_result(result: &serde_json::Value) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
+    let bold = super::ansi("\x1b[1m");
+    let green = super::ansi("\x1b[32m");
+    let reset = super::ansi("\x1b[0m");
+
     if files_synced == 0 && messages_ingested == 0 {
         println!("Already up to date.");
     } else {
-        let bold = super::ansi("\x1b[1m");
-        let reset = super::ansi("\x1b[0m");
         println!(
-            "Synced {bold}{}{reset} new messages from {bold}{}{reset} files.",
-            messages_ingested, files_synced
+            "{green}Done.{reset} {bold}{}{reset} files, {bold}{}{reset} messages.",
+            files_synced, messages_ingested
         );
     }
 }

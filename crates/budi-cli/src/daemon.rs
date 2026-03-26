@@ -35,6 +35,20 @@ pub fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> boo
         .unwrap_or(false)
 }
 
+/// Read the startup timeout from BUDI_STARTUP_TIMEOUT_SECS env var, default to 52s.
+/// This controls how long we wait for the daemon to become healthy after spawning.
+fn startup_timeout_retries() -> usize {
+    std::env::var("BUDI_STARTUP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|secs| {
+            // Each retry: ~500ms request timeout + ~150ms sleep = ~650ms per iteration
+            // Convert seconds to approximate retry count
+            (secs * 1000 / 650).max(1) as usize
+        })
+        .unwrap_or(80) // default: 80 retries * ~650ms = ~52s
+}
+
 pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
     if daemon_health(config) {
         // Daemon is running — but check if it's the same version as this CLI.
@@ -78,9 +92,10 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
     }
 
     spawn_daemon_process(repo_root, config)?;
+    let retries = startup_timeout_retries();
     if wait_for_daemon_health(
         config,
-        80,
+        retries,
         Duration::from_millis(500),
         Duration::from_millis(150),
     ) {
@@ -169,7 +184,7 @@ fn restart_unhealthy_daemon_listener(
     spawn_daemon_process(repo_root, config)?;
     Ok(wait_for_daemon_health(
         config,
-        80,
+        startup_timeout_retries(),
         Duration::from_millis(500),
         Duration::from_millis(150),
     ))

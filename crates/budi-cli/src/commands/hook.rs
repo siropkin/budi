@@ -32,7 +32,9 @@ pub fn cmd_hook() -> anyhow::Result<()> {
         Err(e) => Err(e.to_string()),
     };
 
-    // Debug logging: set BUDI_HOOK_DEBUG=1 to diagnose hook delivery issues
+    // Debug logging: set BUDI_HOOK_DEBUG=1 to diagnose hook delivery issues.
+    // Logs are written to ~/.local/share/budi/hook-debug.log.
+    // Mention this env var in `budi doctor` output when hooks look misconfigured.
     if let Err(ref err) = result
         && std::env::var("BUDI_HOOK_DEBUG").is_ok_and(|v| v == "1")
         && let Ok(log_dir) = config::budi_home_dir()
