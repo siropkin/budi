@@ -161,3 +161,64 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/SHA256SUMS
+
+  update-homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    needs: publish-release
+    steps:
+      - name: Checkout budi repo
+        uses: actions/checkout@v5
+
+      - name: Checkout homebrew-budi tap
+        uses: actions/checkout@v5
+        with:
+          repository: siropkin/homebrew-budi
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VER="${RELEASE_TAG#v}"
+
+          curl -fsSL "https://github.com/siropkin/budi/releases/download/${RELEASE_TAG}/SHA256SUMS" -o sums
+
+          AARCH64_DARWIN=$(awk '/aarch64-apple-darwin\.tar\.gz$/ {print $1}' sums)
+          X86_64_DARWIN=$(awk '/x86_64-apple-darwin\.tar\.gz$/ {print $1}' sums)
+          X86_64_LINUX=$(awk '/x86_64-unknown-linux-gnu\.tar\.gz$/ {print $1}' sums)
+
+          if [[ -z "$AARCH64_DARWIN" || -z "$X86_64_DARWIN" || -z "$X86_64_LINUX" ]]; then
+            echo "::error::Missing SHA256 checksums in release"
+            cat sums
+            exit 1
+          fi
+
+          mkdir -p homebrew-tap/Formula
+          sed \
+            -e "s/{{VERSION}}/${VER}/g" \
+            -e "s/{{SHA256_AARCH64_DARWIN}}/${AARCH64_DARWIN}/g" \
+            -e "s/{{SHA256_X86_64_DARWIN}}/${X86_64_DARWIN}/g" \
+            -e "s/{{SHA256_X86_64_LINUX}}/${X86_64_LINUX}/g" \
+            homebrew/budi.rb > homebrew-tap/Formula/budi.rb
+
+          echo "Formula updated to v${VER}"
+          cat homebrew-tap/Formula/budi.rb
+
+      - name: Push to tap
+        working-directory: homebrew-tap
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/budi.rb
+          if git diff --cached --quiet; then
+            echo "No changes to formula"
+          else
+            git commit -m "budi ${RELEASE_TAG}"
+            git push
+          fi
