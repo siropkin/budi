@@ -39,6 +39,8 @@ pub fn cmd_init(
         None => config::BudiConfig::default(),
     };
 
+    warn_duplicate_binaries();
+
     super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
 
@@ -375,4 +377,44 @@ fn install_cursor_hooks() -> Result<()> {
         println!("  Hooks: Cursor hooks already installed");
     }
     Ok(())
+}
+
+/// Warn if there are multiple `budi` binaries in PATH (e.g. ~/.local/bin shadows Homebrew).
+fn warn_duplicate_binaries() {
+    let Ok(path_var) = std::env::var("PATH") else {
+        return;
+    };
+    let Ok(current_exe) = std::env::current_exe().and_then(|p| p.canonicalize()) else {
+        return;
+    };
+
+    let mut found: Vec<PathBuf> = Vec::new();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("budi");
+        if candidate.exists()
+            && let Ok(resolved) = candidate.canonicalize()
+            && !found.iter().any(|p| p == &resolved)
+        {
+            found.push(resolved);
+        }
+    }
+
+    if found.len() > 1 {
+        let yellow = super::ansi("\x1b[33m");
+        let bold = super::ansi("\x1b[1m");
+        let reset = super::ansi("\x1b[0m");
+        eprintln!("{yellow}  Warning:{reset} multiple budi binaries found in PATH:");
+        for path in &found {
+            let marker = if *path == current_exe {
+                " (active)"
+            } else {
+                ""
+            };
+            eprintln!("    - {}{marker}", path.display());
+        }
+        eprintln!("  Remove the unused one to avoid version conflicts.");
+        eprintln!(
+            "  {bold}Tip:{reset} if you switched to Homebrew, run: rm ~/.local/bin/budi ~/.local/bin/budi-daemon"
+        );
+    }
 }
