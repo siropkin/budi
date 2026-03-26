@@ -62,7 +62,7 @@ jobs:
           done
           # Test endpoints
           curl -sf http://127.0.0.1:19876/health | jq -e '.ok == true'
-          curl -sf http://127.0.0.1:19876/analytics/summary | jq -e '.total_cost != null'
+          curl -sf http://127.0.0.1:19876/analytics/summary | jq -e '.total_messages != null'
           curl -sf http://127.0.0.1:19876/dashboard | head -c 100 | grep -q '<!DOCTYPE html\|<html'
           echo "All daemon endpoints responded correctly"
           kill "$DAEMON_PID" 2>/dev/null || true
