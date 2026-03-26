@@ -65,10 +65,10 @@ pub fn cmd_update(yes: bool) -> Result<()> {
     println!("Updating...");
 
     // Run the standalone installer
-    let status = Command::new("sh")
+    let status = Command::new("bash")
         .args([
             "-c",
-            "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh",
+            "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash",
         ])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
