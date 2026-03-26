@@ -14,7 +14,9 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(name = "budi")]
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
-#[command(after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 7 days)")]
+#[command(
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 7 days)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

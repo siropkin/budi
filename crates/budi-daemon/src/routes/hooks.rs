@@ -7,12 +7,12 @@ use super::internal_error;
 use crate::AppState;
 
 pub async fn health() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    Ok(Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })))
+    Ok(Json(
+        json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }),
+    ))
 }
 
-pub async fn sync_status(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn sync_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
     Json(json!({ "syncing": syncing }))
 }

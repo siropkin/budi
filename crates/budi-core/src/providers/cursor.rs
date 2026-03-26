@@ -308,7 +308,7 @@ fn extract_cursor_auth() -> CursorAuthResult {
             return CursorAuthResult {
                 auth: None,
                 warnings,
-            }
+            };
         }
     };
     let user_id = sub.split('|').next_back().unwrap_or(sub).to_string();
@@ -1094,7 +1094,6 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
             cache_write: 0.27,
             cache_read: 0.07,
         }
-
     } else {
         // Unknown model — use Composer 2 pricing as default (most common Cursor model)
         tracing::warn!(

@@ -45,9 +45,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         (tag, ver)
     } else {
         println!("Checking for updates...");
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+        let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
         let resp = client
             .get("https://api.github.com/repos/siropkin/budi/releases/latest")
             .header("User-Agent", "budi-cli")
@@ -102,7 +100,9 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
                 return Ok(());
             }
         } else {
-            anyhow::bail!("Non-interactive terminal. Use `budi update --yes` to skip confirmation.");
+            anyhow::bail!(
+                "Non-interactive terminal. Use `budi update --yes` to skip confirmation."
+            );
         }
     }
 

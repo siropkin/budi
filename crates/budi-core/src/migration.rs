@@ -336,9 +336,11 @@ mod tests {
         // Verify core tables exist by querying them
         conn.execute_batch("SELECT count(*) FROM messages").unwrap();
         conn.execute_batch("SELECT count(*) FROM sessions").unwrap();
-        conn.execute_batch("SELECT count(*) FROM hook_events").unwrap();
+        conn.execute_batch("SELECT count(*) FROM hook_events")
+            .unwrap();
         conn.execute_batch("SELECT count(*) FROM tags").unwrap();
-        conn.execute_batch("SELECT count(*) FROM sync_state").unwrap();
+        conn.execute_batch("SELECT count(*) FROM sync_state")
+            .unwrap();
 
         // Verify old table was dropped
         let old_exists: bool = conn

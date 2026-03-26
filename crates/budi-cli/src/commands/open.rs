@@ -5,7 +5,9 @@ use anyhow::Result;
 pub fn cmd_open() -> Result<()> {
     // Ensure daemon is running before opening browser
     if let Err(e) = crate::client::DaemonClient::connect() {
-        anyhow::bail!("Could not connect to budi daemon: {e}\nRun `budi init` or `budi doctor` to diagnose.");
+        anyhow::bail!(
+            "Could not connect to budi daemon: {e}\nRun `budi init` or `budi doctor` to diagnose."
+        );
     }
 
     let config = crate::client::DaemonClient::load_config();

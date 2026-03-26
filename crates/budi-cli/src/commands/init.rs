@@ -224,9 +224,7 @@ fn install_statusline_if_missing() {
         Err(e) => {
             let yellow = super::ansi("\x1b[33m");
             let reset = super::ansi("\x1b[0m");
-            eprintln!(
-                "{yellow}  Warning:{reset} status line install failed: {e}"
-            );
+            eprintln!("{yellow}  Warning:{reset} status line install failed: {e}");
         }
     }
 }

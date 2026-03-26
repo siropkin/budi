@@ -328,7 +328,8 @@ mod tests {
         let stored_total_usd = stored_total_cents / 100.0;
 
         // Aggregate recalculated cost (from estimate_cost_filtered breakdown)
-        let breakdown_total = cost.input_cost + cost.output_cost + cost.cache_write_cost + cost.cache_read_cost;
+        let breakdown_total =
+            cost.input_cost + cost.output_cost + cost.cache_write_cost + cost.cache_read_cost;
 
         // total_cost comes from SUM(cost_cents)/100 — should match stored values
         assert!(
@@ -360,7 +361,8 @@ mod tests {
         // Correct cost: 3 × $5/M + 16267 × $6.25/M + 9985 × $0.50/M
         // Wrong cost (if double-counting): (3+16267+9985) × $5/M + 16267 × $6.25/M + 9985 × $0.50/M
         let p = crate::providers::claude_code::claude_pricing_for_model("claude-opus-4-6");
-        let correct = 3.0 * p.input / 1e6 + 16267.0 * p.cache_write / 1e6 + 9985.0 * p.cache_read / 1e6;
+        let correct =
+            3.0 * p.input / 1e6 + 16267.0 * p.cache_write / 1e6 + 9985.0 * p.cache_read / 1e6;
         let wrong_double_count = (3.0 + 16267.0 + 9985.0) * p.input / 1e6
             + 16267.0 * p.cache_write / 1e6
             + 9985.0 * p.cache_read / 1e6;

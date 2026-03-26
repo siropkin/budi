@@ -34,7 +34,10 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
                 if verify_no_budi_hooks_cc(&settings_path) {
                     println!("{green}✓{reset} removed (verified)");
                 } else {
-                    println!("{yellow}✓{reset} removed but some budi hooks may remain — check {}", settings_path.display());
+                    println!(
+                        "{yellow}✓{reset} removed but some budi hooks may remain — check {}",
+                        settings_path.display()
+                    );
                 }
             }
             Ok(false) => println!("none found"),
@@ -49,7 +52,10 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
                 if verify_no_budi_hooks_cursor(&hooks_path) {
                     println!("{green}✓{reset} removed (verified)");
                 } else {
-                    println!("{yellow}✓{reset} removed but some budi hooks may remain — check {}", hooks_path.display());
+                    println!(
+                        "{yellow}✓{reset} removed but some budi hooks may remain — check {}",
+                        hooks_path.display()
+                    );
                 }
             }
             Ok(false) => println!("none found"),
@@ -115,9 +121,7 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     println!("{green}✓{reset} budi uninstalled.");
     println!();
     let bold = super::ansi("\x1b[1m");
-    println!(
-        "{bold}Important:{reset} Binaries are still installed. Remove them manually:"
-    );
+    println!("{bold}Important:{reset} Binaries are still installed. Remove them manually:");
     print_binary_removal_hint();
 
     Ok(())

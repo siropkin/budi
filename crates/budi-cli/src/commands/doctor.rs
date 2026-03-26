@@ -80,17 +80,13 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
         Some(ref dv) => {
             let yellow = super::ansi("\x1b[33m");
-            println!(
-                "  {yellow}!{reset} version: CLI v{cli_version} != daemon v{dv}"
-            );
+            println!("  {yellow}!{reset} version: CLI v{cli_version} != daemon v{dv}");
             issues.push(format!(
                 "Version mismatch: CLI v{cli_version} but daemon v{dv}. Run `budi update` or reinstall."
             ));
         }
         None if daemon_bin_found => {
-            println!(
-                "  {dim}-{reset} version: v{cli_version} (could not read daemon version)"
-            );
+            println!("  {dim}-{reset} version: v{cli_version} (could not read daemon version)");
         }
         None => {} // Already reported as missing binary
     }
@@ -105,7 +101,8 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 doctor_check("daemon (retry)", retry, None);
                 if !retry {
                     issues.push(
-                        "Daemon failed to start. Check logs with `RUST_LOG=debug budi doctor`.".to_string(),
+                        "Daemon failed to start. Check logs with `RUST_LOG=debug budi doctor`."
+                            .to_string(),
                     );
                 }
             }
@@ -122,37 +119,53 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         if db_path.exists() {
             match std::fs::File::open(&db_path) {
                 Ok(_) => {
-                    println!("  {green}\u{2713}{reset} database file: readable at {}", db_path.display());
+                    println!(
+                        "  {green}\u{2713}{reset} database file: readable at {}",
+                        db_path.display()
+                    );
                     // Integrity check: verify DB is not corrupted
                     match budi_core::analytics::open_db(&db_path) {
                         Ok(conn) => {
-                            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
+                            match conn.query_row("PRAGMA integrity_check", [], |row| {
+                                row.get::<_, String>(0)
+                            }) {
                                 Ok(ref result) if result == "ok" => {
                                     println!("  {green}\u{2713}{reset} database integrity: ok");
                                 }
                                 Ok(result) => {
                                     println!("  {red}\u{2717}{reset} database integrity: {result}");
-                                    issues.push(format!("Database integrity check failed: {result}"));
+                                    issues
+                                        .push(format!("Database integrity check failed: {result}"));
                                 }
                                 Err(e) => {
-                                    println!("  {red}\u{2717}{reset} database integrity: could not check ({e})");
+                                    println!(
+                                        "  {red}\u{2717}{reset} database integrity: could not check ({e})"
+                                    );
                                     issues.push(format!("Database integrity check error: {e}"));
                                 }
                             }
                         }
                         Err(e) => {
-                            println!("  {red}\u{2717}{reset} database open: failed ({e}). Try `budi migrate`");
+                            println!(
+                                "  {red}\u{2717}{reset} database open: failed ({e}). Try `budi migrate`"
+                            );
                             issues.push(format!("Database cannot be opened: {e}"));
                         }
                     }
                 }
                 Err(e) => {
-                    println!("  {red}\u{2717}{reset} database file: not readable at {} ({e})", db_path.display());
+                    println!(
+                        "  {red}\u{2717}{reset} database file: not readable at {} ({e})",
+                        db_path.display()
+                    );
                     issues.push(format!("Database file is not readable: {e}"));
                 }
             }
         } else {
-            println!("  {dim}-{reset} database file: not yet created at {}", db_path.display());
+            println!(
+                "  {dim}-{reset} database file: not yet created at {}",
+                db_path.display()
+            );
         }
         // Check for hook delivery errors
         if let Ok(home) = budi_core::config::budi_home_dir() {
@@ -161,8 +174,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 if let Ok(meta) = std::fs::metadata(&log_path) {
                     if meta.len() > 0 {
                         let yellow = super::ansi("\x1b[33m");
-                        println!("  {yellow}!{reset} hook errors: found in {}", log_path.display());
-                        issues.push("Hook delivery errors logged. Check hook-debug.log".to_string());
+                        println!(
+                            "  {yellow}!{reset} hook errors: found in {}",
+                            log_path.display()
+                        );
+                        issues
+                            .push("Hook delivery errors logged. Check hook-debug.log".to_string());
                     }
                 }
             }
@@ -179,9 +196,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
             match check_available_disk_mb(dir) {
                 Some(mb) if mb < 100 => {
                     let yellow = super::ansi("\x1b[33m");
-                    println!(
-                        "  {yellow}!{reset} disk space: {mb} MB available (< 100 MB)"
-                    );
+                    println!("  {yellow}!{reset} disk space: {mb} MB available (< 100 MB)");
                     issues.push(format!("Low disk space: only {mb} MB available"));
                 }
                 Some(mb) => {
@@ -251,8 +266,13 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }) {
             Ok(_) => {}
             Err(e) => {
-                println!("  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}", claude_settings);
-                issues.push(format!("Claude Code settings has invalid JSON: {e}. Fix or delete the file."));
+                println!(
+                    "  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}",
+                    claude_settings
+                );
+                issues.push(format!(
+                    "Claude Code settings has invalid JSON: {e}. Fix or delete the file."
+                ));
             }
         }
     }
@@ -263,8 +283,13 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }) {
             Ok(_) => {}
             Err(e) => {
-                println!("  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}", cursor_hooks);
-                issues.push(format!("Cursor hooks has invalid JSON: {e}. Fix or delete the file."));
+                println!(
+                    "  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}",
+                    cursor_hooks
+                );
+                issues.push(format!(
+                    "Cursor hooks has invalid JSON: {e}. Fix or delete the file."
+                ));
             }
         }
     }
@@ -299,7 +324,11 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 claude_missing.join(", ")
             ));
         }
-        if cursor_dir_exists && !cursor_ok && !cursor_missing.is_empty() && cursor_missing[0] != "file not readable" {
+        if cursor_dir_exists
+            && !cursor_ok
+            && !cursor_missing.is_empty()
+            && cursor_missing[0] != "file not readable"
+        {
             let yellow = super::ansi("\x1b[33m");
             println!(
                 "  {yellow}!{reset} Cursor hooks: missing events: {}",
@@ -316,14 +345,18 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     } else {
         println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
         println!("    Run `budi init` to install hooks");
-        println!("    Tip: set BUDI_HOOK_DEBUG=1 to log hook failures to ~/.local/share/budi/hook-debug.log");
+        println!(
+            "    Tip: set BUDI_HOOK_DEBUG=1 to log hook failures to ~/.local/share/budi/hook-debug.log"
+        );
         issues.push("No hooks installed. Run `budi init` to set up hooks.".into());
     }
 
     // Print hook debug hint if any hook-related issues were found
     if !claude_ok || (cursor_dir_exists && !cursor_ok) {
         println!();
-        println!("  {dim}Tip: set BUDI_HOOK_DEBUG=1 to log hook delivery failures to ~/.local/share/budi/hook-debug.log{reset}");
+        println!(
+            "  {dim}Tip: set BUDI_HOOK_DEBUG=1 to log hook delivery failures to ~/.local/share/budi/hook-debug.log{reset}"
+        );
     }
 
     // Check transcript directories exist

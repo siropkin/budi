@@ -59,7 +59,9 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
             tracing::info!("Daemon version mismatch — restarting with current binary");
             // Kill ALL budi-daemon processes to avoid DB lock conflicts.
             // SIGTERM first, wait, then SIGKILL stragglers.
-            let _ = Command::new("pkill").args(["-f", "budi-daemon serve"]).status();
+            let _ = Command::new("pkill")
+                .args(["-f", "budi-daemon serve"])
+                .status();
             if !wait_for_port_release(config, 40, Duration::from_millis(150)) {
                 let _ = Command::new("pkill")
                     .args(["-9", "-f", "budi-daemon serve"])

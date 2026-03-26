@@ -315,7 +315,10 @@ impl Enricher for HookEnricher {
             return tags;
         };
         let Some(meta) = self.session_cache.get(session_id) else {
-            tracing::trace!("HookEnricher: session '{}' not found in cache (may be outside max_age window)", session_id);
+            tracing::trace!(
+                "HookEnricher: session '{}' not found in cache (may be outside max_age window)",
+                session_id
+            );
             return tags;
         };
 
