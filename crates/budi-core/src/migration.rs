@@ -137,29 +137,44 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
     )?;
 
     // Step 2: Migrate useful session metadata to tags on first message of each session.
-    conn.execute_batch(
-        "
-        WITH first_msgs AS (
-            SELECT session_id, MIN(timestamp) as min_ts FROM messages GROUP BY session_id
-        )
-        INSERT OR IGNORE INTO tags (message_uuid, key, value)
-        SELECT m.uuid, 'session_title', s.session_title
-        FROM sessions s
-        JOIN first_msgs fm ON fm.session_id = s.session_id
-        JOIN messages m ON m.session_id = s.session_id AND m.timestamp = fm.min_ts
-        WHERE s.session_title IS NOT NULL AND s.session_title != '';
+    // Columns may not exist if the DB was created by a different schema variant, so check first.
+    let session_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(sessions)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
 
-        WITH first_msgs AS (
-            SELECT session_id, MIN(timestamp) as min_ts FROM messages GROUP BY session_id
-        )
-        INSERT OR IGNORE INTO tags (message_uuid, key, value)
-        SELECT m.uuid, 'branch', s.git_branch
-        FROM sessions s
-        JOIN first_msgs fm ON fm.session_id = s.session_id
-        JOIN messages m ON m.session_id = s.session_id AND m.timestamp = fm.min_ts
-        WHERE s.git_branch IS NOT NULL AND s.git_branch != '';
-        ",
-    )?;
+    if session_cols.contains(&"session_title".to_string()) {
+        let _ = conn.execute_batch(
+            "
+            WITH first_msgs AS (
+                SELECT session_id, MIN(timestamp) as min_ts FROM messages GROUP BY session_id
+            )
+            INSERT OR IGNORE INTO tags (message_uuid, key, value)
+            SELECT m.uuid, 'session_title', s.session_title
+            FROM sessions s
+            JOIN first_msgs fm ON fm.session_id = s.session_id
+            JOIN messages m ON m.session_id = s.session_id AND m.timestamp = fm.min_ts
+            WHERE s.session_title IS NOT NULL AND s.session_title != '';
+            ",
+        );
+    }
+
+    if session_cols.contains(&"git_branch".to_string()) {
+        let _ = conn.execute_batch(
+            "
+            WITH first_msgs AS (
+                SELECT session_id, MIN(timestamp) as min_ts FROM messages GROUP BY session_id
+            )
+            INSERT OR IGNORE INTO tags (message_uuid, key, value)
+            SELECT m.uuid, 'branch', s.git_branch
+            FROM sessions s
+            JOIN first_msgs fm ON fm.session_id = s.session_id
+            JOIN messages m ON m.session_id = s.session_id AND m.timestamp = fm.min_ts
+            WHERE s.git_branch IS NOT NULL AND s.git_branch != '';
+            ",
+        );
+    }
 
     // Step 3: Rebuild messages table — drop old columns, add new ones.
     conn.execute_batch(
