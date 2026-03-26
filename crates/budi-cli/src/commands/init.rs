@@ -156,6 +156,11 @@ pub fn cmd_init(
     println!("  {bold}Next steps:{reset}");
     println!("    1. Open the dashboard: {underline}{dashboard_url}{reset}");
     println!("    2. Run `budi stats` to see your spending");
+    if is_reinit {
+        println!(
+            "    3. Run `budi sync --all` to load full history {dim}(only last 7 days were synced){reset}"
+        );
+    }
     println!();
     println!("  {dim}Restart Claude Code and Cursor to activate hooks and the status line.{reset}");
     println!();
