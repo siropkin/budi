@@ -52,14 +52,14 @@ pub fn cmd_stats(
 ) -> Result<()> {
     // Validate --provider early with a helpful error message
     const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor"];
-    if let Some(ref p) = provider {
-        if !KNOWN_PROVIDERS.contains(&p.as_str()) {
-            anyhow::bail!(
-                "Unknown provider '{}'. Available providers: {}",
-                p,
-                KNOWN_PROVIDERS.join(", ")
-            );
-        }
+    if let Some(ref p) = provider
+        && !KNOWN_PROVIDERS.contains(&p.as_str())
+    {
+        anyhow::bail!(
+            "Unknown provider '{}'. Available providers: {}",
+            p,
+            KNOWN_PROVIDERS.join(", ")
+        );
     }
 
     let client = DaemonClient::connect().context(

@@ -488,15 +488,15 @@ fn check_daemon_version() {
                 .unwrap_or(String::from_utf8_lossy(&o.stdout).trim())
                 .to_string()
         });
-    if let Some(ref dv) = daemon_version {
-        if dv != cli_version {
-            let yellow = super::ansi("\x1b[33m");
-            let reset = super::ansi("\x1b[0m");
-            eprintln!(
-                "{yellow}  Warning:{reset} version mismatch: CLI v{cli_version} but daemon v{dv}. \
+    if let Some(ref dv) = daemon_version
+        && dv != cli_version
+    {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        eprintln!(
+            "{yellow}  Warning:{reset} version mismatch: CLI v{cli_version} but daemon v{dv}. \
                  Run `budi update` or reinstall both binaries."
-            );
-        }
+        );
     }
 }
 

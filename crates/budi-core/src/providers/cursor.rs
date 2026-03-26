@@ -518,7 +518,7 @@ fn usage_events_to_messages(
                         let d_end = (ev.timestamp_ms - s.end_ms).abs();
                         d_start.min(d_end)
                     });
-                if let Some(ref s) = fallback {
+                if let Some(s) = &fallback {
                     tracing::warn!(
                         "Cursor session correlation: clock-skew fallback used for event at ts={}, matched session '{}'",
                         ev.timestamp_ms,

@@ -96,29 +96,23 @@ impl Pipeline {
             // If it has None, inherit from the most recent preceding message.
             // An explicit empty string (Some("")) does not overwrite an existing
             // non-empty value but is kept as-is on the message (no inheritance).
-            if let Some(ref b) = msg.git_branch {
-                if !b.is_empty() {
-                    session_branch.insert(key.clone(), b.clone());
-                } else if !session_branch.contains_key(&key) {
-                    // First time seeing this session and branch is empty — store it
+            if let Some(b) = &msg.git_branch {
+                // Non-empty overwrites; empty is stored only if no prior value exists.
+                if !b.is_empty() || !session_branch.contains_key(&key) {
                     session_branch.insert(key.clone(), b.clone());
                 }
             } else if let Some(b) = session_branch.get(&key) {
                 msg.git_branch = Some(b.clone());
             }
-            if let Some(ref r) = msg.repo_id {
-                if !r.is_empty() {
-                    session_repo.insert(key.clone(), r.clone());
-                } else if !session_repo.contains_key(&key) {
+            if let Some(r) = &msg.repo_id {
+                if !r.is_empty() || !session_repo.contains_key(&key) {
                     session_repo.insert(key.clone(), r.clone());
                 }
             } else if let Some(r) = session_repo.get(&key) {
                 msg.repo_id = Some(r.clone());
             }
-            if let Some(ref c) = msg.cwd {
-                if !c.is_empty() {
-                    session_cwd.insert(key.clone(), c.clone());
-                } else if !session_cwd.contains_key(&key) {
+            if let Some(c) = &msg.cwd {
+                if !c.is_empty() || !session_cwd.contains_key(&key) {
                     session_cwd.insert(key.clone(), c.clone());
                 }
             } else if let Some(c) = session_cwd.get(&key) {

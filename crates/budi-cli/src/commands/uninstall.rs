@@ -176,10 +176,10 @@ fn remove_claude_code_hooks(home: &str) -> Result<bool> {
     }
 
     // Remove empty hooks object
-    if hooks.is_empty() {
-        if let Some(obj) = settings.as_object_mut() {
-            obj.remove("hooks");
-        }
+    if hooks.is_empty()
+        && let Some(obj) = settings.as_object_mut()
+    {
+        obj.remove("hooks");
     }
 
     if changed {
@@ -350,7 +350,7 @@ fn verify_no_budi_hooks_cc(path: &PathBuf) -> bool {
     };
     !hooks.values().any(|arr| {
         arr.as_array()
-            .map(|a| a.iter().any(|e| is_budi_hook_entry_cc(e)))
+            .map(|a| a.iter().any(is_budi_hook_entry_cc))
             .unwrap_or(false)
     })
 }
@@ -368,7 +368,7 @@ fn verify_no_budi_hooks_cursor(path: &PathBuf) -> bool {
     };
     !hooks.values().any(|arr| {
         arr.as_array()
-            .map(|a| a.iter().any(|e| is_budi_hook_entry_cursor(e)))
+            .map(|a| a.iter().any(is_budi_hook_entry_cursor))
             .unwrap_or(false)
     })
 }

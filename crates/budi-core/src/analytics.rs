@@ -632,7 +632,7 @@ pub fn activity_chart(
     let group_expr = match granularity {
         "hour" => format!("strftime('%H:00', {})", tz_adjust),
         "month" => format!("strftime('%Y-%m', {})", tz_adjust),
-        "day" | _ => format!("date({})", tz_adjust),
+        _ => format!("date({})", tz_adjust),
     };
 
     // Add role = 'assistant' to the WHERE clause

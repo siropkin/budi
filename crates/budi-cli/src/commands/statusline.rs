@@ -328,10 +328,10 @@ fn remove_legacy_budi_hooks_from_value(settings: &mut Value) -> bool {
         hooks.remove(key);
     }
 
-    if hooks.is_empty() {
-        if let Some(obj) = settings.as_object_mut() {
-            obj.remove("hooks");
-        }
+    if hooks.is_empty()
+        && let Some(obj) = settings.as_object_mut()
+    {
+        obj.remove("hooks");
     }
 
     true

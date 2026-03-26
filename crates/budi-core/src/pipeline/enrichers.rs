@@ -324,15 +324,11 @@ impl Enricher for HookEnricher {
 
         // Propagate repo_id and git_branch from hook session metadata.
         // This provides a fallback if GitEnricher can't resolve from cwd.
-        if msg.repo_id.is_none() {
-            if let Some(ref repo) = meta.repo_id {
-                msg.repo_id = Some(repo.clone());
-            }
+        if msg.repo_id.is_none() && meta.repo_id.is_some() {
+            msg.repo_id = meta.repo_id.clone();
         }
-        if msg.git_branch.is_none() {
-            if let Some(ref branch) = meta.git_branch {
-                msg.git_branch = Some(branch.clone());
-            }
+        if msg.git_branch.is_none() && meta.git_branch.is_some() {
+            msg.git_branch = meta.git_branch.clone();
         }
 
         if let Some(ref mode) = meta.composer_mode {

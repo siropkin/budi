@@ -170,18 +170,16 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         // Check for hook delivery errors
         if let Ok(home) = budi_core::config::budi_home_dir() {
             let log_path = home.join("hook-debug.log");
-            if log_path.exists() {
-                if let Ok(meta) = std::fs::metadata(&log_path) {
-                    if meta.len() > 0 {
-                        let yellow = super::ansi("\x1b[33m");
-                        println!(
-                            "  {yellow}!{reset} hook errors: found in {}",
-                            log_path.display()
-                        );
-                        issues
-                            .push("Hook delivery errors logged. Check hook-debug.log".to_string());
-                    }
-                }
+            if log_path.exists()
+                && let Ok(meta) = std::fs::metadata(&log_path)
+                && meta.len() > 0
+            {
+                let yellow = super::ansi("\x1b[33m");
+                println!(
+                    "  {yellow}!{reset} hook errors: found in {}",
+                    log_path.display()
+                );
+                issues.push("Hook delivery errors logged. Check hook-debug.log".to_string());
             }
         }
     }
