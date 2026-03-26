@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Standalone installer for budi — works without cloning the repo.
-# Usage: curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash
 set -euo pipefail
 
 REPO="siropkin/budi"
