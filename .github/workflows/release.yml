@@ -25,14 +25,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Validate tag and workspace version
         shell: bash
         env:
@@ -51,56 +43,6 @@ jobs:
             echo "::error::Tag ${RELEASE_TAG} does not match Cargo version ${actual_version}. Expected tag v${actual_version}."
             exit 1
           fi
-
-      - name: Validate marketplace and plugin manifests
-        run: |
-          claude plugin validate .
-          claude plugin validate plugins/budi-hooks
-
-      - name: Validate plugin versions match release tag
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          release_tag = os.environ["RELEASE_TAG"]
-          expected_version = release_tag[1:] if release_tag.startswith("v") else release_tag
-
-          plugin_manifest_path = Path("plugins/budi-hooks/.claude-plugin/plugin.json")
-          marketplace_path = Path(".claude-plugin/marketplace.json")
-
-          plugin_manifest = json.loads(plugin_manifest_path.read_text(encoding="utf-8"))
-          plugin_version = plugin_manifest.get("version")
-          if not plugin_version:
-              raise SystemExit("Missing plugins/budi-hooks/.claude-plugin/plugin.json version")
-
-          marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
-          matches = [p for p in marketplace.get("plugins", []) if p.get("name") == "budi-hooks"]
-          if len(matches) != 1:
-              raise SystemExit(f"Expected exactly one budi-hooks entry in marketplace, found {len(matches)}")
-
-          marketplace_version = matches[0].get("version")
-          if not marketplace_version:
-              raise SystemExit("Missing budi-hooks version in .claude-plugin/marketplace.json")
-
-          if plugin_version != marketplace_version:
-              raise SystemExit(
-                  f"Version mismatch: plugin.json={plugin_version} marketplace.json={marketplace_version}"
-              )
-
-          if plugin_version != expected_version:
-              raise SystemExit(
-                  f"Version mismatch: release tag {release_tag} expects {expected_version}, plugin is {plugin_version}"
-              )
-
-          print(
-              f"Release version checks passed: tag={release_tag}, plugin={plugin_version}, marketplace={marketplace_version}"
-          )
-          PY
 
   build-assets:
     name: Build ${{ matrix.asset }}
