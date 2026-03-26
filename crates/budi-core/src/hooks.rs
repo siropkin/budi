@@ -29,9 +29,15 @@ pub struct HookEvent {
     pub tool_duration_ms: Option<i64>,
     // Context pressure
     pub context_tokens: Option<i64>,
+    pub context_window_size: Option<i64>,
+    pub context_usage_pct: Option<f64>,
     pub message_count: Option<i64>,
     // Subagent
     pub subagent_type: Option<String>,
+    // Agentic stats
+    pub tool_call_count: Option<i64>,
+    pub loop_count: Option<i64>,
+    pub files_json: Option<String>,
     // Resolved from workspace
     pub repo_id: Option<String>,
     pub git_branch: Option<String>,
@@ -112,6 +118,11 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
 
     // Context pressure (from preCompact)
     let context_tokens = json.get("context_tokens").and_then(|v| v.as_i64());
+    let context_window_size = json.get("context_window_size").and_then(|v| v.as_i64());
+    let context_usage_pct = json
+        .get("context_usage_percent")
+        .or_else(|| json.get("context_usage_pct"))
+        .and_then(|v| v.as_f64());
     let message_count = json.get("message_count").and_then(|v| v.as_i64());
 
     // Subagent fields
@@ -119,6 +130,11 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         .get("subagent_type")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // Agentic stats
+    let tool_call_count = json.get("tool_call_count").and_then(|v| v.as_i64());
+    let loop_count = json.get("loop_count").and_then(|v| v.as_i64());
+    let files_json = json.get("files").map(|v| v.to_string());
 
     // Resolve repo_id and git_branch from workspace root
     let (repo_id, git_branch) = workspace_root
@@ -158,8 +174,13 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         tool_name,
         tool_duration_ms,
         context_tokens,
+        context_window_size,
+        context_usage_pct,
         message_count,
         subagent_type,
+        tool_call_count,
+        loop_count,
+        files_json,
         repo_id,
         git_branch,
         mcp_server,
@@ -173,10 +194,11 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
         "INSERT INTO hook_events (
             provider, event, conversation_id, timestamp, model,
             tool_name, tool_duration_ms,
-            context_tokens, message_count,
-            subagent_type,
+            context_tokens, context_window_size, context_usage_pct,
+            message_count,
+            subagent_type, tool_call_count, loop_count, files_json,
             raw_json, mcp_server
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             event.provider,
             event.event,
@@ -186,8 +208,13 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
             event.tool_name,
             event.tool_duration_ms,
             event.context_tokens,
+            event.context_window_size,
+            event.context_usage_pct,
             event.message_count,
             event.subagent_type,
+            event.tool_call_count,
+            event.loop_count,
+            event.files_json,
             event.raw_json,
             event.mcp_server,
         ],
@@ -694,6 +721,8 @@ mod tests {
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.event, "pre_compact");
         assert_eq!(event.context_tokens, Some(150000));
+        assert_eq!(event.context_window_size, Some(200000));
+        assert_eq!(event.context_usage_pct, Some(75.0));
         assert_eq!(event.message_count, Some(42));
     }
 
@@ -864,8 +893,13 @@ mod tests {
             tool_name: None,
             tool_duration_ms: None,
             context_tokens: None,
+            context_window_size: None,
+            context_usage_pct: None,
             message_count: None,
             subagent_type: None,
+            tool_call_count: None,
+            loop_count: None,
+            files_json: None,
             repo_id: None,
             git_branch: None,
             mcp_server: None,

@@ -10,7 +10,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -56,7 +56,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     }
 
-    // Future migrations go here as: if version < N { ... }
+    // ── v7 → v8: add missing indexes ─────────────────────────────────
+    if version == 7 {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_messages_role_cwd ON messages(role, cwd);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
+            CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
+            ",
+        )?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
 
     Ok(())
 }
@@ -93,8 +103,6 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             repo_id                TEXT,
             provider               TEXT DEFAULT 'claude_code',
             cost_cents             REAL,
-            context_tokens_used    INTEGER,
-            context_token_limit    INTEGER,
             parent_uuid            TEXT,
             git_branch             TEXT,
             cost_confidence        TEXT DEFAULT 'estimated'
@@ -207,6 +215,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_role_ts_cost ON messages(role, timestamp, cost_cents);
         CREATE INDEX IF NOT EXISTS idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents);
         CREATE INDEX IF NOT EXISTS idx_messages_role_branch_ts ON messages(role, git_branch, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_cwd ON messages(role, cwd);
 
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
@@ -221,6 +230,8 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation ON hook_events(event, conversation_id);
         CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation_ts ON hook_events(event, conversation_id, timestamp);
         ",
     )?;

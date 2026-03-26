@@ -213,7 +213,7 @@ fn validate_claude_hooks(path: &str) -> bool {
                             hooks.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.trim() == "budi hook")
+                                    .is_some_and(is_budi_hook_cmd)
                             })
                         })
                         .unwrap_or(false)
@@ -247,11 +247,17 @@ fn validate_cursor_hooks(path: &str) -> bool {
                     entry
                         .get("command")
                         .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.trim() == "budi hook")
+                        .is_some_and(is_budi_hook_cmd)
                 })
             })
             .unwrap_or(false)
     })
+}
+
+/// Match any variant of the budi hook command (with or without `|| true` wrapper).
+fn is_budi_hook_cmd(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed == "budi hook" || trimmed.starts_with("budi hook ")
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {

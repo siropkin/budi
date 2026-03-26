@@ -5,9 +5,7 @@ use anyhow::Result;
 pub fn cmd_open() -> Result<()> {
     // Ensure daemon is running before opening browser
     if let Err(e) = crate::client::DaemonClient::connect() {
-        eprintln!("Could not connect to budi daemon: {e}");
-        eprintln!("Run `budi init` or `budi doctor` to diagnose.");
-        return Ok(());
+        anyhow::bail!("Could not connect to budi daemon: {e}\nRun `budi init` or `budi doctor` to diagnose.");
     }
 
     // Brief delay to let the dashboard endpoint settle

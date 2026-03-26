@@ -232,6 +232,10 @@ impl DaemonClient {
             .query(&params)
             .send()
             .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        // 404 means branch not found — return None instead of error
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         let resp = check_response(resp)?;
         let val: Value = resp.json()?;
         if val.is_null() {
