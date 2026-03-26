@@ -48,8 +48,9 @@ pub fn cmd_stats(
     tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    let client = DaemonClient::connect()
-        .context("Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.")?;
+    let client = DaemonClient::connect().context(
+        "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
+    )?;
 
     if let Some(ref tag_filter) = tag {
         return cmd_stats_tags(&client, period, tag_filter, json_output);
@@ -171,8 +172,6 @@ fn cmd_stats_summary_filtered(
         );
     }
 
-
-
     println!();
     Ok(())
 }
@@ -284,11 +283,7 @@ fn cmd_stats_projects(client: &DaemonClient, period: StatsPeriod) -> Result<()> 
     Ok(())
 }
 
-fn cmd_stats_branches(
-    client: &DaemonClient,
-    period: StatsPeriod,
-    json_output: bool,
-) -> Result<()> {
+fn cmd_stats_branches(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
     let (since, until) = period_date_range(period);
     let branches = client.branches(since.as_deref(), until.as_deref())?;
 
@@ -389,7 +384,10 @@ fn cmd_stats_branch_detail(
             }
             println!("  {bold}Sessions{reset}   {}", b.session_count);
             println!("  {bold}Messages{reset}   {}", b.message_count);
-            println!("  {bold}Input{reset}      {}", format_tokens(b.input_tokens));
+            println!(
+                "  {bold}Input{reset}      {}",
+                format_tokens(b.input_tokens)
+            );
             println!(
                 "  {bold}Output{reset}     {}",
                 format_tokens(b.output_tokens)
@@ -400,15 +398,9 @@ fn cmd_stats_branch_detail(
             );
         }
         None => {
-            println!(
-                "  No data found for branch '{}'.", branch
-            );
-            println!(
-                "  Tip: run `budi sync` first if you haven't synced recently."
-            );
-            println!(
-                "  Run `budi stats --branches` to see available branches."
-            );
+            println!("  No data found for branch '{}'.", branch);
+            println!("  Tip: run `budi sync` first if you haven't synced recently.");
+            println!("  Run `budi stats --branches` to see available branches.");
         }
     }
 
@@ -416,11 +408,7 @@ fn cmd_stats_branch_detail(
     Ok(())
 }
 
-fn cmd_stats_models(
-    client: &DaemonClient,
-    period: StatsPeriod,
-    json_output: bool,
-) -> Result<()> {
+fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
     let (since, until) = period_date_range(period);
     let models = client.models(since.as_deref(), until.as_deref())?;
 
@@ -528,10 +516,7 @@ fn cmd_stats_tags(
         period_label(period)
     );
 
-    println!(
-        "  {dim}{:<40} {:>38}{reset}",
-        "VALUE", "COST"
-    );
+    println!("  {dim}{:<40} {:>38}{reset}", "VALUE", "COST");
     println!("  {dim}{}{reset}", "─".repeat(78));
 
     // Find max cost for bar scaling
@@ -557,4 +542,3 @@ fn cmd_stats_tags(
     println!();
     Ok(())
 }
-

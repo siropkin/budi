@@ -53,7 +53,9 @@ pub fn cmd_update(yes: bool) -> Result<()> {
         println!("This will download and run the budi installer from GitHub.");
         eprint!("Continue? [y/N] ");
         let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).context("Failed to read stdin")?;
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("Failed to read stdin")?;
         if !matches!(answer.trim(), "y" | "Y") {
             println!("Aborted.");
             return Ok(());
@@ -99,9 +101,7 @@ pub fn cmd_update(yes: bool) -> Result<()> {
 
     // Run database migration after updating binary (via daemon)
     println!("Running database migration...");
-    match crate::client::DaemonClient::connect()
-        .and_then(|c| c.migrate())
-    {
+    match crate::client::DaemonClient::connect().and_then(|c| c.migrate()) {
         Ok(_) => println!("{green}✓{reset} Database migrated."),
         Err(e) => println!("{yellow}!{reset} Migration warning: {}", e),
     }
@@ -114,11 +114,17 @@ pub fn cmd_update(yes: bool) -> Result<()> {
             if installed_ver.contains(latest) {
                 println!("{green}✓{reset} Updated to v{}.", latest);
             } else {
-                println!("{yellow}!{reset} Expected v{}, but `budi --version` reports: {}", latest, installed);
+                println!(
+                    "{yellow}!{reset} Expected v{}, but `budi --version` reports: {}",
+                    latest, installed
+                );
             }
         }
         _ => {
-            println!("{green}✓{reset} Updated to v{} (could not verify installed version).", latest);
+            println!(
+                "{green}✓{reset} Updated to v{} (could not verify installed version).",
+                latest
+            );
         }
     }
     Ok(())

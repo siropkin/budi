@@ -94,7 +94,10 @@ fn wait_for_daemon_health(
     false
 }
 
-fn restart_unhealthy_daemon_listener(repo_root: Option<&Path>, config: &BudiConfig) -> Result<bool> {
+fn restart_unhealthy_daemon_listener(
+    repo_root: Option<&Path>,
+    config: &BudiConfig,
+) -> Result<bool> {
     let listener_pids = daemon_listener_pids(config.daemon_port)?;
     if listener_pids.is_empty() {
         return Ok(false);
@@ -236,8 +239,7 @@ fn daemon_log_path(repo_root: Option<&Path>) -> Option<PathBuf> {
 
 fn spawn_daemon_process(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
     let daemon_bin = resolve_daemon_binary()?;
-    let log_path = daemon_log_path(repo_root)
-        .context("Could not determine daemon log path")?;
+    let log_path = daemon_log_path(repo_root).context("Could not determine daemon log path")?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
     }

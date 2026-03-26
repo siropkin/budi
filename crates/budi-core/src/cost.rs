@@ -43,10 +43,7 @@ pub fn estimate_cost_filtered(
     }
     if let Some(p) = provider {
         param_values.push(p.to_string());
-        conditions.push(format!(
-            "provider = ?{}",
-            param_values.len()
-        ));
+        conditions.push(format!("provider = ?{}", param_values.len()));
     }
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -64,8 +61,7 @@ pub fn estimate_cost_filtered(
         "SELECT COALESCE(SUM(cost_cents), 0) FROM messages {}",
         where_clause
     );
-    let sum_cost_cents: f64 =
-        conn.query_row(&sum_sql, param_refs.as_slice(), |r| r.get(0))?;
+    let sum_cost_cents: f64 = conn.query_row(&sum_sql, param_refs.as_slice(), |r| r.get(0))?;
 
     // Group by provider + model to apply correct per-provider pricing for breakdown
     let sql = format!(
@@ -272,9 +268,17 @@ mod tests {
         // cache_creation_tokens (14873) charged at cache_write rate
         // These must not overlap
         // input_cost: 3 * $5/M = $0.000015 → rounds to $0.00
-        assert!(cost.input_cost < 0.01, "input cost should be tiny for 3 tokens, got {}", cost.input_cost);
+        assert!(
+            cost.input_cost < 0.01,
+            "input cost should be tiny for 3 tokens, got {}",
+            cost.input_cost
+        );
         // cache_write_cost: 14873 * $6.25/M = $0.0929 → rounds to $0.09
-        assert!(cost.cache_write_cost >= 0.09, "cache write should be ~$0.09, got {}", cost.cache_write_cost);
+        assert!(
+            cost.cache_write_cost >= 0.09,
+            "cache write should be ~$0.09, got {}",
+            cost.cache_write_cost
+        );
     }
 
     #[test]
@@ -295,6 +299,9 @@ mod tests {
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
         // 100 * 0.0915 cents = 9.15 cents = $0.0915 → rounds to $0.09
         assert_eq!(cost.total_cost, 0.09);
-        assert!(cost.total_cost > 0.0, "sub-cent messages should not be lost");
+        assert!(
+            cost.total_cost > 0.0,
+            "sub-cent messages should not be lost"
+        );
     }
 }

@@ -13,7 +13,6 @@ pub(crate) const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub(crate) const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub(crate) const BUDI_LOG_DIR_NAME: &str = "logs";
 
-
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 
@@ -239,7 +238,6 @@ pub fn daemon_log_path(repo_root: &Path) -> Result<PathBuf> {
 pub fn repo_root_marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join(BUDI_REPO_ROOT_MARKER_FILE_NAME)
 }
-
 
 pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
     let paths = repo_paths(repo_root)?;

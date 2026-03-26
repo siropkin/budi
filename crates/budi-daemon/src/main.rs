@@ -59,7 +59,10 @@ fn build_router(app_state: AppState) -> Router {
             get(a::analytics_registered_providers),
         )
         .route("/analytics/statusline", get(a::analytics_statusline))
-        .route("/analytics/schema-version", get(a::analytics_schema_version))
+        .route(
+            "/analytics/schema-version",
+            get(a::analytics_schema_version),
+        )
         .route("/migrate", post(a::analytics_migrate))
         .route("/analytics/tools", get(h::analytics_tools))
         .route("/analytics/mcp", get(h::analytics_mcp))
@@ -173,7 +176,9 @@ fn kill_existing_daemon(port: u16) {
         let cmd = String::from_utf8_lossy(&ps.stdout);
         if cmd.contains("budi-daemon") {
             tracing::info!("Killing old budi-daemon (pid {pid})");
-            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
             // Brief wait for graceful shutdown
             std::thread::sleep(std::time::Duration::from_millis(300));
         }

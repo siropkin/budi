@@ -161,7 +161,14 @@ fn main() -> Result<()> {
         } => {
             let json_output = matches!(format, StatsFormat::Json);
             commands::stats::cmd_stats(
-                period, projects, branches, branch, models, provider, tag, json_output,
+                period,
+                projects,
+                branches,
+                branch,
+                models,
+                provider,
+                tag,
+                json_output,
             )
         }
         Commands::Sync { all } => {
@@ -176,7 +183,10 @@ fn main() -> Result<()> {
         Commands::Migrate => {
             let c = client::DaemonClient::connect()?;
             let result = c.migrate()?;
-            let migrated = result.get("migrated").and_then(|v| v.as_bool()).unwrap_or(false);
+            let migrated = result
+                .get("migrated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let current = result.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
             if migrated {
                 let from = result.get("from").and_then(|v| v.as_u64()).unwrap_or(0);

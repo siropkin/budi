@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    BranchCost, ModelUsage, ProviderStats, RepoUsage,
-    TagCost, UsageSummary,
+    BranchCost, ModelUsage, ProviderStats, RepoUsage, TagCost, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -52,9 +51,7 @@ impl DaemonClient {
                 .context("Failed to start budi daemon. Run `budi doctor` to diagnose")?;
         }
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+        let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
         Ok(Self { base_url, client })
     }
@@ -191,11 +188,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn branches(
-        &self,
-        since: Option<&str>,
-        until: Option<&str>,
-    ) -> Result<Vec<BranchCost>> {
+    pub fn branches(&self, since: Option<&str>, until: Option<&str>) -> Result<Vec<BranchCost>> {
         let mut params = Vec::new();
         if let Some(s) = since {
             params.push(("since", s));
@@ -240,11 +233,7 @@ impl DaemonClient {
         Ok(Some(serde_json::from_value(val)?))
     }
 
-    pub fn models(
-        &self,
-        since: Option<&str>,
-        until: Option<&str>,
-    ) -> Result<Vec<ModelUsage>> {
+    pub fn models(&self, since: Option<&str>, until: Option<&str>) -> Result<Vec<ModelUsage>> {
         let mut params = Vec::new();
         if let Some(s) = since {
             params.push(("since", s));
@@ -311,5 +300,4 @@ impl DaemonClient {
         let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
-
 }

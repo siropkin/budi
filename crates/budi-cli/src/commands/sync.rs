@@ -43,8 +43,14 @@ pub fn cmd_history() -> Result<()> {
     let elapsed = start.elapsed().as_secs_f64();
     println!(" done in {:.1}s", elapsed);
 
-    let files = result.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
-    let msgs = result.get("messages_ingested").and_then(|v| v.as_u64()).unwrap_or(0);
+    let files = result
+        .get("files_synced")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let msgs = result
+        .get("messages_ingested")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     let bold = super::ansi("\x1b[1m");
     let green = super::ansi("\x1b[32m");

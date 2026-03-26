@@ -55,7 +55,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         .unwrap_or(false);
     doctor_check("budi-daemon binary", daemon_bin_found, None);
     if !daemon_bin_found {
-        issues.push("budi-daemon binary not found on PATH — copy it alongside budi or add to PATH".into());
+        issues.push(
+            "budi-daemon binary not found on PATH — copy it alongside budi or add to PATH".into(),
+        );
     }
 
     let health = daemon_health(&config);
@@ -67,7 +69,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 let retry = daemon_health(&config);
                 doctor_check("daemon (retry)", retry, None);
                 if !retry {
-                    issues.push("Daemon failed to start. Check logs with `budi -vv doctor`.".to_string());
+                    issues.push(
+                        "Daemon failed to start. Check logs with `budi -vv doctor`.".to_string(),
+                    );
                 }
             }
             Err(e) => {
@@ -91,7 +95,10 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 } else if current >= target {
                     println!("  {green}\u{2713}{reset} database schema: v{}", current);
                 } else {
-                    println!("  {red}\u{2717}{reset} database schema: v{} (needs v{})", current, target);
+                    println!(
+                        "  {red}\u{2717}{reset} database schema: v{} (needs v{})",
+                        current, target
+                    );
                     issues.push(format!(
                         "Database needs migration (v{} → v{}). Run `budi sync` or `budi update`.",
                         current, target
@@ -103,9 +110,15 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         // Daemon is down — check if the database file at least exists
         if let Ok(db_path) = budi_core::analytics::db_path() {
             if db_path.exists() {
-                println!("  {dim}-{reset} database: file exists at {} (daemon down, cannot check schema)", db_path.display());
+                println!(
+                    "  {dim}-{reset} database: file exists at {} (daemon down, cannot check schema)",
+                    db_path.display()
+                );
             } else {
-                println!("  {red}\u{2717}{reset} database: not found at {}", db_path.display());
+                println!(
+                    "  {red}\u{2717}{reset} database: not found at {}",
+                    db_path.display()
+                );
                 issues.push("Database not found. Run `budi sync` to create it.".into());
             }
         }
@@ -147,10 +160,15 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         .into_iter()
         .flatten()
         .collect();
-        println!("  {green}\u{2713}{reset} transcripts: {}", sources.join(", "));
+        println!(
+            "  {green}\u{2713}{reset} transcripts: {}",
+            sources.join(", ")
+        );
     } else {
         println!("  {red}\u{2717}{reset} transcripts: no transcript directories found");
-        issues.push("No transcript directories found. Use Claude Code or Cursor to generate data.".into());
+        issues.push(
+            "No transcript directories found. Use Claude Code or Cursor to generate data.".into(),
+        );
     }
 
     println!();
@@ -183,17 +201,24 @@ fn validate_claude_hooks(path: &str) -> bool {
     // Check at least SessionStart and PostToolUse have budi hook
     let required = ["SessionStart", "PostToolUse"];
     required.iter().all(|event| {
-        hooks.get(*event)
+        hooks
+            .get(*event)
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|entry| {
-                entry.get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|hooks| hooks.iter().any(|h| {
-                        h.get("command").and_then(|c| c.as_str())
-                            .is_some_and(|c| c.trim() == "budi hook")
-                    }))
-                    .unwrap_or(false)
-            }))
+            .map(|arr| {
+                arr.iter().any(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|c| c.trim() == "budi hook")
+                            })
+                        })
+                        .unwrap_or(false)
+                })
+            })
             .unwrap_or(false)
     })
 }
@@ -214,18 +239,27 @@ fn validate_cursor_hooks(path: &str) -> bool {
     };
     let required = ["sessionStart", "postToolUse"];
     required.iter().all(|event| {
-        hooks.get(*event)
+        hooks
+            .get(*event)
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|entry| {
-                entry.get("command").and_then(|c| c.as_str())
-                    .is_some_and(|c| c.trim() == "budi hook")
-            }))
+            .map(|arr| {
+                arr.iter().any(|entry| {
+                    entry
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c.trim() == "budi hook")
+                })
+            })
             .unwrap_or(false)
     })
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
-    let (mark, color) = if ok { ("\u{2713}", "\x1b[32m") } else { ("\u{2717}", "\x1b[31m") };
+    let (mark, color) = if ok {
+        ("\u{2713}", "\x1b[32m")
+    } else {
+        ("\u{2717}", "\x1b[31m")
+    };
     let c = super::ansi(color);
     let reset = super::ansi("\x1b[0m");
     if let Some(p) = path {

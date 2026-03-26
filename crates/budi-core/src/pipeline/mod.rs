@@ -52,26 +52,44 @@ impl Pipeline {
         let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
         // Note: "branch" is stored as a column on messages, not emitted as a tag.
         let session_level_keys: &[&str] = &[
-            "ticket_id", "ticket_prefix", "repo", "session_title", "user", "machine",
-            "composer_mode", "permission_mode", "activity", "user_email", "duration", "dominant_tool",
+            "ticket_id",
+            "ticket_prefix",
+            "repo",
+            "session_title",
+            "user",
+            "machine",
+            "composer_mode",
+            "permission_mode",
+            "activity",
+            "user_email",
+            "duration",
+            "dominant_tool",
         ];
 
         // Sort by (session_id, timestamp) to handle out-of-order batches.
         messages.sort_by(|a, b| {
-            a.session_id.cmp(&b.session_id).then(a.timestamp.cmp(&b.timestamp))
+            a.session_id
+                .cmp(&b.session_id)
+                .then(a.timestamp.cmp(&b.timestamp))
         });
 
         // Propagate git_branch, repo_id, cwd from user messages to subsequent
         // assistant messages in the same session (JSONL only has gitBranch on user entries).
         // Uses temporal propagation: each message inherits from the most recent
         // preceding message in the same session that has the field set.
-        let mut session_branch: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut session_repo: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut session_cwd: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut session_branch: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut session_repo: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut session_cwd: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages.iter_mut() {
             // Use session_id for grouping, or a sentinel for unsessionized messages
             // so they can still inherit from preceding messages in the same batch.
-            let key = msg.session_id.clone().unwrap_or_else(|| "__nosession__".to_string());
+            let key = msg
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "__nosession__".to_string());
 
             // If this message has the field, update the running value
             // If not, inherit from the most recent preceding message
@@ -107,7 +125,11 @@ impl Pipeline {
                         let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
                         let key = (dedup_id, tag.key.clone(), tag.value.clone());
                         if !seen_session_tags.insert(key) {
-                            tracing::trace!("pipeline: skipping duplicate session tag {}={}", tag.key, tag.value);
+                            tracing::trace!(
+                                "pipeline: skipping duplicate session tag {}={}",
+                                tag.key,
+                                tag.value
+                            );
                             continue;
                         }
                     }

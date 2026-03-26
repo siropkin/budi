@@ -61,7 +61,10 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let model = json.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let model = json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Session lifecycle fields
     let duration_ms = json.get("duration_ms").and_then(|v| v.as_i64());
@@ -272,11 +275,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
 }
 
 /// Update a session's prompt_category.
-pub fn update_session_category(
-    conn: &Connection,
-    event: &HookEvent,
-    category: &str,
-) -> Result<()> {
+pub fn update_session_category(conn: &Connection, event: &HookEvent, category: &str) -> Result<()> {
     if let Some(ref conv_id) = event.conversation_id {
         conn.execute(
             "UPDATE sessions SET prompt_category = ?2
@@ -293,9 +292,26 @@ pub fn classify_prompt(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
     // Check in priority order (most specific first)
-    let bugfix_words = ["fix", "bug", "broken", "error", "crash", "issue", "debug", "failing", "wrong"];
-    let feature_words = ["add", "implement", "create", "build", "new feature", "integrate"];
-    let refactor_words = ["refactor", "rename", "move", "clean", "extract", "reorganize", "simplify"];
+    let bugfix_words = [
+        "fix", "bug", "broken", "error", "crash", "issue", "debug", "failing", "wrong",
+    ];
+    let feature_words = [
+        "add",
+        "implement",
+        "create",
+        "build",
+        "new feature",
+        "integrate",
+    ];
+    let refactor_words = [
+        "refactor",
+        "rename",
+        "move",
+        "clean",
+        "extract",
+        "reorganize",
+        "simplify",
+    ];
     let question_words = ["why", "how does", "what is", "explain", "understand"];
     let ops_words = ["deploy", "release", "migrate", "upgrade"];
 
@@ -317,7 +333,10 @@ pub fn classify_prompt(text: &str) -> Option<String> {
 /// Query aggregated session metadata for the HookEnricher.
 /// Returns a map of conversation_id → SessionMeta.
 /// When `max_age_days` is Some(N), only sessions started in the last N days are loaded.
-pub fn load_session_meta(conn: &Connection, max_age_days: Option<u64>) -> Result<std::collections::HashMap<String, SessionMeta>> {
+pub fn load_session_meta(
+    conn: &Connection,
+    max_age_days: Option<u64>,
+) -> Result<std::collections::HashMap<String, SessionMeta>> {
     let mut map = std::collections::HashMap::new();
 
     // Load sessions
@@ -371,10 +390,7 @@ pub fn load_session_meta(conn: &Connection, max_age_days: Option<u64>) -> Result
     )?;
 
     let tool_rows = tool_stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
     for row in tool_rows {
@@ -407,7 +423,10 @@ pub fn query_tool_stats(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ToolStats>> {
-    let mut conditions = vec!["event = 'post_tool_use'".to_string(), "tool_name IS NOT NULL".to_string()];
+    let mut conditions = vec![
+        "event = 'post_tool_use'".to_string(),
+        "tool_name IS NOT NULL".to_string(),
+    ];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
@@ -436,7 +455,8 @@ pub fn query_tool_stats(
     );
     param_values.push(Box::new(limit as i64));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -499,7 +519,8 @@ pub fn query_mcp_stats(
     );
     param_values.push(Box::new(limit as i64));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -562,7 +583,7 @@ fn normalize_event_name(name: &str) -> String {
         _ => {
             tracing::debug!("Unknown hook event name: {}", name);
             name
-        },
+        }
     }
     .to_string()
 }
@@ -575,25 +596,34 @@ mod tests {
     fn normalize_cc_events() {
         assert_eq!(normalize_event_name("SessionStart"), "session_start");
         assert_eq!(normalize_event_name("PostToolUse"), "post_tool_use");
-        assert_eq!(normalize_event_name("UserPromptSubmit"), "user_prompt_submit");
+        assert_eq!(
+            normalize_event_name("UserPromptSubmit"),
+            "user_prompt_submit"
+        );
     }
 
     #[test]
     fn normalize_cursor_events() {
         assert_eq!(normalize_event_name("sessionStart"), "session_start");
         assert_eq!(normalize_event_name("postToolUse"), "post_tool_use");
-        assert_eq!(normalize_event_name("beforeSubmitPrompt"), "user_prompt_submit");
+        assert_eq!(
+            normalize_event_name("beforeSubmitPrompt"),
+            "user_prompt_submit"
+        );
     }
 
     #[test]
     fn parse_claude_code_session_start() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "session_id": "abc-123",
             "hook_event_name": "SessionStart",
             "cwd": "/Users/test/project",
             "permission_mode": "default",
             "model": "claude-opus-4-6"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.provider, "claude_code");
@@ -606,7 +636,8 @@ mod tests {
 
     #[test]
     fn parse_cursor_session_start() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "conversation_id": "conv-456",
             "hook_event_name": "sessionStart",
             "cursor_version": "1.7.0",
@@ -614,7 +645,9 @@ mod tests {
             "user_email": "test@example.com",
             "composer_mode": "agent",
             "model": "claude-3-5-sonnet"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.provider, "cursor");
@@ -627,13 +660,16 @@ mod tests {
 
     #[test]
     fn parse_post_tool_use() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "session_id": "abc-123",
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "duration": 1500,
             "model": "claude-opus-4-6"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.event, "post_tool_use");
@@ -643,14 +679,17 @@ mod tests {
 
     #[test]
     fn parse_pre_compact() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "session_id": "abc-123",
             "hook_event_name": "PreCompact",
             "context_tokens": 150000,
             "context_window_size": 200000,
             "context_usage_percent": 75.0,
             "message_count": 42
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.event, "pre_compact");
@@ -660,12 +699,15 @@ mod tests {
 
     #[test]
     fn parse_session_end() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "session_id": "abc-123",
             "hook_event_name": "SessionEnd",
             "reason": "completed",
             "duration_ms": 300000
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.event, "session_end");
@@ -675,26 +717,35 @@ mod tests {
 
     #[test]
     fn parse_mcp_tool_extracts_server() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "session_id": "abc-123",
             "hook_event_name": "PostToolUse",
             "tool_name": "mcp__memory__create_entities",
             "duration": 500
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.mcp_server.as_deref(), Some("memory"));
-        assert_eq!(event.tool_name.as_deref(), Some("mcp__memory__create_entities"));
+        assert_eq!(
+            event.tool_name.as_deref(),
+            Some("mcp__memory__create_entities")
+        );
     }
 
     #[test]
     fn parse_non_mcp_tool_no_server() {
-        let json: Value = serde_json::from_str(r#"{
+        let json: Value = serde_json::from_str(
+            r#"{
             "session_id": "abc-123",
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "duration": 100
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let event = parse_hook_event(&json).unwrap();
         assert!(event.mcp_server.is_none());
@@ -702,36 +753,78 @@ mod tests {
 
     #[test]
     fn classify_bugfix() {
-        assert_eq!(classify_prompt("fix the login bug"), Some("bugfix".to_string()));
-        assert_eq!(classify_prompt("debug this error"), Some("bugfix".to_string()));
-        assert_eq!(classify_prompt("this is broken"), Some("bugfix".to_string()));
+        assert_eq!(
+            classify_prompt("fix the login bug"),
+            Some("bugfix".to_string())
+        );
+        assert_eq!(
+            classify_prompt("debug this error"),
+            Some("bugfix".to_string())
+        );
+        assert_eq!(
+            classify_prompt("this is broken"),
+            Some("bugfix".to_string())
+        );
     }
 
     #[test]
     fn classify_feature() {
-        assert_eq!(classify_prompt("add a new button to the dashboard"), Some("feature".to_string()));
-        assert_eq!(classify_prompt("implement pagination"), Some("feature".to_string()));
-        assert_eq!(classify_prompt("create a new endpoint"), Some("feature".to_string()));
+        assert_eq!(
+            classify_prompt("add a new button to the dashboard"),
+            Some("feature".to_string())
+        );
+        assert_eq!(
+            classify_prompt("implement pagination"),
+            Some("feature".to_string())
+        );
+        assert_eq!(
+            classify_prompt("create a new endpoint"),
+            Some("feature".to_string())
+        );
     }
 
     #[test]
     fn classify_refactor() {
-        assert_eq!(classify_prompt("refactor the auth module"), Some("refactor".to_string()));
-        assert_eq!(classify_prompt("rename this function"), Some("refactor".to_string()));
-        assert_eq!(classify_prompt("extract this into a helper"), Some("refactor".to_string()));
+        assert_eq!(
+            classify_prompt("refactor the auth module"),
+            Some("refactor".to_string())
+        );
+        assert_eq!(
+            classify_prompt("rename this function"),
+            Some("refactor".to_string())
+        );
+        assert_eq!(
+            classify_prompt("extract this into a helper"),
+            Some("refactor".to_string())
+        );
     }
 
     #[test]
     fn classify_question() {
-        assert_eq!(classify_prompt("how does this work?"), Some("question".to_string()));
-        assert_eq!(classify_prompt("explain the pipeline"), Some("question".to_string()));
-        assert_eq!(classify_prompt("is this correct?"), Some("question".to_string()));
+        assert_eq!(
+            classify_prompt("how does this work?"),
+            Some("question".to_string())
+        );
+        assert_eq!(
+            classify_prompt("explain the pipeline"),
+            Some("question".to_string())
+        );
+        assert_eq!(
+            classify_prompt("is this correct?"),
+            Some("question".to_string())
+        );
     }
 
     #[test]
     fn classify_ops() {
-        assert_eq!(classify_prompt("deploy to production"), Some("ops".to_string()));
-        assert_eq!(classify_prompt("upgrade the dependency"), Some("ops".to_string()));
+        assert_eq!(
+            classify_prompt("deploy to production"),
+            Some("ops".to_string())
+        );
+        assert_eq!(
+            classify_prompt("upgrade the dependency"),
+            Some("ops".to_string())
+        );
     }
 
     #[test]
@@ -752,7 +845,8 @@ mod tests {
                 workspace_root TEXT, end_reason TEXT, prompt_category TEXT,
                 model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
             );",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Session start
         let start_event = HookEvent {
@@ -763,17 +857,29 @@ mod tests {
             model: Some("claude-opus-4-6".to_string()),
             permission_mode: Some("auto".to_string()),
             workspace_root: Some("/tmp".to_string()),
-            duration_ms: None, composer_mode: None, user_email: None,
-            end_reason: None, tool_name: None, tool_duration_ms: None,
-            context_tokens: None, message_count: None,
-            subagent_type: None, repo_id: None, git_branch: None,
-            mcp_server: None, raw_json: "{}".to_string(),
+            duration_ms: None,
+            composer_mode: None,
+            user_email: None,
+            end_reason: None,
+            tool_name: None,
+            tool_duration_ms: None,
+            context_tokens: None,
+            message_count: None,
+            subagent_type: None,
+            repo_id: None,
+            git_branch: None,
+            mcp_server: None,
+            raw_json: "{}".to_string(),
         };
         upsert_session(&conn, &start_event).unwrap();
 
         // Verify session created
         let mode: String = conn
-            .query_row("SELECT permission_mode FROM sessions WHERE conversation_id = 'sess-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT permission_mode FROM sessions WHERE conversation_id = 'sess-1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(mode, "auto");
 
@@ -790,7 +896,8 @@ mod tests {
         let (reason, dur): (String, i64) = conn
             .query_row(
                 "SELECT end_reason, duration_ms FROM sessions WHERE conversation_id = 'sess-1'",
-                [], |r| Ok((r.get(0)?, r.get(1)?)),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(reason, "completed");

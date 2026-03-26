@@ -162,13 +162,24 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     const TABLE: [u8; 128] = {
         let mut t = [255u8; 128];
         let mut i = 0u8;
-        while i < 26 { t[(b'A' + i) as usize] = i; i += 1; }
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            i += 1;
+        }
         i = 0;
-        while i < 26 { t[(b'a' + i) as usize] = 26 + i; i += 1; }
+        while i < 26 {
+            t[(b'a' + i) as usize] = 26 + i;
+            i += 1;
+        }
         i = 0;
-        while i < 10 { t[(b'0' + i) as usize] = 52 + i; i += 1; }
-        t[b'+' as usize] = 62; t[b'-' as usize] = 62;
-        t[b'/' as usize] = 63; t[b'_' as usize] = 63;
+        while i < 10 {
+            t[(b'0' + i) as usize] = 52 + i;
+            i += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'-' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t[b'_' as usize] = 63;
         t
     };
     let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
@@ -176,15 +187,23 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     for chunk in bytes.chunks(4) {
         let mut buf = [0u32; 4];
         for (i, &b) in chunk.iter().enumerate() {
-            if b >= 128 { return None; }
+            if b >= 128 {
+                return None;
+            }
             let v = TABLE[b as usize];
-            if v == 255 { return None; }
+            if v == 255 {
+                return None;
+            }
             buf[i] = v as u32;
         }
         let n = (buf[0] << 18) | (buf[1] << 12) | (buf[2] << 6) | buf[3];
         out.push((n >> 16) as u8);
-        if chunk.len() > 2 { out.push((n >> 8) as u8); }
-        if chunk.len() > 3 { out.push(n as u8); }
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
     }
     Some(out)
 }
@@ -193,14 +212,15 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 fn extract_cursor_auth() -> Option<CursorAuth> {
     let paths = all_state_vscdb_paths();
     // Only global state.vscdb has ItemTable with auth
-    let global_path = paths.into_iter().find(|p| {
-        p.to_string_lossy().contains("globalStorage")
-    })?;
+    let global_path = paths
+        .into_iter()
+        .find(|p| p.to_string_lossy().contains("globalStorage"))?;
 
     let vscdb = Connection::open_with_flags(
         &global_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ).ok()?;
+    )
+    .ok()?;
 
     let jwt: String = vscdb
         .query_row(
@@ -229,13 +249,20 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
     // Check JWT expiry — `exp` is assumed to be in seconds (standard JWT).
     // If it looks like milliseconds (> 1_700_000_000_000), convert first.
     if let Some(raw_exp) = payload.get("exp").and_then(|v| v.as_i64()) {
-        let exp = if raw_exp > 1_700_000_000_000 { raw_exp / 1000 } else { raw_exp };
+        let exp = if raw_exp > 1_700_000_000_000 {
+            raw_exp / 1000
+        } else {
+            raw_exp
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if now > exp {
-            tracing::warn!("Cursor auth token expired (exp={}). Re-authenticate in Cursor to restore exact cost tracking.", exp);
+            tracing::warn!(
+                "Cursor auth token expired (exp={}). Re-authenticate in Cursor to restore exact cost tracking.",
+                exp
+            );
             return None;
         }
     }
@@ -315,11 +342,15 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             tracing::warn!("Cursor API totalCents={total_cents} is negative, clamping to 0.0");
             total_cents = 0.0;
         } else if total_cents > 100_000.0 {
-            tracing::warn!("Cursor API totalCents={total_cents} exceeds $1000 — skipping event as likely corrupt");
+            tracing::warn!(
+                "Cursor API totalCents={total_cents} exceeds $1000 — skipping event as likely corrupt"
+            );
             continue;
         } else if total_cents > 5000.0 {
             let dollars = total_cents / 100.0;
-            tracing::warn!("Cursor API totalCents={total_cents} unusually high for a single request (>${dollars:.0} dollars)");
+            tracing::warn!(
+                "Cursor API totalCents={total_cents} unusually high for a single request (>${dollars:.0} dollars)"
+            );
         }
 
         events.push(CursorUsageEvent {
@@ -406,7 +437,10 @@ fn usage_events_to_messages(
                 .or_else(|| {
                     sessions
                         .iter()
-                        .filter(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS))
+                        .filter(|s| {
+                            ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS)
+                                && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS)
+                        })
                         .min_by_key(|s| {
                             let d_start = (ev.timestamp_ms - s.start_ms).abs();
                             let d_end = (ev.timestamp_ms - s.end_ms).abs();
@@ -414,11 +448,10 @@ fn usage_events_to_messages(
                         })
                 });
 
-            let session_id = matched
-                .map(|s| s.conversation_id.clone());
+            let session_id = matched.map(|s| s.conversation_id.clone());
 
-            let timestamp = DateTime::from_timestamp_millis(ev.timestamp_ms)
-                .unwrap_or_else(Utc::now);
+            let timestamp =
+                DateTime::from_timestamp_millis(ev.timestamp_ms).unwrap_or_else(Utc::now);
 
             // Deterministic UUID from timestamp + model + all token counts.
             // Uses all 4 token fields to avoid collisions when two requests share
@@ -426,8 +459,12 @@ fn usage_events_to_messages(
             // previously-skipped events changed the ordering).
             let uuid = format!(
                 "cursor-api-{}-{}-{}-{}-{}-{}",
-                ev.timestamp_ms, ev.model, ev.input_tokens, ev.output_tokens,
-                ev.cache_creation_tokens, ev.cache_read_tokens
+                ev.timestamp_ms,
+                ev.model,
+                ev.input_tokens,
+                ev.output_tokens,
+                ev.cache_creation_tokens,
+                ev.cache_read_tokens
             );
 
             ParsedMessage {
@@ -494,7 +531,6 @@ fn sync_from_usage_api(
 
     Some(Ok((1, count)))
 }
-
 
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.
 /// Returns `None` for detached HEAD or if the file can't be read.
@@ -855,7 +891,10 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
         }
     } else {
         // Unknown model — use GPT-4o pricing as reasonable default
-        tracing::warn!("Unknown Cursor model '{}', using GPT-4o default pricing", model);
+        tracing::warn!(
+            "Unknown Cursor model '{}', using GPT-4o default pricing",
+            model
+        );
         ModelPricing {
             input: 2.50,
             output: 10.0,

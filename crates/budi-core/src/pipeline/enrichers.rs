@@ -39,7 +39,10 @@ impl Enricher for GitEnricher {
         // Resolve repo_id from cwd
         if msg.repo_id.is_none() {
             if msg.cwd.is_none() {
-                tracing::debug!("GitEnricher: no cwd for message {}, skipping repo resolution", msg.uuid);
+                tracing::debug!(
+                    "GitEnricher: no cwd for message {}, skipping repo resolution",
+                    msg.uuid
+                );
             }
             if let Some(ref cwd) = msg.cwd {
                 let repo_id = self.repo_cache.resolve(Path::new(cwd));
@@ -177,11 +180,17 @@ impl Enricher for CostEnricher {
         // Calculate cost if not already set (skip if API provided exact cost)
         if msg.cost_cents.is_none() && msg.role == "assistant" {
             if msg.model.is_none() {
-                tracing::debug!("CostEnricher: model is None for message {}, using default pricing", msg.uuid);
+                tracing::debug!(
+                    "CostEnricher: model is None for message {}, using default pricing",
+                    msg.uuid
+                );
             }
             let model = msg.model.as_deref().unwrap_or("unknown");
             if model == "unknown" {
-                tracing::debug!("CostEnricher: model is 'unknown' for message {}, cost estimate may be inaccurate", msg.uuid);
+                tracing::debug!(
+                    "CostEnricher: model is 'unknown' for message {}, cost estimate may be inaccurate",
+                    msg.uuid
+                );
             }
             let pricing = match msg.provider.as_str() {
                 "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
@@ -271,7 +280,6 @@ impl HookEnricher {
     pub fn new(session_cache: HashMap<String, SessionMeta>) -> Self {
         Self { session_cache }
     }
-
 }
 
 impl Enricher for HookEnricher {
@@ -366,7 +374,10 @@ mod tests {
         // Cost was calculated → confidence should be "estimated"
         assert_eq!(msg.cost_confidence, "estimated");
         // cost_confidence tag should reflect the final value
-        assert!(tags.iter().any(|t| t.key == "cost_confidence" && t.value == "estimated"));
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "cost_confidence" && t.value == "estimated")
+        );
         // Should have provider and model tags
         assert!(tags.iter().any(|t| t.key == "provider"));
         assert!(tags.iter().any(|t| t.key == "model"));
@@ -445,9 +456,7 @@ mod tests {
                 .any(|t| t.key == "ticket_prefix" && t.value == "PAVA")
         );
         // branch should NOT be emitted as a tag (stored as column only)
-        assert!(
-            !tags.iter().any(|t| t.key == "branch")
-        );
+        assert!(!tags.iter().any(|t| t.key == "branch"));
     }
 
     #[test]
@@ -464,7 +473,11 @@ mod tests {
         enricher.enrich(&mut msg);
         let cost = msg.cost_cents.unwrap();
         assert!(cost > 0.0, "sub-cent cost must not be rounded to zero");
-        assert!((cost - 0.0915).abs() < 0.001, "cost should be ~0.0915 cents, got {}", cost);
+        assert!(
+            (cost - 0.0915).abs() < 0.001,
+            "cost should be ~0.0915 cents, got {}",
+            cost
+        );
     }
 
     #[test]

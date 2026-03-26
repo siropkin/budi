@@ -239,7 +239,10 @@ pub fn cmd_statusline_install() -> Result<()> {
         settings = json!({});
     }
     if settings.get("statusLine").is_some() {
-        println!("Status line already configured in {}", settings_path.display());
+        println!(
+            "Status line already configured in {}",
+            settings_path.display()
+        );
         return Ok(());
     }
     settings["statusLine"] = json!({
@@ -278,7 +281,10 @@ pub fn remove_legacy_hooks() {
 
     if let Ok(out) = serde_json::to_string_pretty(&settings) {
         if fs::write(&settings_path, &out).is_ok() {
-            eprintln!("  Cleaned up legacy budi hooks from {}", settings_path.display());
+            eprintln!(
+                "  Cleaned up legacy budi hooks from {}",
+                settings_path.display()
+            );
         }
     }
 }
@@ -297,10 +303,7 @@ fn remove_legacy_budi_hooks_from_value(settings: &mut Value) -> bool {
         if let Some(arr) = hooks.get_mut(key).and_then(|v| v.as_array_mut()) {
             let before = arr.len();
             arr.retain(|entry| {
-                let cmd = entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
+                let cmd = entry.get("command").and_then(|c| c.as_str()).unwrap_or("");
                 // Remove old-style: "budi hook user-prompt-submit", "budi hook stop", etc.
                 // Keep new-style: "budi hook" (exactly, no trailing args)
                 !is_legacy_budi_hook(cmd)

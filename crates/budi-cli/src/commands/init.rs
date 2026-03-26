@@ -8,7 +8,13 @@ use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool, no_open: bool, no_sync: bool) -> Result<()> {
+pub fn cmd_init(
+    local: bool,
+    repo_root: Option<PathBuf>,
+    no_daemon: bool,
+    no_open: bool,
+    no_sync: bool,
+) -> Result<()> {
     let repo_root = if local || repo_root.is_some() {
         let root = super::try_resolve_repo_root(repo_root);
         if root.is_none() {
@@ -77,10 +83,7 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool, no_ope
                 root.display()
             );
         } else {
-            println!(
-                "{bold_cyan}  budi{reset} initialized in {}",
-                root.display()
-            );
+            println!("{bold_cyan}  budi{reset} initialized in {}", root.display());
         }
     } else {
         println!("{bold_cyan}  budi{reset} initialized (global)");
@@ -254,7 +257,9 @@ fn install_claude_code_hooks() -> Result<()> {
         }
 
         // Check if budi hook already installed for this event
-        let arr = event_arr.as_array().expect("event_arr is guaranteed to be array above");
+        let arr = event_arr
+            .as_array()
+            .expect("event_arr is guaranteed to be array above");
         let already_installed = arr.iter().any(|entry| {
             entry
                 .get("hooks")
@@ -270,7 +275,10 @@ fn install_claude_code_hooks() -> Result<()> {
         });
 
         if !already_installed {
-            event_arr.as_array_mut().expect("checked above").push(budi_hook_entry.clone());
+            event_arr
+                .as_array_mut()
+                .expect("checked above")
+                .push(budi_hook_entry.clone());
             changed = true;
         }
     }
@@ -279,7 +287,10 @@ fn install_claude_code_hooks() -> Result<()> {
         let out = serde_json::to_string_pretty(&settings)?;
         fs::write(&settings_path, out)
             .with_context(|| format!("Failed to write {}", settings_path.display()))?;
-        println!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
+        println!(
+            "  Hooks: installed Claude Code hooks in {}",
+            settings_path.display()
+        );
     } else {
         println!("  Hooks: Claude Code hooks already installed");
     }
@@ -332,13 +343,17 @@ fn install_cursor_hooks() -> Result<()> {
     let hooks = config.get_mut("hooks").expect("hooks key guaranteed above");
 
     for event in &cursor_events {
-        let hooks_map = hooks.as_object_mut().expect("hooks is guaranteed to be object above");
+        let hooks_map = hooks
+            .as_object_mut()
+            .expect("hooks is guaranteed to be object above");
         let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
         if !event_arr.is_array() {
             *event_arr = json!([]);
         }
 
-        let arr = event_arr.as_array().expect("event_arr is guaranteed to be array above");
+        let arr = event_arr
+            .as_array()
+            .expect("event_arr is guaranteed to be array above");
         let already_installed = arr.iter().any(|entry| {
             entry
                 .get("command")
@@ -347,7 +362,10 @@ fn install_cursor_hooks() -> Result<()> {
         });
 
         if !already_installed {
-            event_arr.as_array_mut().expect("checked above").push(budi_hook_entry.clone());
+            event_arr
+                .as_array_mut()
+                .expect("checked above")
+                .push(budi_hook_entry.clone());
             changed = true;
         }
     }
@@ -356,7 +374,10 @@ fn install_cursor_hooks() -> Result<()> {
         let out = serde_json::to_string_pretty(&config)?;
         fs::write(&hooks_path, out)
             .with_context(|| format!("Failed to write {}", hooks_path.display()))?;
-        println!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
+        println!(
+            "  Hooks: installed Cursor hooks in {}",
+            hooks_path.display()
+        );
     } else {
         println!("  Hooks: Cursor hooks already installed");
     }

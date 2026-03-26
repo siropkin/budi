@@ -44,7 +44,9 @@ pub async fn analytics_sync(
             } else {
                 let c = budi_core::analytics::open_db(&db_path)?;
                 if budi_core::migration::needs_migration(&c) {
-                    anyhow::bail!("Database needs migration. Use migrate=true or run `budi migrate`.");
+                    anyhow::bail!(
+                        "Database needs migration. Use migrate=true or run `budi migrate`."
+                    );
                 }
                 c
             };

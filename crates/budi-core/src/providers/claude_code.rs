@@ -40,7 +40,6 @@ impl Provider for ClaudeCodeProvider {
     ) -> Result<(Vec<ParsedMessage>, usize)> {
         Ok(jsonl::parse_transcript(content, offset))
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -356,4 +355,3 @@ mod tests {
         );
     }
 }
-

@@ -212,7 +212,8 @@ pub async fn analytics_providers(
     Ok(Json(result))
 }
 
-pub async fn analytics_registered_providers() -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn analytics_registered_providers()
+-> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
     let providers = budi_core::provider::all_providers();
     let list: Vec<serde_json::Value> = providers
         .iter()
@@ -262,7 +263,6 @@ pub async fn analytics_statusline(
     Ok(Json(result))
 }
 
-
 #[derive(serde::Deserialize)]
 pub struct TagParams {
     since: Option<String>,
@@ -305,7 +305,12 @@ pub async fn analytics_branch_detail(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::branch_cost_single(&conn, &branch, params.since.as_deref(), params.until.as_deref())
+        analytics::branch_cost_single(
+            &conn,
+            &branch,
+            params.since.as_deref(),
+            params.until.as_deref(),
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -317,7 +322,8 @@ pub async fn analytics_branch_detail(
     }
 }
 
-pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn analytics_schema_version()
+-> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let db_path = analytics::db_path()?;
         if !db_path.exists() {
@@ -334,7 +340,8 @@ pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (Stat
     Ok(Json(result))
 }
 
-pub async fn analytics_migrate() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn analytics_migrate()
+-> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;

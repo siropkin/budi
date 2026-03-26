@@ -106,9 +106,10 @@ pub fn ingest_messages_with_sync(
         // cost_cents is set by CostEnricher in the pipeline before ingest
         let cost_cents = msg.cost_cents;
         // Strip refs/heads/ prefix from git_branch at write time
-        let git_branch = msg.git_branch.as_deref().map(|b| {
-            b.strip_prefix("refs/heads/").unwrap_or(b)
-        });
+        let git_branch = msg
+            .git_branch
+            .as_deref()
+            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b));
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (uuid, session_id, role, timestamp, model,
@@ -213,8 +214,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
                 cache_read_tokens: row.get::<_, i64>(9)? as u64,
                 git_branch: row.get(15)?,
                 repo_id: row.get(12)?,
-                provider: row
-                    .get::<_, String>(10)?,
+                provider: row.get::<_, String>(10)?,
                 cost_cents: row.get(11)?,
                 session_title: None,
                 parent_uuid: row.get(13)?,
@@ -234,9 +234,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
             "SELECT message_uuid, key, value FROM tags WHERE key IN ('session_title', 'user', 'machine')",
         )?;
         let tag_rows: Vec<(String, String, String)> = tag_stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -327,10 +325,8 @@ fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result
     let mut total_files = 0;
     let mut total_messages = 0;
 
-    let cutoff = max_age_days.map(|days| {
-        std::time::SystemTime::now()
-            - std::time::Duration::from_secs(days * 86400)
-    });
+    let cutoff = max_age_days
+        .map(|days| std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86400));
 
     for provider in &providers {
         // Try direct sync first (e.g. Cursor Usage API).
@@ -381,7 +377,12 @@ fn sync_with_max_age(conn: &mut Connection, max_age_days: Option<u64>) -> Result
             }
 
             let tags = pipeline.process(&mut messages);
-            let count = ingest_messages_with_sync(conn, &messages, Some(&tags), Some((&path_str, new_offset)))?;
+            let count = ingest_messages_with_sync(
+                conn,
+                &messages,
+                Some(&tags),
+                Some((&path_str, new_offset)),
+            )?;
 
             if count > 0 {
                 total_files += 1;
@@ -407,7 +408,11 @@ pub struct UsageSummary {
 
 /// Total assistant cost across all messages for a date range.
 /// Used by multiple functions to compute "(untagged)" cost.
-fn total_assistant_cost(conn: &Connection, since: Option<&str>, until: Option<&str>) -> Result<f64> {
+fn total_assistant_cost(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<f64> {
     let (total_where, total_params) = date_filter(since, until, "WHERE");
     let total_refs: Vec<&dyn rusqlite::types::ToSql> = total_params
         .iter()
@@ -418,7 +423,11 @@ fn total_assistant_cost(conn: &Connection, since: Option<&str>, until: Option<&s
             &format!(
                 "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages {} {} role = 'assistant'",
                 total_where,
-                if total_where.is_empty() { "WHERE" } else { "AND" }
+                if total_where.is_empty() {
+                    "WHERE"
+                } else {
+                    "AND"
+                }
             ),
             total_refs.as_slice(),
             |r| r.get(0),
@@ -429,19 +438,12 @@ fn total_assistant_cost(conn: &Connection, since: Option<&str>, until: Option<&s
 
 /// Build a parameterized date filter clause and its bind values.
 /// Returns (clause_str, params_vec) where clause_str uses ?N placeholders.
-fn date_filter(
-    since: Option<&str>,
-    until: Option<&str>,
-    keyword: &str,
-) -> (String, Vec<String>) {
+fn date_filter(since: Option<&str>, until: Option<&str>, keyword: &str) -> (String, Vec<String>) {
     let mut conditions = Vec::new();
     let mut param_values = Vec::new();
     if let Some(s) = since {
         param_values.push(s.to_string());
-        conditions.push(format!(
-            "timestamp >= ?{}",
-            param_values.len()
-        ));
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
     if let Some(u) = until {
         param_values.push(u.to_string());
@@ -491,18 +493,17 @@ pub fn usage_summary(
         total_output,
         total_cache_create,
         total_cache_read,
-    ): (u64, u64, u64, u64, u64, u64, u64) =
-        conn.query_row(&sql, param_refs.as_slice(), |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?;
+    ): (u64, u64, u64, u64, u64, u64, u64) = conn.query_row(&sql, param_refs.as_slice(), |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+        ))
+    })?;
 
     Ok(UsageSummary {
         total_messages,
@@ -660,7 +661,10 @@ pub fn repo_usage(
     limit: usize,
 ) -> Result<Vec<RepoUsage>> {
     // Build parameterized date filter. Limit param index starts after date params.
-    let mut conditions = vec!["repo_id IS NOT NULL".to_string(), "role = 'assistant'".to_string()];
+    let mut conditions = vec![
+        "repo_id IS NOT NULL".to_string(),
+        "role = 'assistant'".to_string(),
+    ];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(s) = since {
         param_values.push(Box::new(s.to_string()));
@@ -788,7 +792,12 @@ pub fn activity_chart(
     // Build tool subquery expressions with explicit m.timestamp column reference
     // (avoid fragile string replacement of "timestamp" → "m.timestamp").
     let tz_adjust_m = if tz_offset_min != 0 {
-        format!("datetime(m.timestamp, '{}{:02}:{:02}')", sign, hours.abs(), mins)
+        format!(
+            "datetime(m.timestamp, '{}{:02}:{:02}')",
+            sign,
+            hours.abs(),
+            mins
+        )
     } else {
         "m.timestamp".to_string()
     };
@@ -944,7 +953,9 @@ pub fn branch_cost(
     if untagged < -0.01 {
         tracing::warn!(
             "branch_cost: untagged cost is negative ({:.4}), tagged={:.4} > total={:.4} — data inconsistency",
-            untagged, tagged_cost, total_cost
+            untagged,
+            tagged_cost,
+            total_cost
         );
     }
     let untagged = untagged.max(0.0);
@@ -1432,8 +1443,7 @@ pub fn provider_stats(
     let providers = crate::provider::all_providers();
     let mut result = Vec::new();
 
-    for (prov, messages, input, output, cache_create, cache_read, sum_cost_cents) in rows
-    {
+    for (prov, messages, input, output, cache_create, cache_read, sum_cost_cents) in rows {
         let display_name = providers
             .iter()
             .find(|p| p.name() == prov)
@@ -1460,7 +1470,6 @@ pub fn provider_stats(
     Ok(result)
 }
 
-
 /// Build a parameterized filter clause that includes optional date range and provider.
 fn date_provider_filter(
     since: Option<&str>,
@@ -1472,10 +1481,7 @@ fn date_provider_filter(
     let mut param_values = Vec::new();
     if let Some(s) = since {
         param_values.push(s.to_string());
-        conditions.push(format!(
-            "timestamp >= ?{}",
-            param_values.len()
-        ));
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
     if let Some(u) = until {
         param_values.push(u.to_string());
@@ -1483,10 +1489,7 @@ fn date_provider_filter(
     }
     if let Some(p) = provider {
         param_values.push(p.to_string());
-        conditions.push(format!(
-            "provider = ?{}",
-            param_values.len()
-        ));
+        conditions.push(format!("provider = ?{}", param_values.len()));
     }
     if conditions.is_empty() {
         (String::new(), param_values)
@@ -1531,18 +1534,17 @@ pub fn usage_summary_filtered(
         total_output,
         total_cache_create,
         total_cache_read,
-    ): (u64, u64, u64, u64, u64, u64, u64) =
-        conn.query_row(&sql, param_refs.as_slice(), |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?;
+    ): (u64, u64, u64, u64, u64, u64, u64) = conn.query_row(&sql, param_refs.as_slice(), |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+        ))
+    })?;
 
     Ok(UsageSummary {
         total_messages,
@@ -1698,8 +1700,8 @@ mod tests {
 
     #[test]
     fn cost_cents_baked_at_ingest() {
-        use crate::pipeline::enrichers::CostEnricher;
         use crate::pipeline::Enricher;
+        use crate::pipeline::enrichers::CostEnricher;
 
         let mut conn = test_db();
         let mut msg = ParsedMessage {
@@ -1829,7 +1831,6 @@ mod tests {
                 cost_cents: None,
                 session_title: None,
 
-
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
@@ -1847,13 +1848,11 @@ mod tests {
                 cache_creation_tokens: 200,
                 cache_read_tokens: 300,
 
-
                 git_branch: None,
                 repo_id: None,
                 provider: "claude_code".to_string(),
                 cost_cents: Some(2.0), // Pre-calculated by CostEnricher in production
                 session_title: None,
-
 
                 parent_uuid: None,
                 user_name: None,
@@ -1876,7 +1875,6 @@ mod tests {
                 provider: "claude_code".to_string(),
                 cost_cents: None,
                 session_title: None,
-
 
                 parent_uuid: None,
                 user_name: None,
@@ -1953,7 +1951,6 @@ mod tests {
                 cost_cents: None,
                 session_title: None,
 
-
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
@@ -1975,7 +1972,6 @@ mod tests {
                 provider: "claude_code".to_string(),
                 cost_cents: None,
                 session_title: None,
-
 
                 parent_uuid: None,
                 user_name: None,
@@ -1999,7 +1995,6 @@ mod tests {
                 provider: "claude_code".to_string(),
                 cost_cents: None,
                 session_title: None,
-
 
                 parent_uuid: None,
                 user_name: None,
@@ -2098,7 +2093,6 @@ mod tests {
                 cost_cents: None,
                 session_title: None,
 
-
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
@@ -2120,7 +2114,6 @@ mod tests {
                 provider: "claude_code".to_string(),
                 cost_cents: Some(1.75), // Pre-calculated by CostEnricher in production
                 session_title: None,
-
 
                 parent_uuid: None,
                 user_name: None,
@@ -2148,7 +2141,6 @@ mod tests {
                 cost_cents: None,
                 session_title: None,
 
-
                 parent_uuid: None,
                 user_name: None,
                 machine_name: None,
@@ -2170,7 +2162,6 @@ mod tests {
                 provider: "cursor".to_string(),
                 cost_cents: Some(0.62), // Pre-calculated by CostEnricher in production
                 session_title: None,
-
 
                 parent_uuid: None,
                 user_name: None,
@@ -2212,5 +2203,4 @@ mod tests {
         assert_eq!(cc_stats.display_name, "Claude Code");
         assert!(cc_stats.estimated_cost > 0.0);
     }
-
 }
