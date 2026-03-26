@@ -46,7 +46,7 @@ try {
             Log "Checksum verified."
         }
     } catch {
-        # SHA256SUMS not available, skip verification.
+        Log "Checksum file unavailable - skipping verification."
     }
 
     Log "Extracting..."
@@ -88,12 +88,16 @@ try {
     Log "Running budi init..."
     Log ""
     & $budiExe init
-    if ($LASTEXITCODE -eq 0) {
+    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2) {
         Log ""
-        Log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+        if ($LASTEXITCODE -eq 2) {
+            Log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
+        } else {
+            Log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+        }
     } else {
         Log ""
-        Log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+        Log "budi init failed. Run 'budi doctor' to check what needs fixing."
     }
 } finally {
     if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }

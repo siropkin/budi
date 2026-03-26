@@ -111,7 +111,7 @@ shell = ["sh"]
 
 ```bash
 brew upgrade budi
-budi init    # required: restarts daemon with new version, re-installs hooks
+budi init    # required: restarts daemon, re-installs hooks
 ```
 
 **Shell script / Windows / from source:**

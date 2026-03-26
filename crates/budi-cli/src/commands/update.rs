@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -79,14 +80,18 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
     if !yes {
         println!("This will download and run the budi installer from GitHub.");
-        eprint!("Continue? [y/N] ");
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .context("Failed to read stdin")?;
-        if !matches!(answer.trim(), "y" | "Y") {
-            println!("Aborted.");
-            return Ok(());
+        if std::io::stdin().is_terminal() {
+            eprint!("Continue? [y/N] ");
+            let mut answer = String::new();
+            std::io::stdin()
+                .read_line(&mut answer)
+                .context("Failed to read stdin")?;
+            if !matches!(answer.trim(), "y" | "Y") {
+                println!("Aborted.");
+                return Ok(());
+            }
+        } else {
+            anyhow::bail!("Non-interactive terminal. Use `budi update --yes` to skip confirmation.");
         }
     }
 
@@ -167,7 +172,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         Ok(output) if output.status.success() => {
             let installed = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let installed_ver = installed.strip_prefix("budi ").unwrap_or(&installed);
-            if installed_ver.contains(&latest) {
+            if installed_ver == latest || installed_ver == format!("v{latest}") {
                 println!("{green}✓{reset} Updated to v{}.", latest);
             } else {
                 println!(

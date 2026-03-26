@@ -75,6 +75,11 @@ main() {
 
   # Verify checksum if available.
   if curl -fsSL "$base_url/SHA256SUMS" -o "$TEMP_DIR/SHA256SUMS" 2>/dev/null; then
+    :
+  else
+    log "Checksum file unavailable — skipping verification."
+  fi
+  if [ -f "$TEMP_DIR/SHA256SUMS" ]; then
     local expected actual
     expected="$(awk -v f="$asset_name" '$2 == f {print $1}' "$TEMP_DIR/SHA256SUMS")"
     if [ -n "$expected" ]; then
@@ -138,7 +143,7 @@ main() {
         log "Restart your terminal or run: source $shell_profile"
       fi
     elif case "$current_shell" in */fish) true;; *) false;; esac; then
-      : # Already handled above.
+      : # Fish PATH was configured in the case block above — nothing to do here.
     else
       log ""
       log "NOTE: $BIN_DIR is not in your PATH."

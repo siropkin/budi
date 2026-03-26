@@ -43,6 +43,7 @@ pub fn cmd_init(
 
     warn_duplicate_binaries();
     check_daemon_binary();
+    check_daemon_version();
 
     super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
@@ -70,10 +71,14 @@ pub fn cmd_init(
 
     // Ensure database schema is ready BEFORE starting daemon.
     // On fresh install: creates tables. On upgrade: drops old schema, recreates.
+    let mut db_warning = false;
     if let Ok(db_path) = budi_core::analytics::db_path() {
         match budi_core::analytics::open_db_with_migration(&db_path) {
             Ok(_) => {}
-            Err(e) => eprintln!("  Database: schema setup failed: {e}"),
+            Err(e) => {
+                eprintln!("  Database: schema setup failed: {e}");
+                db_warning = true;
+            }
         }
     }
 
@@ -169,7 +174,7 @@ pub fn cmd_init(
         );
     }
 
-    Ok(had_hook_warnings)
+    Ok(had_hook_warnings || db_warning)
 }
 
 pub fn open_url_in_browser(url: &str) {
@@ -461,7 +466,35 @@ fn check_daemon_binary() {
     }
 }
 
-/// Warn if there are multiple `budi` binaries in PATH (e.g. ~/.local/bin shadows Homebrew).
+/// Warn if CLI and daemon versions don't match.
+fn check_daemon_version() {
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let daemon_version = Command::new("budi-daemon")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .strip_prefix("budi-daemon ")
+                .unwrap_or(String::from_utf8_lossy(&o.stdout).trim())
+                .to_string()
+        });
+    if let Some(ref dv) = daemon_version {
+        if dv != cli_version {
+            let yellow = super::ansi("\x1b[33m");
+            let reset = super::ansi("\x1b[0m");
+            eprintln!(
+                "{yellow}  Warning:{reset} version mismatch: CLI v{cli_version} but daemon v{dv}. \
+                 Run `budi update` or reinstall both binaries."
+            );
+        }
+    }
+}
+
+/// Warn if there are multiple `budi` or `budi-daemon` binaries in PATH
+/// (e.g. ~/.local/bin shadows Homebrew).
 fn warn_duplicate_binaries() {
     let Ok(path_var) = std::env::var("PATH") else {
         return;
@@ -470,34 +503,36 @@ fn warn_duplicate_binaries() {
         return;
     };
 
-    let mut found: Vec<PathBuf> = Vec::new();
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join("budi");
-        if candidate.exists()
-            && let Ok(resolved) = candidate.canonicalize()
-            && !found.iter().any(|p| p == &resolved)
-        {
-            found.push(resolved);
+    for bin_name in &["budi", "budi-daemon"] {
+        let mut found: Vec<PathBuf> = Vec::new();
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(bin_name);
+            if candidate.exists()
+                && let Ok(resolved) = candidate.canonicalize()
+                && !found.iter().any(|p| p == &resolved)
+            {
+                found.push(resolved);
+            }
         }
-    }
 
-    if found.len() > 1 {
-        let yellow = super::ansi("\x1b[33m");
-        let bold = super::ansi("\x1b[1m");
-        let reset = super::ansi("\x1b[0m");
-        eprintln!("{yellow}  Warning:{reset} multiple budi binaries found in PATH:");
-        for path in &found {
-            let marker = if *path == current_exe {
-                " (active)"
-            } else {
-                ""
-            };
-            eprintln!("    - {}{marker}", path.display());
+        if found.len() > 1 {
+            let yellow = super::ansi("\x1b[33m");
+            let bold = super::ansi("\x1b[1m");
+            let reset = super::ansi("\x1b[0m");
+            eprintln!("{yellow}  Warning:{reset} multiple {bin_name} binaries found in PATH:");
+            for path in &found {
+                let marker = if *bin_name == "budi" && *path == current_exe {
+                    " (active)"
+                } else {
+                    ""
+                };
+                eprintln!("    - {}{marker}", path.display());
+            }
+            eprintln!("  Remove the unused one to avoid version conflicts.");
+            eprintln!(
+                "  {bold}Tip:{reset} if you switched to Homebrew, run: rm ~/.local/bin/budi ~/.local/bin/budi-daemon"
+            );
         }
-        eprintln!("  Remove the unused one to avoid version conflicts.");
-        eprintln!(
-            "  {bold}Tip:{reset} if you switched to Homebrew, run: rm ~/.local/bin/budi ~/.local/bin/budi-daemon"
-        );
     }
 }
 

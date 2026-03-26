@@ -49,7 +49,13 @@ fail() {
 }
 
 ensure_cmd() {
-  command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+  if ! command -v "$1" >/dev/null 2>&1; then
+    local hint=""
+    case "$1" in
+      gh) hint=" (install: brew install gh / apt install gh / https://cli.github.com)" ;;
+    esac
+    fail "Missing required command: $1${hint}"
+  fi
 }
 
 sha256_of_file() {
@@ -270,6 +276,16 @@ main() {
     local current_shell="${SHELL:-}"
     case "$current_shell" in
       */zsh)  shell_profile="$HOME/.zshrc" ;;
+      */fish)
+        # Fish uses a different syntax — handle separately.
+        local fish_config="$HOME/.config/fish/config.fish"
+        if ! grep -qF "$BIN_DIR" "$fish_config" 2>/dev/null; then
+          mkdir -p "$(dirname "$fish_config")"
+          printf '\n# Added by budi installer\nfish_add_path %s\n' "$BIN_DIR" >> "$fish_config"
+          log "Added $BIN_DIR to PATH in $fish_config"
+          log "Restart your terminal or run: source $fish_config"
+        fi
+        ;;
       */bash)
         if [[ -f "$HOME/.bashrc" ]]; then
           shell_profile="$HOME/.bashrc"
@@ -289,6 +305,8 @@ main() {
         log "Added $BIN_DIR to PATH in $shell_profile"
         log "Restart your terminal or run: source $shell_profile"
       fi
+    elif case "$current_shell" in */fish) true;; *) false;; esac; then
+      : # Already handled above.
     else
       log ""
       log "NOTE: $BIN_DIR is not in your PATH."

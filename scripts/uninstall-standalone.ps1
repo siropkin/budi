@@ -16,7 +16,7 @@ if (Test-Path $budiExe) {
 # 2. Stop daemon processes.
 Log "Stopping daemon..."
 try {
-    Get-Process -Name "budi-daemon" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name "budi-daemon" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Log "Stopped budi-daemon."
 } catch {
     Log "No running daemon found."
