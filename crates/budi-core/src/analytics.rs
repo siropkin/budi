@@ -232,8 +232,14 @@ fn sync_with_max_age(
             let path_str = file_path.display().to_string();
             let offset = get_sync_offset(conn, &path_str)?;
 
-            let content = std::fs::read_to_string(file_path)
-                .with_context(|| format!("Failed to read {}", file_path.display()))?;
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Skipping {}: {e}", file_path.display());
+                    warnings.push(format!("Skipped {}: {e}", file_path.display()));
+                    continue;
+                }
+            };
 
             if offset >= content.len() {
                 continue; // Already fully synced.
@@ -524,7 +530,6 @@ pub fn repo_usage(
          FROM messages
          WHERE {}
          GROUP BY repo
-         HAVING cost > 0 OR (inp + outp) > 0
          ORDER BY cost DESC
          LIMIT ?{}",
         conditions.join(" AND "),
@@ -699,7 +704,6 @@ pub fn branch_cost(
          FROM messages
          {where_clause}
          GROUP BY branch, repo
-         HAVING cost > 0 OR cnt > 0
          ORDER BY cost DESC
          LIMIT 50",
     );
@@ -909,11 +913,11 @@ pub fn tag_stats(
                     COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
              FROM messages m
              WHERE m.role = 'assistant' {untagged_date_filter}
-               AND NOT EXISTS (
-                   SELECT 1
+               AND m.session_id NOT IN (
+                   SELECT DISTINCT tm2.session_id
                    FROM tags t2
                    JOIN messages tm2 ON t2.message_uuid = tm2.uuid
-                   WHERE t2.key = ?1 AND tm2.session_id = m.session_id
+                   WHERE t2.key = ?1 AND tm2.session_id IS NOT NULL
                )"
         )
     } else {
@@ -1223,9 +1227,8 @@ pub fn provider_stats(
             .map(|p| p.display_name().to_string())
             .unwrap_or_else(|| prov.clone());
 
-        // Cost is baked into cost_cents at ingest time — just use the sum.
-        // sum_cost_cents is in cents; estimated_cost is in dollars.
-        let estimated_cost = (sum_cost_cents / 100.0 * 100.0).round() / 100.0;
+        // sum_cost_cents is in cents; estimated_cost is in dollars (rounded to nearest cent).
+        let estimated_cost = sum_cost_cents.round() / 100.0;
 
         result.push(ProviderStats {
             provider: prov,
@@ -1236,7 +1239,7 @@ pub fn provider_stats(
             cache_creation_tokens: cache_create,
             cache_read_tokens: cache_read,
             estimated_cost,
-            total_cost_cents: (sum_cost_cents * 100.0).round() / 100.0,
+            total_cost_cents: sum_cost_cents,
         });
     }
 

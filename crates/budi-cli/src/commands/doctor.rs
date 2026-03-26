@@ -117,12 +117,34 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    // Database file existence and readability check
+    // Database file existence, readability, and integrity check
     if let Ok(db_path) = budi_core::analytics::db_path() {
         if db_path.exists() {
             match std::fs::File::open(&db_path) {
                 Ok(_) => {
                     println!("  {green}\u{2713}{reset} database file: readable at {}", db_path.display());
+                    // Integrity check: verify DB is not corrupted
+                    match budi_core::analytics::open_db(&db_path) {
+                        Ok(conn) => {
+                            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
+                                Ok(ref result) if result == "ok" => {
+                                    println!("  {green}\u{2713}{reset} database integrity: ok");
+                                }
+                                Ok(result) => {
+                                    println!("  {red}\u{2717}{reset} database integrity: {result}");
+                                    issues.push(format!("Database integrity check failed: {result}"));
+                                }
+                                Err(e) => {
+                                    println!("  {red}\u{2717}{reset} database integrity: could not check ({e})");
+                                    issues.push(format!("Database integrity check error: {e}"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("  {red}\u{2717}{reset} database open: failed ({e}). Try `budi migrate`");
+                            issues.push(format!("Database cannot be opened: {e}"));
+                        }
+                    }
                 }
                 Err(e) => {
                     println!("  {red}\u{2717}{reset} database file: not readable at {} ({e})", db_path.display());
@@ -131,6 +153,19 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
             }
         } else {
             println!("  {dim}-{reset} database file: not yet created at {}", db_path.display());
+        }
+        // Check for hook delivery errors
+        if let Ok(home) = budi_core::config::budi_home_dir() {
+            let log_path = home.join("hook-debug.log");
+            if log_path.exists() {
+                if let Ok(meta) = std::fs::metadata(&log_path) {
+                    if meta.len() > 0 {
+                        let yellow = super::ansi("\x1b[33m");
+                        println!("  {yellow}!{reset} hook errors: found in {}", log_path.display());
+                        issues.push("Hook delivery errors logged. Check hook-debug.log".to_string());
+                    }
+                }
+            }
         }
     }
 

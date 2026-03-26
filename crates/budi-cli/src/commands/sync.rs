@@ -101,9 +101,9 @@ fn print_sync_warnings(result: &serde_json::Value) {
         let yellow = super::ansi("\x1b[33m");
         let reset = super::ansi("\x1b[0m");
         for w in warnings {
-            if let Some(msg) = w.as_str() {
-                eprintln!("{yellow}Warning:{reset} {}", msg);
-            }
+            let msg = w.as_str().map(|s| s.to_string())
+                .unwrap_or_else(|| serde_json::to_string(w).unwrap_or_else(|_| "(unparseable)".to_string()));
+            eprintln!("{yellow}Warning:{reset} {}", msg);
         }
     }
 }

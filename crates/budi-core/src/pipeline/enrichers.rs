@@ -163,11 +163,13 @@ impl Enricher for CostEnricher {
     fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
         let mut tags = Vec::new();
 
-        // Add provider tag
-        tags.push(Tag {
-            key: "provider".to_string(),
-            value: msg.provider.clone(),
-        });
+        // Add provider tag (only for assistant messages to avoid unnecessary tag rows)
+        if msg.role == "assistant" {
+            tags.push(Tag {
+                key: "provider".to_string(),
+                value: msg.provider.clone(),
+            });
+        }
 
         // Add model tag
         if let Some(ref model) = msg.model {
@@ -180,14 +182,14 @@ impl Enricher for CostEnricher {
         // Calculate cost if not already set (skip if API provided exact cost)
         if msg.cost_cents.is_none() && msg.role == "assistant" {
             if msg.model.is_none() {
-                tracing::debug!(
+                tracing::trace!(
                     "CostEnricher: model is None for message {}, using default pricing",
                     msg.uuid
                 );
             }
             let model = msg.model.as_deref().unwrap_or("unknown");
             if model == "unknown" {
-                tracing::debug!(
+                tracing::trace!(
                     "CostEnricher: model is 'unknown' for message {}, cost estimate may be inaccurate",
                     msg.uuid
                 );
@@ -308,7 +310,7 @@ impl Enricher for HookEnricher {
             return tags;
         };
         let Some(meta) = self.session_cache.get(session_id) else {
-            tracing::debug!("HookEnricher: session '{}' not found in cache", session_id);
+            tracing::trace!("HookEnricher: session '{}' not found in cache (may be outside max_age window)", session_id);
             return tags;
         };
 

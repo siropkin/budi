@@ -157,11 +157,15 @@ pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessag
     let remaining = &content[start_offset..];
     let mut pos = 0;
     for line in remaining.lines() {
-        pos += line.len();
-        // Only count the newline if it actually exists (handles files without trailing newline)
-        if pos < remaining.len() && remaining.as_bytes()[pos] == b'\n' {
-            pos += 1;
+        let line_end = pos + line.len();
+        // Only count the newline if it actually exists
+        let has_newline = line_end < remaining.len() && remaining.as_bytes()[line_end] == b'\n';
+        if !has_newline && line_end == remaining.len() {
+            // Incomplete final line (no trailing newline) — don't advance offset past it.
+            // It may be a truncated write that will be completed later.
+            break;
         }
+        pos = line_end + if has_newline { 1 } else { 0 };
         if let Some(msg) = parse_line(line) {
             messages.push(msg);
         }

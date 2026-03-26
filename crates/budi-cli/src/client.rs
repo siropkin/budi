@@ -20,14 +20,14 @@ use crate::daemon::{daemon_health, ensure_daemon_running};
 fn describe_send_error(e: reqwest::Error) -> anyhow::Error {
     if e.is_connect() {
         anyhow::anyhow!(
-            "Daemon is not running. Start it with `budi sync` or `budi init`"
+            "daemon is not running — start it with `budi sync` or `budi init`"
         )
     } else if e.is_timeout() {
         anyhow::anyhow!(
-            "Daemon timed out. For large syncs, this is normal — try again in a moment"
+            "daemon timed out — for large syncs, this is normal; try again in a moment"
         )
     } else {
-        anyhow::anyhow!("Cannot reach daemon: {e}. Run `budi doctor` to diagnose")
+        anyhow::anyhow!("cannot reach daemon: {e} — run `budi doctor` to diagnose")
     }
 }
 
@@ -68,7 +68,7 @@ impl DaemonClient {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(10))
             .build()?;
 
         Ok(Self { base_url, client })

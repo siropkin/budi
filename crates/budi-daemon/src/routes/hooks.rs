@@ -13,7 +13,7 @@ pub async fn health() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde
 pub async fn sync_status(
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
-    let syncing = state.syncing.load(std::sync::atomic::Ordering::Relaxed);
+    let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
     Json(json!({ "syncing": syncing }))
 }
 
@@ -133,7 +133,7 @@ pub async fn hooks_ingest(
     State(state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
-    if state.syncing.load(std::sync::atomic::Ordering::Relaxed) {
+    if state.syncing.load(std::sync::atomic::Ordering::Acquire) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "ok": false, "error": "Sync in progress, try again shortly" })),
