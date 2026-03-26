@@ -85,6 +85,12 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+    /// Remove budi hooks, status line, and data (keeps binaries)
+    Uninstall {
+        /// Keep the analytics database and data
+        #[arg(long)]
+        keep_data: bool,
+    },
     /// Run database migration explicitly (usually automatic with sync/update)
     #[command(hide = true)]
     Migrate,
@@ -178,6 +184,7 @@ fn main() -> Result<()> {
                 commands::sync::cmd_sync()
             }
         }
+        Commands::Uninstall { keep_data } => commands::uninstall::cmd_uninstall(keep_data),
         Commands::Open => commands::open::cmd_open(),
         Commands::Update { yes } => commands::update::cmd_update(yes),
         Commands::Migrate => {

@@ -9,6 +9,7 @@ pub mod open;
 pub mod stats;
 pub mod statusline;
 pub mod sync;
+pub mod uninstall;
 pub mod update;
 
 /// Returns true if color output should be used (NO_COLOR env var is not set).

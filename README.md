@@ -116,6 +116,8 @@ budi stats --tag ticket_prefix # cost per team prefix
 budi sync                     # sync recent data (last 7 days)
 budi history                  # load full history (all time)
 budi update                   # check for updates
+budi uninstall                # remove hooks, status line, and data
+budi uninstall --keep-data    # uninstall but keep analytics database
 ```
 
 All data commands support `--period today|week|month|all` and `--json`.
@@ -241,21 +243,12 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
 ## Uninstall
 
-**macOS / Linux:**
-
 ```bash
-pkill -f budi-daemon
-brew uninstall budi                       # or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon
-rm -rf ~/.local/share/budi                # remove data
+budi uninstall                            # stops daemon, removes hooks, status line, and data
+brew uninstall budi                       # remove binaries (or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon)
 ```
 
-**Windows (PowerShell):**
-
-```powershell
-Stop-Process -Name budi-daemon -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:USERPROFILE\.local\bin\budi.exe", "$env:USERPROFILE\.local\bin\budi-daemon.exe" -Force
-Remove-Item "$env:APPDATA\budi" -Recurse -Force   # remove data
-```
+Use `budi uninstall --keep-data` to keep the analytics database.
 
 ## License
 
