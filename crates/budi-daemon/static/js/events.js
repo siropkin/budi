@@ -118,12 +118,17 @@ async function switchAndReload() {
   }
 }
 
-// Period tab switching
+// Period tab switching — restore saved selection
 $$('.period-tabs button').forEach(btn => {
+  if (btn.dataset.period === currentPeriod) {
+    $$('.period-tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
   btn.addEventListener('click', () => {
     $$('.period-tabs button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPeriod = btn.dataset.period;
+    localStorage.setItem('budi_period', currentPeriod);
     switchAndReload();
   });
 });

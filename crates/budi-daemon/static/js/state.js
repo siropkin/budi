@@ -2,7 +2,7 @@ const $ = (s, el) => (el || document).querySelector(s);
 const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
 function esc(s) { if (s == null) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
 
-let currentPeriod = 'today';
+let currentPeriod = localStorage.getItem('budi_period') || 'today';
 const DEFAULT_TABLE_ROWS = 15;
 const DEFAULT_CHART_ROWS = 15;
 
