@@ -84,6 +84,18 @@ try {
     Log "Installed: $ver"
     Log ""
 
+    # Stop existing daemon before init (running executables cannot be overwritten on Windows).
+    try {
+        Stop-Process -Name "budi-daemon" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+    } catch { }
+
+    # Skip init if called from `budi update` (update handles its own post-install sequence).
+    if ($env:BUDI_SKIP_INIT -eq "1") {
+        Log "Skipping init (update mode)."
+        return
+    }
+
     # Auto-run budi init for a seamless setup experience.
     Log "Running budi init..."
     Log ""

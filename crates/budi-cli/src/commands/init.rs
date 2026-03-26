@@ -219,8 +219,15 @@ fn install_statusline_if_missing() {
         return;
     }
 
-    if let Ok(()) = super::statusline::cmd_statusline_install() {
-        println!("Status line: installed in {}", settings_path.display());
+    match super::statusline::cmd_statusline_install() {
+        Ok(()) => println!("  Status line: installed in {}", settings_path.display()),
+        Err(e) => {
+            let yellow = super::ansi("\x1b[33m");
+            let reset = super::ansi("\x1b[0m");
+            eprintln!(
+                "{yellow}  Warning:{reset} status line install failed: {e}"
+            );
+        }
     }
 }
 
@@ -449,8 +456,9 @@ fn install_cursor_hooks() -> Result<()> {
 
 /// Check that budi-daemon is available on PATH before attempting to start it.
 fn check_daemon_binary() {
-    let found = Command::new("sh")
-        .args(["-c", "command -v budi-daemon"])
+    // Use a cross-platform check: try running the binary directly.
+    let found = Command::new("budi-daemon")
+        .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

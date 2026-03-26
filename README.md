@@ -46,7 +46,9 @@ brew install siropkin/budi/budi
 budi init    # required: starts daemon, installs hooks, syncs data
 ```
 
-**Shell script (macOS / Linux):** requires `curl` and `tar`
+Note: after `brew upgrade budi`, always run `budi init` to restart the daemon and re-install hooks.
+
+**Shell script (macOS / Linux):** requires `curl` and `tar` (glibc-based systems only; Alpine/musl users should build from source)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash
@@ -58,6 +60,8 @@ curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-
 irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex
 ```
 
+Windows notes: binaries install to `%LOCALAPPDATA%\budi\bin`. The daemon uses `taskkill` instead of `pkill`. PATH is updated in the user environment — restart your terminal after install.
+
 **From source:** requires [Rust toolchain](https://rustup.rs/) — clones the repo and builds release binaries
 
 ```bash
@@ -68,9 +72,9 @@ git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.s
 
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
-The shell script, PowerShell script, and from-source installers automatically run `budi init` after installation. Homebrew users need to run `budi init` manually.
+All installers automatically run `budi init` after installation. Homebrew users need to run `budi init` manually.
 
-`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks and the status line. The daemon uses port 7878 — make sure it's available.
+`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks and the status line. The daemon uses port 7878 by default — make sure it's available (customize in `~/.config/budi/config.toml` with `daemon_port`).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -99,7 +103,7 @@ For Starship integration, add to `~/.config/starship.toml`:
 ```toml
 [custom.budi]
 command = "budi statusline --format=starship"
-when = "command -v budi-daemon"
+when = "curl -sf http://localhost:7878/health >/dev/null 2>&1"
 format = "[$output]($style) "
 style = "cyan"
 shell = ["sh"]
@@ -164,9 +168,13 @@ value = "backend"
 match_repo = "*Backend*"
 ```
 
+## Privacy
+
+Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on your machine in `~/.local/share/budi/`. Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
+
 ## How it works
 
-A lightweight Rust daemon (port 7878) syncs data from all detected providers into a single SQLite database. The CLI is a thin HTTP client — all queries go through the daemon. Budi only stores metadata (timestamps, token counts, model names, costs) — never file contents or prompt responses.
+A lightweight Rust daemon (port 7878) syncs data from all detected providers into a single SQLite database. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
@@ -292,7 +300,7 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 budi uninstall          # stops daemon, removes hooks, status line, config, and data
 ```
 
-Then remove the binaries:
+`budi uninstall` removes hooks, status line, config, and data but **not** the binaries themselves. Remove binaries separately:
 
 ```bash
 # Homebrew:
@@ -302,6 +310,9 @@ brew uninstall budi
 rm ~/.local/bin/budi ~/.local/bin/budi-daemon
 # or use the full uninstall script:
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/uninstall.sh | bash
+
+# From source (cargo install):
+cargo uninstall budi budi-daemon
 
 # Windows (PowerShell):
 irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/uninstall-standalone.ps1 | iex

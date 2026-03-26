@@ -45,9 +45,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         println!("  {green}\u{2713}{reset} config: using defaults");
     }
 
-    // Check that budi-daemon binary exists on PATH
-    let daemon_bin_found = std::process::Command::new("sh")
-        .args(["-c", "command -v budi-daemon"])
+    // Check that budi-daemon binary exists on PATH (cross-platform).
+    let daemon_bin_found = std::process::Command::new("budi-daemon")
+        .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -444,8 +444,7 @@ fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
 
 /// Match any variant of the budi hook command (with or without `|| true` wrapper).
 fn is_budi_hook_cmd(cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    trimmed == "budi hook" || trimmed.starts_with("budi hook ")
+    super::is_budi_hook_cmd(cmd)
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
@@ -463,8 +462,12 @@ fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
     }
 }
 
-/// Check available disk space in MB using `df`. Returns None if unable to determine.
+/// Check available disk space in MB. Uses `df -k` on Unix, skips on Windows.
 fn check_available_disk_mb(path: &Path) -> Option<u64> {
+    if cfg!(target_os = "windows") {
+        // df is not available on Windows; skip disk space check.
+        return None;
+    }
     let output = std::process::Command::new("df")
         .arg("-k")
         .arg(path)

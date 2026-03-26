@@ -31,6 +31,12 @@ pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
     config::find_repo_root(&cwd).ok()
 }
 
+/// Match any variant of the budi hook command (with or without `|| true` wrapper).
+pub fn is_budi_hook_cmd(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed == "budi hook" || trimmed.starts_with("budi hook ")
+}
+
 /// Format a cost value in dollars: $1.2K, $123, $12.50, $0.42, $0.00
 pub fn format_cost(dollars: f64) -> String {
     if dollars >= 1000.0 {

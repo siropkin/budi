@@ -318,16 +318,30 @@ main() {
   local version
   version="$("$BIN_DIR/budi" --version 2>/dev/null || echo 'budi')"
 
-  cat <<EOF
+  log ""
+  log "Installed: $version"
+  log "Binary directory: $BIN_DIR"
+  log ""
 
-[budi-install] Installed: $version
-[budi-install] Binary directory: $BIN_DIR
+  # Ensure BIN_DIR is in PATH for the current shell so budi init works.
+  export PATH="$BIN_DIR:$PATH"
 
-[budi-install] Get started:
-  budi init         # start daemon, install hooks, sync data
-  budi doctor      # verify everything is working
-  budi stats       # view usage analytics
-EOF
+  # Skip init if called from `budi update` (update handles its own post-install sequence).
+  if [[ "${BUDI_SKIP_INIT:-}" = "1" ]]; then
+    log "Skipping init (update mode)."
+    return 0 2>/dev/null || exit 0
+  fi
+
+  # Auto-run budi init for a seamless setup experience.
+  log "Running budi init..."
+  log ""
+  if "$BIN_DIR/budi" init; then
+    log ""
+    log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+  else
+    log ""
+    log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+  fi
 }
 
 main "$@"

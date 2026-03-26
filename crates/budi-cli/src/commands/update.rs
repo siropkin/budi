@@ -55,7 +55,14 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
             .context("Failed to check for updates")?;
 
         if !resp.status().is_success() {
-            anyhow::bail!("GitHub API returned {}", resp.status());
+            let status = resp.status();
+            if status.as_u16() == 403 || status.as_u16() == 429 {
+                anyhow::bail!(
+                    "GitHub API rate limit exceeded ({}). Try again later, or specify a version: budi update --version <tag>",
+                    status
+                );
+            }
+            anyhow::bail!("GitHub API returned {}", status);
         }
 
         let release: Value = resp.json()?;
@@ -73,10 +80,14 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "New version available: {bold}v{}{reset} → {bold_green}v{}{reset}",
-        current, latest
-    );
+    if version.is_some() && latest == current {
+        println!("Reinstalling v{}...", current);
+    } else {
+        println!(
+            "New version available: {bold}v{}{reset} → {bold_green}v{}{reset}",
+            current, latest
+        );
+    }
 
     if !yes {
         println!("This will download and run the budi installer from GitHub.");
@@ -105,27 +116,32 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
     // Pin the installer to the exact version we resolved to avoid race conditions
     // (a new release published between version check and download).
+    // Also pin the installer script itself to the target tag so the script format
+    // matches the version being installed.
+    let installer_tag = &latest_tag;
     let status = if cfg!(target_os = "windows") {
+        let script_url = format!(
+            "irm https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.ps1 | iex",
+            installer_tag
+        );
         Command::new("powershell")
             .env("VERSION", &latest_tag)
-            .args([
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                "irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex",
-            ])
+            .env("BUDI_SKIP_INIT", "1")
+            .args(["-ExecutionPolicy", "Bypass", "-Command", &script_url])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
             .context("Failed to run PowerShell installer")?
     } else {
+        let script_url = format!(
+            "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.sh | bash",
+            installer_tag
+        );
         Command::new("bash")
             .env("VERSION", &latest_tag)
-            .args([
-                "-c",
-                "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash",
-            ])
+            .env("BUDI_SKIP_INIT", "1")
+            .args(["-c", &script_url])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -200,6 +216,10 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     }
 
     println!();
+    println!(
+        "{dim}Release notes: https://github.com/siropkin/budi/releases/tag/{}{reset}",
+        latest_tag
+    );
     println!("{dim}Restart Claude Code and Cursor to pick up any changes.{reset}");
 
     Ok(())

@@ -28,7 +28,13 @@ detect_target() {
     *) fail "Unsupported architecture: $arch" ;;
   esac
   case "$os" in
-    Linux)  echo "${arch}-unknown-linux-gnu" ;;
+    Linux)
+      # Detect musl-based systems (Alpine, Void, etc.) — prebuilt binaries require glibc.
+      if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+        fail "musl libc detected. Prebuilt binaries require glibc. Install from source instead: https://github.com/siropkin/budi#install"
+      fi
+      echo "${arch}-unknown-linux-gnu"
+      ;;
     Darwin) echo "${arch}-apple-darwin" ;;
     *)      fail "Unsupported OS: $os" ;;
   esac
@@ -59,9 +65,18 @@ main() {
     tag="$VERSION"
   else
     log "Fetching latest release tag..."
-    tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-      | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')" \
-      || fail "Could not determine latest release"
+    local api_response
+    api_response="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")" \
+      || fail "Could not fetch release info from GitHub (check network or try again later)"
+    # Try jq first, fall back to python3, then grep.
+    if command -v jq >/dev/null 2>&1; then
+      tag="$(echo "$api_response" | jq -r '.tag_name')"
+    elif command -v python3 >/dev/null 2>&1; then
+      tag="$(echo "$api_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])")"
+    else
+      tag="$(echo "$api_response" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    fi
+    [ -n "$tag" ] || fail "Could not determine latest release tag"
   fi
 
   local asset_name="budi-${tag}-${target}.tar.gz"
@@ -159,15 +174,20 @@ main() {
   log "Installed budi $tag ($target)"
   log ""
 
-  # Auto-run budi init for a seamless setup experience.
-  log "Running budi init..."
-  log ""
-  if "$BIN_DIR/budi" init; then
-    log ""
-    log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+  # Skip init if called from `budi update` (update handles its own post-install sequence).
+  if [ "${BUDI_SKIP_INIT:-}" = "1" ]; then
+    log "Skipping init (update mode)."
   else
+    # Auto-run budi init for a seamless setup experience.
+    log "Running budi init..."
     log ""
-    log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+    if "$BIN_DIR/budi" init; then
+      log ""
+      log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+    else
+      log ""
+      log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+    fi
   fi
 }
 
