@@ -91,8 +91,8 @@ impl Provider for CursorProvider {
 /// every workspace under workspaceStorage, for both macOS and Linux.
 fn all_state_vscdb_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let home = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
+    let home = match crate::config::home_dir() {
+        Ok(h) => h,
         Err(_) => return paths,
     };
 
@@ -643,8 +643,7 @@ pub fn resolve_git_branch_from_head(dir: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn cursor_home() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".cursor"))
+    Ok(crate::config::home_dir()?.join(".cursor"))
 }
 
 /// Walk `~/.cursor/projects/*/agent-transcripts/` for JSONL files.

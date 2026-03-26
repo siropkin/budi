@@ -37,28 +37,28 @@ No cloud. No uploads. Everything stays on your machine.
 
 ## Install
 
-**Homebrew (macOS / Linux):**
+**Homebrew (macOS / Linux):** requires [Homebrew](https://brew.sh/)
 
 ```bash
 brew install siropkin/budi/budi
 budi init
 ```
 
-**Shell script:**
+**Shell script (macOS / Linux):** requires `curl` and `tar`
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash
 budi init
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell):** requires PowerShell 5.1+
 
 ```powershell
 irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex
 budi init
 ```
 
-**From source:**
+**From source:** requires [Rust toolchain](https://rustup.rs/)
 
 ```bash
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
@@ -69,7 +69,7 @@ budi init
 
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
-`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data.
+`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after running `budi init` to activate hooks and the status line.
 
 ## Status line
 
@@ -100,10 +100,25 @@ style = "cyan"
 shell = ["sh"]
 ```
 
+## Update
+
+**Homebrew:**
+
+```bash
+brew upgrade budi
+budi init        # restart daemon + re-sync
+```
+
+**Shell script / Windows / from source:**
+
+```bash
+budi update      # downloads latest release and restarts daemon
+```
+
 ## CLI
 
 ```bash
-budi init                     # start daemon, install statusline, sync data
+budi init                     # start daemon, install hooks, sync data
 budi open                     # open web dashboard
 budi doctor                   # check health: daemon, database, config
 budi stats                    # usage summary with cost breakdown
@@ -114,7 +129,7 @@ budi stats --branch <name>    # cost for a specific branch
 budi stats --tag ticket_id    # cost per ticket
 budi stats --tag ticket_prefix # cost per team prefix
 budi sync                     # sync recent data (last 7 days)
-budi history                  # load full history (all time)
+budi sync --all               # load full history (all time)
 budi update                   # check for updates
 budi uninstall                # remove hooks, status line, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
@@ -192,7 +207,7 @@ The daemon is the single source of truth — the CLI never opens the database di
 <details>
 <summary>Hooks</summary>
 
-Both Claude Code and Cursor support lifecycle hooks that budi uses for real-time event capture. Hooks are installed automatically by `budi init`.
+Both Claude Code and Cursor support lifecycle hooks that budi uses for real-time event capture. Hooks are installed automatically by `budi init` into `~/.claude/settings.json` and `~/.cursor/hooks.json`. They are non-blocking (`async: true`) and wrapped with `|| true` so that budi can never interfere with your coding agent — even if budi crashes or is uninstalled.
 
 | Data | Claude Code | Cursor |
 |------|-------------|--------|
@@ -241,14 +256,35 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
 </details>
 
+## Troubleshooting
+
+**Dashboard shows no data:**
+1. Run `budi doctor` to check health
+2. Run `budi sync` to sync recent transcripts
+3. For full history: `budi sync --all`
+
+**Daemon won't start:**
+1. Check if port 7878 is in use: `lsof -i :7878`
+2. Kill stale processes: `pkill -f "budi-daemon serve"`
+3. Restart: `budi init`
+
+**Hooks not working:**
+1. Run `budi doctor` — it validates hook installation
+2. Make sure you restarted Claude Code / Cursor after `budi init`
+3. Re-install: `budi init` (safe to run multiple times)
+
+**Status line not showing:**
+1. Restart Claude Code after `budi init`
+2. Check: `budi statusline` should output cost data
+
 ## Uninstall
 
 ```bash
-budi uninstall                            # stops daemon, removes hooks, status line, and data
+budi uninstall                            # stops daemon, removes hooks, status line (prompts before deleting data)
 brew uninstall budi                       # remove binaries (or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon)
 ```
 
-Use `budi uninstall --keep-data` to keep the analytics database.
+Options: `--keep-data` to preserve the analytics database, `--yes` to skip confirmation.
 
 ## License
 

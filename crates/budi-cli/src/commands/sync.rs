@@ -5,6 +5,29 @@ use anyhow::Result;
 
 use crate::client::DaemonClient;
 
+pub fn init_quick_sync() -> Result<(usize, usize)> {
+    let client = DaemonClient::connect()?;
+    let start = std::time::Instant::now();
+    let result = client.sync(true)?;
+    let elapsed = start.elapsed().as_secs_f64();
+    let files = result
+        .get("files_synced")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let msgs = result
+        .get("messages_ingested")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let bold = super::ansi("\x1b[1m");
+    let reset = super::ansi("\x1b[0m");
+    println!(
+        "  Sync: done in {bold}{:.1}s{reset} ({} messages from {} files)",
+        elapsed, msgs, files
+    );
+    print_sync_warnings(&result);
+    Ok((files, msgs))
+}
+
 pub fn init_full_sync() -> Result<(usize, usize)> {
     let client = DaemonClient::connect()?;
     let start = std::time::Instant::now();

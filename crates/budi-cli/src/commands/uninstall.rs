@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::statusline::CLAUDE_USER_SETTINGS;
 
-pub fn cmd_uninstall(keep_data: bool) -> Result<()> {
+pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     let green = super::ansi("\x1b[32m");
     let yellow = super::ansi("\x1b[33m");
     let reset = super::ansi("\x1b[0m");
@@ -21,7 +21,9 @@ pub fn cmd_uninstall(keep_data: bool) -> Result<()> {
     }
 
     // 2. Remove hooks from Claude Code
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = budi_core::config::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     if !home.is_empty() {
         print!("Removing Claude Code hooks... ");
         match remove_claude_code_hooks(&home) {
@@ -48,6 +50,23 @@ pub fn cmd_uninstall(keep_data: bool) -> Result<()> {
 
         // 5. Remove data
         if !keep_data {
+            if !yes {
+                eprint!("Remove all analytics data? This cannot be undone. [y/N] ");
+                let mut answer = String::new();
+                std::io::stdin()
+                    .read_line(&mut answer)
+                    .context("Failed to read stdin")?;
+                if !matches!(answer.trim(), "y" | "Y") {
+                    println!("Keeping data.");
+                    println!();
+                    println!("{green}✓{reset} budi uninstalled (data preserved).");
+                    println!();
+                    println!("To remove the binaries:");
+                    println!("  brew uninstall budi");
+                    println!("  # or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon");
+                    return Ok(());
+                }
+            }
             print!("Removing data... ");
             match remove_data() {
                 Ok(true) => println!("{green}✓{reset} removed"),
@@ -70,11 +89,19 @@ pub fn cmd_uninstall(keep_data: bool) -> Result<()> {
 }
 
 fn stop_daemon() -> Result<bool> {
-    let output = Command::new("pkill")
-        .args(["-f", "budi-daemon"])
-        .output()
-        .context("failed to run pkill")?;
-    Ok(output.status.success())
+    if cfg!(target_os = "windows") {
+        let output = Command::new("taskkill")
+            .args(["/F", "/IM", "budi-daemon.exe"])
+            .output()
+            .context("failed to run taskkill")?;
+        Ok(output.status.success())
+    } else {
+        let output = Command::new("pkill")
+            .args(["-f", "budi-daemon serve"])
+            .output()
+            .context("failed to run pkill")?;
+        Ok(output.status.success())
+    }
 }
 
 fn remove_claude_code_hooks(home: &str) -> Result<bool> {

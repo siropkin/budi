@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::jsonl::{self, ParsedMessage};
 use crate::provider::{DiscoveredFile, ModelPricing, Provider};
@@ -47,8 +47,7 @@ impl Provider for ClaudeCodeProvider {
 // ---------------------------------------------------------------------------
 
 fn claude_home() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".claude"))
+    Ok(crate::config::home_dir()?.join(".claude"))
 }
 
 /// Discover all Claude Code JSONL transcript files under `~/.claude/projects/`.

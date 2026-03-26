@@ -13,6 +13,24 @@ pub(crate) const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub(crate) const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub(crate) const BUDI_LOG_DIR_NAME: &str = "logs";
 
+/// Cross-platform home directory detection.
+/// Uses HOME on Unix, USERPROFILE (then HOMEPATH) on Windows.
+pub fn home_dir() -> Result<PathBuf> {
+    if let Ok(home) = env::var("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(profile) = env::var("USERPROFILE") {
+            return Ok(PathBuf::from(profile));
+        }
+        if let (Ok(drive), Ok(path)) = (env::var("HOMEDRIVE"), env::var("HOMEPATH")) {
+            return Ok(PathBuf::from(format!("{drive}{path}")));
+        }
+    }
+    anyhow::bail!("Could not determine home directory (HOME not set)")
+}
+
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 
@@ -75,8 +93,8 @@ impl StatuslineConfig {
 
 /// Path to the global statusline config file.
 pub fn statusline_config_path() -> Result<PathBuf> {
-    let home = env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".config/budi/statusline.toml"))
+    let home = home_dir()?;
+    Ok(home.join(".config/budi/statusline.toml"))
 }
 
 /// Load statusline config, falling back to defaults if the file doesn't exist.
@@ -112,8 +130,8 @@ pub struct TagsConfig {
 
 /// Path to the global tags config file.
 pub fn tags_config_path() -> Result<PathBuf> {
-    let home = env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".config/budi/tags.toml"))
+    let home = home_dir()?;
+    Ok(home.join(".config/budi/tags.toml"))
 }
 
 /// Load tags config, returning None if the file doesn't exist.
@@ -207,8 +225,7 @@ pub fn budi_home_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = env::var(BUDI_HOME_ENV) {
         return Ok(PathBuf::from(override_dir));
     }
-    let home_dir = env::var("HOME").context("HOME environment variable is not set")?;
-    Ok(PathBuf::from(home_dir).join(BUDI_HOME_DEFAULT_REL))
+    Ok(home_dir()?.join(BUDI_HOME_DEFAULT_REL))
 }
 
 pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {

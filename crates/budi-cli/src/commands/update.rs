@@ -64,17 +64,31 @@ pub fn cmd_update(yes: bool) -> Result<()> {
 
     println!("Updating...");
 
-    // Run the standalone installer
-    let status = Command::new("bash")
-        .args([
-            "-c",
-            "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash",
-        ])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("Failed to run installer")?;
+    // Run the platform-appropriate standalone installer
+    let status = if cfg!(target_os = "windows") {
+        Command::new("powershell")
+            .args([
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                "irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex",
+            ])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to run PowerShell installer")?
+    } else {
+        Command::new("bash")
+            .args([
+                "-c",
+                "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | bash",
+            ])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to run installer")?
+    };
 
     if !status.success() {
         anyhow::bail!("Installer exited with {}", status);
@@ -99,7 +113,7 @@ pub fn cmd_update(yes: bool) -> Result<()> {
 
     // Restart daemon with new version
     println!("Restarting daemon...");
-    let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
+    stop_all_daemons();
     thread::sleep(Duration::from_millis(500));
 
     {
@@ -135,4 +149,19 @@ pub fn cmd_update(yes: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Stop all budi-daemon processes using platform-appropriate methods.
+fn stop_all_daemons() {
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "budi-daemon.exe"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        let _ = Command::new("pkill")
+            .args(["-f", "budi-daemon serve"])
+            .status();
+    }
 }

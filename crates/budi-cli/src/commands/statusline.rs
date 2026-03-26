@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -222,8 +222,8 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 }
 
 pub fn cmd_statusline_install() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
+    let home = budi_core::config::home_dir()?;
+    let settings_path = home.join(CLAUDE_USER_SETTINGS);
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed creating {}", parent.display()))?;
@@ -261,10 +261,10 @@ pub fn cmd_statusline_install() -> Result<()> {
 /// Old budi versions installed hooks that call `budi hook <subcommand>` (with arguments).
 /// Preserves new-style hooks that use just `budi hook` (no arguments).
 pub fn remove_legacy_hooks() {
-    let Ok(home) = std::env::var("HOME") else {
+    let Ok(home) = budi_core::config::home_dir() else {
         return;
     };
-    let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
+    let settings_path = home.join(CLAUDE_USER_SETTINGS);
     if !settings_path.exists() {
         return;
     }

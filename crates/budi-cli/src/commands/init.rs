@@ -56,6 +56,17 @@ pub fn cmd_init(
         eprintln!("  Run `budi doctor` to diagnose.");
     }
 
+    // Detect re-init before sync — DB already exists means quick sync is enough.
+    let is_reinit = if let Some(ref root) = repo_root {
+        config::repo_paths(root)
+            .map(|p| p.data_dir.join("analytics.db").exists())
+            .unwrap_or(false)
+    } else {
+        budi_core::analytics::db_path()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    };
+
     // Ensure database schema is ready BEFORE starting daemon.
     // On fresh install: creates tables. On upgrade: drops old schema, recreates.
     if let Ok(db_path) = budi_core::analytics::db_path() {
@@ -71,9 +82,13 @@ pub fn cmd_init(
         println!("  Daemon: running on {}", config.daemon_base_url());
     }
 
-    // Always sync full history — users won't run `budi sync --all` manually.
+    // Fresh install: full history sync (users won't run `budi sync --all` manually).
+    // Re-init: quick 7-day sync (fast, data already exists).
     let sync_result = if no_sync {
         Ok((0, 0))
+    } else if is_reinit {
+        println!("  Sync: syncing recent transcripts...");
+        super::sync::init_quick_sync()
     } else {
         println!("  Sync: scanning transcripts (this may take a few minutes)...");
         super::sync::init_full_sync()
@@ -85,12 +100,6 @@ pub fn cmd_init(
     let bold = super::ansi("\x1b[1m");
     let underline = super::ansi("\x1b[4m");
     let reset = super::ansi("\x1b[0m");
-
-    let is_reinit = repo_root.as_ref().is_some_and(|root| {
-        config::repo_paths(root)
-            .map(|p| p.data_dir.join("analytics.db").exists())
-            .unwrap_or(false)
-    });
 
     let status_suffix = if had_hook_warnings {
         " with warnings"
@@ -137,9 +146,12 @@ pub fn cmd_init(
         println!("  Sync: skipped (run `budi sync` manually).");
     }
     println!();
+    let dim = super::ansi("\x1b[90m");
     println!("  {bold}Next steps:{reset}");
     println!("    1. Open the dashboard: {underline}{dashboard_url}{reset}");
     println!("    2. Run `budi stats` to see your spending");
+    println!();
+    println!("  {dim}Restart Claude Code and Cursor to activate hooks and the status line.{reset}");
     println!();
 
     // Only open browser on fresh init (not re-init) and when --no-open is not set
@@ -185,10 +197,10 @@ pub fn open_url_in_browser(url: &str) {
 }
 
 fn install_statusline_if_missing() {
-    let Ok(home) = std::env::var("HOME") else {
+    let Ok(home) = budi_core::config::home_dir() else {
         return;
     };
-    let settings_path = PathBuf::from(&home).join(super::statusline::CLAUDE_USER_SETTINGS);
+    let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
     let existing = settings_path
         .exists()
         .then(|| fs::read_to_string(&settings_path).ok())
@@ -235,8 +247,8 @@ fn install_hooks() -> Vec<String> {
 /// Install hooks into ~/.claude/settings.json.
 /// Uses Claude Code's nested format: hooks → EventName → [{ matcher, hooks: [{ type, command }] }]
 fn install_claude_code_hooks() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let settings_path = PathBuf::from(&home).join(super::statusline::CLAUDE_USER_SETTINGS);
+    let home = budi_core::config::home_dir()?;
+    let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
 
     let mut settings = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)
@@ -337,8 +349,8 @@ fn install_claude_code_hooks() -> Result<()> {
 /// Install hooks into ~/.cursor/hooks.json.
 /// Uses Cursor's flat format: hooks → eventName → [{ command, type }]
 fn install_cursor_hooks() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let hooks_path = PathBuf::from(&home).join(".cursor/hooks.json");
+    let home = budi_core::config::home_dir()?;
+    let hooks_path = home.join(".cursor/hooks.json");
 
     // Ensure directory exists
     if let Some(parent) = hooks_path.parent() {

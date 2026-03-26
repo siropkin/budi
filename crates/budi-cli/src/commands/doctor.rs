@@ -125,7 +125,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     }
 
     // Check hooks installation — validate structure, not just string presence
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = budi_core::config::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     let claude_settings = format!("{}/.claude/settings.json", home);
     let cursor_hooks = format!("{}/.cursor/hooks.json", home);
 

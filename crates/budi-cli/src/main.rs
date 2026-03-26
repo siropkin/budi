@@ -90,6 +90,9 @@ enum Commands {
         /// Keep the analytics database and data
         #[arg(long)]
         keep_data: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// Run database migration explicitly (usually automatic with init/update)
     #[command(hide = true)]
@@ -191,7 +194,9 @@ fn main() -> Result<()> {
                 commands::sync::cmd_sync()
             }
         }
-        Commands::Uninstall { keep_data } => commands::uninstall::cmd_uninstall(keep_data),
+        Commands::Uninstall { keep_data, yes } => {
+            commands::uninstall::cmd_uninstall(keep_data, yes)
+        }
         Commands::Open => commands::open::cmd_open(),
         Commands::Update { yes } => commands::update::cmd_update(yes),
         Commands::Migrate => {
