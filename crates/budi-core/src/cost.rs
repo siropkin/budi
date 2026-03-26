@@ -221,4 +221,25 @@ mod tests {
         assert_eq!(cost.input_cost, 3.0);
         assert_eq!(cost.total_cost, 3.0);
     }
+
+    #[test]
+    fn cost_sub_cent_messages_not_lost() {
+        let conn = setup_db();
+        // 100 small messages, each: 3 input + 36 output tokens on Opus 4.6
+        // Per message: 3*$5/1M + 36*$25/1M = $0.000015 + $0.0009 = $0.000915 = 0.0915 cents
+        // Total: 100 * 0.0915 = 9.15 cents = $0.0915
+        // Before fix: each rounded to 0 cents → total $0.00 (100% loss)
+        // After fix: each stored as 0.0915 cents → total $0.09 (rounded at display)
+        for i in 0..100 {
+            conn.execute(
+                "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+                 VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 36, ?2)",
+                params![format!("msg{}", i), 0.0915],
+            ).unwrap();
+        }
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        // 100 * 0.0915 cents = 9.15 cents = $0.0915 → rounds to $0.09
+        assert_eq!(cost.total_cost, 0.09);
+        assert!(cost.total_cost > 0.0, "sub-cent messages should not be lost");
+    }
 }

@@ -193,7 +193,7 @@ impl Enricher for CostEnricher {
                 + msg.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
             // Always set cost_cents for assistant messages (Some(0.0) for zero-cost)
             // so they are distinguishable from NULL (unknown cost) in queries.
-            msg.cost_cents = Some((cost * 100.0).round());
+            msg.cost_cents = Some(cost * 100.0);
             msg.cost_confidence = "estimated".to_string();
         }
 
@@ -448,5 +448,36 @@ mod tests {
         assert!(
             !tags.iter().any(|t| t.key == "branch")
         );
+    }
+
+    #[test]
+    fn cost_enricher_preserves_sub_cent_precision() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        // Tiny message: 3 input + 36 output
+        // Cost: 3*$5/1M + 36*$25/1M = $0.000015 + $0.0009 = $0.000915
+        // In cents: 0.0915 — must NOT be rounded to 0
+        msg.input_tokens = 3;
+        msg.output_tokens = 36;
+        enricher.enrich(&mut msg);
+        let cost = msg.cost_cents.unwrap();
+        assert!(cost > 0.0, "sub-cent cost must not be rounded to zero");
+        assert!((cost - 0.0915).abs() < 0.001, "cost should be ~0.0915 cents, got {}", cost);
+    }
+
+    #[test]
+    fn cost_enricher_large_message_precision() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        // 1M input * $5/M = $5.00, 100K output * $25/M = $2.50
+        // Total: $7.50 = 750.0 cents exactly
+        msg.input_tokens = 1_000_000;
+        msg.output_tokens = 100_000;
+        enricher.enrich(&mut msg);
+        assert_eq!(msg.cost_cents.unwrap(), 750.0);
     }
 }
