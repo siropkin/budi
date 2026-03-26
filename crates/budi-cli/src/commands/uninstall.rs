@@ -7,8 +7,6 @@ use serde_json::Value;
 
 use super::statusline::CLAUDE_USER_SETTINGS;
 
-const BUDI_HOOK_CMD: &str = "budi hook";
-
 pub fn cmd_uninstall(keep_data: bool) -> Result<()> {
     let green = super::ansi("\x1b[32m");
     let yellow = super::ansi("\x1b[33m");
@@ -196,7 +194,7 @@ fn remove_data() -> Result<bool> {
     Ok(true)
 }
 
-/// Check if a Claude Code hook entry contains a budi hook command.
+/// Check if a Claude Code hook entry contains a budi hook command (any variant).
 fn is_budi_hook_entry_cc(entry: &Value) -> bool {
     entry
         .get("hooks")
@@ -205,16 +203,22 @@ fn is_budi_hook_entry_cc(entry: &Value) -> bool {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
+                    .is_some_and(is_budi_cmd)
             })
         })
         .unwrap_or(false)
 }
 
-/// Check if a Cursor hook entry is a budi hook command.
+/// Check if a Cursor hook entry is a budi hook command (any variant).
 fn is_budi_hook_entry_cursor(entry: &Value) -> bool {
     entry
         .get("command")
         .and_then(|c| c.as_str())
-        .is_some_and(|c| c.trim() == BUDI_HOOK_CMD)
+        .is_some_and(is_budi_cmd)
+}
+
+/// Match any variant of the budi hook command (with or without `|| true` wrapper).
+fn is_budi_cmd(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed == "budi hook" || trimmed.starts_with("budi hook ")
 }

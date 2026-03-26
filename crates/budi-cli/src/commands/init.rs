@@ -190,7 +190,12 @@ fn install_statusline_if_missing() {
 // ---------------------------------------------------------------------------
 
 /// The budi hook command string — same for all hook events.
-const BUDI_HOOK_CMD: &str = "budi hook";
+/// Wrapped with `|| true` so the hook never blocks the host agent,
+/// even if budi is not installed or crashes.
+const BUDI_HOOK_CMD: &str = "budi hook 2>/dev/null || true";
+
+/// Legacy hook command (without || true wrapper). Used for detection/cleanup.
+const BUDI_HOOK_CMD_LEGACY: &str = "budi hook";
 
 /// Install budi hooks for Claude Code and Cursor.
 /// Merges with existing hooks — never overwrites non-budi entries.
@@ -260,11 +265,18 @@ fn install_claude_code_hooks() -> Result<()> {
             *event_arr = json!([]);
         }
 
-        // Check if budi hook already installed for this event
-        let arr = event_arr
-            .as_array()
+        // Remove any legacy budi hooks (without || true wrapper) so we can re-add with the safe version
+        let arr_mut = event_arr
+            .as_array_mut()
             .expect("event_arr is guaranteed to be array above");
-        let already_installed = arr.iter().any(|entry| {
+        let had_legacy = arr_mut.iter().any(is_legacy_cc_hook);
+        if had_legacy {
+            arr_mut.retain(|entry| !is_legacy_cc_hook(entry));
+            changed = true;
+        }
+
+        // Check if the safe budi hook is already installed
+        let already_installed = arr_mut.iter().any(|entry| {
             entry
                 .get("hooks")
                 .and_then(|h| h.as_array())
@@ -355,10 +367,17 @@ fn install_cursor_hooks() -> Result<()> {
             *event_arr = json!([]);
         }
 
-        let arr = event_arr
-            .as_array()
+        // Remove legacy hooks (without || true wrapper)
+        let arr_mut = event_arr
+            .as_array_mut()
             .expect("event_arr is guaranteed to be array above");
-        let already_installed = arr.iter().any(|entry| {
+        let had_legacy = arr_mut.iter().any(is_legacy_cursor_hook);
+        if had_legacy {
+            arr_mut.retain(|entry| !is_legacy_cursor_hook(entry));
+            changed = true;
+        }
+
+        let already_installed = arr_mut.iter().any(|entry| {
             entry
                 .get("command")
                 .and_then(|c| c.as_str())
@@ -426,4 +445,31 @@ fn warn_duplicate_binaries() {
             "  {bold}Tip:{reset} if you switched to Homebrew, run: rm ~/.local/bin/budi ~/.local/bin/budi-daemon"
         );
     }
+}
+
+/// Check if a Claude Code hook entry is a legacy budi hook (without `|| true`).
+fn is_legacy_cc_hook(entry: &Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|hooks| {
+            hooks.iter().any(|h| {
+                h.get("command").and_then(|c| c.as_str()).is_some_and(|c| {
+                    let trimmed = c.trim();
+                    trimmed == BUDI_HOOK_CMD_LEGACY && trimmed != BUDI_HOOK_CMD
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Check if a Cursor hook entry is a legacy budi hook (without `|| true`).
+fn is_legacy_cursor_hook(entry: &Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| {
+            let trimmed = c.trim();
+            trimmed == BUDI_HOOK_CMD_LEGACY && trimmed != BUDI_HOOK_CMD
+        })
 }

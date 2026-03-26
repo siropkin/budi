@@ -206,7 +206,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Hook { .. } => commands::hook::cmd_hook(),
+        Commands::Hook { .. } => {
+            // Hooks must NEVER block the host agent. Swallow all errors silently.
+            let _ = commands::hook::cmd_hook();
+            Ok(())
+        }
         Commands::Statusline { install, format } => {
             if install {
                 commands::statusline::cmd_statusline_install()

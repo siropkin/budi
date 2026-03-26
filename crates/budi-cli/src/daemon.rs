@@ -46,7 +46,9 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
             // SIGTERM first, wait, then SIGKILL stragglers.
             let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
             if !wait_for_port_release(config, 40, Duration::from_millis(150)) {
-                let _ = Command::new("pkill").args(["-9", "-f", "budi-daemon"]).status();
+                let _ = Command::new("pkill")
+                    .args(["-9", "-f", "budi-daemon"])
+                    .status();
                 let _ = wait_for_port_release(config, 20, Duration::from_millis(150));
             }
         } else {
