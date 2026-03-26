@@ -73,6 +73,11 @@ function localDateStr(d) {
   return `${y}-${m}-${day}`;
 }
 
+// Activity bucket filling: the server's /analytics/activity endpoint applies
+// `tz_offset` (minutes east of UTC) so that returned labels are in the user's
+// local time. Hourly labels come back as "HH:00" (e.g. "09:00", "14:00") and
+// daily labels as "YYYY-MM-DD". This client-side function must generate
+// matching label formats so the dataMap lookup aligns with server data.
 function fillActivityBuckets(chartData) {
   const dataMap = {};
   if (chartData) for (const b of chartData) dataMap[b.label] = b;

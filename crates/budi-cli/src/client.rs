@@ -51,7 +51,10 @@ impl DaemonClient {
                 .context("Failed to start budi daemon. Run `budi doctor` to diagnose")?;
         }
 
-        let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(5))
+            .build()?;
 
         Ok(Self { base_url, client })
     }

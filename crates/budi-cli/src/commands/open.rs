@@ -8,9 +8,6 @@ pub fn cmd_open() -> Result<()> {
         anyhow::bail!("Could not connect to budi daemon: {e}\nRun `budi init` or `budi doctor` to diagnose.");
     }
 
-    // Brief delay to let the dashboard endpoint settle
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
     let config = crate::client::DaemonClient::load_config();
     let url = format!("{}/dashboard", config.daemon_base_url());
 

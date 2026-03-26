@@ -1,4 +1,5 @@
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -18,9 +19,18 @@ pub struct SyncParams {
 
 pub async fn analytics_sync(
     State(state): State<AppState>,
-    params: Option<Json<SyncParams>>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let params = params.map(|p| p.0).unwrap_or_default();
+    let params: SyncParams = if body.is_empty() {
+        SyncParams::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": format!("invalid JSON: {e}") })),
+            )
+        })?
+    };
     if state
         .syncing
         .compare_exchange(
@@ -31,8 +41,9 @@ pub async fn analytics_sync(
         )
         .is_err()
     {
-        return Ok(Json(
-            json!({ "files_synced": 0, "messages_ingested": 0, "skipped": "sync already running" }),
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "sync already running" })),
         ));
     }
     let flag = state.syncing.clone();
@@ -81,8 +92,9 @@ pub async fn analytics_history(
         )
         .is_err()
     {
-        return Ok(Json(
-            json!({ "files_synced": 0, "messages_ingested": 0, "skipped": "sync already running" }),
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "sync already running" })),
         ));
     }
     let flag = state.syncing.clone();

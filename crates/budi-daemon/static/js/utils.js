@@ -3,13 +3,14 @@ function dateRange(period) {
   const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
   const toISO = dt => dt.toISOString();
   switch (period) {
-    case 'today': return { since: toISO(new Date(y, m, d)) };
+    case 'today': return { since: toISO(new Date(y, m, d)), until: toISO(new Date(y, m, d + 1)) };
     case 'week': {
       const dow = now.getDay();
       const mondayOffset = dow === 0 ? 6 : dow - 1;
-      return { since: toISO(new Date(y, m, d - mondayOffset)) };
+      const monday = new Date(y, m, d - mondayOffset);
+      return { since: toISO(monday), until: toISO(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7)) };
     }
-    case 'month': return { since: toISO(new Date(y, m, 1)) };
+    case 'month': return { since: toISO(new Date(y, m, 1)), until: toISO(new Date(y, m + 1, 1)) };
     case 'all': return {};
   }
 }

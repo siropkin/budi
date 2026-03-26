@@ -70,7 +70,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 doctor_check("daemon (retry)", retry, None);
                 if !retry {
                     issues.push(
-                        "Daemon failed to start. Check logs with `budi -vv doctor`.".to_string(),
+                        "Daemon failed to start. Check logs with `RUST_LOG=debug budi doctor`.".to_string(),
                     );
                 }
             }
@@ -130,7 +130,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     let cursor_hooks = format!("{}/.cursor/hooks.json", home);
 
     let (claude_ok, claude_missing) = validate_claude_hooks(&claude_settings);
-    let (cursor_ok, cursor_missing) = validate_cursor_hooks(&cursor_hooks);
+    let cursor_dir_exists = Path::new(&format!("{home}/.cursor")).is_dir();
+    let (cursor_ok, cursor_missing) = if cursor_dir_exists {
+        validate_cursor_hooks(&cursor_hooks)
+    } else {
+        (false, vec![])
+    };
 
     if claude_ok || cursor_ok {
         let sources: Vec<&str> = [
@@ -154,7 +159,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 claude_missing.join(", ")
             ));
         }
-        if !cursor_ok && !cursor_missing.is_empty() && cursor_missing[0] != "file not readable" {
+        if cursor_dir_exists && !cursor_ok && !cursor_missing.is_empty() && cursor_missing[0] != "file not readable" {
             let yellow = super::ansi("\x1b[33m");
             println!(
                 "  {yellow}!{reset} Cursor hooks: missing events: {}",
@@ -164,6 +169,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 "Cursor hooks missing events: {}. Run `budi init` to fix.",
                 cursor_missing.join(", ")
             ));
+        } else if cursor_dir_exists && !cursor_ok {
+            let dim = super::ansi("\x1b[90m");
+            println!("  {dim}-{reset} hooks: Cursor hooks missing or misconfigured");
         }
     } else {
         println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");

@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use budi_core::{analytics, cost};
@@ -7,6 +7,7 @@ use chrono::Datelike;
 use serde_json::json;
 
 use super::{bad_request, internal_error, not_found};
+use crate::AppState;
 
 #[derive(serde::Deserialize)]
 pub struct DateRangeParams {
@@ -301,7 +302,7 @@ pub struct BranchDetailParams {
 pub async fn analytics_branch_detail(
     Path(branch): Path<String>,
     Query(params): Query<BranchDetailParams>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -340,8 +341,15 @@ pub async fn analytics_schema_version()
     Ok(Json(result))
 }
 
-pub async fn analytics_migrate()
--> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn analytics_migrate(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state.syncing.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "cannot migrate while sync is running" })),
+        ));
+    }
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;

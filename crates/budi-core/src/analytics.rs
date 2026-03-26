@@ -742,6 +742,7 @@ pub fn branch_cost(
          FROM messages
          {where_clause}
          GROUP BY branch, repo
+         HAVING cost > 0 OR cnt > 0
          ORDER BY cost DESC
          LIMIT 50",
     );
@@ -1215,6 +1216,11 @@ pub fn provider_stats(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
+    let role_filter = if where_clause.is_empty() {
+        "WHERE role = 'assistant'"
+    } else {
+        "AND role = 'assistant'"
+    };
     let sql = format!(
         "SELECT provider as p,
                 COUNT(*) as msgs,
@@ -1223,9 +1229,9 @@ pub fn provider_stats(
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cost_cents), 0.0)
-         FROM messages {}
+         FROM messages {} {}
          GROUP BY p ORDER BY msgs DESC",
-        where_clause
+        where_clause, role_filter
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -2001,13 +2007,13 @@ mod tests {
         assert_eq!(cu.total_input_tokens, 2000);
         assert_eq!(cu.total_output_tokens, 800);
 
-        // Provider stats
+        // Provider stats (only assistant messages counted after role pre-filter)
         let pstats = provider_stats(&conn, None, None).unwrap();
         assert_eq!(pstats.len(), 2);
         let cc_stats = pstats.iter().find(|p| p.provider == "claude_code").unwrap();
         let cu_stats = pstats.iter().find(|p| p.provider == "cursor").unwrap();
-        assert_eq!(cc_stats.message_count, 2);
-        assert_eq!(cu_stats.message_count, 2);
+        assert_eq!(cc_stats.message_count, 1);
+        assert_eq!(cu_stats.message_count, 1);
 
         // Claude Code is registered, so it gets proper display name and cost.
         assert_eq!(cc_stats.display_name, "Claude Code");

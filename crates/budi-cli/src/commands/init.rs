@@ -92,18 +92,27 @@ pub fn cmd_init(
             .unwrap_or(false)
     });
 
+    let status_suffix = if had_hook_warnings {
+        " with warnings"
+    } else {
+        ""
+    };
+
     println!();
     if let Some(ref root) = repo_root {
         if is_reinit {
             println!(
-                "{bold_cyan}  budi{reset} re-initialized in {}",
+                "{bold_cyan}  budi{reset} re-initialized{status_suffix} in {}",
                 root.display()
             );
         } else {
-            println!("{bold_cyan}  budi{reset} initialized in {}", root.display());
+            println!(
+                "{bold_cyan}  budi{reset} initialized{status_suffix} in {}",
+                root.display()
+            );
         }
     } else {
-        println!("{bold_cyan}  budi{reset} initialized (global)");
+        println!("{bold_cyan}  budi{reset} initialized{status_suffix} (global)");
     }
     println!();
     if let Some(ref root) = repo_root {
@@ -136,6 +145,15 @@ pub fn cmd_init(
     // Only open browser on fresh init (not re-init) and when --no-open is not set
     if !no_open && !is_reinit {
         open_url_in_browser(&dashboard_url);
+    }
+
+    if had_hook_warnings {
+        let yellow = super::ansi("\x1b[33m");
+        let reset2 = super::ansi("\x1b[0m");
+        eprintln!(
+            "{yellow}  Warning:{reset2} {} hook issue(s) detected. Run `budi doctor` for details.",
+            hook_warnings.len()
+        );
     }
 
     Ok(had_hook_warnings)

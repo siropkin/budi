@@ -218,6 +218,14 @@ impl Enricher for CostEnricher {
             msg.cost_confidence = "estimated".to_string();
         }
 
+        // Invariant: if cost_cents is set, cost_confidence must explain how
+        // the cost was determined (e.g. "exact", "exact_cost", "estimated").
+        debug_assert!(
+            msg.cost_cents.is_none() || !msg.cost_confidence.is_empty(),
+            "cost_cents is Some but cost_confidence is empty for message {}",
+            msg.uuid
+        );
+
         // Emit cost_confidence tag for assistant messages that have cost data
         if msg.role == "assistant" && msg.cost_cents.is_some() {
             tags.push(Tag {

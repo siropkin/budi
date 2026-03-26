@@ -378,7 +378,7 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .and_then(|t: &Value| t.get("cacheReadTokens"))
             .and_then(|v: &Value| v.as_u64())
             .unwrap_or(0);
-
+        // totalCents is in US cents (100 = $1.00).
         // Cursor Usage API returns cost in US cents for pay-per-use plans.
         // Subscription ("Included") plans return null or 0 — we treat both as None
         // so CostEnricher can estimate cost from tokens instead of assuming $0.
@@ -499,23 +499,31 @@ fn usage_events_to_messages(
             // Find matching session by timestamp — prefer strict containment,
             // fall back to clock-skew window with closest-timestamp tiebreak.
             const CLOCK_SKEW_MS: i64 = 2000;
-            let matched = sessions
+            let strict_match = sessions
                 .iter()
                 .filter(|s| ev.timestamp_ms >= s.start_ms && ev.timestamp_ms <= s.end_ms)
-                .min_by_key(|s| (ev.timestamp_ms - s.start_ms).abs())
-                .or_else(|| {
-                    sessions
-                        .iter()
-                        .filter(|s| {
-                            ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS)
-                                && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS)
-                        })
-                        .min_by_key(|s| {
-                            let d_start = (ev.timestamp_ms - s.start_ms).abs();
-                            let d_end = (ev.timestamp_ms - s.end_ms).abs();
-                            d_start.min(d_end)
-                        })
-                });
+                .min_by_key(|s| (ev.timestamp_ms - s.start_ms).abs());
+            let matched = strict_match.or_else(|| {
+                let fallback = sessions
+                    .iter()
+                    .filter(|s| {
+                        ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS)
+                            && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS)
+                    })
+                    .min_by_key(|s| {
+                        let d_start = (ev.timestamp_ms - s.start_ms).abs();
+                        let d_end = (ev.timestamp_ms - s.end_ms).abs();
+                        d_start.min(d_end)
+                    });
+                if let Some(ref s) = fallback {
+                    tracing::warn!(
+                        "Cursor session correlation: clock-skew fallback used for event at ts={}, matched session '{}'",
+                        ev.timestamp_ms,
+                        s.conversation_id
+                    );
+                }
+                fallback
+            });
 
             let session_id = matched.map(|s| s.conversation_id.clone());
 
@@ -807,7 +815,8 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            cost_confidence: "estimated".to_string(),
+            // User messages have no cost, so cost_confidence is not applicable.
+            cost_confidence: String::new(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();

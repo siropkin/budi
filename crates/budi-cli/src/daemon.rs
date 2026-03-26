@@ -41,6 +41,7 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
         // A version mismatch (e.g. after `brew upgrade`) means the old daemon
         // has old code (migrations, endpoints) and must be replaced.
         if !daemon_version_matches(config) {
+            eprintln!("budi: restarting daemon (version mismatch)");
             tracing::info!("Daemon version mismatch — restarting with current binary");
             // Kill ALL budi-daemon processes to avoid DB lock conflicts.
             // SIGTERM first, wait, then SIGKILL stragglers.

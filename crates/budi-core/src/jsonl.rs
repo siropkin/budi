@@ -115,7 +115,8 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             parent_uuid: u.parent_uuid,
             user_name: None,
             machine_name: None,
-            cost_confidence: "estimated".to_string(),
+            // User messages have no cost, so cost_confidence is not applicable.
+            cost_confidence: String::new(),
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();

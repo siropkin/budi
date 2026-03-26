@@ -49,11 +49,25 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         // The JSONL transcript files are the source of truth — just drop and
         // recreate the schema. A fresh sync rebuilds everything in ~60s, which
         // is faster and simpler than migrating 400k+ rows in-place.
-        drop_all_tables(conn)?;
-        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
-        create_current_schema(conn)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        tracing::info!(
+            from_version = version,
+            to_version = SCHEMA_VERSION,
+            "Destructive migration: dropping all tables and recreating schema"
+        );
+        conn.execute_batch("BEGIN EXCLUSIVE;")?;
+        let result = (|| -> Result<()> {
+            drop_all_tables(conn)?;
+            conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+            create_current_schema(conn)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return result;
+        }
+        conn.execute_batch("COMMIT;")?;
     }
 
     // ── v7 → v8: add missing indexes ─────────────────────────────────
@@ -277,4 +291,73 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         ",
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Simulate a v5 database with a different schema, then migrate and verify
+    /// it reaches the current SCHEMA_VERSION with all expected tables.
+    #[test]
+    fn migrate_from_old_schema_to_current() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Create a fake old schema (v5) with a subset of tables
+        conn.execute_batch(
+            "
+            CREATE TABLE messages (id INTEGER PRIMARY KEY, text TEXT);
+            CREATE TABLE old_table (id INTEGER PRIMARY KEY);
+            ",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 5u32).unwrap();
+
+        assert_eq!(current_version(&conn), 5);
+        assert!(needs_migration(&conn));
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+        assert!(!needs_migration(&conn));
+
+        // Verify core tables exist by querying them
+        conn.execute_batch("SELECT count(*) FROM messages").unwrap();
+        conn.execute_batch("SELECT count(*) FROM sessions").unwrap();
+        conn.execute_batch("SELECT count(*) FROM hook_events").unwrap();
+        conn.execute_batch("SELECT count(*) FROM tags").unwrap();
+        conn.execute_batch("SELECT count(*) FROM tool_usage").unwrap();
+        conn.execute_batch("SELECT count(*) FROM sync_state").unwrap();
+
+        // Verify old table was dropped
+        let old_exists: bool = conn
+            .prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='old_table'")
+            .unwrap()
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(!old_exists, "old_table should have been dropped");
+    }
+
+    #[test]
+    fn migrate_fresh_install() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(current_version(&conn), 0);
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+        conn.execute_batch("SELECT count(*) FROM messages").unwrap();
+        conn.execute_batch("SELECT count(*) FROM sessions").unwrap();
+    }
+
+    #[test]
+    fn migrate_already_current_is_noop() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        // Running again should be a no-op
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+    }
 }
