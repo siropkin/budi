@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: plugins-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
 
       - name: Install Claude Code CLI and validation tools
         run: |
-          npm install -g @anthropic-ai/claude-code
+          npm install -g @anthropic-ai/claude-code@latest
           sudo apt-get update
           sudo apt-get install -y jq shellcheck ripgrep
 

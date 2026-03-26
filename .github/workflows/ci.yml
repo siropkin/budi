@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -30,7 +30,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -53,6 +53,7 @@ jobs:
         run: |
           ./target/release/budi-daemon serve --port 19876 &
           DAEMON_PID=$!
+          trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
           # Wait for daemon to be ready
           for i in $(seq 1 20); do
             if curl -sf http://127.0.0.1:19876/health >/dev/null 2>&1; then
@@ -67,7 +68,6 @@ jobs:
           test "$HTTP_CODE" = "200"
           curl -sf http://127.0.0.1:19876/dashboard | head -c 100 | grep -q '<!DOCTYPE html\|<html'
           echo "All daemon endpoints responded correctly"
-          kill "$DAEMON_PID" 2>/dev/null || true
 
       - name: Test install script (from source build)
         run: |
@@ -92,7 +92,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build
         run: cargo build --workspace --locked
@@ -129,7 +129,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build
         run: cargo build --workspace --locked

@@ -18,8 +18,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci-check:
+    name: Verify CI passed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI workflow
+        uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028fb74dc5a068cccc # v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: rust-checks
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+
   verify_tag_version:
     name: Verify tag matches Cargo version
+    needs: ci-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -78,7 +91,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: release-${{ matrix.target }}
 
@@ -153,10 +166,14 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum *.tar.gz *.zip 2>/dev/null > SHA256SUMS || true
+          sha256sum *.tar.gz > SHA256SUMS
+          if ls *.zip 1>/dev/null 2>&1; then
+            sha256sum *.zip >> SHA256SUMS
+          fi
+          cat SHA256SUMS
 
       - name: Create or update release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
