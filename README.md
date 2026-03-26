@@ -241,10 +241,20 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
 ## Uninstall
 
+**macOS / Linux:**
+
 ```bash
 pkill -f budi-daemon
 brew uninstall budi                       # or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon
 rm -rf ~/.local/share/budi                # remove data
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Stop-Process -Name budi-daemon -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.local\bin\budi.exe", "$env:USERPROFILE\.local\bin\budi-daemon.exe" -Force
+Remove-Item "$env:APPDATA\budi" -Recurse -Force   # remove data
 ```
 
 ## License
