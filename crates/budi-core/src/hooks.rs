@@ -333,7 +333,7 @@ pub fn load_session_meta(
     };
     let sql = format!(
         "SELECT conversation_id, composer_mode, permission_mode, prompt_category,
-                user_email, duration_ms, model
+                user_email, duration_ms, model, repo_id, git_branch
          FROM sessions
          WHERE conversation_id IS NOT NULL{}",
         date_clause
@@ -356,6 +356,8 @@ pub fn load_session_meta(
             duration_ms: row.get(5)?,
             model: row.get(6)?,
             dominant_tool: None,
+            repo_id: row.get(7)?,
+            git_branch: row.get(8)?,
         };
         map.insert(id, meta);
     }
@@ -398,6 +400,8 @@ pub struct SessionMeta {
     pub duration_ms: Option<i64>,
     pub model: Option<String>,
     pub dominant_tool: Option<String>,
+    pub repo_id: Option<String>,
+    pub git_branch: Option<String>,
 }
 
 /// Query tool usage stats from hook_events.

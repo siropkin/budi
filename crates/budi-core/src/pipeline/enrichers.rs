@@ -211,7 +211,12 @@ impl Enricher for CostEnricher {
             // Always set cost_cents for assistant messages (Some(0.0) for zero-cost)
             // so they are distinguishable from NULL (unknown cost) in queries.
             msg.cost_cents = Some(cost * 100.0);
-            msg.cost_confidence = "estimated".to_string();
+            // Distinguish between known and unknown model estimates
+            if model == "unknown" {
+                msg.cost_confidence = "estimated_unknown_model".to_string();
+            } else {
+                msg.cost_confidence = "estimated".to_string();
+            }
         }
 
         // Ensure cost_confidence is always set for assistant messages.
@@ -313,6 +318,19 @@ impl Enricher for HookEnricher {
             tracing::trace!("HookEnricher: session '{}' not found in cache (may be outside max_age window)", session_id);
             return tags;
         };
+
+        // Propagate repo_id and git_branch from hook session metadata.
+        // This provides a fallback if GitEnricher can't resolve from cwd.
+        if msg.repo_id.is_none() {
+            if let Some(ref repo) = meta.repo_id {
+                msg.repo_id = Some(repo.clone());
+            }
+        }
+        if msg.git_branch.is_none() {
+            if let Some(ref branch) = meta.git_branch {
+                msg.git_branch = Some(branch.clone());
+            }
+        }
 
         if let Some(ref mode) = meta.composer_mode {
             tags.push(Tag {

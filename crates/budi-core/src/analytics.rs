@@ -281,18 +281,42 @@ pub struct UsageSummary {
     pub total_cache_read_tokens: u64,
 }
 
+/// Validate an ISO 8601 date/datetime string.
+/// Accepts formats: "2026-03-14", "2026-03-14T18:00:00Z", "2026-03-14T18:00:00+00:00".
+fn is_valid_timestamp(s: &str) -> bool {
+    // Must start with YYYY-MM-DD pattern
+    if s.len() < 10 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(|b| b.is_ascii_digit())
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(|b| b.is_ascii_digit())
+}
+
 /// Build a parameterized date filter clause and its bind values.
 /// Returns (clause_str, params_vec) where clause_str uses ?N placeholders.
+/// Invalid timestamps are silently skipped (treated as None).
 fn date_filter(since: Option<&str>, until: Option<&str>, keyword: &str) -> (String, Vec<String>) {
     let mut conditions = Vec::new();
     let mut param_values = Vec::new();
     if let Some(s) = since {
-        param_values.push(s.to_string());
-        conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        } else {
+            tracing::warn!("date_filter: invalid 'since' timestamp ignored: {s}");
+        }
     }
     if let Some(u) = until {
-        param_values.push(u.to_string());
-        conditions.push(format!("timestamp < ?{}", param_values.len()));
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        } else {
+            tracing::warn!("date_filter: invalid 'until' timestamp ignored: {u}");
+        }
     }
     if conditions.is_empty() {
         (String::new(), param_values)
@@ -604,10 +628,11 @@ pub fn activity_chart(
         "timestamp".to_string()
     };
 
+    // Validate granularity to prevent any future SQL injection risk
     let group_expr = match granularity {
         "hour" => format!("strftime('%H:00', {})", tz_adjust),
         "month" => format!("strftime('%Y-%m', {})", tz_adjust),
-        _ => format!("date({})", tz_adjust),
+        "day" | _ => format!("date({})", tz_adjust),
     };
 
     // Add role = 'assistant' to the WHERE clause
@@ -913,11 +938,11 @@ pub fn tag_stats(
                     COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
              FROM messages m
              WHERE m.role = 'assistant' {untagged_date_filter}
-               AND m.session_id NOT IN (
-                   SELECT DISTINCT tm2.session_id
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM tags t2
                    JOIN messages tm2 ON t2.message_uuid = tm2.uuid
-                   WHERE t2.key = ?1 AND tm2.session_id IS NOT NULL
+                   WHERE t2.key = ?1 AND tm2.session_id = m.session_id
                )"
         )
     } else {

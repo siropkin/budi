@@ -20,7 +20,7 @@ use crate::daemon::{daemon_health, ensure_daemon_running};
 fn describe_send_error(e: reqwest::Error) -> anyhow::Error {
     if e.is_connect() {
         anyhow::anyhow!(
-            "daemon is not running — start it with `budi sync` or `budi init`"
+            "daemon is not running — start it with `budi init`"
         )
     } else if e.is_timeout() {
         anyhow::anyhow!(

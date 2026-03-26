@@ -274,9 +274,9 @@ fn install_claude_code_hooks() -> Result<()> {
         settings = json!({});
     }
 
-    let hooks_obj = settings
-        .as_object_mut()
-        .expect("settings is guaranteed to be object above");
+    let Some(hooks_obj) = settings.as_object_mut() else {
+        anyhow::bail!("Claude Code settings is not a JSON object");
+    };
     let hooks = hooks_obj.entry("hooks").or_insert_with(|| json!({}));
     if !hooks.is_object() {
         *hooks = json!({});
@@ -303,18 +303,18 @@ fn install_claude_code_hooks() -> Result<()> {
 
     let mut changed = false;
     for event in &cc_events {
-        let hooks_map = hooks
-            .as_object_mut()
-            .expect("hooks is guaranteed to be object above");
+        let Some(hooks_map) = hooks.as_object_mut() else {
+            anyhow::bail!("Claude Code hooks is not a JSON object");
+        };
         let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
         if !event_arr.is_array() {
             *event_arr = json!([]);
         }
 
         // Remove any legacy budi hooks (without || true wrapper) so we can re-add with the safe version
-        let arr_mut = event_arr
-            .as_array_mut()
-            .expect("event_arr is guaranteed to be array above");
+        let Some(arr_mut) = event_arr.as_array_mut() else {
+            continue;
+        };
         let had_legacy = arr_mut.iter().any(is_legacy_cc_hook);
         if had_legacy {
             arr_mut.retain(|entry| !is_legacy_cc_hook(entry));
@@ -337,10 +337,9 @@ fn install_claude_code_hooks() -> Result<()> {
         });
 
         if !already_installed {
-            event_arr
-                .as_array_mut()
-                .expect("checked above")
-                .push(budi_hook_entry.clone());
+            if let Some(arr) = event_arr.as_array_mut() {
+                arr.push(budi_hook_entry.clone());
+            }
             changed = true;
         }
     }
@@ -402,21 +401,23 @@ fn install_cursor_hooks() -> Result<()> {
     });
 
     let mut changed = false;
-    let hooks = config.get_mut("hooks").expect("hooks key guaranteed above");
+    let Some(hooks) = config.get_mut("hooks") else {
+        anyhow::bail!("Cursor hooks config missing hooks key");
+    };
 
     for event in &cursor_events {
-        let hooks_map = hooks
-            .as_object_mut()
-            .expect("hooks is guaranteed to be object above");
+        let Some(hooks_map) = hooks.as_object_mut() else {
+            anyhow::bail!("Cursor hooks is not a JSON object");
+        };
         let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
         if !event_arr.is_array() {
             *event_arr = json!([]);
         }
 
         // Remove legacy hooks (without || true wrapper)
-        let arr_mut = event_arr
-            .as_array_mut()
-            .expect("event_arr is guaranteed to be array above");
+        let Some(arr_mut) = event_arr.as_array_mut() else {
+            continue;
+        };
         let had_legacy = arr_mut.iter().any(is_legacy_cursor_hook);
         if had_legacy {
             arr_mut.retain(|entry| !is_legacy_cursor_hook(entry));
@@ -432,10 +433,9 @@ fn install_cursor_hooks() -> Result<()> {
         });
 
         if !already_installed {
-            event_arr
-                .as_array_mut()
-                .expect("checked above")
-                .push(budi_hook_entry.clone());
+            if let Some(arr) = event_arr.as_array_mut() {
+                arr.push(budi_hook_entry.clone());
+            }
             changed = true;
         }
     }

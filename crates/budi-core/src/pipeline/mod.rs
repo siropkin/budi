@@ -84,13 +84,13 @@ impl Pipeline {
         let mut session_cwd: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for msg in messages.iter_mut() {
-            // Use session_id for grouping, or a sentinel for unsessionized messages
-            // so they can still inherit from preceding messages in the same batch.
+            // Use session_id for grouping. Unsessionized messages use their own uuid
+            // as the key so they don't share context with other unsessionized messages.
             let key = msg
                 .session_id
                 .clone()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "__nosession__".to_string());
+                .unwrap_or_else(|| msg.uuid.clone());
 
             // If this message has a non-empty value, update the running context.
             // If it has None, inherit from the most recent preceding message.
@@ -330,7 +330,7 @@ mod tests {
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            cost_confidence: "estimated".to_string(),
+            cost_confidence: "n/a".to_string(),
         }
     }
 }

@@ -173,10 +173,9 @@ fn remove_claude_code_hooks(home: &str) -> Result<bool> {
 
     // Remove empty hooks object
     if hooks.is_empty() {
-        settings
-            .as_object_mut()
-            .expect("settings is object")
-            .remove("hooks");
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("hooks");
+        }
     }
 
     if changed {

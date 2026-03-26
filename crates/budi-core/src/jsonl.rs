@@ -94,7 +94,13 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
     if line.is_empty() {
         return None;
     }
-    let entry: TranscriptEntry = serde_json::from_str(line).ok()?;
+    let entry: TranscriptEntry = match serde_json::from_str(line) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("JSONL parse error (skipping line): {e}");
+            return None;
+        }
+    };
     match entry {
         TranscriptEntry::User(u) => Some(ParsedMessage {
             uuid: u.uuid,
@@ -115,8 +121,9 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             parent_uuid: u.parent_uuid,
             user_name: None,
             machine_name: None,
-            // User messages have no cost, so cost_confidence is not applicable.
-            cost_confidence: String::new(),
+            // User messages have no cost — use "n/a" to distinguish from
+            // assistant messages whose confidence hasn't been set yet (empty string).
+            cost_confidence: "n/a".to_string(),
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
