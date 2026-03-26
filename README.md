@@ -14,17 +14,8 @@ Free, open-source, local-only analytics for AI coding agents.
 See where your tokens and money go across Claude Code, Cursor, and more.
 Live cost tracking in the Claude Code status line and a full web dashboard.
 
-Install:
-  brew install siropkin/budi/budi
-
-Commands:
-  budi init       — one-time setup, works for all repos and worktrees
-  budi stats      — usage summary (tokens, sessions, cost)
-  budi open       — open the web dashboard
-
-Links:
-  Dashboard: http://localhost:7878/dashboard
-  GitHub:    https://github.com/siropkin/budi
+brew install siropkin/budi/budi
+budi init
 ```
 
 ---
@@ -123,46 +114,49 @@ Cursor is auto-detected. Run `budi sync` and Cursor data appears alongside Claud
 
 ## Install
 
-### Quick start (paste into your AI coding agent)
+```bash
+brew install siropkin/budi/budi
+budi init
+```
+
+That's it. `budi init` starts the daemon, installs the status line, sets up hooks for Claude Code and Cursor, and syncs existing transcripts. Works from any directory — no need to be in a git repo. Data syncs automatically every 30 seconds.
+
+### Other install methods
+
+<details>
+<summary>Paste into your AI coding agent</summary>
 
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
 Your AI agent will clone the repo, run the installer, and set up your project automatically.
+</details>
 
-### Manual install
+<details>
+<summary>Shell script (macOS / Linux)</summary>
 
-**Step 1 — Install binaries**
-
-Homebrew (macOS / Linux):
-```bash
-brew install siropkin/budi/budi
-```
-
-Shell script (macOS / Linux):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.sh | sh
+budi init
 ```
+</details>
 
-Windows (PowerShell):
+<details>
+<summary>Windows (PowerShell)</summary>
+
 ```powershell
 irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex
+budi init
 ```
+</details>
 
-Or build from source (requires Rust toolchain):
+<details>
+<summary>Build from source (requires Rust toolchain)</summary>
 
 ```bash
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
-```
-
-**Step 2 — Initialize budi**
-
-```bash
 budi init
 ```
-
-This starts the daemon, installs the status line, sets up hooks for Claude Code and Cursor, and syncs existing transcripts. Works from any directory — no need to be in a git repo. Data syncs automatically every 30 seconds.
-
-**Step 3 — Use your AI coding agent normally.** Budi tracks your sessions in the background.
+</details>
 
 ## Status line
 
