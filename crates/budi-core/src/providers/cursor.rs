@@ -314,11 +314,12 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
         if total_cents < 0.0 {
             tracing::warn!("Cursor API totalCents={total_cents} is negative, clamping to 0.0");
             total_cents = 0.0;
-        } else if total_cents > 1000.0 {
-            tracing::warn!("Cursor API totalCents={total_cents} exceeds 1000 — skipping event as likely corrupt");
+        } else if total_cents > 100_000.0 {
+            tracing::warn!("Cursor API totalCents={total_cents} exceeds $1000 — skipping event as likely corrupt");
             continue;
-        } else if total_cents > 100.0 {
-            tracing::warn!("Cursor API totalCents={total_cents} unusually high for a single request");
+        } else if total_cents > 5000.0 {
+            let dollars = total_cents / 100.0;
+            tracing::warn!("Cursor API totalCents={total_cents} unusually high for a single request (>${dollars:.0} dollars)");
         }
 
         events.push(CursorUsageEvent {
@@ -392,11 +393,9 @@ fn usage_events_to_messages(
     events: &[CursorUsageEvent],
     sessions: &[SessionContext],
 ) -> Vec<ParsedMessage> {
-    let mut counter: usize = 0;
     events
         .iter()
         .map(|ev| {
-            counter += 1;
             // Find matching session by timestamp — prefer strict containment,
             // fall back to clock-skew window with closest-timestamp tiebreak.
             const CLOCK_SKEW_MS: i64 = 2000;
@@ -421,11 +420,14 @@ fn usage_events_to_messages(
             let timestamp = DateTime::from_timestamp_millis(ev.timestamp_ms)
                 .unwrap_or_else(Utc::now);
 
-            // Deterministic UUID from timestamp + model + tokens + counter (avoids collision
-            // when two requests share the same millisecond, model, and token count)
+            // Deterministic UUID from timestamp + model + all token counts.
+            // Uses all 4 token fields to avoid collisions when two requests share
+            // the same millisecond and model (sequential counter was unstable when
+            // previously-skipped events changed the ordering).
             let uuid = format!(
-                "cursor-api-{}-{}-{}-{}",
-                ev.timestamp_ms, ev.model, ev.input_tokens + ev.output_tokens, counter
+                "cursor-api-{}-{}-{}-{}-{}-{}",
+                ev.timestamp_ms, ev.model, ev.input_tokens, ev.output_tokens,
+                ev.cache_creation_tokens, ev.cache_read_tokens
             );
 
             ParsedMessage {
@@ -1128,6 +1130,6 @@ mod tests {
         }];
 
         let msgs = usage_events_to_messages(&events, &[]);
-        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-150-1");
+        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-100-50-0-0");
     }
 }
