@@ -30,22 +30,13 @@ class Budi < Formula
     bin.install "budi-daemon"
   end
 
-  def post_install
-    system bin/"budi", "init"
-  end
-
   def caveats
     <<~EOS
-      budi has been initialized automatically.
-      The daemon is running on http://127.0.0.1:7878
+      To get started, run:
+        budi init
 
+      This starts the daemon, installs hooks, and syncs your data.
       Restart Claude Code and Cursor to activate hooks and the status line.
-
-      Open the dashboard:
-        budi open
-
-      Load full history (first time only):
-        budi history
     EOS
   end
 
