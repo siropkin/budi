@@ -58,13 +58,14 @@ pub async fn analytics_messages(
     Query(params): Query<MessagesParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
     if let Some(ref sort) = params.sort_by
-        && !VALID_SORT_BY.contains(&sort.as_str()) {
-            return Err(bad_request(format!(
-                "invalid sort_by '{}'; valid values: {}",
-                sort,
-                VALID_SORT_BY.join(", ")
-            )));
-        }
+        && !VALID_SORT_BY.contains(&sort.as_str())
+    {
+        return Err(bad_request(format!(
+            "invalid sort_by '{}'; valid values: {}",
+            sort,
+            VALID_SORT_BY.join(", ")
+        )));
+    }
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;

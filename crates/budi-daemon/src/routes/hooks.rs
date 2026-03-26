@@ -133,9 +133,10 @@ pub async fn hooks_ingest(
                 .get("user_prompt")
                 .or_else(|| payload.get("prompt"))
                 .and_then(|v| v.as_str())
-                && let Some(category) = budi_core::hooks::classify_prompt(prompt) {
-                    let _ = budi_core::hooks::update_session_category(&tx, &event, &category);
-                }
+            && let Some(category) = budi_core::hooks::classify_prompt(prompt)
+        {
+            let _ = budi_core::hooks::update_session_category(&tx, &event, &category);
+        }
 
         budi_core::hooks::upsert_session(&tx, &event)?;
         budi_core::hooks::ingest_hook_event(&tx, &event)?;

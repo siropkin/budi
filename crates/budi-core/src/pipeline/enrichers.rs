@@ -61,19 +61,20 @@ impl Enricher for GitEnricher {
 
         // Extract ticket_id from git_branch (branch itself is stored as a column, not a tag)
         if let Some(ref branch) = msg.git_branch
-            && let Some(ticket) = extract_ticket_id(branch) {
+            && let Some(ticket) = extract_ticket_id(branch)
+        {
+            tags.push(Tag {
+                key: "ticket_id".to_string(),
+                value: ticket.to_string(),
+            });
+            // Extract prefix (e.g. "PAVA" from "PAVA-2057")
+            if let Some(dash) = ticket.find('-') {
                 tags.push(Tag {
-                    key: "ticket_id".to_string(),
-                    value: ticket.to_string(),
+                    key: "ticket_prefix".to_string(),
+                    value: ticket[..dash].to_string(),
                 });
-                // Extract prefix (e.g. "PAVA" from "PAVA-2057")
-                if let Some(dash) = ticket.find('-') {
-                    tags.push(Tag {
-                        key: "ticket_prefix".to_string(),
-                        value: ticket[..dash].to_string(),
-                    });
-                }
             }
+        }
 
         tags
     }
@@ -140,12 +141,13 @@ impl Enricher for IdentityEnricher {
 
         // Produce session_title tag if present
         if let Some(ref title) = msg.session_title
-            && !title.is_empty() {
-                tags.push(Tag {
-                    key: "session_title".to_string(),
-                    value: title.clone(),
-                });
-            }
+            && !title.is_empty()
+        {
+            tags.push(Tag {
+                key: "session_title".to_string(),
+                value: title.clone(),
+            });
+        }
 
         tags
     }

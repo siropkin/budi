@@ -35,16 +35,17 @@ pub fn cmd_hook() -> anyhow::Result<()> {
     // Debug logging: set BUDI_HOOK_DEBUG=1 to diagnose hook delivery issues
     if let Err(ref err) = result
         && std::env::var("BUDI_HOOK_DEBUG").is_ok_and(|v| v == "1")
-        && let Ok(log_dir) = config::budi_home_dir() {
-            let log_path = log_dir.join("hook-debug.log");
-            let ts = chrono::Utc::now().to_rfc3339();
-            let line = format!("[{ts}] hook POST to {url} failed: {err}\n");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-        }
+        && let Ok(log_dir) = config::budi_home_dir()
+    {
+        let log_path = log_dir.join("hook-debug.log");
+        let ts = chrono::Utc::now().to_rfc3339();
+        let line = format!("[{ts}] hook POST to {url} failed: {err}\n");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    }
 
     Ok(())
 }
