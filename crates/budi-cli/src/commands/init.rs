@@ -35,7 +35,15 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool, no_ope
 
     super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
-    install_hooks();
+
+    let hook_warnings = install_hooks();
+    if !hook_warnings.is_empty() {
+        eprintln!("  Warning: hook installation had issues:");
+        for w in &hook_warnings {
+            eprintln!("    - {w}");
+        }
+        eprintln!("  Run `budi doctor` to diagnose.");
+    }
 
     if !no_daemon {
         ensure_daemon_running(repo_root.as_deref(), &config)?;
@@ -55,11 +63,14 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool, no_ope
     let underline = super::ansi("\x1b[4m");
     let reset = super::ansi("\x1b[0m");
 
+    let is_reinit = repo_root.as_ref().map_or(false, |root| {
+        config::repo_paths(root)
+            .map(|p| p.data_dir.join("analytics.db").exists())
+            .unwrap_or(false)
+    });
+
     println!();
     if let Some(ref root) = repo_root {
-        let is_reinit = config::repo_paths(root)
-            .map(|p| p.data_dir.join("analytics.db").exists())
-            .unwrap_or(false);
         if is_reinit {
             println!(
                 "{bold_cyan}  budi{reset} re-initialized in {}",
@@ -113,11 +124,6 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool, no_ope
     println!();
 
     // Only open browser on fresh init (not re-init) and when --no-open is not set
-    let is_reinit = repo_root.as_ref().map_or(false, |root| {
-        config::repo_paths(root)
-            .map(|p| p.data_dir.join("analytics.db").exists())
-            .unwrap_or(false)
-    });
     if !no_open && !is_reinit {
         open_url_in_browser(&dashboard_url);
     }
@@ -181,13 +187,16 @@ const BUDI_HOOK_CMD: &str = "budi hook";
 
 /// Install budi hooks for Claude Code and Cursor.
 /// Merges with existing hooks — never overwrites non-budi entries.
-fn install_hooks() {
+/// Returns a list of warning messages for any hooks that failed to install.
+fn install_hooks() -> Vec<String> {
+    let mut warnings = Vec::new();
     if let Err(e) = install_claude_code_hooks() {
-        eprintln!("  Hooks: failed to install Claude Code hooks: {e}");
+        warnings.push(format!("Claude Code hooks: {e}"));
     }
     if let Err(e) = install_cursor_hooks() {
-        eprintln!("  Hooks: failed to install Cursor hooks: {e}");
+        warnings.push(format!("Cursor hooks: {e}"));
     }
+    warnings
 }
 
 /// Install hooks into ~/.claude/settings.json.

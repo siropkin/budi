@@ -226,8 +226,10 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
 
     // `sub` is like "user_2xyz..." or "auth0|273223875" — extract the user ID part
-    // Check JWT expiry
-    if let Some(exp) = payload.get("exp").and_then(|v| v.as_i64()) {
+    // Check JWT expiry — `exp` is assumed to be in seconds (standard JWT).
+    // If it looks like milliseconds (> 1_700_000_000_000), convert first.
+    if let Some(raw_exp) = payload.get("exp").and_then(|v| v.as_i64()) {
+        let exp = if raw_exp > 1_700_000_000_000 { raw_exp / 1000 } else { raw_exp };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -304,12 +306,18 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .unwrap_or(0);
         // Cursor Usage API returns cost in US cents (confirmed by API response analysis:
         // typical values are 0.5–5.0 for individual requests). Maps directly to cost_cents.
-        let total_cents = token_usage
+        let mut total_cents = token_usage
             .and_then(|t: &Value| t.get("totalCents"))
             .and_then(|v: &Value| v.as_f64())
             .unwrap_or(0.0);
 
-        if total_cents > 100.0 {
+        if total_cents < 0.0 {
+            tracing::warn!("Cursor API totalCents={total_cents} is negative, clamping to 0.0");
+            total_cents = 0.0;
+        } else if total_cents > 1000.0 {
+            tracing::warn!("Cursor API totalCents={total_cents} exceeds 1000 — skipping event as likely corrupt");
+            continue;
+        } else if total_cents > 100.0 {
             tracing::warn!("Cursor API totalCents={total_cents} unusually high for a single request");
         }
 
@@ -747,6 +755,15 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 /// Prices are per MTok (million tokens), matching actual API rates that Cursor
 /// bills against credit pools.
 pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
+    if model.is_empty() {
+        tracing::warn!("Cursor model is empty, using GPT-4o default pricing");
+        return ModelPricing {
+            input: 2.50,
+            output: 10.0,
+            cache_write: 2.50,
+            cache_read: 1.25,
+        };
+    }
     let m = model.to_lowercase();
     // GPT-5.x models
     if m.contains("gpt-5") {

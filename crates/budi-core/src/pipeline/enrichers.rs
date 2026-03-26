@@ -176,6 +176,9 @@ impl Enricher for CostEnricher {
 
         // Calculate cost if not already set (skip if API provided exact cost)
         if msg.cost_cents.is_none() && msg.role == "assistant" {
+            if msg.model.is_none() {
+                tracing::debug!("CostEnricher: model is None for message {}, using default pricing", msg.uuid);
+            }
             let model = msg.model.as_deref().unwrap_or("unknown");
             if model == "unknown" {
                 tracing::debug!("CostEnricher: model is 'unknown' for message {}, cost estimate may be inaccurate", msg.uuid);
@@ -195,7 +198,8 @@ impl Enricher for CostEnricher {
         }
 
         // Ensure cost_confidence is always set for assistant messages
-        if msg.role == "assistant" && msg.cost_confidence.is_empty() {
+        // Only apply fallback if cost_confidence is not already set (preserves API-provided values)
+        if msg.role == "assistant" && msg.cost_cents.is_some() && msg.cost_confidence.is_empty() {
             msg.cost_confidence = "estimated".to_string();
         }
 

@@ -6,7 +6,7 @@ use budi_core::{analytics, cost};
 use chrono::Datelike;
 use serde_json::json;
 
-use super::internal_error;
+use super::{bad_request, internal_error, not_found};
 
 #[derive(serde::Deserialize)]
 pub struct DateRangeParams {
@@ -52,9 +52,20 @@ pub struct MessagesParams {
     offset: Option<usize>,
 }
 
+const VALID_SORT_BY: &[&str] = &["timestamp", "cost", "model", "tokens", "provider"];
+
 pub async fn analytics_messages(
     Query(params): Query<MessagesParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(ref sort) = params.sort_by {
+        if !VALID_SORT_BY.contains(&sort.as_str()) {
+            return Err(bad_request(format!(
+                "invalid sort_by '{}'; valid values: {}",
+                sort,
+                VALID_SORT_BY.join(", ")
+            )));
+        }
+    }
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -302,7 +313,7 @@ pub async fn analytics_branch_detail(
 
     match result {
         Some(detail) => Ok(Json(detail).into_response()),
-        None => Ok((StatusCode::NOT_FOUND, Json(json!({"error": "branch not found"}))).into_response()),
+        None => Ok(not_found("branch not found").into_response()),
     }
 }
 

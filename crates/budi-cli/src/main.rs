@@ -43,7 +43,7 @@ enum Commands {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    /// Show usage analytics
+    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --models, or --tag)
     #[command(group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "models", "tag"])))]
     Stats {
         /// Time period to show (default: today)

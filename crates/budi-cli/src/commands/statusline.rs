@@ -155,6 +155,10 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         _ => Duration::from_secs(3),
     };
     let Ok(client) = daemon_client_with_timeout(timeout) else {
+        if format == StatuslineFormat::Claude {
+            let budi_label = "\x1b[36m📊 budi\x1b[0m";
+            println!("{} \x1b[90m--\x1b[0m", budi_label);
+        }
         return Ok(());
     };
     let statusline_url = format!("{}/analytics/statusline", base);

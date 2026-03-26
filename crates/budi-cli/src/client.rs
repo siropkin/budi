@@ -12,10 +12,24 @@ use budi_core::analytics::{
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
 use serde_json::Value;
 
 use crate::daemon::{daemon_health, ensure_daemon_running};
+
+/// Check the response status and return a descriptive error for non-success codes.
+fn check_response(resp: Response) -> Result<Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().unwrap_or_default();
+    if body.is_empty() {
+        anyhow::bail!("Daemon returned {status}");
+    } else {
+        anyhow::bail!("Daemon returned {status}: {body}");
+    }
+}
 
 /// Thin HTTP client that talks to budi-daemon.
 pub struct DaemonClient {
@@ -63,9 +77,8 @@ impl DaemonClient {
                 "migrate": migrate,
             }))
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Sync request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -75,9 +88,8 @@ impl DaemonClient {
             .post(format!("{}/sync/all", self.base_url))
             .timeout(std::time::Duration::from_secs(600)) // History can take minutes
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("History sync request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -86,9 +98,8 @@ impl DaemonClient {
             .client
             .post(format!("{}/migrate", self.base_url))
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Migration request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -97,9 +108,8 @@ impl DaemonClient {
             .client
             .get(format!("{}/analytics/schema-version", self.base_url))
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Schema version request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -126,9 +136,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/summary", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Summary request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -153,9 +162,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/cost", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Cost request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -178,9 +186,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/projects", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Projects request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -201,9 +208,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/branches", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Branches request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -225,9 +231,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/branches/{}", self.base_url, branch))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Branch detail request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         let val: Value = resp.json()?;
         if val.is_null() {
             return Ok(None);
@@ -252,9 +257,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/models", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Models request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -281,9 +285,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/tags", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Tags request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 
@@ -304,9 +307,8 @@ impl DaemonClient {
             .get(format!("{}/analytics/providers", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
-            .error_for_status()
-            .context("Providers request failed")?;
+            .map_err(|e| anyhow::anyhow!("Cannot reach budi daemon (is it running?): {e}"))?;
+        let resp = check_response(resp)?;
         Ok(resp.json()?)
     }
 

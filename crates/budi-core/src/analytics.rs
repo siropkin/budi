@@ -178,12 +178,17 @@ pub fn db_path() -> Result<PathBuf> {
 /// Clears the tags table and re-populates it.
 pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
     let tags_config = crate::config::load_tags_config();
-    let session_cache = crate::hooks::load_session_meta(conn, None).unwrap_or_default();
+
+    // Start transaction early so that session_cache and message reads are consistent
+    // (prevents stale reads if concurrent hook writes arrive between the two queries).
+    let tx = conn.transaction()?;
+
+    let session_cache = crate::hooks::load_session_meta(&tx, None).unwrap_or_default();
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
 
     // Read all messages
     let mut parsed: Vec<crate::jsonl::ParsedMessage> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT m.uuid, m.session_id, m.timestamp, m.cwd, m.role, m.model,
                     m.input_tokens, m.output_tokens, m.cache_creation_tokens, m.cache_read_tokens,
                     m.provider, m.cost_cents, m.repo_id, m.parent_uuid,
@@ -225,7 +230,7 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
     // Populate fields from existing tags so enrichers can reproduce session-level tags
     // (git_branch is read from the messages column above, not from tags)
     {
-        let mut tag_stmt = conn.prepare(
+        let mut tag_stmt = tx.prepare(
             "SELECT message_uuid, key, value FROM tags WHERE key IN ('session_title', 'user', 'machine')",
         )?;
         let tag_rows: Vec<(String, String, String)> = tag_stmt
@@ -256,11 +261,8 @@ pub fn backfill_tags(conn: &mut Connection) -> Result<usize> {
 
     let all_tags = pipeline.process(&mut parsed);
 
-    // Clear and re-insert tags atomically. Safe under concurrent hook_ingest
-    // because: (1) this runs in a single transaction, (2) SQLite serializes
-    // writers via busy_timeout, (3) session_cache was loaded above so the
-    // pipeline recreates all hook-derived tags from the sessions table.
-    let tx = conn.transaction()?;
+    // Clear and re-insert tags atomically within the same transaction that
+    // loaded session_cache and messages (prevents stale reads).
     tx.execute_batch("DELETE FROM tags")?;
     let mut count = 0usize;
     // Collect (uuid, branch) pairs for batch git_branch update
@@ -939,6 +941,13 @@ pub fn branch_cost(
     let tagged_cost: f64 = rows.iter().map(|r| r.cost_cents).sum();
     let total_cost = total_assistant_cost(conn, since, until).unwrap_or(0.0);
     let untagged = total_cost - tagged_cost;
+    if untagged < -0.01 {
+        tracing::warn!(
+            "branch_cost: untagged cost is negative ({:.4}), tagged={:.4} > total={:.4} — data inconsistency",
+            untagged, tagged_cost, total_cost
+        );
+    }
+    let untagged = untagged.max(0.0);
     if untagged > 0.01 {
         rows.push(BranchCost {
             git_branch: "(untagged)".to_string(),

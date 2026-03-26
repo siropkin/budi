@@ -29,15 +29,9 @@ pub struct HookEvent {
     pub tool_duration_ms: Option<i64>,
     // Context pressure
     pub context_tokens: Option<i64>,
-    pub context_window_size: Option<i64>,
-    pub context_usage_pct: Option<f64>,
     pub message_count: Option<i64>,
     // Subagent
     pub subagent_type: Option<String>,
-    pub tool_call_count: Option<i64>,
-    pub loop_count: Option<i64>,
-    // Files
-    pub files_json: Option<String>,
     // Resolved from workspace
     pub repo_id: Option<String>,
     pub git_branch: Option<String>,
@@ -115,11 +109,6 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
 
     // Context pressure (from preCompact)
     let context_tokens = json.get("context_tokens").and_then(|v| v.as_i64());
-    let context_window_size = json.get("context_window_size").and_then(|v| v.as_i64());
-    let context_usage_pct = json
-        .get("context_usage_percent")
-        .or_else(|| json.get("context_usage_pct"))
-        .and_then(|v| v.as_f64());
     let message_count = json.get("message_count").and_then(|v| v.as_i64());
 
     // Subagent fields
@@ -127,25 +116,6 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         .get("subagent_type")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let tool_call_count = json.get("tool_call_count").and_then(|v| v.as_i64());
-    let loop_count = json.get("loop_count").and_then(|v| v.as_i64());
-
-    // Files modified
-    let files_json = json
-        .get("modified_files")
-        .and_then(|v| {
-            if v.is_array() {
-                Some(v.to_string())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            // afterFileEdit: extract file_path
-            json.get("file_path")
-                .and_then(|v| v.as_str())
-                .map(|p| format!("[\"{p}\"]"))
-        });
 
     // Resolve repo_id and git_branch from workspace root
     let (repo_id, git_branch) = workspace_root
@@ -185,13 +155,8 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         tool_name,
         tool_duration_ms,
         context_tokens,
-        context_window_size,
-        context_usage_pct,
         message_count,
         subagent_type,
-        tool_call_count,
-        loop_count,
-        files_json,
         repo_id,
         git_branch,
         mcp_server,
@@ -205,10 +170,10 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
         "INSERT INTO hook_events (
             provider, event, conversation_id, timestamp, model,
             tool_name, tool_duration_ms,
-            context_tokens, context_window_size, context_usage_pct, message_count,
-            subagent_type, tool_call_count, loop_count,
-            files_json, raw_json, mcp_server
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            context_tokens, message_count,
+            subagent_type,
+            raw_json, mcp_server
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             event.provider,
             event.event,
@@ -218,13 +183,8 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
             event.tool_name,
             event.tool_duration_ms,
             event.context_tokens,
-            event.context_window_size,
-            event.context_usage_pct,
             event.message_count,
             event.subagent_type,
-            event.tool_call_count,
-            event.loop_count,
-            event.files_json,
             event.raw_json,
             event.mcp_server,
         ],
@@ -438,117 +398,6 @@ pub struct SessionMeta {
     pub duration_ms: Option<i64>,
     pub model: Option<String>,
     pub dominant_tool: Option<String>,
-}
-
-/// Query session stats for the /analytics/sessions endpoint.
-pub fn query_sessions(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-    limit: usize,
-) -> Result<Vec<SessionStats>> {
-    let mut conditions = Vec::new();
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    let mut idx = 1;
-
-    if let Some(s) = since {
-        conditions.push(format!("s.started_at >= ?{idx}"));
-        param_values.push(Box::new(s.to_string()));
-        idx += 1;
-    }
-    if let Some(u) = until {
-        conditions.push(format!("s.started_at < ?{idx}"));
-        param_values.push(Box::new(u.to_string()));
-        idx += 1;
-    }
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
-    // Build date filter for the inner messages subquery — deliberately reuse
-    // the outer query's ?N params (SQLite resolves ?N globally across the statement).
-    let inner_conditions: Vec<String> = {
-        let mut ic = Vec::new();
-        // Outer params: ?1 = since, ?2 = until (matching the order they were pushed above)
-        let mut reuse_idx = 1;
-        if since.is_some() {
-            ic.push(format!("session_id IN (SELECT conversation_id FROM sessions WHERE started_at >= ?{reuse_idx})"));
-            reuse_idx += 1;
-        }
-        if until.is_some() {
-            ic.push(format!("session_id IN (SELECT conversation_id FROM sessions WHERE started_at < ?{reuse_idx})"));
-        }
-        ic
-    };
-    let inner_where = if inner_conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", inner_conditions.join(" AND "))
-    };
-
-    let sql = format!(
-        "SELECT s.conversation_id, s.provider, s.started_at, s.ended_at,
-                s.duration_ms, s.composer_mode, s.permission_mode, s.user_email,
-                s.end_reason, s.prompt_category, s.model,
-                COALESCE(m.msg_count, 0),
-                COALESCE(m.total_cost, 0.0)
-         FROM sessions s
-         LEFT JOIN (
-             SELECT session_id, COUNT(*) as msg_count, COALESCE(SUM(cost_cents), 0.0) as total_cost
-             FROM messages
-             {inner_where}
-             GROUP BY session_id
-         ) m ON m.session_id = s.conversation_id
-         {where_clause}
-         ORDER BY s.started_at DESC
-         LIMIT ?{idx}",
-    );
-    param_values.push(Box::new(limit as i64));
-
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok(SessionStats {
-                conversation_id: row.get(0)?,
-                provider: row.get(1)?,
-                started_at: row.get(2)?,
-                ended_at: row.get(3)?,
-                duration_ms: row.get(4)?,
-                composer_mode: row.get(5)?,
-                permission_mode: row.get(6)?,
-                user_email: row.get(7)?,
-                end_reason: row.get(8)?,
-                prompt_category: row.get(9)?,
-                model: row.get(10)?,
-                message_count: row.get(11)?,
-                cost_cents: row.get(12)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    Ok(rows)
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionStats {
-    pub conversation_id: String,
-    pub provider: String,
-    pub started_at: Option<String>,
-    pub ended_at: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub composer_mode: Option<String>,
-    pub permission_mode: Option<String>,
-    pub user_email: Option<String>,
-    pub end_reason: Option<String>,
-    pub prompt_category: Option<String>,
-    pub model: Option<String>,
-    pub message_count: i64,
-    pub cost_cents: f64,
 }
 
 /// Query tool usage stats from hook_events.
@@ -806,8 +655,6 @@ mod tests {
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.event, "pre_compact");
         assert_eq!(event.context_tokens, Some(150000));
-        assert_eq!(event.context_window_size, Some(200000));
-        assert_eq!(event.context_usage_pct, Some(75.0));
         assert_eq!(event.message_count, Some(42));
     }
 
@@ -918,10 +765,8 @@ mod tests {
             workspace_root: Some("/tmp".to_string()),
             duration_ms: None, composer_mode: None, user_email: None,
             end_reason: None, tool_name: None, tool_duration_ms: None,
-            context_tokens: None, context_window_size: None,
-            context_usage_pct: None, message_count: None,
-            subagent_type: None, tool_call_count: None, loop_count: None,
-            files_json: None, repo_id: None, git_branch: None,
+            context_tokens: None, message_count: None,
+            subagent_type: None, repo_id: None, git_branch: None,
             mcp_server: None, raw_json: "{}".to_string(),
         };
         upsert_session(&conn, &start_event).unwrap();

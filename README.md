@@ -361,21 +361,19 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | GET | `/analytics/registered-providers` | Available providers |
 | GET | `/analytics/activity` | Token activity over time (bucketed) |
 | GET | `/analytics/tags` | Cost breakdown by tag |
-| GET | `/analytics/sessions` | Session list with lifecycle metadata |
 | GET | `/analytics/tools` | Tool usage frequency and duration |
 | GET | `/analytics/mcp` | MCP server usage stats |
 | GET | `/analytics/statusline` | Day/week/month/session/branch/project costs |
 | GET | `/analytics/schema-version` | Current and target schema version |
 
-Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering. Additional query parameters per endpoint:
+Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering. Default limits: chart endpoints return up to 20 results, the messages table returns up to 50. Additional query parameters per endpoint:
 
 | Endpoint | Extra Parameters |
 |----------|-----------------|
-| `/analytics/messages` | `search`, `sort_by`, `sort_asc` (bool), `limit` (default 50), `offset` (default 0) |
+| `/analytics/messages` | `search`, `sort_by` (`timestamp` (default), `cost`, `model`, `tokens`, `provider`), `sort_asc` (bool), `limit` (default 50), `offset` (default 0) |
 | `/analytics/projects` | `limit` (default 20) |
 | `/analytics/tags` | `key` (tag key to filter), `limit` (default 20) |
 | `/analytics/activity` | `granularity` (`hour`, `day`, `month`; default `day`), `tz_offset` (minutes from UTC; default 0) |
-| `/analytics/sessions` | `limit` (default 50) |
 | `/analytics/tools` | `limit` (default 50) |
 | `/analytics/mcp` | `limit` (default 50) |
 | `/analytics/statusline` | `session_id`, `branch`, `project_dir` |

@@ -172,7 +172,7 @@ pub async fn analytics_tools(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
-            params.limit.unwrap_or(50),
+            params.limit.unwrap_or(20),
         )
     })
     .await
@@ -192,7 +192,7 @@ pub async fn analytics_mcp(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
-            params.limit.unwrap_or(50),
+            params.limit.unwrap_or(20),
         )
     })
     .await

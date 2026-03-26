@@ -4,7 +4,14 @@ use anyhow::Result;
 
 pub fn cmd_open() -> Result<()> {
     // Ensure daemon is running before opening browser
-    let _ = crate::client::DaemonClient::connect();
+    if let Err(e) = crate::client::DaemonClient::connect() {
+        eprintln!("Could not connect to budi daemon: {e}");
+        eprintln!("Run `budi init` or `budi doctor` to diagnose.");
+        return Ok(());
+    }
+
+    // Brief delay to let the dashboard endpoint settle
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     let config = crate::client::DaemonClient::load_config();
     let url = format!("{}/dashboard", config.daemon_base_url());

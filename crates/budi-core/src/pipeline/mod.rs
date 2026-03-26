@@ -90,14 +90,15 @@ impl Pipeline {
                 msg.repo_id = Some(r.clone());
             }
             if let Some(ref c) = msg.cwd {
-                session_cwd.insert(key.clone(), c.clone());
+                if !c.is_empty() {
+                    session_cwd.insert(key.clone(), c.clone());
+                }
             } else if let Some(c) = session_cwd.get(&key) {
                 msg.cwd = Some(c.clone());
             }
         }
 
         for msg in messages.iter_mut() {
-            normalize(msg);
             let mut msg_tags = Vec::new();
             for enricher in &mut self.enrichers {
                 for tag in enricher.enrich(msg) {
@@ -116,27 +117,6 @@ impl Pipeline {
             all_tags.push(msg_tags);
         }
         all_tags
-    }
-}
-
-/// Normalize a parsed message (trim whitespace, apply defaults).
-fn normalize(msg: &mut ParsedMessage) {
-    // Trim whitespace from string fields
-    if let Some(ref mut cwd) = msg.cwd {
-        let trimmed = cwd.trim().to_string();
-        if trimmed.is_empty() {
-            msg.cwd = None;
-        } else {
-            *cwd = trimmed;
-        }
-    }
-    if let Some(ref mut branch) = msg.git_branch {
-        let trimmed = branch.trim().to_string();
-        if trimmed.is_empty() {
-            msg.git_branch = None;
-        } else {
-            *branch = trimmed;
-        }
     }
 }
 
@@ -296,22 +276,6 @@ mod tests {
         );
         // No ticket at all
         assert_eq!(extract_ticket_id("kiyoshi/pava-searchbars"), None);
-    }
-
-    #[test]
-    fn normalize_trims_cwd() {
-        let mut msg = test_msg();
-        msg.cwd = Some("  /tmp/project  ".to_string());
-        normalize(&mut msg);
-        assert_eq!(msg.cwd.as_deref(), Some("/tmp/project"));
-    }
-
-    #[test]
-    fn normalize_clears_empty_cwd() {
-        let mut msg = test_msg();
-        msg.cwd = Some("   ".to_string());
-        normalize(&mut msg);
-        assert!(msg.cwd.is_none());
     }
 
     pub fn test_msg() -> ParsedMessage {

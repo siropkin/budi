@@ -24,18 +24,6 @@ pub struct CostEstimate {
     pub cache_savings: f64,
 }
 
-/// Compute estimated cost from token usage grouped by model.
-///
-/// Queries the messages table for per-model token totals and applies pricing.
-#[cfg(test)]
-pub fn estimate_cost(
-    conn: &Connection,
-    since: Option<&str>,
-    until: Option<&str>,
-) -> Result<CostEstimate> {
-    estimate_cost_filtered(conn, since, until, None)
-}
-
 /// Compute estimated cost with optional provider filter.
 pub fn estimate_cost_filtered(
     conn: &Connection,
@@ -174,7 +162,7 @@ mod tests {
     #[test]
     fn cost_empty_db() {
         let conn = setup_db();
-        let cost = estimate_cost(&conn, None, None).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
         assert_eq!(cost.total_cost, 0.0);
     }
 
@@ -187,7 +175,7 @@ mod tests {
              VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, ?4, ?5, ?6)",
             params!["msg1", 1_000_000i64, 100_000i64, 0i64, 0i64, 750.0],
         ).unwrap();
-        let cost = estimate_cost(&conn, None, None).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
         assert_eq!(cost.input_cost, 5.0);
         assert_eq!(cost.output_cost, 2.5);
         assert_eq!(cost.total_cost, 7.5);
@@ -202,7 +190,7 @@ mod tests {
              VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6-20260321', ?2, ?3, ?4, ?5, ?6)",
             params!["msg1", 100_000i64, 50_000i64, 200_000i64, 500_000i64, 195.0],
         ).unwrap();
-        let cost = estimate_cost(&conn, None, None).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
         // input: 100K * $3/M = $0.30
         // output: 50K * $15/M = $0.75
         // cache_write: 200K * $3.75/M = $0.75
@@ -228,7 +216,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let cost = estimate_cost(&conn, Some("2026-03-20"), None).unwrap();
+        let cost = estimate_cost_filtered(&conn, Some("2026-03-20"), None, None).unwrap();
         // Only the "new" message: 1M * $3/M = $3.00
         assert_eq!(cost.input_cost, 3.0);
         assert_eq!(cost.total_cost, 3.0);

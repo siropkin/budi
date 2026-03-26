@@ -78,7 +78,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    // Database schema check (via daemon if healthy, otherwise skip)
+    // Database schema check (via daemon if healthy, otherwise check file existence)
     if daemon_health(&config) {
         if let Ok(client) = crate::client::DaemonClient::connect() {
             if let Ok(sv) = client.schema_version() {
@@ -97,6 +97,16 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                         current, target
                     ));
                 }
+            }
+        }
+    } else {
+        // Daemon is down — check if the database file at least exists
+        if let Ok(db_path) = budi_core::analytics::db_path() {
+            if db_path.exists() {
+                println!("  {dim}-{reset} database: file exists at {} (daemon down, cannot check schema)", db_path.display());
+            } else {
+                println!("  {red}\u{2717}{reset} database: not found at {}", db_path.display());
+                issues.push("Database not found. Run `budi sync` to create it.".into());
             }
         }
     }
