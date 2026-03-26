@@ -93,6 +93,14 @@ async fn main() -> Result<()> {
     // take over without manual intervention (e.g. after `cargo build && cp`).
     kill_existing_daemon(port);
 
+    // Ensure database exists and schema is up to date.
+    if let Ok(db_path) = analytics::db_path() {
+        match analytics::open_db_with_migration(&db_path) {
+            Ok(_) => tracing::debug!("Database ready at {}", db_path.display()),
+            Err(e) => tracing::warn!("Database migration failed: {e}"),
+        }
+    }
+
     let app_state = AppState {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
