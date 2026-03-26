@@ -22,7 +22,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     if let Some(ref root) = repo_root {
         println!("budi doctor — {}", root.display());
     } else {
-        println!("budi doctor — global (not in a git repo)");
+        println!("budi doctor — global mode");
     }
     println!();
 
@@ -43,6 +43,19 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     } else {
         println!("  {dim}-{reset} git repo: not in a git repository (global mode)");
         println!("  {green}\u{2713}{reset} config: using defaults");
+    }
+
+    // Check that budi-daemon binary exists on PATH
+    let daemon_bin_found = std::process::Command::new("sh")
+        .args(["-c", "command -v budi-daemon"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    doctor_check("budi-daemon binary", daemon_bin_found, None);
+    if !daemon_bin_found {
+        issues.push("budi-daemon binary not found on PATH — copy it alongside budi or add to PATH".into());
     }
 
     let health = daemon_health(&config);
@@ -138,7 +151,8 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         for issue in &issues {
             println!("  - {issue}");
         }
-        anyhow::bail!("{} issue(s) found", issues.len());
+        eprintln!("{} issue(s) found", issues.len());
+        std::process::exit(1);
     }
     Ok(())
 }

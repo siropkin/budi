@@ -302,20 +302,8 @@ pub async fn analytics_branch_detail(
 
     match result {
         Some(detail) => Ok(Json(detail).into_response()),
-        None => Ok(Json(serde_json::Value::Null).into_response()),
+        None => Ok((StatusCode::NOT_FOUND, Json(json!({"error": "branch not found"}))).into_response()),
     }
-}
-
-pub async fn analytics_provider_count() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::provider_count(&conn)
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(json!({ "count": result })))
 }
 
 pub async fn analytics_schema_version() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {

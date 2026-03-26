@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_update() -> Result<()> {
+pub fn cmd_update(yes: bool) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: v{}", current);
     println!("Checking for updates...");
@@ -48,6 +48,18 @@ pub fn cmd_update() -> Result<()> {
         "New version available: {bold}v{}{reset} → {bold_green}v{}{reset}",
         current, latest
     );
+
+    if !yes {
+        println!("This will download and run the budi installer from GitHub.");
+        eprint!("Continue? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).context("Failed to read stdin")?;
+        if !matches!(answer.trim(), "y" | "Y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
     println!("Updating...");
 
     // Run the standalone installer
@@ -94,6 +106,20 @@ pub fn cmd_update() -> Result<()> {
         Err(e) => println!("{yellow}!{reset} Migration warning: {}", e),
     }
 
-    println!("{green}✓{reset} Updated to v{}.", latest);
+    // Verify installed version
+    match Command::new("budi").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let installed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let installed_ver = installed.strip_prefix("budi ").unwrap_or(&installed);
+            if installed_ver.contains(latest) {
+                println!("{green}✓{reset} Updated to v{}.", latest);
+            } else {
+                println!("{yellow}!{reset} Expected v{}, but `budi --version` reports: {}", latest, installed);
+            }
+        }
+        _ => {
+            println!("{green}✓{reset} Updated to v{} (could not verify installed version).", latest);
+        }
+    }
     Ok(())
 }

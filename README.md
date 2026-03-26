@@ -342,7 +342,7 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/sync` | Sync recent data (last 7 days) |
-| POST | `/history` | Load full transcript history (all time) |
+| POST | `/sync/all` | Load full transcript history (all time) |
 | POST | `/migrate` | Run database schema migration |
 | POST | `/hooks/ingest` | Receive hook events from Claude Code / Cursor |
 
@@ -358,13 +358,12 @@ The daemon (`budi-daemon`) runs on `http://127.0.0.1:7878` and exposes a REST AP
 | GET | `/analytics/cost` | Cost breakdown |
 | GET | `/analytics/models` | Model usage breakdown |
 | GET | `/analytics/providers` | Per-provider breakdown |
-| GET | `/analytics/provider-count` | Number of distinct providers |
 | GET | `/analytics/registered-providers` | Available providers |
 | GET | `/analytics/activity` | Token activity over time (bucketed) |
-| GET | `/analytics/context-usage` | Context window stats |
 | GET | `/analytics/tags` | Cost breakdown by tag |
 | GET | `/analytics/sessions` | Session list with lifecycle metadata |
 | GET | `/analytics/tools` | Tool usage frequency and duration |
+| GET | `/analytics/mcp` | MCP server usage stats |
 | GET | `/analytics/statusline` | Day/week/month/session/branch/project costs |
 | GET | `/analytics/schema-version` | Current and target schema version |
 
@@ -376,7 +375,7 @@ Most analytics endpoints accept `?since=<ISO>&until=<ISO>` for date filtering. A
 | `/analytics/projects` | `limit` (default 20) |
 | `/analytics/tags` | `key` (tag key to filter), `limit` (default 20) |
 | `/analytics/activity` | `granularity` (`hour`, `day`, `month`; default `day`), `tz_offset` (minutes from UTC; default 0) |
-| `/analytics/sessions` | `limit` (default 100) |
+| `/analytics/sessions` | `limit` (default 50) |
 | `/analytics/tools` | `limit` (default 50) |
 | `/analytics/mcp` | `limit` (default 50) |
 | `/analytics/statusline` | `session_id`, `branch`, `project_dir` |

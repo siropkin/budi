@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Result<()> {
+pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool, no_open: bool, no_sync: bool) -> Result<()> {
     let repo_root = if local || repo_root.is_some() {
         let root = super::try_resolve_repo_root(repo_root);
         if root.is_none() {
@@ -42,7 +42,11 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Res
     }
 
     // Auto-sync existing transcripts on first run
-    let sync_result = super::sync::init_auto_sync();
+    let sync_result = if no_sync {
+        Ok((0, 0))
+    } else {
+        super::sync::init_auto_sync()
+    };
 
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
 
@@ -105,10 +109,18 @@ pub fn cmd_init(local: bool, repo_root: Option<PathBuf>, no_daemon: bool) -> Res
     println!();
     println!("  {bold}Next steps:{reset}");
     println!("    1. Open the dashboard: {underline}{dashboard_url}{reset}");
-    println!("    2. Run `budi doctor` to verify everything is working");
+    println!("    2. Run `budi stats` to see your spending");
     println!();
 
-    open_url_in_browser(&dashboard_url);
+    // Only open browser on fresh init (not re-init) and when --no-open is not set
+    let is_reinit = repo_root.as_ref().map_or(false, |root| {
+        config::repo_paths(root)
+            .map(|p| p.data_dir.join("analytics.db").exists())
+            .unwrap_or(false)
+    });
+    if !no_open && !is_reinit {
+        open_url_in_browser(&dashboard_url);
+    }
 
     Ok(())
 }
@@ -156,7 +168,7 @@ fn install_statusline_if_missing() {
     }
 
     if let Ok(()) = super::statusline::cmd_statusline_install() {
-        eprintln!("Status line: installed in {}", settings_path.display());
+        println!("Status line: installed in {}", settings_path.display());
     }
 }
 
@@ -258,11 +270,11 @@ fn install_claude_code_hooks() {
     if changed {
         if let Ok(out) = serde_json::to_string_pretty(&settings) {
             if fs::write(&settings_path, out).is_ok() {
-                eprintln!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
+                println!("  Hooks: installed Claude Code hooks in {}", settings_path.display());
             }
         }
     } else {
-        eprintln!("  Hooks: Claude Code hooks already installed");
+        println!("  Hooks: Claude Code hooks already installed");
     }
 }
 
@@ -340,10 +352,10 @@ fn install_cursor_hooks() {
     if changed {
         if let Ok(out) = serde_json::to_string_pretty(&config) {
             if fs::write(&hooks_path, out).is_ok() {
-                eprintln!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
+                println!("  Hooks: installed Cursor hooks in {}", hooks_path.display());
             }
         }
     } else {
-        eprintln!("  Hooks: Cursor hooks already installed");
+        println!("  Hooks: Cursor hooks already installed");
     }
 }

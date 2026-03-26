@@ -77,7 +77,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             context_token_limit    INTEGER,
             parent_uuid            TEXT,
             git_branch             TEXT,
-            cost_confidence        TEXT DEFAULT 'exact'
+            cost_confidence        TEXT DEFAULT 'estimated'
         );
 
         CREATE TABLE IF NOT EXISTS tool_usage (
@@ -182,7 +182,7 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
             context_token_limit    INTEGER,
             parent_uuid            TEXT,
             git_branch             TEXT,
-            cost_confidence        TEXT DEFAULT 'exact'
+            cost_confidence        TEXT DEFAULT 'estimated'
         );
         INSERT INTO messages_new (
             uuid, session_id, role, timestamp, model,
@@ -209,6 +209,8 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
             WHERE t.message_uuid = messages.uuid AND t.key = 'branch'
             LIMIT 1
         ) WHERE git_branch IS NULL;
+
+        DELETE FROM tags WHERE key = 'branch';
         ",
     )?;
 
@@ -217,7 +219,7 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
         "
         UPDATE messages SET cost_confidence = 'estimated'
           WHERE provider = 'cursor' AND (cost_cents IS NULL OR cost_cents = 0);
-        UPDATE messages SET cost_confidence = 'exact_cost'
+        UPDATE messages SET cost_confidence = 'exact'
           WHERE provider = 'cursor' AND cost_cents IS NOT NULL AND cost_cents > 0;
         UPDATE messages SET cost_confidence = 'estimated'
           WHERE provider != 'cursor' AND role = 'assistant';
@@ -260,6 +262,12 @@ fn upgrade_from_v6(conn: &Connection) -> Result<()> {
 
 // ── Shared helpers ─────────────────────────────────────────────────────
 
+/// Create sessions and hook_events tables.
+///
+/// Note: `repo_id` and `git_branch` are denormalized on both `messages` (canonical)
+/// and `sessions` (derived from hooks). Messages are the source of truth for cost
+/// queries; sessions provide metadata context. Do not update `sessions.git_branch`
+/// without re-enriching the corresponding messages.
 fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -329,10 +337,14 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
         CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
 
+        -- messages (covering indexes for cost queries)
+        CREATE INDEX IF NOT EXISTS idx_messages_ts_cost ON messages(timestamp, cost_cents);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_ts_cost ON messages(role, timestamp, cost_cents);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents);
+
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
-        CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id);
 
         -- hook_events
         CREATE INDEX IF NOT EXISTS idx_hook_events_conversation ON hook_events(conversation_id);

@@ -29,3 +29,18 @@ pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     config::find_repo_root(&cwd).ok()
 }
+
+/// Format a cost value in dollars: $1.2K, $123, $12.50, $0.42, $0.00
+pub fn format_cost(dollars: f64) -> String {
+    if dollars >= 1000.0 {
+        format!("${:.1}K", dollars / 1000.0)
+    } else if dollars >= 100.0 {
+        format!("${:.0}", dollars)
+    } else if dollars >= 1.0 {
+        format!("${:.2}", dollars)
+    } else if dollars > 0.0 {
+        format!("${:.2}", dollars)
+    } else {
+        "$0.00".to_string()
+    }
+}

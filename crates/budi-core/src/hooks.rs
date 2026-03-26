@@ -270,13 +270,21 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                 "UPDATE sessions SET
                     ended_at = ?2,
                     duration_ms = ?3,
-                    end_reason = ?4
+                    end_reason = ?4,
+                    model = COALESCE(?5, model),
+                    user_email = COALESCE(?6, user_email),
+                    repo_id = COALESCE(?7, repo_id),
+                    git_branch = COALESCE(?8, git_branch)
                 WHERE conversation_id = ?1",
                 params![
                     conv_id,
                     event.timestamp.to_rfc3339(),
                     event.duration_ms,
                     event.end_reason,
+                    event.model,
+                    event.user_email,
+                    event.repo_id,
+                    event.git_branch,
                 ],
             )?;
         }
@@ -348,37 +356,48 @@ pub fn classify_prompt(text: &str) -> Option<String> {
 
 /// Query aggregated session metadata for the HookEnricher.
 /// Returns a map of conversation_id → SessionMeta.
-pub fn load_session_meta(conn: &Connection) -> Result<std::collections::HashMap<String, SessionMeta>> {
+/// When `max_age_days` is Some(N), only sessions started in the last N days are loaded.
+pub fn load_session_meta(conn: &Connection, max_age_days: Option<u64>) -> Result<std::collections::HashMap<String, SessionMeta>> {
     let mut map = std::collections::HashMap::new();
 
     // Load sessions
-    let mut stmt = conn.prepare(
+    let (date_clause, date_param) = match max_age_days {
+        Some(days) => (
+            " AND started_at >= datetime('now', ?1)".to_string(),
+            Some(format!("-{} days", days)),
+        ),
+        None => (String::new(), None),
+    };
+    let sql = format!(
         "SELECT conversation_id, composer_mode, permission_mode, prompt_category,
                 user_email, duration_ms, model
          FROM sessions
-         WHERE conversation_id IS NOT NULL",
-    )?;
+         WHERE conversation_id IS NOT NULL{}",
+        date_clause
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            SessionMeta {
-                composer_mode: row.get(1)?,
-                permission_mode: row.get(2)?,
-                prompt_category: row.get(3)?,
-                user_email: row.get(4)?,
-                duration_ms: row.get(5)?,
-                model: row.get(6)?,
-                dominant_tool: None,
-            },
-        ))
-    })?;
-
-    for row in rows {
-        if let Ok((id, meta)) = row {
-            map.insert(id, meta);
-        }
+    let params: Vec<Box<dyn rusqlite::types::ToSql>> = match date_param {
+        Some(p) => vec![Box::new(p)],
+        None => vec![],
+    };
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let meta = SessionMeta {
+            composer_mode: row.get(1)?,
+            permission_mode: row.get(2)?,
+            prompt_category: row.get(3)?,
+            user_email: row.get(4)?,
+            duration_ms: row.get(5)?,
+            model: row.get(6)?,
+            dominant_tool: None,
+        };
+        map.insert(id, meta);
     }
+    drop(rows);
+    drop(stmt);
 
     // Load dominant tool per conversation from hook_events using window function
     let mut tool_stmt = conn.prepare(
@@ -449,6 +468,27 @@ pub fn query_sessions(
         format!("WHERE {}", conditions.join(" AND "))
     };
 
+    // Build date filter for the inner messages subquery — deliberately reuse
+    // the outer query's ?N params (SQLite resolves ?N globally across the statement).
+    let inner_conditions: Vec<String> = {
+        let mut ic = Vec::new();
+        // Outer params: ?1 = since, ?2 = until (matching the order they were pushed above)
+        let mut reuse_idx = 1;
+        if since.is_some() {
+            ic.push(format!("session_id IN (SELECT conversation_id FROM sessions WHERE started_at >= ?{reuse_idx})"));
+            reuse_idx += 1;
+        }
+        if until.is_some() {
+            ic.push(format!("session_id IN (SELECT conversation_id FROM sessions WHERE started_at < ?{reuse_idx})"));
+        }
+        ic
+    };
+    let inner_where = if inner_conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", inner_conditions.join(" AND "))
+    };
+
     let sql = format!(
         "SELECT s.conversation_id, s.provider, s.started_at, s.ended_at,
                 s.duration_ms, s.composer_mode, s.permission_mode, s.user_email,
@@ -459,6 +499,7 @@ pub fn query_sessions(
          LEFT JOIN (
              SELECT session_id, COUNT(*) as msg_count, COALESCE(SUM(cost_cents), 0.0) as total_cost
              FROM messages
+             {inner_where}
              GROUP BY session_id
          ) m ON m.session_id = s.conversation_id
          {where_clause}
@@ -669,7 +710,10 @@ fn normalize_event_name(name: &str) -> String {
         "afterFileEdit" => "after_file_edit",
         "afterAgentResponse" => "after_agent_response",
         "beforeShellExecution" => "before_shell_execution",
-        _ => name,
+        _ => {
+            tracing::debug!("Unknown hook event name: {}", name);
+            name
+        },
     }
     .to_string()
 }

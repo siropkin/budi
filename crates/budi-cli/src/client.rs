@@ -39,7 +39,7 @@ impl DaemonClient {
         }
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(10))
             .build()?;
 
         Ok(Self { base_url, client })
@@ -63,7 +63,7 @@ impl DaemonClient {
                 "migrate": migrate,
             }))
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Sync request failed")?;
         Ok(resp.json()?)
@@ -75,7 +75,7 @@ impl DaemonClient {
             .post(format!("{}/sync/all", self.base_url))
             .timeout(std::time::Duration::from_secs(600)) // History can take minutes
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("History sync request failed")?;
         Ok(resp.json()?)
@@ -86,7 +86,7 @@ impl DaemonClient {
             .client
             .post(format!("{}/migrate", self.base_url))
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Migration request failed")?;
         Ok(resp.json()?)
@@ -97,7 +97,7 @@ impl DaemonClient {
             .client
             .get(format!("{}/analytics/schema-version", self.base_url))
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Schema version request failed")?;
         Ok(resp.json()?)
@@ -126,7 +126,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/summary", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Summary request failed")?;
         Ok(resp.json()?)
@@ -153,7 +153,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/cost", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Cost request failed")?;
         Ok(resp.json()?)
@@ -178,7 +178,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/projects", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Projects request failed")?;
         Ok(resp.json()?)
@@ -201,7 +201,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/branches", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Branches request failed")?;
         Ok(resp.json()?)
@@ -225,7 +225,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/branches/{}", self.base_url, branch))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Branch detail request failed")?;
         let val: Value = resp.json()?;
@@ -252,7 +252,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/models", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Models request failed")?;
         Ok(resp.json()?)
@@ -281,7 +281,7 @@ impl DaemonClient {
             .get(format!("{}/analytics/tags", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Tags request failed")?;
         Ok(resp.json()?)
@@ -304,25 +304,10 @@ impl DaemonClient {
             .get(format!("{}/analytics/providers", self.base_url))
             .query(&params)
             .send()
-            .context("Failed to connect to budi daemon")?
+            .context("Failed to connect to budi daemon. Run `budi doctor` to diagnose")?
             .error_for_status()
             .context("Providers request failed")?;
         Ok(resp.json()?)
-    }
-
-    pub fn provider_count(&self) -> Result<usize> {
-        let resp = self
-            .client
-            .get(format!("{}/analytics/provider-count", self.base_url))
-            .send()
-            .context("Failed to connect to budi daemon")?
-            .error_for_status()
-            .context("Provider count request failed")?;
-        let val: Value = resp.json()?;
-        Ok(val
-            .get("count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize)
     }
 
 }

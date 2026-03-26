@@ -73,10 +73,6 @@ impl Provider for CursorProvider {
         ))
     }
 
-    fn pricing_for_model(&self, model: &str) -> ModelPricing {
-        cursor_pricing_for_model(model)
-    }
-
     fn sync_direct(
         &self,
         conn: &mut Connection,
@@ -311,6 +307,10 @@ fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<Cu
             .and_then(|v: &Value| v.as_f64())
             .unwrap_or(0.0);
 
+        if total_cents > 100.0 {
+            tracing::warn!("Cursor API totalCents={total_cents} unusually high — verify cents vs dollars");
+        }
+
         events.push(CursorUsageEvent {
             timestamp_ms: ts,
             model,
@@ -382,16 +382,28 @@ fn usage_events_to_messages(
     events: &[CursorUsageEvent],
     sessions: &[SessionContext],
 ) -> Vec<ParsedMessage> {
+    let mut counter: usize = 0;
     events
         .iter()
         .map(|ev| {
-            // Find matching session by timestamp — prefer the session with the
-            // tightest time window when multiple sessions overlap.
+            counter += 1;
+            // Find matching session by timestamp — prefer strict containment,
+            // fall back to clock-skew window with closest-timestamp tiebreak.
             const CLOCK_SKEW_MS: i64 = 2000;
             let matched = sessions
                 .iter()
-                .filter(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS))
-                .min_by_key(|s| s.end_ms - s.start_ms);
+                .filter(|s| ev.timestamp_ms >= s.start_ms && ev.timestamp_ms <= s.end_ms)
+                .min_by_key(|s| (ev.timestamp_ms - s.start_ms).abs())
+                .or_else(|| {
+                    sessions
+                        .iter()
+                        .filter(|s| ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS) && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS))
+                        .min_by_key(|s| {
+                            let d_start = (ev.timestamp_ms - s.start_ms).abs();
+                            let d_end = (ev.timestamp_ms - s.end_ms).abs();
+                            d_start.min(d_end)
+                        })
+                });
 
             let session_id = matched
                 .map(|s| s.conversation_id.clone());
@@ -399,11 +411,11 @@ fn usage_events_to_messages(
             let timestamp = DateTime::from_timestamp_millis(ev.timestamp_ms)
                 .unwrap_or_else(Utc::now);
 
-            // Deterministic UUID from timestamp + model + tokens (avoids collision
-            // when two requests share the same millisecond and model)
+            // Deterministic UUID from timestamp + model + tokens + counter (avoids collision
+            // when two requests share the same millisecond, model, and token count)
             let uuid = format!(
-                "cursor-api-{}-{}-{}",
-                ev.timestamp_ms, ev.model, ev.input_tokens + ev.output_tokens
+                "cursor-api-{}-{}-{}-{}",
+                ev.timestamp_ms, ev.model, ev.input_tokens + ev.output_tokens, counter
             );
 
             ParsedMessage {
@@ -421,8 +433,6 @@ fn usage_events_to_messages(
                 repo_id: matched.and_then(|s| s.repo_id.clone()),
                 provider: "cursor".to_string(),
                 cost_cents: Some(ev.total_cents),
-                context_tokens_used: None,
-                context_token_limit: None,
                 session_title: None,
                 parent_uuid: None,
                 user_name: None,
@@ -658,8 +668,6 @@ fn parse_cursor_line(
             repo_id: None,
             provider: "cursor".to_string(),
             cost_cents: None,
-            context_tokens_used: None,
-            context_token_limit: None,
             session_title: None,
             parent_uuid: None,
             user_name: None,
@@ -683,8 +691,6 @@ fn parse_cursor_line(
                 repo_id: None,
                 provider: "cursor".to_string(),
                 cost_cents: None,
-                context_tokens_used: None,
-                context_token_limit: None,
                 session_title: None,
                 parent_uuid: None,
                 user_name: None,
@@ -697,7 +703,7 @@ fn parse_cursor_line(
 }
 
 /// Parse all lines from a Cursor JSONL string with incremental offset support.
-pub fn parse_cursor_transcript(
+pub(crate) fn parse_cursor_transcript(
     content: &str,
     start_offset: usize,
     session_id: &str,
@@ -1103,6 +1109,6 @@ mod tests {
         }];
 
         let msgs = usage_events_to_messages(&events, &[]);
-        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-150");
+        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-150-1");
     }
 }

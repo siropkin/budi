@@ -8,10 +8,10 @@ use sha2::{Digest, Sha256};
 
 pub const BUDI_HOME_ENV: &str = "BUDI_HOME";
 pub const BUDI_HOME_DEFAULT_REL: &str = ".local/share/budi";
-pub const BUDI_REPOS_DIR: &str = "repos";
-pub const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
-pub const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
-pub const BUDI_LOG_DIR_NAME: &str = "logs";
+pub(crate) const BUDI_REPOS_DIR: &str = "repos";
+pub(crate) const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
+pub(crate) const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
+pub(crate) const BUDI_LOG_DIR_NAME: &str = "logs";
 
 
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
@@ -240,18 +240,6 @@ pub fn repo_root_marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join(BUDI_REPO_ROOT_MARKER_FILE_NAME)
 }
 
-pub fn read_repo_root_marker(data_dir: &Path) -> Option<PathBuf> {
-    let marker = repo_root_marker_path(data_dir);
-    let Ok(raw) = fs::read_to_string(&marker) else {
-        return None;
-    };
-    let value = raw.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(value))
-    }
-}
 
 pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
     let paths = repo_paths(repo_root)?;

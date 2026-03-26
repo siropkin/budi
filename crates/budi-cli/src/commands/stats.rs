@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use budi_core::analytics;
 use chrono::{Datelike, Local, NaiveDate};
 
@@ -48,15 +48,8 @@ pub fn cmd_stats(
     tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    let exclusive_count = [projects, branches, branch.is_some(), models, tag.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-    if exclusive_count > 1 {
-        anyhow::bail!("--projects, --branches, --branch, --models, and --tag are mutually exclusive");
-    }
-
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect()
+        .context("Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.")?;
 
     if let Some(ref tag_filter) = tag {
         return cmd_stats_tags(&client, period, tag_filter, json_output);
@@ -92,7 +85,7 @@ pub fn cmd_stats(
     }
 
     // When no provider filter and multiple agents detected, show breakdown
-    if provider.is_none() && client.provider_count()? > 1 {
+    if provider.is_none() {
         let (since, until) = period_date_range(period);
         let providers = client.providers(since.as_deref(), until.as_deref())?;
         if providers.len() > 1 {
@@ -148,12 +141,9 @@ fn cmd_stats_summary_filtered(
     );
     println!();
 
-    let total_input = summary.total_input_tokens
-        + summary.total_cache_creation_tokens
-        + summary.total_cache_read_tokens;
     println!(
         "  {bold}Input tokens{reset}  {}",
-        format_tokens(total_input)
+        format_tokens(summary.total_input_tokens)
     );
     println!(
         "  {bold}Output tokens{reset} {}",
@@ -238,12 +228,9 @@ fn cmd_stats_multi_agent(
         summary.total_messages
     );
 
-    let total_input = summary.total_input_tokens
-        + summary.total_cache_creation_tokens
-        + summary.total_cache_read_tokens;
     println!(
         "  {bold}Tokens{reset}       {} in, {} out",
-        format_tokens(total_input),
+        format_tokens(summary.total_input_tokens),
         format_tokens(summary.total_output_tokens),
     );
 
@@ -402,8 +389,7 @@ fn cmd_stats_branch_detail(
             }
             println!("  {bold}Sessions{reset}   {}", b.session_count);
             println!("  {bold}Messages{reset}   {}", b.message_count);
-            let total_input = b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens;
-            println!("  {bold}Input{reset}      {}", format_tokens(total_input));
+            println!("  {bold}Input{reset}      {}", format_tokens(b.input_tokens));
             println!(
                 "  {bold}Output{reset}     {}",
                 format_tokens(b.output_tokens)
@@ -459,6 +445,8 @@ fn cmd_stats_models(
         return Ok(());
     }
 
+    let yellow = ansi("\x1b[33m");
+
     let max_msgs = models.first().map(|m| m.message_count).unwrap_or(1);
     for m in &models {
         let bar_len = ((m.message_count as f64 / max_msgs as f64) * 16.0) as usize;
@@ -466,10 +454,11 @@ fn cmd_stats_models(
         let total_tok =
             m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
         println!(
-            "    {bold}{:<30}{reset} {:>5} msgs  {:>8} tok  {cyan}{}{reset}",
+            "    {bold}{:<30}{reset} {:>5} msgs  {:>8} tok  {yellow}{:>8}{reset}  {cyan}{}{reset}",
             m.model,
             m.message_count,
             format_tokens(total_tok),
+            format_cost_cents(m.cost_cents),
             bar
         );
     }
@@ -492,19 +481,7 @@ pub fn format_tokens(n: u64) -> String {
     }
 }
 
-pub fn format_cost(dollars: f64) -> String {
-    if dollars >= 1000.0 {
-        format!("${:.1}K", dollars / 1000.0)
-    } else if dollars >= 100.0 {
-        format!("${:.0}", dollars)
-    } else if dollars >= 1.0 {
-        format!("${:.2}", dollars)
-    } else if dollars > 0.0 {
-        format!("${:.2}", dollars)
-    } else {
-        "$0.00".to_string()
-    }
-}
+pub use super::format_cost;
 
 pub fn format_cost_cents(cents: f64) -> String {
     format_cost(cents / 100.0)
@@ -538,11 +515,19 @@ fn cmd_stats_tags(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
+    let dim = ansi("\x1b[90m");
+
     println!(
         "\n{bold}  Tag: {} — {}{reset}\n",
         tag_filter,
         period_label(period)
     );
+
+    println!(
+        "  {dim}{:<40} {:>38}{reset}",
+        "VALUE", "COST"
+    );
+    println!("  {dim}{}{reset}", "─".repeat(78));
 
     // Find max cost for bar scaling
     let max_cost = data.iter().map(|t| t.cost_cents).fold(0.0f64, f64::max);

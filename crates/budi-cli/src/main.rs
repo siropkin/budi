@@ -31,6 +31,12 @@ enum Commands {
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
+        /// Don't open the dashboard in the browser
+        #[arg(long)]
+        no_open: bool,
+        /// Skip automatic sync of existing transcripts
+        #[arg(long)]
+        no_sync: bool,
     },
     /// Check health: daemon, database, config
     Doctor {
@@ -38,6 +44,7 @@ enum Commands {
         repo_root: Option<PathBuf>,
     },
     /// Show usage analytics
+    #[command(group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "models", "tag"])))]
     Stats {
         /// Time period to show (default: today)
         #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
@@ -63,9 +70,6 @@ enum Commands {
         /// Output format: text (default) or json
         #[arg(long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
-        /// Shorthand for --format json
-        #[arg(long, default_value_t = false)]
-        json: bool,
     },
     /// Sync recent transcripts (last 7 days). Use --all for full history.
     Sync {
@@ -76,7 +80,11 @@ enum Commands {
     /// Open the budi dashboard in the browser
     Open,
     /// Update budi to the latest version
-    Update,
+    Update {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run database migration explicitly (usually automatic with sync/update)
     #[command(hide = true)]
     Migrate,
@@ -86,7 +94,7 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         _args: Vec<String>,
     },
-    /// Print a compact status line (reads stdin, outputs one line)
+    /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
         #[arg(long, default_value_t = false)]
@@ -137,7 +145,9 @@ fn main() -> Result<()> {
             local,
             repo_root,
             no_daemon,
-        } => commands::init::cmd_init(local, repo_root, no_daemon),
+            no_open,
+            no_sync,
+        } => commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync),
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
         Commands::Stats {
             period,
@@ -148,9 +158,8 @@ fn main() -> Result<()> {
             provider,
             tag,
             format,
-            json,
         } => {
-            let json_output = json || matches!(format, StatsFormat::Json);
+            let json_output = matches!(format, StatsFormat::Json);
             commands::stats::cmd_stats(
                 period, projects, branches, branch, models, provider, tag, json_output,
             )
@@ -163,7 +172,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Open => commands::open::cmd_open(),
-        Commands::Update => commands::update::cmd_update(),
+        Commands::Update { yes } => commands::update::cmd_update(yes),
         Commands::Migrate => {
             let c = client::DaemonClient::connect()?;
             let result = c.migrate()?;

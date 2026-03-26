@@ -27,6 +27,7 @@ pub struct CostEstimate {
 /// Compute estimated cost from token usage grouped by model.
 ///
 /// Queries the messages table for per-model token totals and applies pricing.
+#[cfg(test)]
 pub fn estimate_cost(
     conn: &Connection,
     since: Option<&str>,

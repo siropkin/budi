@@ -53,7 +53,6 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/branches/{branch}",
             get(a::analytics_branch_detail),
         )
-        .route("/analytics/provider-count", get(a::analytics_provider_count))
         .route("/analytics/providers", get(a::analytics_providers))
         .route(
             "/analytics/registered-providers",

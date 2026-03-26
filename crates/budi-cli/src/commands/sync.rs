@@ -36,13 +36,24 @@ pub fn cmd_sync() -> Result<()> {
 pub fn cmd_history() -> Result<()> {
     let client = DaemonClient::connect()?;
 
-    print!("Loading full transcript history (this may take a while)...");
+    println!("Syncing full history (this may take a while)...");
     let _ = std::io::stdout().flush();
     let start = Instant::now();
     let result = client.history()?;
-    println!(" done in {:.1}s", start.elapsed().as_secs_f64());
+    let elapsed = start.elapsed().as_secs_f64();
 
-    print_sync_result(&result);
+    let files = result.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
+    let msgs = result.get("messages_ingested").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let bold = super::ansi("\x1b[1m");
+    let green = super::ansi("\x1b[32m");
+    let reset = super::ansi("\x1b[0m");
+
+    println!("{green}✓{reset} Full history sync complete in {:.1}s.", elapsed);
+    println!(
+        "  {bold}{}{reset} messages from {bold}{}{reset} files.",
+        msgs, files
+    );
     Ok(())
 }
 

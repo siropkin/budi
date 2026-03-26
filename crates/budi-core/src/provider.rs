@@ -37,7 +37,6 @@ pub trait Provider: Send + Sync {
         content: &str,
         offset: usize,
     ) -> Result<(Vec<crate::jsonl::ParsedMessage>, usize)>;
-    fn pricing_for_model(&self, model: &str) -> ModelPricing;
 
     /// Direct sync from a structured data source (e.g. SQLite database).
     /// Returns Some((files_synced, messages_ingested)) if this provider uses

@@ -190,6 +190,10 @@ impl Enricher for CostEnricher {
                 + msg.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
             if cost > 0.0 {
                 msg.cost_cents = Some((cost * 100.0).round());
+                // Cost calculated from tokens × pricing is always "estimated"
+                msg.cost_confidence = "estimated".to_string();
+            } else {
+                // Zero cost with zero tokens: confidence is "estimated" (no data)
                 msg.cost_confidence = "estimated".to_string();
             }
         }

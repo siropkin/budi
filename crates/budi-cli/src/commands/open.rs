@@ -8,7 +8,6 @@ pub fn cmd_open() -> Result<()> {
 
     let config = crate::client::DaemonClient::load_config();
     let url = format!("{}/dashboard", config.daemon_base_url());
-    println!("{}", url);
 
     // Cross-platform browser launch
     let result = {
@@ -34,6 +33,7 @@ pub fn cmd_open() -> Result<()> {
     };
 
     if let Err(e) = result {
+        println!("{}", url);
         eprintln!("Could not open browser automatically: {e}");
         eprintln!("Open the URL above in your browser.");
     }

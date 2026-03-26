@@ -85,7 +85,6 @@ a:hover { text-decoration: underline; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sortable-table tr:hover td { background: rgba(88,166,255,0.05); }
-.sortable-table .mono { font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
 .sortable-table .dir {
   max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
 }

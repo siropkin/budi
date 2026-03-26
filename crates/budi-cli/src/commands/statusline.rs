@@ -14,18 +14,7 @@ use crate::daemon::daemon_client_with_timeout;
 
 pub const CLAUDE_USER_SETTINGS: &str = ".claude/settings.json";
 
-/// Format a cost value like the dashboard: $1.2K, $123, $12.50, $0.42, $0
-fn fmt_cost(c: f64) -> String {
-    if c >= 1000.0 {
-        format!("${:.1}K", c / 1000.0)
-    } else if c >= 100.0 {
-        format!("${:.0}", c)
-    } else if c > 0.0 {
-        format!("${:.2}", c)
-    } else {
-        "$0".to_string()
-    }
-}
+use super::format_cost as fmt_cost;
 
 /// Detect the current git branch from a directory.
 fn detect_git_branch(dir: &str) -> Option<String> {
@@ -245,6 +234,10 @@ pub fn cmd_statusline_install() -> Result<()> {
     if !settings.is_object() {
         settings = json!({});
     }
+    if settings.get("statusLine").is_some() {
+        println!("Status line already configured in {}", settings_path.display());
+        return Ok(());
+    }
     settings["statusLine"] = json!({
         "type": "command",
         "command": "budi statusline",
@@ -253,7 +246,7 @@ pub fn cmd_statusline_install() -> Result<()> {
     let raw = serde_json::to_string_pretty(&settings)?;
     fs::write(&settings_path, raw)
         .with_context(|| format!("Failed writing {}", settings_path.display()))?;
-    eprintln!("Installed budi status line in {}", settings_path.display());
+    println!("Installed budi status line in {}", settings_path.display());
     Ok(())
 }
 
@@ -280,7 +273,9 @@ pub fn remove_legacy_hooks() {
     }
 
     if let Ok(out) = serde_json::to_string_pretty(&settings) {
-        let _ = fs::write(&settings_path, out);
+        if fs::write(&settings_path, &out).is_ok() {
+            eprintln!("  Cleaned up legacy budi hooks from {}", settings_path.display());
+        }
     }
 }
 
@@ -357,7 +352,7 @@ mod tests {
 
     #[test]
     fn fmt_cost_formats_correctly() {
-        assert_eq!(fmt_cost(0.0), "$0");
+        assert_eq!(fmt_cost(0.0), "$0.00");
         assert_eq!(fmt_cost(0.42), "$0.42");
         assert_eq!(fmt_cost(12.50), "$12.50");
         assert_eq!(fmt_cost(123.0), "$123");
@@ -413,7 +408,7 @@ mod tests {
         let vals = build_slot_values(&data);
         assert_eq!(vals.get("today").unwrap(), "$1.23");
         assert_eq!(vals.get("week").unwrap(), "$5.00");
-        assert_eq!(vals.get("month").unwrap(), "$0");
+        assert_eq!(vals.get("month").unwrap(), "$0.00");
         assert_eq!(vals.get("branch").unwrap(), "$12.50");
         assert_eq!(vals.get("provider").unwrap(), "claude_code");
         assert!(!vals.contains_key("session")); // not in response

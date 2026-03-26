@@ -25,6 +25,12 @@ impl Pipeline {
         tags_config: Option<crate::config::TagsConfig>,
         session_cache: std::collections::HashMap<String, crate::hooks::SessionMeta>,
     ) -> Self {
+        // Enricher order is critical — do not reorder without understanding dependencies:
+        //   1. HookEnricher  — populates session-level metadata (composer_mode, etc.)
+        //   2. IdentityEnricher — populates user/machine tags
+        //   3. GitEnricher   — sets repo_id for glob_match (MUST run before TagEnricher)
+        //   4. CostEnricher  — calculates cost_cents and cost_confidence
+        //   5. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
         let enrichers: Vec<Box<dyn Enricher>> = vec![
             Box::new(enrichers::HookEnricher::new(session_cache)),
             Box::new(enrichers::IdentityEnricher::new()),
@@ -66,12 +72,16 @@ impl Pipeline {
                 // If this message has the field, update the running value
                 // If not, inherit from the most recent preceding message
                 if let Some(ref b) = msg.git_branch {
-                    session_branch.insert(sid.clone(), b.clone());
+                    if !b.is_empty() {
+                        session_branch.insert(sid.clone(), b.clone());
+                    }
                 } else if let Some(b) = session_branch.get(sid) {
                     msg.git_branch = Some(b.clone());
                 }
                 if let Some(ref r) = msg.repo_id {
-                    session_repo.insert(sid.clone(), r.clone());
+                    if !r.is_empty() {
+                        session_repo.insert(sid.clone(), r.clone());
+                    }
                 } else if let Some(r) = session_repo.get(sid) {
                     msg.repo_id = Some(r.clone());
                 }
@@ -317,8 +327,6 @@ mod tests {
             repo_id: None,
             provider: "claude_code".to_string(),
             cost_cents: None,
-            context_tokens_used: None,
-            context_token_limit: None,
             session_title: None,
             parent_uuid: None,
             user_name: None,

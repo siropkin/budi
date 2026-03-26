@@ -1,8 +1,3 @@
-const providerColors = {
-  claude_code: '#f0883e',
-  cursor: '#58a6ff',
-};
-
 function agentBarData() {
   return registeredProviders.map(rp => {
     const stats = providersData.find(p => p.provider === rp.name);
@@ -20,7 +15,7 @@ function agentBarData() {
 /* ===== Render: Summary Cards ===== */
 function renderCards(s, cost) {
   const totalTokens = s.total_input_tokens + s.total_output_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
-  const totalIn = s.total_input_tokens + s.total_cache_creation_tokens + s.total_cache_read_tokens;
+  const totalIn = s.total_input_tokens;
   return `
   <div class="cards">
     <div class="card">

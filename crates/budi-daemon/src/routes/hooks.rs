@@ -155,15 +155,15 @@ pub async fn hooks_ingest(
 // Session & tool analytics endpoints
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Deserialize)]
-pub struct SessionsParams {
+#[derive(Debug, serde::Deserialize)]
+pub struct ListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
 }
 
 pub async fn analytics_sessions(
-    Query(params): Query<SessionsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::SessionStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = budi_core::analytics::db_path()?;
@@ -172,7 +172,7 @@ pub async fn analytics_sessions(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
-            params.limit.unwrap_or(100),
+            params.limit.unwrap_or(50),
         )
     })
     .await
@@ -182,15 +182,8 @@ pub async fn analytics_sessions(
     Ok(Json(result))
 }
 
-#[derive(serde::Deserialize)]
-pub struct ToolsParams {
-    pub since: Option<String>,
-    pub until: Option<String>,
-    pub limit: Option<usize>,
-}
-
 pub async fn analytics_tools(
-    Query(params): Query<ToolsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = budi_core::analytics::db_path()?;
@@ -209,15 +202,8 @@ pub async fn analytics_tools(
     Ok(Json(result))
 }
 
-#[derive(serde::Deserialize)]
-pub struct McpParams {
-    pub since: Option<String>,
-    pub until: Option<String>,
-    pub limit: Option<usize>,
-}
-
 pub async fn analytics_mcp(
-    Query(params): Query<McpParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = budi_core::analytics::db_path()?;

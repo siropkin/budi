@@ -5,12 +5,11 @@
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use serde_json::Value;
 
 /// Top-level entry from a Claude Code JSONL transcript line.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-pub enum TranscriptEntry {
+pub(crate) enum TranscriptEntry {
     #[serde(rename = "user")]
     User(UserEntry),
     #[serde(rename = "assistant")]
@@ -22,34 +21,18 @@ pub enum TranscriptEntry {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UserEntry {
+pub(crate) struct UserEntry {
     pub uuid: String,
     pub session_id: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub cwd: Option<String>,
-    pub message: UserMessage,
-    pub version: Option<String>,
     pub git_branch: Option<String>,
     pub parent_uuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UserMessage {
-    pub content: UserContent,
-}
-
-/// User content can be a plain string or structured array.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum UserContent {
-    Text(String),
-    Structured(Vec<Value>),
-}
-
-
-#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AssistantEntry {
+pub(crate) struct AssistantEntry {
     pub uuid: String,
     pub session_id: Option<String>,
     pub timestamp: DateTime<Utc>,
@@ -59,41 +42,17 @@ pub struct AssistantEntry {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AssistantMessage {
+pub(crate) struct AssistantMessage {
     pub model: Option<String>,
-    pub content: Option<Vec<ContentBlock>>,
     pub usage: Option<TokenUsage>,
-    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-pub enum ContentBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "thinking")]
-    Thinking {},
-    #[serde(rename = "tool_use")]
-    ToolUse { name: String },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TokenUsage {
+pub(crate) struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
-}
-
-impl TokenUsage {
-    /// Total billable input tokens (direct + cache creation + cache read).
-    pub fn total_input(&self) -> u64 {
-        self.input_tokens.unwrap_or(0)
-            + self.cache_creation_input_tokens.unwrap_or(0)
-            + self.cache_read_input_tokens.unwrap_or(0)
-    }
 }
 
 /// Parsed analytics-relevant data from a single assistant message.
@@ -116,10 +75,6 @@ pub struct ParsedMessage {
     pub provider: String,
     /// Provider-reported cost in cents (ground truth from Cursor, None for Claude Code).
     pub cost_cents: Option<f64>,
-    /// Total context tokens used in this request.
-    pub context_tokens_used: Option<u64>,
-    /// Context window token limit for this request.
-    pub context_token_limit: Option<u64>,
     /// Human-readable session title (used by enrichers to produce tags, not stored as column).
     pub session_title: Option<String>,
     /// Parent message UUID (for subagent messages).
@@ -156,8 +111,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             repo_id: None,
             provider: "claude_code".to_string(),
             cost_cents: None,
-            context_tokens_used: None,
-            context_token_limit: None,
             session_title: None,
             parent_uuid: u.parent_uuid,
             user_name: None,
@@ -166,8 +119,6 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
-            // Context tokens used = sum of all input-side tokens
-            let context_tokens_used = usage.map(|u| u.total_input());
             Some(ParsedMessage {
                 uuid: a.uuid,
                 session_id: a.session_id,
@@ -185,13 +136,11 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 repo_id: None,
                 provider: "claude_code".to_string(),
                 cost_cents: None, // Calculated during ingest from tokens × pricing
-                context_tokens_used,
-                context_token_limit: None,
                 session_title: None,
                 parent_uuid: a.parent_uuid,
                 user_name: None,
                 machine_name: None,
-                cost_confidence: "exact".to_string(),
+                cost_confidence: "estimated".to_string(),
             })
         }
         TranscriptEntry::Other => None,
@@ -207,7 +156,6 @@ pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessag
     let remaining = &content[start_offset..];
     let mut pos = 0;
     for line in remaining.lines() {
-        let line_start = pos;
         pos += line.len();
         // Only count the newline if it actually exists (handles files without trailing newline)
         if pos < remaining.len() && remaining.as_bytes()[pos] == b'\n' {
@@ -216,7 +164,6 @@ pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessag
         if let Some(msg) = parse_line(line) {
             messages.push(msg);
         }
-        let _ = line_start; // suppress unused warning
         offset = start_offset + pos;
     }
 

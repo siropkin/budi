@@ -41,10 +41,6 @@ impl Provider for ClaudeCodeProvider {
         Ok(jsonl::parse_transcript(content, offset))
     }
 
-    fn pricing_for_model(&self, model: &str) -> ModelPricing {
-        claude_pricing_for_model(model)
-    }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +53,7 @@ fn claude_home() -> Result<PathBuf> {
 }
 
 /// Discover all Claude Code JSONL transcript files under `~/.claude/projects/`.
-pub fn discover_jsonl_files() -> Result<Vec<PathBuf>> {
+pub(crate) fn discover_jsonl_files() -> Result<Vec<PathBuf>> {
     let claude_dir = claude_home()?.join("projects");
     let mut files = Vec::new();
     collect_jsonl_recursive(&claude_dir, &mut files, 0);
