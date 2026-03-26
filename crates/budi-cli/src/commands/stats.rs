@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use budi_core::analytics;
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate, TimeZone};
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
@@ -16,23 +16,34 @@ pub fn period_label(period: StatsPeriod) -> &'static str {
     }
 }
 
+/// Convert a local NaiveDate at midnight to a UTC RFC3339 string.
+/// This matches the statusline endpoint's date handling so that
+/// CLI and dashboard/statusline produce identical time ranges.
+fn local_midnight_to_utc(date: NaiveDate) -> String {
+    let local_dt = Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+        .latest()
+        .unwrap_or_else(|| chrono::Utc::now().with_timezone(&Local));
+    local_dt.with_timezone(&chrono::Utc).to_rfc3339()
+}
+
 pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
     let today = Local::now().date_naive();
     match period {
         StatsPeriod::Today => {
-            let since = today.format("%Y-%m-%dT00:00:00").to_string();
+            let since = local_midnight_to_utc(today);
             (Some(since), None)
         }
         StatsPeriod::Week => {
             let weekday = today.weekday().num_days_from_monday();
             let monday = today - chrono::Duration::days(weekday as i64);
-            let since = monday.format("%Y-%m-%dT00:00:00").to_string();
+            let since = local_midnight_to_utc(monday);
             (Some(since), None)
         }
         StatsPeriod::Month => {
             let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
                 .expect("valid first-of-month date");
-            let since = first.format("%Y-%m-%dT00:00:00").to_string();
+            let since = local_midnight_to_utc(first);
             (Some(since), None)
         }
         StatsPeriod::All => (None, None),
