@@ -7,8 +7,9 @@ use crate::client::DaemonClient;
 
 pub fn init_auto_sync() -> Result<(usize, usize)> {
     let client = DaemonClient::connect()?;
-    // Full history sync on first install so dashboard has all data
-    let result = client.history()?;
+    let start = std::time::Instant::now();
+    let result = client.sync(true)?;
+    let elapsed = start.elapsed().as_secs_f64();
     let files = result
         .get("files_synced")
         .and_then(|v| v.as_u64())
@@ -17,6 +18,12 @@ pub fn init_auto_sync() -> Result<(usize, usize)> {
         .get("messages_ingested")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
+    let bold = super::ansi("\x1b[1m");
+    let reset = super::ansi("\x1b[0m");
+    println!(
+        "  Sync: done in {bold}{:.1}s{reset} ({} messages from {} files)",
+        elapsed, msgs, files
+    );
     Ok((files, msgs))
 }
 

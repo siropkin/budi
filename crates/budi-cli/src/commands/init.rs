@@ -52,13 +52,16 @@ pub fn cmd_init(
     }
 
     if !no_daemon {
+        println!("  Daemon: starting...");
         ensure_daemon_running(repo_root.as_deref(), &config)?;
+        println!("  Daemon: running on {}", config.daemon_base_url());
     }
 
     // Auto-sync existing transcripts on first run
     let sync_result = if no_sync {
         Ok((0, 0))
     } else {
+        println!("  Sync: scanning transcripts (this may take a moment)...");
         super::sync::init_auto_sync()
     };
 
@@ -106,19 +109,9 @@ pub fn cmd_init(
     }
     println!("  Dashboard: {dashboard_url}");
     println!();
-    match sync_result {
-        Ok((files, msgs)) if files > 0 => {
-            println!(
-                "  Synced {bold}{msgs}{reset} messages from {bold}{files}{reset} transcript files."
-            );
-        }
-        Ok(_) => {
-            println!("  No existing transcripts found (data syncs automatically every 30s).");
-        }
-        Err(e) => {
-            tracing::warn!("auto-sync failed: {e}");
-            println!("  Auto-sync skipped (run `budi sync` manually).");
-        }
+    if let Err(e) = sync_result {
+        tracing::warn!("auto-sync failed: {e}");
+        println!("  Sync: skipped (run `budi sync` manually).");
     }
     println!();
     println!("  {bold}Next steps:{reset}");
