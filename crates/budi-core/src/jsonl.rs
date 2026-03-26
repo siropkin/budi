@@ -228,4 +228,37 @@ mod tests {
         let (msgs2, _) = parse_transcript(content, offset);
         assert!(msgs2.is_empty());
     }
+
+    /// Verify that extra usage fields (service_tier, cache_creation sub-object)
+    /// don't break parsing. Real JSONL includes these fields.
+    #[test]
+    fn parse_assistant_with_extended_usage_fields() {
+        let line = r#"{"parentUuid":"abc","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":10,"cache_creation_input_tokens":14873,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":14873,"ephemeral_1h_input_tokens":0},"service_tier":"standard","inference_geo":"global"}},"uuid":"ext-1","timestamp":"2026-03-25T00:00:00.000Z","sessionId":"s1","cwd":"/tmp"}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.input_tokens, 2);
+        assert_eq!(msg.output_tokens, 10);
+        assert_eq!(msg.cache_creation_tokens, 14873);
+        assert_eq!(msg.cache_read_tokens, 0);
+    }
+
+    /// Verify user messages have zero tokens (no cost).
+    #[test]
+    fn user_messages_have_zero_tokens() {
+        let line = r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"test"},"uuid":"u1","timestamp":"2026-03-25T00:00:00.000Z","sessionId":"s1"}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.input_tokens, 0);
+        assert_eq!(msg.output_tokens, 0);
+        assert_eq!(msg.cache_creation_tokens, 0);
+        assert_eq!(msg.cache_read_tokens, 0);
+        assert!(msg.cost_cents.is_none());
+    }
+
+    /// Verify assistant message without usage (edge case) gets zero tokens.
+    #[test]
+    fn assistant_without_usage_gets_zero_tokens() {
+        let line = r#"{"parentUuid":"abc","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"},"uuid":"no-usage","timestamp":"2026-03-25T00:00:00.000Z","sessionId":"s1"}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.input_tokens, 0);
+        assert_eq!(msg.output_tokens, 0);
+    }
 }

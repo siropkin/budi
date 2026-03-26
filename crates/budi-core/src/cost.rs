@@ -222,6 +222,61 @@ mod tests {
         assert_eq!(cost.total_cost, 3.0);
     }
 
+    /// Verify that mixed-model cost calculation applies correct per-model pricing.
+    #[test]
+    fn cost_mixed_models() {
+        let conn = setup_db();
+        // Opus 4.6: 100K input * $5/M = $0.50 = 50 cents
+        conn.execute(
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+             VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 100000, 0, 50.0)",
+            [],
+        ).unwrap();
+        // Haiku 4.5: 100K input * $1/M = $0.10 = 10 cents
+        conn.execute(
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+             VALUES ('m2', 'assistant', '2026-03-21T00:00:00Z', 'claude-haiku-4-5-20251001', 100000, 0, 10.0)",
+            [],
+        ).unwrap();
+        // Sonnet 4.6: 100K input * $3/M = $0.30 = 30 cents
+        conn.execute(
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+             VALUES ('m3', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 100000, 0, 30.0)",
+            [],
+        ).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        // Total: $0.50 + $0.10 + $0.30 = $0.90
+        assert_eq!(cost.total_cost, 0.90);
+        // Input breakdown: $0.50 + $0.10 + $0.30 = $0.90
+        assert_eq!(cost.input_cost, 0.90);
+    }
+
+    /// Verify that token fields don't overlap (Anthropic API: input_tokens is
+    /// non-cached input, separate from cache_creation and cache_read tokens).
+    #[test]
+    fn cost_token_fields_no_double_counting() {
+        let conn = setup_db();
+        // Simulate real data: input=3 (non-cached), cache_create=14873, cache_read=0
+        // Cost should be: 3*$5/M + 0*$25/M + 14873*$6.25/M + 0*$0.50/M
+        let input_cost = 3.0 * 5.0 / 1_000_000.0;
+        let cache_write_cost = 14873.0 * 6.25 / 1_000_000.0;
+        let total_dollars = input_cost + cache_write_cost;
+        let total_cents = total_dollars * 100.0;
+        conn.execute(
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 14873, 0, ?1)",
+            params![total_cents],
+        ).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        // input_tokens (3) charged at input rate, NOT at cache_write rate
+        // cache_creation_tokens (14873) charged at cache_write rate
+        // These must not overlap
+        // input_cost: 3 * $5/M = $0.000015 → rounds to $0.00
+        assert!(cost.input_cost < 0.01, "input cost should be tiny for 3 tokens, got {}", cost.input_cost);
+        // cache_write_cost: 14873 * $6.25/M = $0.0929 → rounds to $0.09
+        assert!(cost.cache_write_cost >= 0.09, "cache write should be ~$0.09, got {}", cost.cache_write_cost);
+    }
+
     #[test]
     fn cost_sub_cent_messages_not_lost() {
         let conn = setup_db();
