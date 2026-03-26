@@ -84,6 +84,9 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Update to a specific version (e.g. 7.1.0 or v7.1.0)
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Remove budi hooks, status line, and data (keeps binaries)
     Uninstall {
@@ -159,6 +162,8 @@ fn main() -> Result<()> {
         } => {
             let had_warnings =
                 commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
+            // Exit 2 = partial success (init completed but hooks had warnings).
+            // Exit 0 = full success, exit 1 = hard error (from anyhow bail).
             if had_warnings {
                 std::process::exit(2);
             }
@@ -194,11 +199,11 @@ fn main() -> Result<()> {
                 commands::sync::cmd_sync()
             }
         }
+        Commands::Update { yes, version } => commands::update::cmd_update(yes, version),
         Commands::Uninstall { keep_data, yes } => {
             commands::uninstall::cmd_uninstall(keep_data, yes)
         }
         Commands::Open => commands::open::cmd_open(),
-        Commands::Update { yes } => commands::update::cmd_update(yes),
         Commands::Migrate => {
             let c = client::DaemonClient::connect()?;
             let result = c.migrate()?;

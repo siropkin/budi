@@ -55,6 +55,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: aarch64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
             asset: aarch64-apple-darwin
@@ -190,8 +193,9 @@ jobs:
           AARCH64_DARWIN=$(awk '/aarch64-apple-darwin\.tar\.gz$/ {print $1}' sums)
           X86_64_DARWIN=$(awk '/x86_64-apple-darwin\.tar\.gz$/ {print $1}' sums)
           X86_64_LINUX=$(awk '/x86_64-unknown-linux-gnu\.tar\.gz$/ {print $1}' sums)
+          AARCH64_LINUX=$(awk '/aarch64-unknown-linux-gnu\.tar\.gz$/ {print $1}' sums)
 
-          if [[ -z "$AARCH64_DARWIN" || -z "$X86_64_DARWIN" || -z "$X86_64_LINUX" ]]; then
+          if [[ -z "$AARCH64_DARWIN" || -z "$X86_64_DARWIN" || -z "$X86_64_LINUX" || -z "$AARCH64_LINUX" ]]; then
             echo "::error::Missing SHA256 checksums in release"
             cat sums
             exit 1
@@ -203,6 +207,7 @@ jobs:
             -e "s/{{SHA256_AARCH64_DARWIN}}/${AARCH64_DARWIN}/g" \
             -e "s/{{SHA256_X86_64_DARWIN}}/${X86_64_DARWIN}/g" \
             -e "s/{{SHA256_X86_64_LINUX}}/${X86_64_LINUX}/g" \
+            -e "s/{{SHA256_AARCH64_LINUX}}/${AARCH64_LINUX}/g" \
             homebrew/budi.rb > homebrew-tap/Formula/budi.rb
 
           echo "Formula updated to v${VER}"

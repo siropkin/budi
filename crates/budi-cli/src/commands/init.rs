@@ -42,6 +42,7 @@ pub fn cmd_init(
     };
 
     warn_duplicate_binaries();
+    check_daemon_binary();
 
     super::statusline::remove_legacy_hooks();
     install_statusline_if_missing();
@@ -438,6 +439,26 @@ fn install_cursor_hooks() -> Result<()> {
         println!("  Hooks: Cursor hooks already installed");
     }
     Ok(())
+}
+
+/// Check that budi-daemon is available on PATH before attempting to start it.
+fn check_daemon_binary() {
+    let found = Command::new("sh")
+        .args(["-c", "command -v budi-daemon"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !found {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        eprintln!(
+            "{yellow}  Warning:{reset} budi-daemon not found on PATH. \
+             The daemon may fail to start."
+        );
+        eprintln!("  Ensure both budi and budi-daemon are installed in the same directory.");
+    }
 }
 
 /// Warn if there are multiple `budi` binaries in PATH (e.g. ~/.local/bin shadows Homebrew).

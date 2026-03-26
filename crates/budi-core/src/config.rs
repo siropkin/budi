@@ -228,6 +228,11 @@ pub fn budi_home_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(BUDI_HOME_DEFAULT_REL))
 }
 
+/// Returns `~/.config/budi/` — the config directory for statusline.toml, tags.toml, etc.
+pub fn budi_config_dir() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config/budi"))
+}
+
 pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
     let repos_root = repos_root_dir()?;
     let repo_id = repo_storage_id(repo_root);

@@ -41,6 +41,14 @@ main() {
   command -v curl >/dev/null 2>&1 || fail "curl is required"
   command -v tar >/dev/null 2>&1 || fail "tar is required"
 
+  # Warn if budi is already installed via Homebrew
+  if command -v brew >/dev/null 2>&1 && brew list budi >/dev/null 2>&1; then
+    log "WARNING: budi is already installed via Homebrew."
+    log "This will install a second copy in $BIN_DIR."
+    log "Consider using 'brew upgrade budi' instead."
+    log ""
+  fi
+
   local target tag asset_url
   target="$(detect_target)"
 

@@ -21,8 +21,13 @@ class Budi < Formula
   end
 
   on_linux do
-    url "https://github.com/siropkin/budi/releases/download/v{{VERSION}}/budi-v{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "{{SHA256_X86_64_LINUX}}"
+    if Hardware::CPU.arm?
+      url "https://github.com/siropkin/budi/releases/download/v{{VERSION}}/budi-v{{VERSION}}-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "{{SHA256_AARCH64_LINUX}}"
+    else
+      url "https://github.com/siropkin/budi/releases/download/v{{VERSION}}/budi-v{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "{{SHA256_X86_64_LINUX}}"
+    end
   end
 
   def install
@@ -34,6 +39,7 @@ class Budi < Formula
     <<~EOS
       To get started, run:
         budi init
+        budi doctor     # verify everything is working
 
       This starts the daemon, installs hooks, and syncs your data.
       Restart Claude Code and Cursor to activate hooks and the status line.

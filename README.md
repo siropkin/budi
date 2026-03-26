@@ -58,7 +58,7 @@ irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standal
 budi init
 ```
 
-**From source:** requires [Rust toolchain](https://rustup.rs/)
+**From source:** requires [Rust toolchain](https://rustup.rs/) — clones the repo and builds release binaries
 
 ```bash
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
@@ -70,6 +70,8 @@ budi init
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
 `budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after running `budi init` to activate hooks and the status line.
+
+Run `budi doctor` to verify everything is set up correctly.
 
 ## Status line
 
@@ -112,8 +114,11 @@ budi init        # restart daemon + re-sync
 **Shell script / Windows / from source:**
 
 ```bash
-budi update      # downloads latest release and restarts daemon
+budi update              # downloads latest release and restarts daemon
+budi update --version 7.1.0  # update to a specific version
 ```
+
+**Restart Claude Code and Cursor** after updating to pick up any changes.
 
 ## CLI
 
@@ -130,8 +135,9 @@ budi stats --tag ticket_id    # cost per ticket
 budi stats --tag ticket_prefix # cost per team prefix
 budi sync                     # sync recent data (last 7 days)
 budi sync --all               # load full history (all time)
-budi update                   # check for updates
-budi uninstall                # remove hooks, status line, and data
+budi update                   # check for updates (detects Homebrew)
+budi update --version 7.1.0  # update to a specific version
+budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
 ```
 
@@ -280,11 +286,25 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 ## Uninstall
 
 ```bash
-budi uninstall                            # stops daemon, removes hooks, status line (prompts before deleting data)
-brew uninstall budi                       # remove binaries (or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon)
+budi uninstall          # stops daemon, removes hooks, status line, config, and data
 ```
 
-Options: `--keep-data` to preserve the analytics database, `--yes` to skip confirmation.
+Then remove the binaries:
+
+```bash
+# Homebrew:
+brew uninstall budi
+
+# Shell script (macOS / Linux):
+rm ~/.local/bin/budi ~/.local/bin/budi-daemon
+
+# Windows (PowerShell):
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\budi"
+```
+
+Options: `--keep-data` to preserve the analytics database and config, `--yes` to skip confirmation.
+
+**Exit codes:** `budi init` returns 0 on success, 2 on partial success (init completed but hooks had warnings), 1 on hard error.
 
 ## License
 

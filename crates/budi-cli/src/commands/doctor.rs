@@ -60,6 +60,41 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         );
     }
 
+    // Version consistency: CLI and daemon should be the same version
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let daemon_version = std::process::Command::new("budi-daemon")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .strip_prefix("budi-daemon ")
+                .unwrap_or(String::from_utf8_lossy(&o.stdout).trim())
+                .to_string()
+        });
+    match daemon_version {
+        Some(ref dv) if dv == cli_version => {
+            println!("  {green}\u{2713}{reset} version: v{cli_version} (CLI and daemon match)");
+        }
+        Some(ref dv) => {
+            let yellow = super::ansi("\x1b[33m");
+            println!(
+                "  {yellow}!{reset} version: CLI v{cli_version} != daemon v{dv}"
+            );
+            issues.push(format!(
+                "Version mismatch: CLI v{cli_version} but daemon v{dv}. Run `budi update` or reinstall."
+            ));
+        }
+        None if daemon_bin_found => {
+            println!(
+                "  {dim}-{reset} version: v{cli_version} (could not read daemon version)"
+            );
+        }
+        None => {} // Already reported as missing binary
+    }
+
     let health = daemon_health(&config);
     doctor_check("daemon", health, None);
     if !health {

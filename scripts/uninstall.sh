@@ -55,6 +55,12 @@ parse_args() {
 main() {
   parse_args "$@"
 
+  # Run `budi uninstall --yes` first if available — removes hooks, statusline, config, and data.
+  if command -v budi >/dev/null 2>&1; then
+    log "Running budi uninstall to remove hooks, status line, and data..."
+    budi uninstall --yes 2>/dev/null || true
+  fi
+
   if [[ "$KILL_DAEMONS" -eq 1 ]] && command -v pgrep >/dev/null 2>&1; then
     local pids
     pids="$(pgrep -f 'budi-daemon serve' || true)"

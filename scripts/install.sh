@@ -25,7 +25,7 @@ Options:
   --prefix <dir>          Install prefix (default: ~/.local)
   --bin-dir <dir>         Binary install directory (default: <prefix>/bin)
   --profile <name>        Cargo profile: release or dev (default: release)
-  --from-release          Download prebuilt binaries from GitHub release assets
+  --from-release          Download prebuilt binaries from GitHub release assets (requires gh CLI)
   --repo <owner/repo>     Release repository (default: siropkin/budi)
   --version <tag>         Release tag to install (default: latest release)
   --cargo-install         Install via cargo install (into cargo bin dir)

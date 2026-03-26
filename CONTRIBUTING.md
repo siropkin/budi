@@ -26,8 +26,8 @@ Or manually:
 ```bash
 cargo build --release
 cp target/release/budi target/release/budi-daemon ~/.local/bin/
-pkill -9 -f budi-daemon
-budi sync               # restarts daemon + syncs data
+pkill -f "budi-daemon serve"   # graceful stop (avoid -9 unless stuck)
+budi init               # restarts daemon + re-syncs data
 ```
 
 ## Validate cost accuracy

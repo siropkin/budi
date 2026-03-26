@@ -51,19 +51,14 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
         // 5. Remove data
         if !keep_data {
             if !yes {
-                eprint!("Remove all analytics data? This cannot be undone. [y/N] ");
+                eprint!("Remove all analytics data and config? This cannot be undone. [y/N] ");
                 let mut answer = String::new();
                 std::io::stdin()
                     .read_line(&mut answer)
                     .context("Failed to read stdin")?;
                 if !matches!(answer.trim(), "y" | "Y") {
                     println!("Keeping data.");
-                    println!();
-                    println!("{green}✓{reset} budi uninstalled (data preserved).");
-                    println!();
-                    println!("To remove the binaries:");
-                    println!("  brew uninstall budi");
-                    println!("  # or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon");
+                    print_binary_removal_hint();
                     return Ok(());
                 }
             }
@@ -73,17 +68,20 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
                 Ok(false) => println!("none found"),
                 Err(e) => println!("{yellow}warning: {e}{reset}"),
             }
+            print!("Removing config... ");
+            match remove_config() {
+                Ok(true) => println!("{green}✓{reset} removed"),
+                Ok(false) => println!("none found"),
+                Err(e) => println!("{yellow}warning: {e}{reset}"),
+            }
         } else {
-            println!("Keeping data (--keep-data)");
+            println!("Keeping data and config (--keep-data)");
         }
     }
 
     println!();
     println!("{green}✓{reset} budi uninstalled.");
-    println!();
-    println!("To remove the binaries:");
-    println!("  brew uninstall budi");
-    println!("  # or: rm ~/.local/bin/budi ~/.local/bin/budi-daemon");
+    print_binary_removal_hint();
 
     Ok(())
 }
@@ -219,6 +217,32 @@ fn remove_data() -> Result<bool> {
     }
     fs::remove_dir_all(&data_dir)?;
     Ok(true)
+}
+
+fn remove_config() -> Result<bool> {
+    let config_dir = budi_core::config::budi_config_dir()?;
+    if !config_dir.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&config_dir)?;
+    Ok(true)
+}
+
+fn print_binary_removal_hint() {
+    println!();
+    println!("To remove the binaries:");
+    if cfg!(target_os = "windows") {
+        let bin_dir = std::env::var("LOCALAPPDATA")
+            .map(|d| format!("{}\\budi\\bin", d))
+            .unwrap_or_else(|_| "%LOCALAPPDATA%\\budi\\bin".to_string());
+        println!("  # If installed via PowerShell:");
+        println!("  Remove-Item -Recurse -Force \"{}\"", bin_dir);
+    } else {
+        println!("  # If installed via Homebrew:");
+        println!("  brew uninstall budi");
+        println!("  # If installed via shell script:");
+        println!("  rm ~/.local/bin/budi ~/.local/bin/budi-daemon");
+    }
 }
 
 /// Check if a Claude Code hook entry contains a budi hook command (any variant).
