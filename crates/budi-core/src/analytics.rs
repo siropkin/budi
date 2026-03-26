@@ -476,8 +476,8 @@ pub fn usage_summary(
     // Single scan: all aggregates in one query
     let sql = format!(
         "SELECT COUNT(*),
-                SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END),
+                COALESCE(SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
@@ -1517,8 +1517,8 @@ pub fn usage_summary_filtered(
     // Single scan: all aggregates in one query
     let sql = format!(
         "SELECT COUNT(*),
-                SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END),
+                COALESCE(SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
