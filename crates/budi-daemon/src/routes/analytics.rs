@@ -77,7 +77,7 @@ pub async fn analytics_messages(
                 search: params.search.as_deref(),
                 sort_by: params.sort_by.as_deref(),
                 sort_asc: params.sort_asc.unwrap_or(false),
-                limit: params.limit.unwrap_or(50),
+                limit: params.limit.unwrap_or(50).min(1000),
                 offset: params.offset.unwrap_or(0),
             },
         )
