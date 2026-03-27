@@ -1031,13 +1031,22 @@ pub fn tag_stats(
         String::new()
     };
 
-    // Use CTEs with window functions to scan tags+messages only once.
+    // Use CTEs to compute tag-based cost splitting.
+    // value_counts: how many distinct tag values per (key, session) — for even cost splitting.
+    // tag_sessions: distinct (key, value, session_id) triples joined with value_count.
     let sql = format!(
-        "WITH tag_sessions AS (
-             SELECT DISTINCT t.key, t.value, tm.session_id,
-                    COUNT(DISTINCT t.value) OVER (PARTITION BY t.key, tm.session_id) as value_count
+        "WITH value_counts AS (
+             SELECT t.key, tm.session_id, COUNT(DISTINCT t.value) as value_count
              FROM tags t
              JOIN messages tm ON t.message_uuid = tm.uuid
+             {tag_where}
+             GROUP BY t.key, tm.session_id
+         ),
+         tag_sessions AS (
+             SELECT DISTINCT t.key, t.value, tm.session_id, vc.value_count
+             FROM tags t
+             JOIN messages tm ON t.message_uuid = tm.uuid
+             JOIN value_counts vc ON vc.key = t.key AND vc.session_id = tm.session_id
              {tag_where}
          ),
          session_costs AS (
