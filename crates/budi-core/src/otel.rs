@@ -291,17 +291,14 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
-            // Pick the closest non-otel_exact row
+            // Pick the closest non-otel_exact row by actual timestamp distance
+            let target_secs = event.timestamp.timestamp();
             rows.into_iter()
                 .filter(|(_, conf, _)| conf != "otel_exact")
                 .min_by_key(|(_, _, row_ts)| {
-                    // Approximate distance by string comparison (RFC3339 is sortable)
-                    let diff = row_ts.as_str().cmp(ts.as_str());
-                    match diff {
-                        std::cmp::Ordering::Equal => 0i64,
-                        std::cmp::Ordering::Less => 1,
-                        std::cmp::Ordering::Greater => 1,
-                    }
+                    DateTime::parse_from_rfc3339(row_ts)
+                        .map(|dt| (dt.timestamp() - target_secs).unsigned_abs())
+                        .unwrap_or(u64::MAX)
                 })
                 .map(|(uuid, _, _)| uuid)
         };

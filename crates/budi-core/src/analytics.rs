@@ -991,6 +991,28 @@ pub fn tag_stats(
         } else {
             format!("AND {}", untagged_date_parts.join(" AND "))
         };
+        // Build matching date filter for the tagged sessions subquery
+        // so we only consider tags within the same date range
+        let mut tagged_date_parts = Vec::new();
+        {
+            let mut tidx = 0usize;
+            if tag_key.is_some() {
+                tidx += 1;
+            }
+            if since.is_some() {
+                tidx += 1;
+                tagged_date_parts.push(format!("tm2.timestamp >= ?{tidx}"));
+            }
+            if until.is_some() {
+                tidx += 1;
+                tagged_date_parts.push(format!("tm2.timestamp < ?{tidx}"));
+            }
+        }
+        let tagged_date_filter = if tagged_date_parts.is_empty() {
+            String::new()
+        } else {
+            format!("AND {}", tagged_date_parts.join(" AND "))
+        };
         format!(
             "UNION ALL
              SELECT '{k}' as key, '(untagged)' as value, 0 as session_count,
@@ -1000,7 +1022,7 @@ pub fn tag_stats(
                  SELECT DISTINCT tm2.session_id
                  FROM tags t2
                  JOIN messages tm2 ON t2.message_uuid = tm2.uuid
-                 WHERE t2.key = ?1
+                 WHERE t2.key = ?1 {tagged_date_filter}
              ) tagged ON tagged.session_id = m.session_id
              WHERE m.role = 'assistant' {untagged_date_filter}
                AND tagged.session_id IS NULL"
