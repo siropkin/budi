@@ -482,15 +482,15 @@ pub struct MessageListParams<'a> {
 
 /// List messages with pagination, search, and sorting.
 pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<PaginatedMessages> {
-    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut conditions = vec!["messages.role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = p.since {
         param_values.push(s.to_string());
-        conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        conditions.push(format!("messages.timestamp >= ?{}", param_values.len()));
     }
     if let Some(u) = p.until {
         param_values.push(u.to_string());
-        conditions.push(format!("timestamp < ?{}", param_values.len()));
+        conditions.push(format!("messages.timestamp < ?{}", param_values.len()));
     }
     if let Some(q) = p.search
         && !q.is_empty()
@@ -498,7 +498,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         param_values.push(format!("%{q}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(model LIKE ?{idx} OR repo_id LIKE ?{idx} OR cwd LIKE ?{idx} OR provider LIKE ?{idx})"
+            "(messages.model LIKE ?{idx} OR messages.repo_id LIKE ?{idx} OR messages.cwd LIKE ?{idx} OR messages.provider LIKE ?{idx})"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -508,11 +508,11 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         .collect();
 
     let order_col = match p.sort_by.unwrap_or("timestamp") {
-        "model" => "model",
-        "provider" => "provider",
-        "tokens" => "(input_tokens + output_tokens)",
-        "cost" => "COALESCE(cost_cents, 0.0)",
-        _ => "timestamp",
+        "model" => "messages.model",
+        "provider" => "messages.provider",
+        "tokens" => "(messages.input_tokens + messages.output_tokens)",
+        "cost" => "COALESCE(messages.cost_cents, 0.0)",
+        _ => "messages.timestamp",
     };
     let order_dir = if p.sort_asc { "ASC" } else { "DESC" };
 
