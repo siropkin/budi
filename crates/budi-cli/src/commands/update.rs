@@ -180,8 +180,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         }
     }
 
-    // Restart daemon with new version
-    println!("Restarting daemon...");
+    // Ensure OTEL env vars are configured (for users upgrading from pre-OTEL versions)
     {
         let repo_root = std::env::current_dir()
             .ok()
@@ -190,6 +189,10 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
             Some(root) => config::load_or_default(root).unwrap_or_default(),
             None => config::BudiConfig::default(),
         };
+        crate::commands::init::install_otel_env_vars(&config);
+
+        // Restart daemon with new version
+        println!("Restarting daemon...");
         let _ = ensure_daemon_running(repo_root.as_deref(), &config);
     }
 

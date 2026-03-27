@@ -357,6 +357,20 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         );
     }
 
+    // Check OTEL configuration in Claude Code settings
+    {
+        let otel_ok = check_otel_config(&claude_settings, &config);
+        if otel_ok {
+            println!("  {green}\u{2713}{reset} OTEL: configured for exact cost tracking");
+        } else {
+            let yellow = super::ansi("\x1b[33m");
+            println!(
+                "  {yellow}!{reset} OTEL: not configured. Run `budi init` to enable exact cost tracking"
+            );
+            // Not a hard issue — JSONL still works, just estimated cost
+        }
+    }
+
     // Check transcript directories exist
     let cc_transcripts = format!("{}/.claude/transcripts", home);
     let cursor_transcripts = format!("{}/.cursor/projects", home);
@@ -526,6 +540,37 @@ fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
     } else {
         println!("  {c}{mark}{reset} {label}");
     }
+}
+
+/// Check if OTEL env vars are correctly configured in Claude Code settings.
+fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
+    let Ok(raw) = std::fs::read_to_string(settings_path) else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(env) = settings.get("env").and_then(|e| e.as_object()) else {
+        return false;
+    };
+
+    let expected_endpoint = format!("http://127.0.0.1:{}", config.daemon_port);
+    let checks = [
+        ("CLAUDE_CODE_ENABLE_TELEMETRY", Some("1")),
+        (
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            Some(expected_endpoint.as_str()),
+        ),
+        ("OTEL_EXPORTER_OTLP_PROTOCOL", Some("http/json")),
+        ("OTEL_METRICS_EXPORTER", Some("otlp")),
+        ("OTEL_LOGS_EXPORTER", Some("otlp")),
+    ];
+
+    checks.iter().all(|(key, expected_val)| {
+        env.get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| expected_val.is_none_or(|exp| v == exp))
+    })
 }
 
 /// Check available disk space in MB. Uses `df -k` on Unix, skips on Windows.

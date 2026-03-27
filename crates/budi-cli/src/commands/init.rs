@@ -557,7 +557,7 @@ fn warn_duplicate_binaries() {
 /// Install OTEL telemetry env vars into ~/.claude/settings.json.
 /// Merges with existing env — never overwrites user's custom OTEL endpoint
 /// that points to a different host.
-fn install_otel_env_vars(config: &config::BudiConfig) {
+pub fn install_otel_env_vars(config: &config::BudiConfig) {
     let result = (|| -> Result<()> {
         let home = budi_core::config::home_dir()?;
         let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
