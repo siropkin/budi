@@ -1539,7 +1539,7 @@ mod tests {
             user_name: None,
             machine_name: None,
             cost_confidence: "exact".to_string(),
-                request_id: None,
+            request_id: None,
         };
         // CostEnricher is the single source of truth for cost_cents
         CostEnricher.enrich(&mut msg);
