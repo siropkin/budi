@@ -315,6 +315,23 @@ fn remove_otel_env_vars(home: &str) -> Result<bool> {
         return Ok(false);
     };
 
+    // Only remove OTEL vars if the endpoint points to budi's daemon (localhost + budi port).
+    // If it points elsewhere, the user configured it independently — don't touch.
+    let is_budi_endpoint = env
+        .get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .and_then(|v| v.as_str())
+        .is_some_and(|url| {
+            let lower = url.to_lowercase();
+            let is_local_address = lower.contains("127.0.0.1") || lower.contains("localhost");
+            let is_budi_port =
+                lower.contains(&format!(":{}", budi_core::config::DEFAULT_DAEMON_PORT));
+            is_local_address && is_budi_port
+        });
+
+    if !is_budi_endpoint {
+        return Ok(false);
+    }
+
     let otel_keys = [
         "CLAUDE_CODE_ENABLE_TELEMETRY",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
