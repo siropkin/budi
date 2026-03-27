@@ -449,11 +449,11 @@ fn fetch_usage_events(
         let mut all_below_watermark = true;
 
         for ev in &events_arr {
-            if let Some(parsed) = parse_usage_event(ev) {
-                if parsed.timestamp_ms > since {
-                    all_below_watermark = false;
-                    all_events.push(parsed);
-                }
+            if let Some(parsed) = parse_usage_event(ev)
+                && parsed.timestamp_ms > since
+            {
+                all_below_watermark = false;
+                all_events.push(parsed);
             }
         }
 
@@ -682,7 +682,7 @@ fn sync_from_usage_api(
 
     let api_calls = if paginate_all {
         // Approximate: ceil(events / 100)
-        ((events.len() + 99) / 100).max(1)
+        events.len().div_ceil(100).max(1)
     } else {
         1
     };

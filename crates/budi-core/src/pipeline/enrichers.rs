@@ -260,13 +260,13 @@ impl Enricher for CostEnricher {
         );
 
         // Add speed tag if not standard (fast mode = 6x pricing)
-        if let Some(ref speed) = msg.speed {
-            if speed != "standard" {
-                tags.push(Tag {
-                    key: "speed".to_string(),
-                    value: speed.clone(),
-                });
-            }
+        if let Some(ref speed) = msg.speed
+            && speed != "standard"
+        {
+            tags.push(Tag {
+                key: "speed".to_string(),
+                value: speed.clone(),
+            });
         }
 
         // Emit cost_confidence tag for assistant messages that have cost data

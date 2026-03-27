@@ -72,10 +72,10 @@ pub fn cmd_init(
 
     // Ensure database schema is ready BEFORE starting daemon.
     // On fresh install: creates tables. On upgrade: drops old schema, recreates.
-    if let Ok(db_path) = budi_core::analytics::db_path() {
-        if let Err(e) = budi_core::analytics::open_db_with_migration(&db_path) {
-            eprintln!("  Database: schema setup failed: {e}");
-        }
+    if let Ok(db_path) = budi_core::analytics::db_path()
+        && let Err(e) = budi_core::analytics::open_db_with_migration(&db_path)
+    {
+        eprintln!("  Database: schema setup failed: {e}");
     }
 
     if !no_daemon {
