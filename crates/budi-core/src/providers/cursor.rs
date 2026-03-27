@@ -431,9 +431,7 @@ fn fetch_usage_events(
             .header("Origin", "https://cursor.com")
             .header("Referer", "https://cursor.com/dashboard")
             .send_json(body_json)
-            .with_context(|| {
-                format!("Cursor Usage API request failed (page {page})")
-            })?;
+            .with_context(|| format!("Cursor Usage API request failed (page {page})"))?;
 
         let body: Value = response.body_mut().read_json()?;
 

@@ -52,7 +52,17 @@ pub struct MessagesParams {
     pub offset: Option<usize>,
 }
 
-const VALID_SORT_BY: &[&str] = &["timestamp", "cost", "model", "tokens", "provider", "branch", "git_branch", "ticket", "repo_id"];
+const VALID_SORT_BY: &[&str] = &[
+    "timestamp",
+    "cost",
+    "model",
+    "tokens",
+    "provider",
+    "branch",
+    "git_branch",
+    "ticket",
+    "repo_id",
+];
 
 pub async fn analytics_messages(
     Query(params): Query<MessagesParams>,

@@ -286,9 +286,10 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                    AND timestamp BETWEEN ?3 AND ?4",
             )?;
             let rows: Vec<(String, String, String)> = stmt
-                .query_map(params![event.session_id, event.model, ts_lo, ts_hi], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?
+                .query_map(
+                    params![event.session_id, event.model, ts_lo, ts_hi],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?
                 .filter_map(|r| r.ok())
                 .collect();
             // Pick the closest non-otel_exact row by actual timestamp distance
@@ -580,7 +581,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!((cost - 7.375).abs() < 0.001, "cost_cents should be 7.375, got {cost}");
+        assert!(
+            (cost - 7.375).abs() < 0.001,
+            "cost_cents should be 7.375, got {cost}"
+        );
 
         // Verify session stub was created
         let sess_count: i64 = conn
@@ -649,7 +653,10 @@ mod tests {
             .unwrap();
 
         // Cost calculated from tokens: (1000*5 + 500*25 + 5000*6.25 + 50000*0.50) / 1M * 100
-        assert!((cost - 7.375).abs() < 0.001, "cost should be 7.375, got {cost}");
+        assert!(
+            (cost - 7.375).abs() < 0.001,
+            "cost should be 7.375, got {cost}"
+        );
         assert_eq!(confidence, "otel_exact");
         assert_eq!(input_tokens, 1000);
     }
@@ -711,7 +718,10 @@ mod tests {
             .query_row("SELECT cost_cents FROM messages LIMIT 1", [], |r| r.get(0))
             .unwrap();
         // Original cost from tokens: (1000*5 + 500*25 + 5000*6.25 + 50000*0.50) / 1M * 100
-        assert!((cost - 7.375).abs() < 0.001, "original cost should be preserved, got {cost}");
+        assert!(
+            (cost - 7.375).abs() < 0.001,
+            "original cost should be preserved, got {cost}"
+        );
     }
 
     #[test]

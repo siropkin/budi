@@ -208,7 +208,9 @@ impl Enricher for CostEnricher {
             // Split cache_creation_tokens into 5-min and 1-hour tiers.
             // 1-hour cache: 2x input rate. 5-min cache: 1.25x input rate (pricing.cache_write).
             // If no breakdown available, assume all tokens are 5-min tier.
-            let cache_5m_tokens = msg.cache_creation_tokens.saturating_sub(msg.cache_creation_1h_tokens);
+            let cache_5m_tokens = msg
+                .cache_creation_tokens
+                .saturating_sub(msg.cache_creation_1h_tokens);
             let cache_1h_rate = pricing.input * 2.0; // 1-hour tier = 2x base input
 
             let mut cost = msg.input_tokens as f64 * pricing.input / 1_000_000.0

@@ -405,9 +405,16 @@ mod tests {
             [],
         ).unwrap();
         let stored: f64 = conn
-            .query_row("SELECT cost_cents FROM messages WHERE uuid = 'half'", [], |r| r.get(0))
+            .query_row(
+                "SELECT cost_cents FROM messages WHERE uuid = 'half'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!((stored - 0.5).abs() < 1e-10, "cost_cents should store sub-cent precision");
+        assert!(
+            (stored - 0.5).abs() < 1e-10,
+            "cost_cents should store sub-cent precision"
+        );
     }
 
     #[test]

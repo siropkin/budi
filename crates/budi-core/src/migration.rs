@@ -485,6 +485,9 @@ mod tests {
             .query_row([], |r| r.get::<_, i64>(0))
             .map(|c| c > 0)
             .unwrap();
-        assert!(has_idx, "idx_messages_dedup should exist after v11→v12 migration");
+        assert!(
+            has_idx,
+            "idx_messages_dedup should exist after v11→v12 migration"
+        );
     }
 }
