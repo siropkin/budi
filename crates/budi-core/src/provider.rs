@@ -42,10 +42,13 @@ pub trait Provider: Send + Sync {
     /// Returns Some((files_synced, messages_ingested, warnings)) if this provider uses
     /// direct sync instead of file-based discovery. Returns None to fall back
     /// to discover_files() + parse_file().
+    ///
+    /// `max_age_days`: Some(N) for quick sync (recent data only), None for full history.
     fn sync_direct(
         &self,
         _conn: &mut Connection,
         _pipeline: &mut crate::pipeline::Pipeline,
+        _max_age_days: Option<u64>,
     ) -> Option<Result<(usize, usize, Vec<String>)>> {
         None
     }

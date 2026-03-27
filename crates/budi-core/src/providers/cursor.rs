@@ -77,9 +77,10 @@ impl Provider for CursorProvider {
         &self,
         conn: &mut Connection,
         pipeline: &mut crate::pipeline::Pipeline,
+        max_age_days: Option<u64>,
     ) -> Option<Result<(usize, usize, Vec<String>)>> {
         // Sync from Cursor Usage API (exact per-request tokens and cost)
-        sync_from_usage_api(conn, pipeline)
+        sync_from_usage_api(conn, pipeline, max_age_days)
     }
 }
 
@@ -319,124 +320,167 @@ fn extract_cursor_auth() -> CursorAuthResult {
     }
 }
 
-/// Fetch usage events from Cursor's API since a timestamp watermark.
-fn fetch_usage_events(auth: &CursorAuth, since_ms: Option<i64>) -> Result<Vec<CursorUsageEvent>> {
+/// Parse a single usage event JSON value into a CursorUsageEvent.
+/// Returns None if the event should be skipped.
+fn parse_usage_event(ev: &Value) -> Option<CursorUsageEvent> {
+    let ts_str = ev.get("timestamp").and_then(|v| v.as_str()).unwrap_or("0");
+    let ts: i64 = ts_str.parse().unwrap_or(0);
+
+    let model = ev
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let token_usage = ev.get("tokenUsage");
+    let input_tokens = token_usage
+        .and_then(|t: &Value| t.get("inputTokens"))
+        .and_then(|v: &Value| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = token_usage
+        .and_then(|t: &Value| t.get("outputTokens"))
+        .and_then(|v: &Value| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation_tokens = token_usage
+        .and_then(|t: &Value| t.get("cacheWriteTokens"))
+        .and_then(|v: &Value| v.as_u64())
+        .unwrap_or(0);
+    let cache_read_tokens = token_usage
+        .and_then(|t: &Value| t.get("cacheReadTokens"))
+        .and_then(|v: &Value| v.as_u64())
+        .unwrap_or(0);
+
+    let total_cents_raw = token_usage
+        .and_then(|t: &Value| t.get("totalCents"))
+        .and_then(|v: &Value| v.as_f64());
+
+    let is_subscription = ev
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| k.eq_ignore_ascii_case("included"));
+
+    let total_cents = match total_cents_raw {
+        Some(c) if c == 0.0 && is_subscription => Some(0.0),
+        Some(c) if c < 0.0 => {
+            tracing::warn!("Cursor API totalCents={c} is negative, clamping to 0.0");
+            Some(0.0)
+        }
+        Some(c) if c > 100_000.0 => {
+            tracing::warn!(
+                "Cursor API totalCents={c} exceeds $1000 — skipping event as likely corrupt"
+            );
+            return None;
+        }
+        Some(c) if c > 5000.0 => {
+            let dollars = c / 100.0;
+            tracing::warn!(
+                "Cursor API totalCents={c} unusually high for a single request (>${dollars:.0} dollars)"
+            );
+            Some(c)
+        }
+        Some(c) => Some(c),
+        None => None,
+    };
+
+    let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
+    if total_tokens == 0 && total_cents.is_none() {
+        return None;
+    }
+
+    Some(CursorUsageEvent {
+        timestamp_ms: ts,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+        total_cents,
+    })
+}
+
+/// Fetch usage events from Cursor's API with pagination.
+/// `since_ms`: only return events newer than this timestamp.
+/// `paginate_all`: when true, fetches all pages; when false, fetches only page 1.
+fn fetch_usage_events(
+    auth: &CursorAuth,
+    since_ms: Option<i64>,
+    paginate_all: bool,
+) -> Result<Vec<CursorUsageEvent>> {
     let cookie = format!(
         "WorkosCursorSessionToken={}%3A%3A{}",
         auth.user_id, auth.jwt
     );
 
-    let agent = ureq::agent();
-    let mut response = agent
-        .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
-        .header("Cookie", &cookie)
-        .header("Origin", "https://cursor.com")
-        .header("Referer", "https://cursor.com/dashboard")
-        .send_json(serde_json::json!({}))
-        .context("Cursor Usage API request failed (possible Cloudflare block or auth issue)")?;
-
-    let body: Value = response.body_mut().read_json()?;
-
-    let events_arr = body
-        .get("usageEventsDisplay")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
     let since = since_ms.unwrap_or(0);
-    let mut events: Vec<CursorUsageEvent> = Vec::new();
+    let mut all_events: Vec<CursorUsageEvent> = Vec::new();
+    let agent = ureq::agent();
 
-    for ev in &events_arr {
-        let ts_str = ev.get("timestamp").and_then(|v| v.as_str()).unwrap_or("0");
-        let ts: i64 = ts_str.parse().unwrap_or(0);
+    // API returns 100 events per page, newest first. Page 1 is default (no param needed).
+    let max_pages: u32 = if paginate_all { 200 } else { 1 };
 
-        if ts <= since {
-            continue;
-        }
-
-        let model = ev
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let token_usage = ev.get("tokenUsage");
-        let input_tokens = token_usage
-            .and_then(|t: &Value| t.get("inputTokens"))
-            .and_then(|v: &Value| v.as_u64())
-            .unwrap_or(0);
-        let output_tokens = token_usage
-            .and_then(|t: &Value| t.get("outputTokens"))
-            .and_then(|v: &Value| v.as_u64())
-            .unwrap_or(0);
-        // API field is "cacheWriteTokens" (maps to our cache_creation concept)
-        let cache_creation_tokens = token_usage
-            .and_then(|t: &Value| t.get("cacheWriteTokens"))
-            .and_then(|v: &Value| v.as_u64())
-            .unwrap_or(0);
-        let cache_read_tokens = token_usage
-            .and_then(|t: &Value| t.get("cacheReadTokens"))
-            .and_then(|v: &Value| v.as_u64())
-            .unwrap_or(0);
-        // totalCents is in US cents (100 = $1.00).
-        // Cursor Usage API returns cost in US cents for pay-per-use plans.
-        // Subscription ("Included") plans return null or 0 — we treat both as None
-        // so CostEnricher can estimate cost from tokens instead of assuming $0.
-        let total_cents_raw = token_usage
-            .and_then(|t: &Value| t.get("totalCents"))
-            .and_then(|v: &Value| v.as_f64());
-
-        // Detect subscription plan: kind="included" means no per-request billing
-        let is_subscription = ev
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .is_some_and(|k| k.eq_ignore_ascii_case("included"));
-
-        let total_cents = match total_cents_raw {
-            // Subscription plans: totalCents=0 means "included in plan" — exact $0 cost
-            Some(c) if c == 0.0 && is_subscription => Some(0.0),
-            Some(c) if c < 0.0 => {
-                tracing::warn!("Cursor API totalCents={c} is negative, clamping to 0.0");
-                Some(0.0)
-            }
-            Some(c) if c > 100_000.0 => {
-                tracing::warn!(
-                    "Cursor API totalCents={c} exceeds $1000 — skipping event as likely corrupt"
-                );
-                continue;
-            }
-            Some(c) if c > 5000.0 => {
-                let dollars = c / 100.0;
-                tracing::warn!(
-                    "Cursor API totalCents={c} unusually high for a single request (>${dollars:.0} dollars)"
-                );
-                Some(c)
-            }
-            Some(c) => Some(c),
-            None => None, // no cost data — subscription or missing field
+    for page in 1..=max_pages {
+        let body_json = if page == 1 {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"page": page})
         };
 
-        let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
-        if total_tokens == 0 && total_cents.is_none() {
-            // No token or cost data — skip (JSONL fallback is primary)
-            continue;
+        let mut response = agent
+            .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+            .header("Cookie", &cookie)
+            .header("Origin", "https://cursor.com")
+            .header("Referer", "https://cursor.com/dashboard")
+            .send_json(body_json)
+            .with_context(|| {
+                format!("Cursor Usage API request failed (page {page})")
+            })?;
+
+        let body: Value = response.body_mut().read_json()?;
+
+        let events_arr = body
+            .get("usageEventsDisplay")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if events_arr.is_empty() {
+            break;
         }
 
-        events.push(CursorUsageEvent {
-            timestamp_ms: ts,
-            model,
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens,
-            cache_read_tokens,
-            total_cents,
-        });
+        // Track whether all events on this page were older than watermark.
+        let mut all_below_watermark = true;
+
+        for ev in &events_arr {
+            if let Some(parsed) = parse_usage_event(ev) {
+                if parsed.timestamp_ms > since {
+                    all_below_watermark = false;
+                    all_events.push(parsed);
+                }
+            }
+        }
+
+        // If every event on this page was already synced, no need to fetch older pages.
+        if all_below_watermark {
+            break;
+        }
+
+        // Last page: fewer than 100 events means no more pages.
+        if events_arr.len() < 100 {
+            break;
+        }
+
+        if page > 1 {
+            tracing::info!(
+                "Cursor API: fetched page {page} ({} new events so far)",
+                all_events.len()
+            );
+        }
     }
 
     // Sort by timestamp ascending
-    events.sort_by_key(|e| e.timestamp_ms);
+    all_events.sort_by_key(|e| e.timestamp_ms);
 
-    Ok(events)
+    Ok(all_events)
 }
 
 /// Session context for correlating API events to hook sessions.
@@ -581,9 +625,11 @@ fn usage_events_to_messages(
 }
 
 /// Sync from Cursor's Usage API (exact per-request tokens and cost).
+/// `max_age_days`: Some(N) for quick sync (page 1 only), None for full history (all pages).
 fn sync_from_usage_api(
     conn: &mut Connection,
     pipeline: &mut crate::pipeline::Pipeline,
+    max_age_days: Option<u64>,
 ) -> Option<Result<(usize, usize, Vec<String>)>> {
     let auth_result = extract_cursor_auth();
     let warnings = auth_result.warnings;
@@ -609,7 +655,11 @@ fn sync_from_usage_api(
             if ts > 0 { Some(ts) } else { None }
         });
 
-    let events = match fetch_usage_events(&auth, watermark) {
+    // Quick sync (max_age_days=Some): fetch page 1 only (100 most recent events).
+    // Full history (max_age_days=None): paginate all pages back to watermark.
+    let paginate_all = max_age_days.is_none();
+
+    let events = match fetch_usage_events(&auth, watermark, paginate_all) {
         Ok(e) => e,
         Err(e) => return Some(Err(e)),
     };
@@ -627,13 +677,18 @@ fn sync_from_usage_api(
     };
 
     // Update watermark to latest event timestamp.
-    // Note: cast to usize is safe on 64-bit targets (macOS/Linux). Budi does not support 32-bit.
-    if let Some(last) = events.last() {
-        let _ = analytics::set_sync_offset(conn, watermark_key, last.timestamp_ms as usize);
+    // Use the max timestamp from events (they're sorted ascending, so last is newest).
+    if let Some(newest_ts) = events.iter().map(|e| e.timestamp_ms).max() {
+        let _ = analytics::set_sync_offset(conn, watermark_key, newest_ts as usize);
     }
 
-    // api_calls=1 (single batch request to the Usage API)
-    Some(Ok((1, count, warnings)))
+    let api_calls = if paginate_all {
+        // Approximate: ceil(events / 100)
+        ((events.len() + 99) / 100).max(1)
+    } else {
+        1
+    };
+    Some(Ok((api_calls, count, warnings)))
 }
 
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.

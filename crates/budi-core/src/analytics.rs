@@ -257,7 +257,7 @@ fn sync_with_max_age(
 
     for provider in &providers {
         // Try direct sync first (e.g. Cursor Usage API).
-        if let Some(result) = provider.sync_direct(conn, &mut pipeline) {
+        if let Some(result) = provider.sync_direct(conn, &mut pipeline, max_age_days) {
             match result {
                 Ok((files, messages, w)) => {
                     total_files += files;
