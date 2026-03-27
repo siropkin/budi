@@ -498,7 +498,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         param_values.push(format!("%{q}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(messages.model LIKE ?{idx} OR messages.repo_id LIKE ?{idx} OR messages.cwd LIKE ?{idx} OR messages.provider LIKE ?{idx})"
+            "(messages.model LIKE ?{idx} OR messages.repo_id LIKE ?{idx} OR messages.provider LIKE ?{idx} OR COALESCE(messages.git_branch, s.git_branch) LIKE ?{idx} OR EXISTS (SELECT 1 FROM tags WHERE tags.message_uuid = messages.uuid AND tags.key = 'ticket_id' AND tags.value LIKE ?{idx}))"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -507,17 +507,37 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    let order_col = match p.sort_by.unwrap_or("timestamp") {
-        "model" => "messages.model",
-        "provider" => "messages.provider",
-        "tokens" => "(messages.input_tokens + messages.output_tokens)",
-        "cost" => "COALESCE(messages.cost_cents, 0.0)",
-        "branch" | "git_branch" => "COALESCE(messages.git_branch, s.git_branch)",
-        "ticket" => "COALESCE(messages.git_branch, s.git_branch)",
-        "repo_id" => "COALESCE(messages.repo_id, s.repo_id)",
-        _ => "messages.timestamp",
+    let dir = if p.sort_asc { "ASC" } else { "DESC" };
+    // For nullable text columns in ASC order, push NULLs/empty to the bottom.
+    let order_expr = match p.sort_by.unwrap_or("timestamp") {
+        col @ ("model" | "provider") => {
+            let qcol = format!("messages.{col}");
+            if p.sort_asc {
+                format!("({qcol} IS NULL OR {qcol} = '') ASC, {qcol} {dir}")
+            } else {
+                format!("{qcol} {dir}")
+            }
+        }
+        "tokens" => format!("(messages.input_tokens + messages.output_tokens) {dir}"),
+        "cost" => format!("COALESCE(messages.cost_cents, 0.0) {dir}"),
+        "branch" | "git_branch" | "ticket" => {
+            let col = "COALESCE(messages.git_branch, s.git_branch)";
+            if p.sort_asc {
+                format!("({col} IS NULL OR {col} = '') ASC, {col} {dir}")
+            } else {
+                format!("{col} {dir}")
+            }
+        }
+        "repo_id" => {
+            let col = "COALESCE(messages.repo_id, s.repo_id)";
+            if p.sort_asc {
+                format!("({col} IS NULL OR {col} = '') ASC, {col} {dir}")
+            } else {
+                format!("{col} {dir}")
+            }
+        }
+        _ => format!("messages.timestamp {dir}"),
     };
-    let order_dir = if p.sort_asc { "ASC" } else { "DESC" };
 
     let sql = format!(
         "SELECT COUNT(*) OVER() as total_count,
@@ -532,9 +552,9 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
          FROM messages
          LEFT JOIN sessions s ON s.conversation_id = messages.session_id
          {}
-         ORDER BY {} {}
+         ORDER BY {order_expr}
          LIMIT {} OFFSET {}",
-        where_clause, order_col, order_dir, p.limit, p.offset
+        where_clause, p.limit, p.offset
     );
 
     let mut stmt = conn.prepare(&sql)?;
