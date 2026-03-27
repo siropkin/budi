@@ -221,6 +221,18 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
     Ok(())
 }
 
+/// The budi statusline command string used in settings.
+const BUDI_STATUSLINE_CMD: &str = "budi statusline";
+
+/// Suffix appended to an existing command to merge budi output after it.
+const BUDI_STATUSLINE_SUFFIX: &str =
+    r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#;
+
+/// Check if a statusLine command already includes budi.
+fn statusline_has_budi(cmd: &str) -> bool {
+    cmd.contains("budi statusline") || cmd.contains("budi statusline")
+}
+
 pub fn cmd_statusline_install() -> Result<()> {
     let home = budi_core::config::home_dir()?;
     let settings_path = home.join(CLAUDE_USER_SETTINGS);
@@ -238,16 +250,37 @@ pub fn cmd_statusline_install() -> Result<()> {
     if !settings.is_object() {
         settings = json!({});
     }
-    if settings.get("statusLine").is_some() {
+
+    if let Some(existing) = settings.get("statusLine") {
+        // Already has a statusLine — check if budi is already there
+        let existing_cmd = existing
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        if statusline_has_budi(existing_cmd) {
+            println!(
+                "Status line already includes budi in {}",
+                settings_path.display()
+            );
+            return Ok(());
+        }
+        // Merge: append budi to the existing command
+        let merged = format!("{existing_cmd}{BUDI_STATUSLINE_SUFFIX}");
+        settings["statusLine"]["command"] = Value::String(merged);
+        let raw = serde_json::to_string_pretty(&settings)?;
+        fs::write(&settings_path, &raw)
+            .with_context(|| format!("Failed writing {}", settings_path.display()))?;
         println!(
-            "Status line already configured in {}",
+            "Merged budi into existing status line in {}",
             settings_path.display()
         );
         return Ok(());
     }
+
+    // No statusLine at all — install budi as the sole command
     settings["statusLine"] = json!({
         "type": "command",
-        "command": "budi statusline",
+        "command": BUDI_STATUSLINE_CMD,
         "padding": 0
     });
     let raw = serde_json::to_string_pretty(&settings)?;
@@ -494,5 +527,15 @@ mod tests {
         assert!(!is_legacy_budi_hook("budi hook"));
         assert!(!is_legacy_budi_hook("budi statusline"));
         assert!(!is_legacy_budi_hook("other-tool do-something"));
+    }
+
+    #[test]
+    fn statusline_has_budi_detects_presence() {
+        assert!(statusline_has_budi("budi statusline"));
+        assert!(statusline_has_budi(
+            "some-cmd; budi statusline 2>/dev/null || true"
+        ));
+        assert!(!statusline_has_budi("echo hello"));
+        assert!(!statusline_has_budi("other-tool --flag"));
     }
 }

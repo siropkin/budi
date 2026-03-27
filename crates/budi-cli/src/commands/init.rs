@@ -208,20 +208,9 @@ fn install_statusline_if_missing() {
         return;
     };
     let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
-    let existing = settings_path
-        .exists()
-        .then(|| fs::read_to_string(&settings_path).ok())
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-
-    if let Some(ref s) = existing
-        && s.get("statusLine").is_some()
-    {
-        return;
-    }
 
     match super::statusline::cmd_statusline_install() {
-        Ok(()) => println!("  Status line: installed in {}", settings_path.display()),
+        Ok(()) => println!("  Status line: configured in {}", settings_path.display()),
         Err(e) => {
             let yellow = super::ansi("\x1b[33m");
             let reset = super::ansi("\x1b[0m");
