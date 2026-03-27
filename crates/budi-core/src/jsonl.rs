@@ -43,6 +43,10 @@ pub(crate) struct AssistantEntry {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AssistantMessage {
+    /// The API request ID (e.g. "msg_01QXt5..."). Multiple JSONL entries can
+    /// share the same `id` when a single API response contains multiple content
+    /// blocks (thinking, text, tool_use). We deduplicate by this field.
+    pub id: Option<String>,
     pub model: Option<String>,
     pub usage: Option<TokenUsage>,
 }
@@ -86,6 +90,9 @@ pub struct ParsedMessage {
     /// Confidence level: "exact" (tokens from source), "exact_cost" (cost from API, tokens estimated),
     /// "estimated" (both calculated from heuristics).
     pub cost_confidence: String,
+    /// API request ID (message.id from JSONL). Used for deduplication of
+    /// multi-content-block responses.
+    pub request_id: Option<String>,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -124,6 +131,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             // User messages have no cost — use "n/a" to distinguish from
             // assistant messages whose confidence hasn't been set yet (empty string).
             cost_confidence: "n/a".to_string(),
+            request_id: None,
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
@@ -149,6 +157,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
+                request_id: a.message.id,
             })
         }
         TranscriptEntry::Other => None,
@@ -157,6 +166,12 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
 
 /// Parse all lines from a JSONL string, returning parsed messages and the byte
 /// offset of the end of the last successfully parsed line.
+///
+/// Claude Code logs each content block of a single API response as a separate
+/// JSONL entry (sharing the same `message.id`). Intermediate entries have
+/// identical input/cache tokens but partial output_tokens; only the final entry
+/// (highest output_tokens) is authoritative. We deduplicate by `message.id`,
+/// keeping the entry with the most output_tokens to avoid inflating costs.
 pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
     let mut messages = Vec::new();
     let mut offset = start_offset;
@@ -179,7 +194,51 @@ pub fn parse_transcript(content: &str, start_offset: usize) -> (Vec<ParsedMessag
         offset = start_offset + pos;
     }
 
+    dedup_by_request_id(&mut messages);
+
     (messages, offset)
+}
+
+/// Deduplicate assistant messages that share the same API request ID.
+/// When a single API call produces multiple content blocks (thinking, text,
+/// tool_use), Claude Code writes each as a separate JSONL entry with the same
+/// `message.id`. All entries have identical input/cache tokens, but only the
+/// last one has the final output_tokens count. We keep the entry with the
+/// highest output_tokens and discard the rest.
+fn dedup_by_request_id(messages: &mut Vec<ParsedMessage>) {
+    use std::collections::HashMap;
+
+    // Map request_id → index of the best (highest output_tokens) message so far
+    let mut best: HashMap<String, usize> = HashMap::new();
+    let mut to_remove = Vec::new();
+
+    for i in 0..messages.len() {
+        let Some(ref request_id) = messages[i].request_id else {
+            continue; // no request_id (user messages, etc.) — keep as-is
+        };
+        if let Some(&prev_idx) = best.get(request_id) {
+            // Keep the one with higher output_tokens
+            if messages[i].output_tokens > messages[prev_idx].output_tokens {
+                to_remove.push(prev_idx);
+                best.insert(request_id.clone(), i);
+            } else {
+                to_remove.push(i);
+            }
+        } else {
+            best.insert(request_id.clone(), i);
+        }
+    }
+
+    if to_remove.is_empty() {
+        return;
+    }
+
+    // Sort descending so we can remove from the end without invalidating indices
+    to_remove.sort_unstable_by(|a, b| b.cmp(a));
+    to_remove.dedup();
+    for idx in to_remove {
+        messages.remove(idx);
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +331,61 @@ mod tests {
         let msg = parse_line(line).unwrap();
         assert_eq!(msg.input_tokens, 0);
         assert_eq!(msg.output_tokens, 0);
+    }
+
+    /// When a single API call produces multiple content blocks (thinking, text,
+    /// tool_use), Claude Code writes each as a separate JSONL entry sharing the
+    /// same message.id. Verify that parse_transcript deduplicates these, keeping
+    /// only the entry with the highest output_tokens.
+    #[test]
+    fn dedup_multi_content_block_entries() {
+        // Three entries with same message.id "req1":
+        //   1) intermediate: stop_reason=null, output=10
+        //   2) intermediate: stop_reason=null, output=10
+        //   3) final: stop_reason=tool_use, output=425
+        // All share identical input/cache tokens.
+        let content = concat!(
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"req1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"hmm"}],"stop_reason":null,"usage":{"input_tokens":3,"output_tokens":10,"cache_creation_input_tokens":21559,"cache_read_input_tokens":0}},"uuid":"a1","timestamp":"2026-03-25T00:00:01.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"req1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":null,"usage":{"input_tokens":3,"output_tokens":10,"cache_creation_input_tokens":21559,"cache_read_input_tokens":0}},"uuid":"a2","timestamp":"2026-03-25T00:00:02.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"req1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":425,"cache_creation_input_tokens":21559,"cache_read_input_tokens":0}},"uuid":"a3","timestamp":"2026-03-25T00:00:03.000Z","sessionId":"s1"}"#,
+            "\n",
+        );
+
+        let (msgs, _) = parse_transcript(content, 0);
+        // Should have 1 assistant message (deduped from 3)
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].output_tokens, 425);
+        assert_eq!(msgs[0].input_tokens, 3);
+        assert_eq!(msgs[0].cache_creation_tokens, 21559);
+    }
+
+    /// Different request IDs should not be deduped.
+    #[test]
+    fn no_dedup_across_request_ids() {
+        let content = concat!(
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"req1","type":"message","role":"assistant","content":[{"type":"text","text":"a"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":50,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}},"uuid":"a1","timestamp":"2026-03-25T00:00:01.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"req2","type":"message","role":"assistant","content":[{"type":"text","text":"b"}],"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":60,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}},"uuid":"a2","timestamp":"2026-03-25T00:00:02.000Z","sessionId":"s1"}"#,
+            "\n",
+        );
+
+        let (msgs, _) = parse_transcript(content, 0);
+        assert_eq!(msgs.len(), 2);
+    }
+
+    /// User messages (no request_id) are never deduped.
+    #[test]
+    fn user_messages_not_deduped() {
+        let content = concat!(
+            r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1","timestamp":"2026-03-25T00:00:01.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"hello"},"uuid":"u2","timestamp":"2026-03-25T00:00:02.000Z","sessionId":"s1"}"#,
+            "\n",
+        );
+
+        let (msgs, _) = parse_transcript(content, 0);
+        assert_eq!(msgs.len(), 2);
     }
 }

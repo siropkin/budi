@@ -76,6 +76,48 @@ pub async fn analytics_sync(
     Ok(Json(result))
 }
 
+pub async fn analytics_sync_reset(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if state
+        .syncing
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "sync already running" })),
+        ));
+    }
+    let flag = state.syncing.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let r = (|| -> anyhow::Result<_> {
+            let db_path = budi_core::analytics::db_path()?;
+            let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
+            budi_core::analytics::reset_sync_state(&conn)?;
+            let (files_synced, messages_ingested, warnings) =
+                budi_core::analytics::sync_history(&mut conn)?;
+            Ok(json!({
+                "files_synced": files_synced,
+                "messages_ingested": messages_ingested,
+                "warnings": warnings,
+            }))
+        })();
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        r
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
 pub async fn analytics_history(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {

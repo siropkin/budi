@@ -65,6 +65,19 @@ pub fn set_sync_offset(conn: &Connection, file_path: &str, offset: usize) -> Res
     Ok(())
 }
 
+/// Reset all sync state and data so the next sync re-ingests everything from scratch.
+/// Used by `budi sync --force` after schema/parser changes.
+pub fn reset_sync_state(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DELETE FROM sync_state;
+         DELETE FROM tags;
+         DELETE FROM messages;
+         DELETE FROM sessions;
+         DELETE FROM hook_events;",
+    )?;
+    Ok(())
+}
+
 /// A tag to be stored alongside a message.
 #[derive(Debug, Clone)]
 pub struct Tag {
@@ -1459,6 +1472,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1480,6 +1494,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
         ];
 
@@ -1524,6 +1539,7 @@ mod tests {
             user_name: None,
             machine_name: None,
             cost_confidence: "exact".to_string(),
+                request_id: None,
         };
         // CostEnricher is the single source of truth for cost_cents
         CostEnricher.enrich(&mut msg);
@@ -1577,6 +1593,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -1598,6 +1615,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
         ];
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1635,6 +1653,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1658,6 +1677,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -1680,6 +1700,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
         ]
     }
@@ -1755,6 +1776,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -1777,6 +1799,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -1800,6 +1823,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
         ]
     }
@@ -1897,6 +1921,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "cc-a1".to_string(),
@@ -1919,6 +1944,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
         ];
 
@@ -1945,6 +1971,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
             ParsedMessage {
                 uuid: "cu-a1".to_string(),
@@ -1967,6 +1994,7 @@ mod tests {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
+                request_id: None,
             },
         ];
 

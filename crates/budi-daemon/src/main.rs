@@ -41,6 +41,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/health", get(h::health))
         .route("/sync", post(h::analytics_sync))
         .route("/sync/all", post(h::analytics_history))
+        .route("/sync/reset", post(h::analytics_sync_reset))
         .route("/sync/status", get(h::sync_status))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))

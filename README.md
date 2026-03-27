@@ -137,6 +137,7 @@ budi stats --tag ticket_id    # cost per ticket
 budi stats --tag ticket_prefix # cost per team prefix
 budi sync                     # sync recent data (last 30 days)
 budi sync --all               # load full history (all time)
+budi sync --force             # re-ingest all data from scratch (use after upgrades)
 budi update                   # check for updates (detects Homebrew)
 budi update --version 7.1.0  # update to a specific version
 budi uninstall                # remove hooks, status line, config, and data

@@ -110,6 +110,17 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    pub fn sync_reset(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!("{}/sync/reset", self.base_url))
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     pub fn migrate(&self) -> Result<Value> {
         let resp = self
             .client

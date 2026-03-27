@@ -571,6 +571,7 @@ fn usage_events_to_messages(
                 } else {
                     "estimated".to_string()
                 },
+                request_id: None,
             }
         })
         .collect()
@@ -821,6 +822,7 @@ fn parse_cursor_line(
             machine_name: None,
             // User messages have no cost, so cost_confidence is not applicable.
             cost_confidence: String::new(),
+            request_id: None,
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -844,6 +846,7 @@ fn parse_cursor_line(
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
+                request_id: None,
             })
         }
         _ => None,

@@ -96,6 +96,37 @@ pub fn cmd_history() -> Result<()> {
     Ok(())
 }
 
+pub fn cmd_force_sync() -> Result<()> {
+    let client = DaemonClient::connect()?;
+
+    print!("Force re-syncing all data (this may take a while)...");
+    let _ = std::io::stdout().flush();
+    let start = Instant::now();
+    let result = client.sync_reset()?;
+    let elapsed = start.elapsed().as_secs_f64();
+    println!(" done in {:.1}s", elapsed);
+
+    let files = result
+        .get("files_synced")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let msgs = result
+        .get("messages_ingested")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let bold = super::ansi("\x1b[1m");
+    let green = super::ansi("\x1b[32m");
+    let reset = super::ansi("\x1b[0m");
+
+    println!(
+        "{green}✓{reset} {bold}{}{reset} messages from {bold}{}{reset} files.",
+        msgs, files
+    );
+    print_sync_warnings(&result);
+    Ok(())
+}
+
 fn print_sync_warnings(result: &serde_json::Value) {
     if let Some(warnings) = result.get("warnings").and_then(|v| v.as_array()) {
         let yellow = super::ansi("\x1b[33m");

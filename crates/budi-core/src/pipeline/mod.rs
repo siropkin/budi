@@ -325,6 +325,7 @@ mod tests {
             user_name: None,
             machine_name: None,
             cost_confidence: "n/a".to_string(),
+            request_id: None,
         }
     }
 }

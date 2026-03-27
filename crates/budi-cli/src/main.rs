@@ -15,7 +15,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -87,11 +87,15 @@ Examples:
         #[arg(long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
     },
-    /// Sync recent transcripts (last 30 days). Use --all for full history.
+    /// Sync recent transcripts (last 30 days). Use --all for full history, --force to re-ingest from scratch.
     Sync {
         /// Load full transcript history (all time — may take a while)
         #[arg(long)]
         all: bool,
+        /// Force re-sync: clears all data and re-ingests from scratch.
+        /// Use after upgrading budi when the cost calculation has changed.
+        #[arg(long)]
+        force: bool,
     },
     /// Open the budi dashboard in the browser
     Open,
@@ -207,8 +211,10 @@ fn main() -> Result<()> {
                 json_output,
             )
         }
-        Commands::Sync { all } => {
-            if all {
+        Commands::Sync { all, force } => {
+            if force {
+                commands::sync::cmd_force_sync()
+            } else if all {
                 commands::sync::cmd_history()
             } else {
                 commands::sync::cmd_sync()
