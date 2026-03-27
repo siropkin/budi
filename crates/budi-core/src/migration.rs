@@ -245,7 +245,8 @@ mod tests {
             )
             .unwrap();
             conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-            conn.pragma_update(None, "user_version", old_version).unwrap();
+            conn.pragma_update(None, "user_version", old_version)
+                .unwrap();
 
             assert!(needs_migration(&conn));
 
@@ -257,18 +258,25 @@ mod tests {
             // Verify core tables exist
             conn.execute_batch("SELECT count(*) FROM messages").unwrap();
             conn.execute_batch("SELECT count(*) FROM sessions").unwrap();
-            conn.execute_batch("SELECT count(*) FROM hook_events").unwrap();
+            conn.execute_batch("SELECT count(*) FROM hook_events")
+                .unwrap();
             conn.execute_batch("SELECT count(*) FROM tags").unwrap();
-            conn.execute_batch("SELECT count(*) FROM sync_state").unwrap();
+            conn.execute_batch("SELECT count(*) FROM sync_state")
+                .unwrap();
 
             // Verify old table was dropped
             let old_exists: bool = conn
-                .prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='old_table'")
+                .prepare(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='old_table'",
+                )
                 .unwrap()
                 .query_row([], |r| r.get::<_, i64>(0))
                 .map(|c| c > 0)
                 .unwrap();
-            assert!(!old_exists, "old_table should have been dropped (v{old_version})");
+            assert!(
+                !old_exists,
+                "old_table should have been dropped (v{old_version})"
+            );
         }
     }
 
