@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod dashboard;
 pub mod hooks;
+pub mod otel;
 
 use axum::Json;
 use axum::http::StatusCode;

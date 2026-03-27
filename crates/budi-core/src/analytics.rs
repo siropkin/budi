@@ -116,6 +116,49 @@ pub fn ingest_messages_with_sync(
             .git_branch
             .as_deref()
             .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b));
+
+        // OTEL dedup: if an otel_exact row already covers this API call (same session +
+        // model + close timestamp but different UUID), don't insert a duplicate. Instead,
+        // enrich the OTEL row with JSONL-only context (parent_uuid, cwd, git_branch)
+        // that OTEL doesn't carry.
+        if msg.role == "assistant" && msg.session_id.is_some() && msg.model.is_some() {
+            let otel_uuid: Option<String> = tx
+                .query_row(
+                    "SELECT uuid FROM messages
+                     WHERE session_id = ?1
+                       AND model = ?2
+                       AND role = 'assistant'
+                       AND cost_confidence = 'otel_exact'
+                       AND abs(julianday(timestamp) - julianday(?3)) < (1.0 / 86400.0)
+                     LIMIT 1",
+                    params![msg.session_id, msg.model, ts],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(otel_id) = otel_uuid {
+                // Enrich the OTEL row with JSONL context (only fill NULLs)
+                tx.execute(
+                    "UPDATE messages SET
+                        parent_uuid = COALESCE(parent_uuid, ?1),
+                        cwd = COALESCE(cwd, ?2),
+                        git_branch = COALESCE(git_branch, ?3),
+                        repo_id = COALESCE(repo_id, ?4)
+                     WHERE uuid = ?5",
+                    params![msg.parent_uuid, msg.cwd, git_branch, msg.repo_id, otel_id],
+                )?;
+                // Insert tags for this message even though we skipped the INSERT
+                if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
+                    for tag in msg_tags {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                            params![otel_id, tag.key, tag.value],
+                        )?;
+                    }
+                }
+                continue;
+            }
+        }
+
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (uuid, session_id, role, timestamp, model,

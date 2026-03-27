@@ -22,7 +22,7 @@ function renderMessagesSection(messages) {
   const rowFn = m => {
     const totalTok = m.input_tokens + m.output_tokens;
     const costVal = (m.cost_cents || 0) / 100;
-    const isEstimated = m.cost_confidence && m.cost_confidence !== 'exact';
+    const isEstimated = m.cost_confidence && m.cost_confidence !== 'exact' && m.cost_confidence !== 'otel_exact';
     const costDisplay = isEstimated ? `~${fmtCost(costVal)}` : fmtCost(costVal);
     const costClass = isEstimated ? 'right muted' : 'right';
     const provDisplay = (registeredProviders.find(rp => rp.name === m.provider) || {}).display_name || m.provider;

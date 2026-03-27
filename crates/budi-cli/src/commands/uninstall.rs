@@ -62,7 +62,15 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
 
-        // 4. Remove status line from Claude Code
+        // 4. Remove OTEL env vars from Claude Code
+        print!("Removing OTEL env vars... ");
+        match remove_otel_env_vars(&home) {
+            Ok(true) => println!("{green}✓{reset} removed"),
+            Ok(false) => println!("none found"),
+            Err(e) => println!("{yellow}warning: {e}{reset}"),
+        }
+
+        // 5. Remove status line from Claude Code
         print!("Removing status line... ");
         match remove_statusline(&home) {
             Ok(true) => println!("{green}✓{reset} removed"),
@@ -70,7 +78,7 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
 
-        // 5. Remove data
+        // 6. Remove data
         if !keep_data {
             if !yes {
                 if !std::io::stdin().is_terminal() {
@@ -291,6 +299,50 @@ fn remove_launch_agents() -> Result<bool> {
         }
     }
     Ok(removed_any)
+}
+
+/// Remove budi OTEL env vars from ~/.claude/settings.json.
+fn remove_otel_env_vars(home: &str) -> Result<bool> {
+    let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+
+    let raw = fs::read_to_string(&settings_path)?;
+    let mut settings: Value = serde_json::from_str(&raw)?;
+
+    let Some(env) = settings.get_mut("env").and_then(|e| e.as_object_mut()) else {
+        return Ok(false);
+    };
+
+    let otel_keys = [
+        "CLAUDE_CODE_ENABLE_TELEMETRY",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_METRICS_EXPORTER",
+        "OTEL_LOGS_EXPORTER",
+    ];
+
+    let mut changed = false;
+    for key in &otel_keys {
+        if env.remove(*key).is_some() {
+            changed = true;
+        }
+    }
+
+    // Remove empty env object
+    if env.is_empty()
+        && let Some(obj) = settings.as_object_mut()
+    {
+        obj.remove("env");
+    }
+
+    if changed {
+        let out = serde_json::to_string_pretty(&settings)?;
+        fs::write(&settings_path, out)?;
+    }
+
+    Ok(changed)
 }
 
 fn print_binary_removal_hint() {

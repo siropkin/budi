@@ -50,6 +50,8 @@ pub fn cmd_init(
 
     let hook_warnings = install_hooks();
     let had_hook_warnings = !hook_warnings.is_empty();
+
+    install_otel_env_vars(&config);
     if had_hook_warnings {
         eprintln!("  Warning: hook installation had issues:");
         for w in &hook_warnings {
@@ -545,6 +547,98 @@ fn warn_duplicate_binaries() {
                 "  {bold}Tip:{reset} if you switched to Homebrew, run: rm ~/.local/bin/budi ~/.local/bin/budi-daemon"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OTEL env var installation
+// ---------------------------------------------------------------------------
+
+/// Install OTEL telemetry env vars into ~/.claude/settings.json.
+/// Merges with existing env — never overwrites user's custom OTEL endpoint
+/// that points to a different host.
+fn install_otel_env_vars(config: &config::BudiConfig) {
+    let result = (|| -> Result<()> {
+        let home = budi_core::config::home_dir()?;
+        let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
+
+        let mut settings = if settings_path.exists() {
+            let raw = fs::read_to_string(&settings_path)
+                .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+            serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}))
+        } else {
+            json!({})
+        };
+        if !settings.is_object() {
+            settings = json!({});
+        }
+
+        let obj = settings.as_object_mut().unwrap();
+        let env = obj.entry("env").or_insert_with(|| json!({}));
+        if !env.is_object() {
+            *env = json!({});
+        }
+        let env_obj = env.as_object_mut().unwrap();
+
+        let budi_endpoint = format!("http://127.0.0.1:{}", config.daemon_port);
+
+        // Check if user has a custom OTEL endpoint pointing elsewhere
+        if let Some(existing) = env_obj
+            .get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .and_then(|v| v.as_str())
+        {
+            let existing_lower = existing.to_lowercase();
+            let is_localhost =
+                existing_lower.contains("127.0.0.1") || existing_lower.contains("localhost");
+            if !is_localhost {
+                println!(
+                    "  OTEL: already configured (pointing to {existing}). \
+                     To also send to budi, use an OTEL Collector with multiple exporters."
+                );
+                return Ok(());
+            }
+            // Localhost but different port → update to budi's port (likely stale config)
+        }
+
+        let otel_vars = [
+            ("CLAUDE_CODE_ENABLE_TELEMETRY", "1"),
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", &budi_endpoint),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
+            ("OTEL_METRICS_EXPORTER", "otlp"),
+            ("OTEL_LOGS_EXPORTER", "otlp"),
+        ];
+
+        let mut changed = false;
+        for (key, value) in &otel_vars {
+            let current = env_obj.get(*key).and_then(|v| v.as_str());
+            if current != Some(value) {
+                env_obj.insert(key.to_string(), json!(value));
+                changed = true;
+            }
+        }
+
+        if changed {
+            if let Some(parent) = settings_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let out = serde_json::to_string_pretty(&settings)?;
+            fs::write(&settings_path, out)
+                .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+            println!(
+                "  OTEL: configured telemetry in {}",
+                settings_path.display()
+            );
+        } else {
+            println!("  OTEL: telemetry already configured");
+        }
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        eprintln!("{yellow}  Warning:{reset} OTEL setup failed: {e}");
     }
 }
 

@@ -35,10 +35,12 @@ pub struct AppState {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, dashboard as d, hooks as h};
+    use routes::{analytics as a, dashboard as d, hooks as h, otel as o};
 
     Router::new()
         .route("/health", get(h::health))
+        .route("/v1/logs", post(o::otel_logs_ingest))
+        .route("/v1/metrics", post(o::otel_metrics_ingest))
         .route("/sync", post(h::analytics_sync))
         .route("/sync/all", post(h::analytics_history))
         .route("/sync/reset", post(h::analytics_sync_reset))

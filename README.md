@@ -20,6 +20,7 @@ No cloud. No uploads. Everything stays on your machine.
 ## What it does
 
 - Tracks tokens, costs, and usage per message across AI coding agents
+- **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
 - Web dashboard at `http://localhost:7878/dashboard`
 - Live cost status line in Claude Code
@@ -30,7 +31,7 @@ No cloud. No uploads. Everything stays on your machine.
 
 | Agent | Status | How |
 |-------|--------|-----|
-| **Claude Code** | Supported | JSONL transcripts + hooks |
+| **Claude Code** | Supported | OpenTelemetry (exact cost) + JSONL transcripts + hooks |
 | **Cursor** | Supported | Usage API + hooks |
 | **Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI** | Planned | |
 
@@ -70,7 +71,7 @@ git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.s
 
 All installers automatically run `budi init` after installation. Homebrew users need to run `budi init` manually.
 
-`budi init` starts the daemon, installs hooks for Claude Code and Cursor, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks and the status line. The daemon uses port 7878 by default — make sure it's available (customize in `~/.config/budi/config.toml` with `daemon_port`).
+`budi init` starts the daemon, installs hooks for Claude Code and Cursor, configures OpenTelemetry for exact cost tracking, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks, telemetry, and the status line. The daemon uses port 7878 by default — make sure it's available (customize in `~/.config/budi/config.toml` with `daemon_port`).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -170,7 +171,7 @@ Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on you
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) syncs data from all detected providers into a single SQLite database. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
@@ -180,6 +181,7 @@ A lightweight Rust daemon (port 7878) syncs data from all detected providers int
 | | budi | ccusage | Claude `/cost` |
 |---|---|---|---|
 | Multi-agent support | **Yes** (Claude Code + Cursor) | Claude Code only | Claude Code only |
+| Exact cost (incl. thinking tokens) | **Yes** (via OTEL) | No | Approximate |
 | Cost history | **Per-message + daily** | Per-session | Current session |
 | Web dashboard | **Yes** | No | No |
 | Status line | **Yes** (Claude Code + Starship) | No | No |
@@ -199,21 +201,26 @@ A lightweight Rust daemon (port 7878) syncs data from all detected providers int
 │ budi CLI │ ──────────▶ │ budi-daemon  │ ───────────▶ │  budi.db │
 └──────────┘             │  (port 7878) │              └──────────┘
                          │              │                    ▲
-┌──────────┐    HTTP     │  - 30s sync  │    Pipeline       │
-│ Dashboard│ ──────────▶ │  - analytics │ ──────────────────┘
-└──────────┘             │  - hooks     │    Extract → Normalize
-                         └──────────────┘      → Enrich → Load
-                            ▲   ▲   ▲
-                 JSONL ─────┘   │   └───── Cursor API
-               (transcripts)    │       (usage events)
-                                │
+┌──────────┐    HTTP     │  - OTEL recv │    Pipeline       │
+│ Dashboard│ ──────────▶ │  - 30s sync  │ ──────────────────┘
+└──────────┘             │  - analytics │    Extract → Normalize
+                         │  - hooks     │      → Enrich → Load
+                         └──────────────┘
+                          ▲   ▲   ▲   ▲
+             OTEL ────────┘   │   │   └───── Cursor API
+         (exact cost)         │   │       (usage events)
+                   JSONL ─────┘   │
+                 (transcripts)    │
+                                  │
 ┌──────────┐  hooks    ┌──────────┐  hooks
 │ Claude   │ ──────────│ budi hook│──────── Cursor
 │ Code     │  (stdin)  │  (CLI)   │ (stdin)
 └──────────┘           └──────────┘
+  │
+  └── OTLP HTTP/JSON ──▶ POST /v1/logs (auto-configured)
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly.
+The daemon is the single source of truth — the CLI never opens the database directly. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user).
 
 </details>
 
@@ -234,6 +241,43 @@ Both Claude Code and Cursor support lifecycle hooks that budi uses for real-time
 </details>
 
 <details>
+<summary>OpenTelemetry (Claude Code)</summary>
+
+When Claude Code has telemetry enabled, it sends OTLP HTTP/JSON events to budi's daemon for every API request. This provides **exact cost data** including thinking tokens — closing the accuracy gap that JSONL-only parsing has (JSONL's `output_tokens` doesn't include thinking tokens).
+
+`budi init` automatically configures the following env vars in `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:7878",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp"
+  }
+}
+```
+
+All telemetry stays local — it goes directly from Claude Code to budi's daemon on localhost. No data leaves your machine.
+
+**How the data merges:** Each API call produces data from three sources. OTEL provides exact cost and token counts (including thinking tokens). JSONL provides message context (parent UUID, working directory, git branch). Hooks provide session metadata (repo, branch, user email). Budi merges all three into a single message row — regardless of which source arrives first.
+
+**Cost confidence levels:**
+
+| Level | Source | Accuracy |
+|-------|--------|----------|
+| `otel_exact` | OTEL `api_request` event | Exact (includes thinking tokens) |
+| `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
+| `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
+
+Messages with `otel_exact` or `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
+
+**If you already use OTEL elsewhere:** If `OTEL_EXPORTER_OTLP_ENDPOINT` is already set to a non-localhost URL, `budi init` won't overwrite it. You can use an [OTEL Collector](https://opentelemetry.io/docs/collector/) with multiple exporters to send data to both budi and your existing endpoint.
+
+</details>
+
+<details>
 <summary>Daemon API</summary>
 
 The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
@@ -246,6 +290,8 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | POST | `/sync` | Sync recent data (last 7 days) |
 | POST | `/sync/all` | Load full transcript history |
 | POST | `/hooks/ingest` | Receive hook events |
+| POST | `/v1/logs` | OTLP logs ingestion (exact cost from Claude Code) |
+| POST | `/v1/metrics` | OTLP metrics ingestion (stub for future use) |
 
 **Analytics:**
 

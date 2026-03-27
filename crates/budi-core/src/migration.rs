@@ -11,7 +11,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -62,7 +62,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     }
 
     // ── Incremental migrations from stable baseline (v10+) ─────────
-    // Future migrations go here as: if current_version(conn) == N { ... }
+    if current_version(conn) == 10 {
+        migrate_v10_to_v11(conn)?;
+    }
 
     Ok(())
 }
@@ -121,6 +123,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
         ",
     )?;
     create_sessions_and_hook_events(conn)?;
+    create_otel_events(conn)?;
     create_indexes(conn)?;
     Ok(())
 }
@@ -171,6 +174,37 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Create otel_events table for raw OTEL event storage.
+fn create_otel_events(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS otel_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_name  TEXT NOT NULL,
+            session_id  TEXT,
+            timestamp   TEXT NOT NULL,
+            raw_json    TEXT,
+            processed   INTEGER NOT NULL DEFAULT 0
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+/// Incremental migration from v10 to v11: add otel_events table.
+fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v10 → v11: adding otel_events table");
+    create_otel_events(conn)?;
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_otel_events_session ON otel_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_otel_events_timestamp ON otel_events(timestamp);
+        ",
+    )?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
 fn create_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -216,6 +250,10 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation_ts ON hook_events(event, conversation_id, timestamp);
+
+        -- otel_events
+        CREATE INDEX IF NOT EXISTS idx_otel_events_session ON otel_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_otel_events_timestamp ON otel_events(timestamp);
         ",
     )?;
     Ok(())
@@ -263,6 +301,8 @@ mod tests {
             conn.execute_batch("SELECT count(*) FROM tags").unwrap();
             conn.execute_batch("SELECT count(*) FROM sync_state")
                 .unwrap();
+            conn.execute_batch("SELECT count(*) FROM otel_events")
+                .unwrap();
 
             // Verify old table was dropped
             let old_exists: bool = conn
@@ -299,6 +339,54 @@ mod tests {
         // Running again should be a no-op
         migrate(&conn).unwrap();
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v10_to_v11_adds_otel_events() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Start at v10 with current schema minus otel_events
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        // Create the v10 schema (everything except otel_events)
+        conn.execute_batch(
+            "
+            CREATE TABLE messages (
+                uuid TEXT PRIMARY KEY, session_id TEXT, role TEXT NOT NULL,
+                timestamp TEXT NOT NULL, model TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT, repo_id TEXT, provider TEXT DEFAULT 'claude_code', cost_cents REAL,
+                parent_uuid TEXT, git_branch TEXT, cost_confidence TEXT DEFAULT 'estimated'
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, message_uuid TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                UNIQUE(message_uuid, key, value),
+                FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+            );
+            CREATE TABLE sync_state (file_path TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL DEFAULT 0, last_synced TEXT NOT NULL);
+            CREATE TABLE sessions (
+                conversation_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'claude_code',
+                started_at TEXT, ended_at TEXT, duration_ms INTEGER, composer_mode TEXT,
+                permission_mode TEXT, user_email TEXT, workspace_root TEXT, end_reason TEXT,
+                prompt_category TEXT, model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
+            );
+            CREATE TABLE hook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, event TEXT NOT NULL,
+                conversation_id TEXT, timestamp TEXT NOT NULL, model TEXT, tool_name TEXT,
+                tool_duration_ms INTEGER, tool_call_count INTEGER, raw_json TEXT, mcp_server TEXT
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+
+        assert!(needs_migration(&conn));
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        // otel_events table should exist
+        conn.execute_batch("SELECT count(*) FROM otel_events")
+            .unwrap();
     }
 
     /// Simulate a database with orphaned FK references (tags pointing to
