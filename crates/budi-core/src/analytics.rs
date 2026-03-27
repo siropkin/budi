@@ -512,6 +512,9 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         "provider" => "messages.provider",
         "tokens" => "(messages.input_tokens + messages.output_tokens)",
         "cost" => "COALESCE(messages.cost_cents, 0.0)",
+        "branch" | "git_branch" => "COALESCE(messages.git_branch, s.git_branch)",
+        "ticket" => "COALESCE(messages.git_branch, s.git_branch)",
+        "repo_id" => "COALESCE(messages.repo_id, s.repo_id)",
         _ => "messages.timestamp",
     };
     let order_dir = if p.sort_asc { "ASC" } else { "DESC" };
