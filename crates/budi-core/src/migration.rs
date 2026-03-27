@@ -11,7 +11,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -64,6 +64,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // ── Incremental migrations from stable baseline (v10+) ─────────
     if current_version(conn) == 10 {
         migrate_v10_to_v11(conn)?;
+    }
+    if current_version(conn) == 11 {
+        migrate_v11_to_v12(conn)?;
     }
 
     Ok(())
@@ -205,6 +208,17 @@ fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Incremental migration from v11 to v12: add composite dedup index for OTEL/JSONL matching.
+fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v11 → v12: adding dedup index for OTEL/JSONL matching");
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_messages_dedup
+            ON messages(session_id, model, role, cost_confidence, timestamp);",
+    )?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
 fn create_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -232,6 +246,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);
         CREATE INDEX IF NOT EXISTS idx_messages_cwd_role ON messages(cwd, role);
         CREATE INDEX IF NOT EXISTS idx_messages_session_role_cost ON messages(session_id, role, cost_cents);
+        CREATE INDEX IF NOT EXISTS idx_messages_dedup ON messages(session_id, model, role, cost_confidence, timestamp);
 
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
@@ -448,5 +463,28 @@ mod tests {
         // This should succeed even with orphaned FK data
         migrate(&conn).unwrap();
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v11_to_v12_adds_dedup_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Start at v11 (full schema)
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        create_current_schema(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+        assert!(needs_migration(&conn));
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        // Verify the dedup index exists
+        let has_idx: bool = conn
+            .prepare("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_dedup'")
+            .unwrap()
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_idx, "idx_messages_dedup should exist after v11→v12 migration");
     }
 }

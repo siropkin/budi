@@ -8,15 +8,14 @@ use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
 
-/// Run `budi init`. Returns `Ok(true)` if setup completed but with hook warnings
-/// (caller should exit 1), `Ok(false)` on full success.
+/// Run `budi init`. Prints warnings to stderr if hook installation had issues.
 pub fn cmd_init(
     local: bool,
     repo_root: Option<PathBuf>,
     no_daemon: bool,
     no_open: bool,
     no_sync: bool,
-) -> Result<bool> {
+) -> Result<()> {
     let repo_root = if local || repo_root.is_some() {
         let root = super::try_resolve_repo_root(repo_root);
         if root.is_none() {
@@ -73,14 +72,9 @@ pub fn cmd_init(
 
     // Ensure database schema is ready BEFORE starting daemon.
     // On fresh install: creates tables. On upgrade: drops old schema, recreates.
-    let mut db_warning = false;
     if let Ok(db_path) = budi_core::analytics::db_path() {
-        match budi_core::analytics::open_db_with_migration(&db_path) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("  Database: schema setup failed: {e}");
-                db_warning = true;
-            }
+        if let Err(e) = budi_core::analytics::open_db_with_migration(&db_path) {
+            eprintln!("  Database: schema setup failed: {e}");
         }
     }
 
@@ -181,7 +175,7 @@ pub fn cmd_init(
         );
     }
 
-    Ok(had_hook_warnings || db_warning)
+    Ok(())
 }
 
 pub fn open_url_in_browser(url: &str) {

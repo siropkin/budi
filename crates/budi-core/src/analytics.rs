@@ -122,6 +122,9 @@ pub fn ingest_messages_with_sync(
         // enrich the OTEL row with JSONL-only context (parent_uuid, cwd, git_branch)
         // that OTEL doesn't carry.
         if msg.role == "assistant" && msg.session_id.is_some() && msg.model.is_some() {
+            // Pre-compute ±1 second window for index-friendly range predicates
+            let ts_lo = (msg.timestamp - chrono::Duration::seconds(1)).to_rfc3339();
+            let ts_hi = (msg.timestamp + chrono::Duration::seconds(1)).to_rfc3339();
             let otel_uuid: Option<String> = tx
                 .query_row(
                     "SELECT uuid FROM messages
@@ -129,9 +132,9 @@ pub fn ingest_messages_with_sync(
                        AND model = ?2
                        AND role = 'assistant'
                        AND cost_confidence = 'otel_exact'
-                       AND abs(julianday(timestamp) - julianday(?3)) < (1.0 / 86400.0)
+                       AND timestamp BETWEEN ?3 AND ?4
                      LIMIT 1",
-                    params![msg.session_id, msg.model, ts],
+                    params![msg.session_id, msg.model, ts_lo, ts_hi],
                     |row| row.get(0),
                 )
                 .ok();
@@ -993,13 +996,14 @@ pub fn tag_stats(
              SELECT '{k}' as key, '(untagged)' as value, 0 as session_count,
                     COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
              FROM messages m
+             LEFT JOIN (
+                 SELECT DISTINCT tm2.session_id
+                 FROM tags t2
+                 JOIN messages tm2 ON t2.message_uuid = tm2.uuid
+                 WHERE t2.key = ?1
+             ) tagged ON tagged.session_id = m.session_id
              WHERE m.role = 'assistant' {untagged_date_filter}
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM tags t2
-                   JOIN messages tm2 ON t2.message_uuid = tm2.uuid
-                   WHERE t2.key = ?1 AND tm2.session_id = m.session_id
-               )"
+               AND tagged.session_id IS NULL"
         )
     } else {
         String::new()

@@ -274,8 +274,9 @@ mod tests {
             // Sonnet 4.6
             ("claude-sonnet-4-6-20260321", 3.0, 15.0, 3.75, 0.30),
             ("claude-sonnet-4-6", 3.0, 15.0, 3.75, 0.30),
-            // Sonnet 4.5
+            // Sonnet 4.5 — all known ID variants
             ("claude-sonnet-4-5-20241022", 3.0, 15.0, 3.75, 0.30),
+            ("claude-sonnet-4-5-20250514", 3.0, 15.0, 3.75, 0.30),
             // Sonnet 4.0
             ("claude-sonnet-4-20250514", 3.0, 15.0, 3.75, 0.30),
             // Sonnet 3.7 (deprecated)

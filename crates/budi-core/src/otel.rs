@@ -226,6 +226,9 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
 
     for event in events {
         let ts = event.timestamp.to_rfc3339();
+        // Pre-compute ±1 second window for index-friendly range predicates
+        let ts_lo = (event.timestamp - chrono::Duration::seconds(1)).to_rfc3339();
+        let ts_hi = (event.timestamp + chrono::Duration::seconds(1)).to_rfc3339();
         // Calculate cost from tokens × pricing instead of trusting OTEL's self-reported
         // cost_usd, which systematically underreports by ~10% vs official Anthropic billing.
         let pricing = crate::providers::claude_code::claude_pricing_for_model(&event.model);
@@ -255,9 +258,9 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                       AND model = ?2
                       AND role = 'assistant'
                       AND cost_confidence = 'otel_exact'
-                      AND abs(julianday(timestamp) - julianday(?3)) < (1.0 / 86400.0)
+                      AND timestamp BETWEEN ?3 AND ?4
                 )",
-                params![event.session_id, event.model, ts],
+                params![event.session_id, event.model, ts_lo, ts_hi],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -281,10 +284,13 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                    AND model = ?2
                    AND role = 'assistant'
                    AND cost_confidence != 'otel_exact'
-                   AND abs(julianday(timestamp) - julianday(?3)) < (1.0 / 86400.0)
-                 ORDER BY abs(julianday(timestamp) - julianday(?3))
+                   AND timestamp BETWEEN ?3 AND ?4
+                 ORDER BY ABS(
+                     CAST(strftime('%s', timestamp) AS INTEGER)
+                     - CAST(strftime('%s', ?5) AS INTEGER)
+                 )
                  LIMIT 1",
-                params![event.session_id, event.model, ts],
+                params![event.session_id, event.model, ts_lo, ts_hi, ts],
                 |row| row.get(0),
             )
             .ok();

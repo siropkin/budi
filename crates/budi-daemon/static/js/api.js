@@ -27,7 +27,7 @@ async function loadStatsData(signal) {
   const [summary, sessionsResult, cwds, cost, models, activityChart, providers, branches, tickets, tools, mcp] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(ok),
     fetch('/analytics/messages' + sessionsQ, opts).then(ok).catch(() => ({messages:[],total_count:0})),
-    fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/repos' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
     fetch('/analytics/cost' + q, opts).then(ok),
     fetch('/analytics/models' + q, opts).then(ok).catch(() => []),
     fetch('/analytics/activity' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(ok).catch(() => []),

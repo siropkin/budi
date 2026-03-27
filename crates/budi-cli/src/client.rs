@@ -19,9 +19,9 @@ use crate::daemon::{daemon_health, ensure_daemon_running};
 /// Produce a user-friendly error message based on the kind of reqwest error.
 fn describe_send_error(e: reqwest::Error) -> anyhow::Error {
     if e.is_connect() {
-        anyhow::anyhow!("daemon is not running — start it with `budi init`")
+        anyhow::anyhow!("daemon is not running — start it with `budi init`, or run `budi doctor` to diagnose")
     } else if e.is_timeout() {
-        anyhow::anyhow!("daemon timed out — for large syncs, this is normal; try again in a moment")
+        anyhow::anyhow!("daemon timed out — first sync or full history can take several minutes. Run `budi doctor` to check status")
     } else {
         anyhow::anyhow!("cannot reach daemon: {e} — run `budi doctor` to diagnose")
     }
@@ -212,7 +212,7 @@ impl DaemonClient {
         params.push(("limit", limit.to_string()));
         let resp = self
             .client
-            .get(format!("{}/analytics/projects", self.base_url))
+            .get(format!("{}/analytics/repos", self.base_url))
             .query(&params)
             .send()
             .map_err(describe_send_error)?;

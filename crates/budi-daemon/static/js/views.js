@@ -22,9 +22,9 @@ function renderMessagesSection(messages) {
   const rowFn = m => {
     const totalTok = m.input_tokens + m.output_tokens;
     const costVal = (m.cost_cents || 0) / 100;
-    const isEstimated = m.cost_confidence && m.cost_confidence !== 'exact' && m.cost_confidence !== 'otel_exact';
-    const costDisplay = isEstimated ? `~${fmtCost(costVal)}` : fmtCost(costVal);
-    const costClass = isEstimated ? 'right muted' : 'right';
+    const isExact = !m.cost_confidence || m.cost_confidence === 'exact' || m.cost_confidence === 'exact_cost' || m.cost_confidence === 'otel_exact';
+    const costDisplay = isExact ? fmtCost(costVal) : `~${fmtCost(costVal)}`;
+    const costClass = isExact ? 'right' : 'right muted';
     const provDisplay = (registeredProviders.find(rp => rp.name === m.provider) || {}).display_name || m.provider;
     const modelLabel = multiProvider
       ? provDisplay + ' / ' + formatModelName(m.model || 'unknown')
@@ -39,7 +39,7 @@ function renderMessagesSection(messages) {
       <td class="dir" title="${esc(branch)}">${esc(shortBranch || '--')}</td>
       <td>${esc(ticket || '--')}</td>
       <td class="right">${fmtNum(totalTok)}</td>
-      <td class="${costClass}">${costDisplay}</td>
+      <td class="${costClass}" title="${esc(m.cost_confidence || 'n/a')}">${costDisplay}</td>
     </tr>`;
   };
   return `

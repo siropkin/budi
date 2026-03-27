@@ -15,7 +15,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -25,7 +25,6 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Set up budi (starts daemon, installs status line, syncs existing data).
-    /// Exit codes: 0 = success, 1 = error, 2 = success with warnings
     Init {
         /// Initialize for the current git repo only (default: global)
         #[arg(long)]
@@ -179,13 +178,7 @@ fn main() -> Result<()> {
             no_open,
             no_sync,
         } => {
-            let had_warnings =
-                commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
-            // Exit 2 = partial success (init completed but hooks had warnings).
-            // Exit 0 = full success, exit 1 = hard error (from anyhow bail).
-            if had_warnings {
-                std::process::exit(2);
-            }
+            commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
             Ok(())
         }
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
