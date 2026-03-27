@@ -276,24 +276,35 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         }
 
         // Strategy 1: Try to find and upgrade an existing JSONL row.
-        // Match by session_id + model + timestamp within 1 second + not already otel_exact.
-        let existing_uuid: Option<String> = tx
-            .query_row(
-                "SELECT uuid FROM messages
+        // Fetch candidates from the index-friendly range, then filter in Rust.
+        let existing_uuid: Option<String> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT uuid, cost_confidence, timestamp FROM messages
                  WHERE session_id = ?1
                    AND model = ?2
                    AND role = 'assistant'
-                   AND cost_confidence != 'otel_exact'
-                   AND timestamp BETWEEN ?3 AND ?4
-                 ORDER BY ABS(
-                     CAST(strftime('%s', timestamp) AS INTEGER)
-                     - CAST(strftime('%s', ?5) AS INTEGER)
-                 )
-                 LIMIT 1",
-                params![event.session_id, event.model, ts_lo, ts_hi, ts],
-                |row| row.get(0),
-            )
-            .ok();
+                   AND timestamp BETWEEN ?3 AND ?4",
+            )?;
+            let rows: Vec<(String, String, String)> = stmt
+                .query_map(params![event.session_id, event.model, ts_lo, ts_hi], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            // Pick the closest non-otel_exact row
+            rows.into_iter()
+                .filter(|(_, conf, _)| conf != "otel_exact")
+                .min_by_key(|(_, _, row_ts)| {
+                    // Approximate distance by string comparison (RFC3339 is sortable)
+                    let diff = row_ts.as_str().cmp(ts.as_str());
+                    match diff {
+                        std::cmp::Ordering::Equal => 0i64,
+                        std::cmp::Ordering::Less => 1,
+                        std::cmp::Ordering::Greater => 1,
+                    }
+                })
+                .map(|(uuid, _, _)| uuid)
+        };
 
         if let Some(ref jsonl_uuid) = existing_uuid {
             // Upgrade the existing JSONL row in-place with exact OTEL data
