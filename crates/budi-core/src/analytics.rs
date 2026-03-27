@@ -145,9 +145,17 @@ pub fn ingest_messages_with_sync(
                         parent_uuid = COALESCE(parent_uuid, ?1),
                         cwd = COALESCE(cwd, ?2),
                         git_branch = COALESCE(git_branch, ?3),
-                        repo_id = COALESCE(repo_id, ?4)
-                     WHERE uuid = ?5",
-                    params![msg.parent_uuid, msg.cwd, git_branch, msg.repo_id, otel_id],
+                        repo_id = COALESCE(repo_id, ?4),
+                        request_id = COALESCE(request_id, ?5)
+                     WHERE uuid = ?6",
+                    params![
+                        msg.parent_uuid,
+                        msg.cwd,
+                        git_branch,
+                        msg.repo_id,
+                        msg.request_id,
+                        otel_id
+                    ],
                 )?;
                 // Insert tags for this message even though we skipped the INSERT
                 if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
@@ -162,14 +170,53 @@ pub fn ingest_messages_with_sync(
             }
         }
 
+        // Cross-parse dedup: when Claude Code streams a multi-content-block response
+        // (thinking → text → tool_use), each block is a separate JSONL entry with a
+        // different UUID but the same request_id (message.id). If budi syncs mid-stream,
+        // intermediate entries can be ingested in one parse, and the final entry in the
+        // next. Without this check, both get inserted — double-counting input/cache tokens.
+        // We keep the entry with the highest output_tokens (the final, authoritative one).
+        if let Some(ref request_id) = msg.request_id {
+            let existing: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT uuid, output_tokens FROM messages WHERE request_id = ?1 LIMIT 1",
+                    params![request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok();
+            if let Some((existing_uuid, existing_output)) = existing {
+                if (msg.output_tokens as i64) > existing_output {
+                    // New entry has more output tokens — update the existing row in-place
+                    // (keep its UUID to avoid FK violations on tags)
+                    tx.execute(
+                        "UPDATE messages SET
+                            output_tokens = ?1,
+                            cost_cents = ?2
+                         WHERE uuid = ?3",
+                        params![msg.output_tokens as i64, cost_cents, existing_uuid,],
+                    )?;
+                }
+                // Either way, add tags to the surviving row and skip INSERT
+                if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
+                    for tag in msg_tags {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                            params![existing_uuid, tag.key, tag.value],
+                        )?;
+                    }
+                }
+                continue;
+            }
+        }
+
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (uuid, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               cwd, repo_id, provider,
               cost_cents,
-              parent_uuid, git_branch, cost_confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              parent_uuid, git_branch, cost_confidence, request_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 msg.uuid,
                 msg.session_id,
@@ -187,6 +234,7 @@ pub fn ingest_messages_with_sync(
                 msg.parent_uuid,
                 git_branch,
                 msg.cost_confidence,
+                msg.request_id,
             ],
         )?;
 
@@ -2176,5 +2224,239 @@ mod tests {
         // Claude Code is registered, so it gets proper display name and cost.
         assert_eq!(cc_stats.display_name, "Claude Code");
         assert!(cc_stats.estimated_cost > 0.0);
+    }
+
+    /// Simulate the cross-parse dedup bug: a multi-content-block API response where
+    /// intermediate entries are ingested in one parse call and the final entry in the
+    /// next. Without request_id dedup, both get inserted — double-counting cache tokens.
+    #[test]
+    fn cross_parse_dedup_by_request_id() {
+        let mut conn = test_db();
+
+        // First parse: intermediate entry with partial output but full cache tokens
+        let intermediate = ParsedMessage {
+            uuid: "a1".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-25T00:00:01.000Z".parse().unwrap(),
+            cwd: Some("/tmp/proj".to_string()),
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 3,
+            output_tokens: 10, // intermediate: partial output
+            cache_creation_tokens: 21559,
+            cache_read_tokens: 50000,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(1.5),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: Some("msg_01ABC".to_string()), // same request_id
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        };
+        ingest_messages(&mut conn, &[intermediate], None).unwrap();
+
+        // Verify first message is inserted
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Second parse: final entry with same request_id but higher output_tokens
+        let final_entry = ParsedMessage {
+            uuid: "a3".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-25T00:00:01.500Z".parse().unwrap(),
+            cwd: Some("/tmp/proj".to_string()),
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 3,
+            output_tokens: 425, // final: full output
+            cache_creation_tokens: 21559,
+            cache_read_tokens: 50000,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(5.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: Some("msg_01ABC".to_string()), // same request_id
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        };
+        ingest_messages(&mut conn, &[final_entry], None).unwrap();
+
+        // Should still have only 1 message (deduped by request_id)
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "should dedup by request_id, not insert both");
+
+        // The surviving row should have the higher output_tokens
+        let (output, cache_read): (i64, i64) = conn
+            .query_row(
+                "SELECT output_tokens, cache_read_tokens FROM messages",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(output, 425, "should keep higher output_tokens");
+        assert_eq!(cache_read, 50000, "cache_read should not be doubled");
+    }
+
+    /// When an intermediate entry arrives AFTER the final entry (re-ordered parse),
+    /// the existing higher-output row should be kept.
+    #[test]
+    fn cross_parse_dedup_keeps_higher_output() {
+        let mut conn = test_db();
+
+        // Insert final entry first
+        let final_entry = ParsedMessage {
+            uuid: "a3".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-25T00:00:01.000Z".parse().unwrap(),
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 3,
+            output_tokens: 425,
+            cache_creation_tokens: 21559,
+            cache_read_tokens: 50000,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(5.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: Some("msg_01XYZ".to_string()),
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        };
+        ingest_messages(&mut conn, &[final_entry], None).unwrap();
+
+        // Then insert intermediate (lower output)
+        let intermediate = ParsedMessage {
+            uuid: "a1".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-25T00:00:01.000Z".parse().unwrap(),
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 3,
+            output_tokens: 10,
+            cache_creation_tokens: 21559,
+            cache_read_tokens: 50000,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(1.5),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: Some("msg_01XYZ".to_string()),
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        };
+        ingest_messages(&mut conn, &[intermediate], None).unwrap();
+
+        // Should still have only 1 message
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // The surviving row should have the higher output_tokens (425)
+        let output: i64 = conn
+            .query_row("SELECT output_tokens FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            output, 425,
+            "should keep the final entry with higher output"
+        );
+    }
+
+    /// Messages without request_id should not be affected by cross-parse dedup.
+    #[test]
+    fn no_request_id_no_dedup() {
+        let mut conn = test_db();
+
+        let msg1 = ParsedMessage {
+            uuid: "m1".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-25T00:00:01.000Z".parse().unwrap(),
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 1000,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(1.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: None, // no request_id
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        };
+        ingest_messages(&mut conn, &[msg1], None).unwrap();
+
+        let msg2 = ParsedMessage {
+            uuid: "m2".to_string(),
+            session_id: Some("s1".to_string()),
+            timestamp: "2026-03-25T00:00:02.000Z".parse().unwrap(),
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 200,
+            output_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 2000,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(2.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        };
+        ingest_messages(&mut conn, &[msg2], None).unwrap();
+
+        // Both should be inserted (different UUIDs, no request_id dedup)
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "messages without request_id should both be inserted"
+        );
     }
 }

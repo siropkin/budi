@@ -11,7 +11,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -68,6 +68,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if current_version(conn) == 11 {
         migrate_v11_to_v12(conn)?;
     }
+    if current_version(conn) == 12 {
+        migrate_v12_to_v13(conn)?;
+    }
 
     Ok(())
 }
@@ -106,7 +109,8 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             cost_cents             REAL,
             parent_uuid            TEXT,
             git_branch             TEXT,
-            cost_confidence        TEXT DEFAULT 'estimated'
+            cost_confidence        TEXT DEFAULT 'estimated',
+            request_id             TEXT
         );
 
         CREATE TABLE IF NOT EXISTS tags (
@@ -204,7 +208,7 @@ fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_otel_events_timestamp ON otel_events(timestamp);
         ",
     )?;
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    conn.pragma_update(None, "user_version", 11u32)?;
     Ok(())
 }
 
@@ -215,6 +219,58 @@ fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_messages_dedup
             ON messages(session_id, model, role, cost_confidence, timestamp);",
     )?;
+    conn.pragma_update(None, "user_version", 12u32)?;
+    Ok(())
+}
+
+/// Incremental migration from v12 to v13: add request_id column for cross-parse dedup.
+///
+/// Also deduplicates existing rows that were created by the cross-parse dedup bug:
+/// when Claude Code streams a multi-content-block response, intermediate JSONL entries
+/// (with full cache_read but partial output_tokens) could be ingested alongside the
+/// final entry if budi synced mid-stream. This inflates cache_read tokens.
+fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    tracing::info!(
+        "Migrating schema v12 → v13: adding request_id column + deduplicating stale rows"
+    );
+
+    // Add request_id column
+    conn.execute_batch(
+        "ALTER TABLE messages ADD COLUMN request_id TEXT;
+         CREATE INDEX IF NOT EXISTS idx_messages_request_id ON messages(request_id) WHERE request_id IS NOT NULL;",
+    )?;
+
+    // Deduplicate existing data: find rows that are likely duplicates from the
+    // cross-parse bug. Two assistant rows in the same session, same model, within
+    // ±1 second, with identical input_tokens + cache_read_tokens but different
+    // output_tokens — the one with fewer output_tokens is the stale intermediate.
+    let deleted: usize = conn.execute(
+        "DELETE FROM messages WHERE uuid IN (
+            SELECT m1.uuid FROM messages m1
+            INNER JOIN messages m2
+                ON m1.session_id = m2.session_id
+                AND m1.model = m2.model
+                AND m1.role = 'assistant'
+                AND m2.role = 'assistant'
+                AND m1.uuid != m2.uuid
+                AND m1.input_tokens = m2.input_tokens
+                AND m1.cache_read_tokens = m2.cache_read_tokens
+                AND m1.cache_creation_tokens = m2.cache_creation_tokens
+                AND m1.output_tokens < m2.output_tokens
+                AND ABS(JULIANDAY(m1.timestamp) - JULIANDAY(m2.timestamp)) < (2.0 / 86400.0)
+        )",
+        [],
+    )?;
+    if deleted > 0 {
+        tracing::info!("Dedup migration: removed {deleted} stale duplicate rows");
+    }
+
+    // Clean up orphaned tags for deleted messages
+    conn.execute(
+        "DELETE FROM tags WHERE message_uuid NOT IN (SELECT uuid FROM messages)",
+        [],
+    )?;
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -247,6 +303,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_cwd_role ON messages(cwd, role);
         CREATE INDEX IF NOT EXISTS idx_messages_session_role_cost ON messages(session_id, role, cost_cents);
         CREATE INDEX IF NOT EXISTS idx_messages_dedup ON messages(session_id, model, role, cost_confidence, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_messages_request_id ON messages(request_id) WHERE request_id IS NOT NULL;
 
         -- sessions
         CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
@@ -468,11 +525,43 @@ mod tests {
     #[test]
     fn migrate_v11_to_v12_adds_dedup_index() {
         let conn = Connection::open_in_memory().unwrap();
-        // Start at v11 (full schema)
         conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
-        create_current_schema(&conn).unwrap();
-        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        // Create v11 schema (no request_id column, no dedup index)
+        conn.execute_batch(
+            "
+            CREATE TABLE messages (
+                uuid TEXT PRIMARY KEY, session_id TEXT, role TEXT NOT NULL,
+                timestamp TEXT NOT NULL, model TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT, repo_id TEXT, provider TEXT DEFAULT 'claude_code', cost_cents REAL,
+                parent_uuid TEXT, git_branch TEXT, cost_confidence TEXT DEFAULT 'estimated'
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, message_uuid TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                UNIQUE(message_uuid, key, value),
+                FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+            );
+            CREATE TABLE sync_state (file_path TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL DEFAULT 0, last_synced TEXT NOT NULL);
+            CREATE TABLE sessions (
+                conversation_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'claude_code',
+                started_at TEXT, ended_at TEXT, duration_ms INTEGER, composer_mode TEXT,
+                permission_mode TEXT, user_email TEXT, workspace_root TEXT, end_reason TEXT,
+                prompt_category TEXT, model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
+            );
+            CREATE TABLE hook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, event TEXT NOT NULL,
+                conversation_id TEXT, timestamp TEXT NOT NULL, model TEXT, tool_name TEXT,
+                tool_duration_ms INTEGER, tool_call_count INTEGER, raw_json TEXT, mcp_server TEXT
+            );
+            CREATE TABLE otel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT NOT NULL, session_id TEXT,
+                timestamp TEXT NOT NULL, raw_json TEXT, processed INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        ).unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
 
         assert!(needs_migration(&conn));
         migrate(&conn).unwrap();
@@ -489,5 +578,100 @@ mod tests {
             has_idx,
             "idx_messages_dedup should exist after v11→v12 migration"
         );
+        // Verify request_id column was added by v12→v13
+        conn.execute("SELECT request_id FROM messages LIMIT 0", [])
+            .expect("request_id column should exist after migration");
+    }
+
+    #[test]
+    fn migrate_v12_to_v13_adds_request_id_and_deduplicates() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        // Create v12 schema (no request_id)
+        conn.execute_batch(
+            "
+            CREATE TABLE messages (
+                uuid TEXT PRIMARY KEY, session_id TEXT, role TEXT NOT NULL,
+                timestamp TEXT NOT NULL, model TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT, repo_id TEXT, provider TEXT DEFAULT 'claude_code', cost_cents REAL,
+                parent_uuid TEXT, git_branch TEXT, cost_confidence TEXT DEFAULT 'estimated'
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, message_uuid TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                UNIQUE(message_uuid, key, value),
+                FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+            );
+            CREATE TABLE sync_state (file_path TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL DEFAULT 0, last_synced TEXT NOT NULL);
+            CREATE TABLE sessions (
+                conversation_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'claude_code',
+                started_at TEXT, ended_at TEXT, duration_ms INTEGER, composer_mode TEXT,
+                permission_mode TEXT, user_email TEXT, workspace_root TEXT, end_reason TEXT,
+                prompt_category TEXT, model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
+            );
+            CREATE TABLE hook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, event TEXT NOT NULL,
+                conversation_id TEXT, timestamp TEXT NOT NULL, model TEXT, tool_name TEXT,
+                tool_duration_ms INTEGER, tool_call_count INTEGER, raw_json TEXT, mcp_server TEXT
+            );
+            CREATE TABLE otel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT NOT NULL, session_id TEXT,
+                timestamp TEXT NOT NULL, raw_json TEXT, processed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX idx_messages_dedup ON messages(session_id, model, role, cost_confidence, timestamp);
+            ",
+        ).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 12u32).unwrap();
+
+        // Insert duplicate rows (simulating the cross-parse bug)
+        conn.execute_batch(
+            "
+            INSERT INTO messages (uuid, session_id, role, timestamp, model, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence)
+            VALUES ('a1', 'sess-1', 'assistant', '2026-03-25T00:00:01.000Z', 'claude-sonnet-4-6', 3, 10, 21559, 50000, 1.5, 'estimated');
+            INSERT INTO messages (uuid, session_id, role, timestamp, model, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence)
+            VALUES ('a3', 'sess-1', 'assistant', '2026-03-25T00:00:01.500Z', 'claude-sonnet-4-6', 3, 425, 21559, 50000, 5.0, 'estimated');
+            INSERT INTO tags (message_uuid, key, value) VALUES ('a1', 'model', 'claude-sonnet-4-6');
+            INSERT INTO tags (message_uuid, key, value) VALUES ('a3', 'model', 'claude-sonnet-4-6');
+            ",
+        ).unwrap();
+
+        // Verify duplicates exist
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        // Verify duplicate was removed (a1 with output_tokens=10 should be gone)
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "duplicate should have been removed");
+
+        // The remaining row should be the one with higher output_tokens
+        let output: i64 = conn
+            .query_row("SELECT output_tokens FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(output, 425, "should keep the row with higher output_tokens");
+
+        // Orphaned tags for a1 should be cleaned up
+        let tag_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tags WHERE message_uuid = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 0, "orphaned tags should be cleaned up");
+
+        // request_id column should exist
+        conn.execute("SELECT request_id FROM messages LIMIT 0", [])
+            .expect("request_id column should exist");
     }
 }
