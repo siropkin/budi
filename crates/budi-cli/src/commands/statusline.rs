@@ -106,21 +106,8 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         .as_deref()
         .and_then(|c| config::find_repo_root(Path::new(c)).ok());
 
-    let repo_initialized = repo_root
-        .as_ref()
-        .is_some_and(|root| root.join(".claude/settings.local.json").exists());
-
     let cfg = crate::client::DaemonClient::load_config();
     let base = cfg.daemon_base_url();
-
-    // For starship/json/custom: output nothing on error (Starship hides empty modules)
-    if !repo_initialized {
-        if format == StatuslineFormat::Claude {
-            let budi_label = "\x1b[36m📊 budi\x1b[0m";
-            println!("{} \x1b[90m· not set up\x1b[0m", budi_label);
-        }
-        return Ok(());
-    }
 
     // Load statusline config (for Claude/Custom formats, and to determine needed query params)
     let sl_config = config::load_statusline_config();
