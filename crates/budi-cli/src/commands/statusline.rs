@@ -225,8 +225,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 const BUDI_STATUSLINE_CMD: &str = "budi statusline";
 
 /// Suffix appended to an existing command to merge budi output after it.
-const BUDI_STATUSLINE_SUFFIX: &str =
-    r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#;
+const BUDI_STATUSLINE_SUFFIX: &str = r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#;
 
 /// Check if a statusLine command already includes budi.
 fn statusline_has_budi(cmd: &str) -> bool {
