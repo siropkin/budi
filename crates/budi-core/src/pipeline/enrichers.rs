@@ -204,10 +204,30 @@ impl Enricher for CostEnricher {
                 "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
                 _ => crate::providers::claude_code::claude_pricing_for_model(model),
             };
-            let cost = msg.input_tokens as f64 * pricing.input / 1_000_000.0
+
+            // Split cache_creation_tokens into 5-min and 1-hour tiers.
+            // 1-hour cache: 2x input rate. 5-min cache: 1.25x input rate (pricing.cache_write).
+            // If no breakdown available, assume all tokens are 5-min tier.
+            let cache_5m_tokens = msg.cache_creation_tokens.saturating_sub(msg.cache_creation_1h_tokens);
+            let cache_1h_rate = pricing.input * 2.0; // 1-hour tier = 2x base input
+
+            let mut cost = msg.input_tokens as f64 * pricing.input / 1_000_000.0
                 + msg.output_tokens as f64 * pricing.output / 1_000_000.0
-                + msg.cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
+                + cache_5m_tokens as f64 * pricing.cache_write / 1_000_000.0
+                + msg.cache_creation_1h_tokens as f64 * cache_1h_rate / 1_000_000.0
                 + msg.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
+
+            // Fast mode: 6x all token costs
+            let is_fast = msg.speed.as_deref() == Some("fast");
+            if is_fast {
+                cost *= 6.0;
+            }
+
+            // Web search: $10 per 1000 searches ($0.01 per search)
+            if msg.web_search_requests > 0 {
+                cost += msg.web_search_requests as f64 * 0.01;
+            }
+
             // Always set cost_cents for assistant messages (Some(0.0) for zero-cost)
             // so they are distinguishable from NULL (unknown cost) in queries.
             msg.cost_cents = Some(cost * 100.0);
@@ -236,6 +256,16 @@ impl Enricher for CostEnricher {
             "cost_cents is Some but cost_confidence is empty for message {}",
             msg.uuid
         );
+
+        // Add speed tag if not standard (fast mode = 6x pricing)
+        if let Some(ref speed) = msg.speed {
+            if speed != "standard" {
+                tags.push(Tag {
+                    key: "speed".to_string(),
+                    value: speed.clone(),
+                });
+            }
+        }
 
         // Emit cost_confidence tag for assistant messages that have cost data
         if msg.role == "assistant" && msg.cost_cents.is_some() {
@@ -529,5 +559,90 @@ mod tests {
         msg.output_tokens = 100_000;
         enricher.enrich(&mut msg);
         assert_eq!(msg.cost_cents.unwrap(), 750.0);
+    }
+
+    #[test]
+    fn cost_enricher_fast_mode_6x() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        msg.input_tokens = 1_000_000;
+        msg.output_tokens = 100_000;
+        msg.speed = Some("fast".to_string());
+        enricher.enrich(&mut msg);
+        // Standard cost: $7.50. Fast mode: 6x = $45.00 = 4500 cents
+        assert_eq!(msg.cost_cents.unwrap(), 4500.0);
+    }
+
+    #[test]
+    fn cost_enricher_standard_speed_no_multiplier() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        msg.input_tokens = 1_000_000;
+        msg.speed = Some("standard".to_string());
+        enricher.enrich(&mut msg);
+        // Standard: 1M * $5/M = $5.00 = 500 cents (no multiplier)
+        assert_eq!(msg.cost_cents.unwrap(), 500.0);
+    }
+
+    #[test]
+    fn cost_enricher_1h_cache_tier() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        // All cache tokens in 1-hour tier
+        msg.cache_creation_tokens = 1_000_000;
+        msg.cache_creation_1h_tokens = 1_000_000;
+        enricher.enrich(&mut msg);
+        // 1h cache: 1M * $10/M (2x input of $5) = $10.00 = 1000 cents
+        assert_eq!(msg.cost_cents.unwrap(), 1000.0);
+    }
+
+    #[test]
+    fn cost_enricher_mixed_cache_tiers() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        // 800K in 5-min tier, 200K in 1-hour tier
+        msg.cache_creation_tokens = 1_000_000;
+        msg.cache_creation_1h_tokens = 200_000;
+        enricher.enrich(&mut msg);
+        // 5m: 800K * $6.25/M = $5.00
+        // 1h: 200K * $10/M = $2.00
+        // Total: $7.00 = 700 cents
+        assert_eq!(msg.cost_cents.unwrap(), 700.0);
+    }
+
+    #[test]
+    fn cost_enricher_web_search() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        msg.web_search_requests = 5;
+        enricher.enrich(&mut msg);
+        // 5 web searches * $0.01/search = $0.05 = 5 cents
+        assert_eq!(msg.cost_cents.unwrap(), 5.0);
+    }
+
+    #[test]
+    fn cost_enricher_fast_with_web_search() {
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        msg.input_tokens = 1_000_000;
+        msg.speed = Some("fast".to_string());
+        msg.web_search_requests = 10;
+        enricher.enrich(&mut msg);
+        // Token cost: 1M * $5/M = $5.00, fast 6x = $30.00
+        // Web search: 10 * $0.01 = $0.10 (NOT multiplied by fast)
+        // Total: $30.10 = 3010 cents
+        assert_eq!(msg.cost_cents.unwrap(), 3010.0);
     }
 }

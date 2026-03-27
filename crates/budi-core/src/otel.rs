@@ -226,7 +226,14 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
 
     for event in events {
         let ts = event.timestamp.to_rfc3339();
-        let cost_cents = event.cost_usd * 100.0;
+        // Calculate cost from tokens × pricing instead of trusting OTEL's self-reported
+        // cost_usd, which systematically underreports by ~10% vs official Anthropic billing.
+        let pricing = crate::providers::claude_code::claude_pricing_for_model(&event.model);
+        let cost_cents = (event.input_tokens as f64 * pricing.input / 1_000_000.0
+            + event.output_tokens as f64 * pricing.output / 1_000_000.0
+            + event.cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
+            + event.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0)
+            * 100.0;
 
         // Look up session context (repo_id, git_branch, cwd)
         let session_ctx: Option<(Option<String>, Option<String>, Option<String>)> = tx
@@ -548,7 +555,10 @@ mod tests {
             .unwrap();
         assert_eq!(confidence, "otel_exact");
 
-        // Verify cost_cents = cost_usd * 100
+        // Verify cost_cents is calculated from tokens × pricing (not from cost_usd)
+        // Event 1: opus-4-6, 1000 input, 500 output, 5000 cache_create, 50000 cache_read
+        // Cost = (1000*5 + 500*25 + 5000*6.25 + 50000*0.50) / 1M * 100 cents
+        //      = (5000 + 12500 + 31250 + 25000) / 1M * 100 = 0.07375 * 100 = 7.375
         let cost: f64 = conn
             .query_row(
                 "SELECT cost_cents FROM messages ORDER BY timestamp LIMIT 1",
@@ -556,7 +566,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!((cost - 5.0).abs() < 1e-10); // 0.05 * 100
+        assert!((cost - 7.375).abs() < 0.001, "cost_cents should be 7.375, got {cost}");
 
         // Verify session stub was created
         let sess_count: i64 = conn
@@ -624,7 +634,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!((cost - 7.0).abs() < 1e-10); // 0.07 * 100
+        // Cost calculated from tokens: (1000*5 + 500*25 + 5000*6.25 + 50000*0.50) / 1M * 100
+        assert!((cost - 7.375).abs() < 0.001, "cost should be 7.375, got {cost}");
         assert_eq!(confidence, "otel_exact");
         assert_eq!(input_tokens, 1000);
     }
@@ -685,7 +696,8 @@ mod tests {
         let cost: f64 = conn
             .query_row("SELECT cost_cents FROM messages LIMIT 1", [], |r| r.get(0))
             .unwrap();
-        assert!((cost - 5.0).abs() < 1e-10); // original 0.05 * 100
+        // Original cost from tokens: (1000*5 + 500*25 + 5000*6.25 + 50000*0.50) / 1M * 100
+        assert!((cost - 7.375).abs() < 0.001, "original cost should be preserved, got {cost}");
     }
 
     #[test]

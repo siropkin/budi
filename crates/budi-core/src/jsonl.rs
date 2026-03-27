@@ -57,6 +57,29 @@ pub(crate) struct TokenUsage {
     pub output_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
+    /// Breakdown of cache creation tokens by tier.
+    pub cache_creation: Option<CacheCreationBreakdown>,
+    /// "standard" or "fast" (fast = 6x pricing).
+    pub speed: Option<String>,
+    /// Server-side tool usage (web search, code execution).
+    pub server_tool_use: Option<ServerToolUse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CacheCreationBreakdown {
+    /// Not directly used — 5m tokens are derived as `cache_creation_tokens - ephemeral_1h_input_tokens`.
+    /// Kept for deserialization completeness and debugging.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ServerToolUse {
+    #[serde(default)]
+    pub web_search_requests: u64,
 }
 
 /// Parsed analytics-relevant data from a single assistant message.
@@ -93,6 +116,12 @@ pub struct ParsedMessage {
     /// API request ID (message.id from JSONL). Used for deduplication of
     /// multi-content-block responses.
     pub request_id: Option<String>,
+    /// "standard" or "fast". Fast mode = 6x pricing.
+    pub speed: Option<String>,
+    /// Cache creation tokens using the 1-hour tier (2x input rate, vs 1.25x for 5-min).
+    pub cache_creation_1h_tokens: u64,
+    /// Number of web search requests (billed separately).
+    pub web_search_requests: u64,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -132,9 +161,21 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             // assistant messages whose confidence hasn't been set yet (empty string).
             cost_confidence: "n/a".to_string(),
             request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
         }),
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
+            // Extract 1-hour cache tier tokens from cache_creation breakdown
+            let cache_1h = usage
+                .and_then(|u| u.cache_creation.as_ref())
+                .map(|cc| cc.ephemeral_1h_input_tokens)
+                .unwrap_or(0);
+            let web_searches = usage
+                .and_then(|u| u.server_tool_use.as_ref())
+                .map(|s| s.web_search_requests)
+                .unwrap_or(0);
             Some(ParsedMessage {
                 uuid: a.uuid,
                 session_id: a.session_id,
@@ -158,6 +199,9 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
                 request_id: a.message.id,
+                speed: usage.and_then(|u| u.speed.clone()),
+                cache_creation_1h_tokens: cache_1h,
+                web_search_requests: web_searches,
             })
         }
         TranscriptEntry::Other => None,

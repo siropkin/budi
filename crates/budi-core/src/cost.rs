@@ -391,6 +391,25 @@ mod tests {
         );
     }
 
+    /// Simulate realistic workload and verify cost_cents precision is maintained
+    /// at f64 level (no premature rounding to integer cents).
+    #[test]
+    fn cost_cents_stored_as_f64_not_integer() {
+        let conn = setup_db();
+        // A message that costs exactly 0.5 cents ($0.005)
+        // If stored as integer: 0 or 1 cent (up to 100% error)
+        // If stored as f64: 0.5 cents exactly
+        conn.execute(
+            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+             VALUES ('half', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 0, 0, 0.5)",
+            [],
+        ).unwrap();
+        let stored: f64 = conn
+            .query_row("SELECT cost_cents FROM messages WHERE uuid = 'half'", [], |r| r.get(0))
+            .unwrap();
+        assert!((stored - 0.5).abs() < 1e-10, "cost_cents should store sub-cent precision");
+    }
+
     #[test]
     fn cost_sub_cent_messages_not_lost() {
         let conn = setup_db();

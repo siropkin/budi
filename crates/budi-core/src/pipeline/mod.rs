@@ -326,6 +326,9 @@ mod tests {
             machine_name: None,
             cost_confidence: "n/a".to_string(),
             request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
         }
     }
 }

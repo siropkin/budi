@@ -572,6 +572,9 @@ fn usage_events_to_messages(
                     "estimated".to_string()
                 },
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             }
         })
         .collect()
@@ -823,6 +826,9 @@ fn parse_cursor_line(
             // User messages have no cost, so cost_confidence is not applicable.
             cost_confidence: String::new(),
             request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -847,6 +853,9 @@ fn parse_cursor_line(
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             })
         }
         _ => None,

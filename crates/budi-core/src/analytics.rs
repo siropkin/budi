@@ -1516,6 +1516,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1538,6 +1541,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
         ];
 
@@ -1583,6 +1589,9 @@ mod tests {
             machine_name: None,
             cost_confidence: "exact".to_string(),
             request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
         };
         // CostEnricher is the single source of truth for cost_cents
         CostEnricher.enrich(&mut msg);
@@ -1637,6 +1646,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -1659,6 +1671,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
         ];
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1697,6 +1712,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -1721,6 +1739,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -1744,6 +1765,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
         ]
     }
@@ -1820,6 +1844,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -1843,6 +1870,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -1867,6 +1897,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
         ]
     }
@@ -1965,6 +1998,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "cc-a1".to_string(),
@@ -1988,6 +2024,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
         ];
 
@@ -2015,6 +2054,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
             ParsedMessage {
                 uuid: "cu-a1".to_string(),
@@ -2038,6 +2080,9 @@ mod tests {
                 machine_name: None,
                 cost_confidence: "exact".to_string(),
                 request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
             },
         ];
 
