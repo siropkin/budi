@@ -46,11 +46,13 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     } else {
         println!("Checking for updates...");
         let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
-        let resp = client
+        let mut req = client
             .get("https://api.github.com/repos/siropkin/budi/releases/latest")
-            .header("User-Agent", "budi-cli")
-            .send()
-            .context("Failed to check for updates")?;
+            .header("User-Agent", "budi-cli");
+        if let Some(token) = github_token() {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = req.send().context("Failed to check for updates")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -226,6 +228,24 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     println!("{dim}Restart Claude Code and Cursor to pick up any changes.{reset}");
 
     Ok(())
+}
+
+/// Try to find a GitHub token from env vars or `gh auth token`.
+fn github_token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .ok()
+        .or_else(|| {
+            Command::new("gh")
+                .args(["auth", "token"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|t| !t.is_empty())
+        })
 }
 
 /// Check if budi was installed via Homebrew by examining the executable path.
