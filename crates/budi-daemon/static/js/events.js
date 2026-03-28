@@ -30,8 +30,8 @@ async function renderCurrentPage(content) {
     if (!settingsData) await loadSettingsData();
     renderSettingsView(content);
   } else {
+    if (!statsData) await loadStatsData();
     renderStatsView(content);
-    // Overview has no interactive handlers
   }
 }
 

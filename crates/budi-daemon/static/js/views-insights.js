@@ -123,7 +123,7 @@ function renderInsightsView(content) {
     <div class="grid-2 section-mb">
       <div class="panel">
         <h2>Tools</h2>
-        ${renderBarChart(toolsData.slice(0, DEFAULT_CHART_ROWS),
+        ${renderBarChart(toolsData,
           t => t.tool_name,
           t => t.call_count,
           (t, i) => toolColor(t.tool_name),
@@ -133,7 +133,7 @@ function renderInsightsView(content) {
       </div>
       <div class="panel">
         <h2>MCP Servers</h2>
-        ${renderBarChart(mcpData.slice(0, DEFAULT_CHART_ROWS),
+        ${renderBarChart(mcpData,
           m => fmtMcpName(m.tool_name || m.mcp_server),
           m => m.call_count,
           (m, i) => paletteColor(i),

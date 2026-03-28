@@ -31,6 +31,11 @@ function qs(params) {
   return s ? '?' + s : '';
 }
 
+// Build a URL with date range params merged with extra params
+function buildUrl(path, extra) {
+  return path + qs({ ...dateRange(currentPeriod), ...extra });
+}
+
 function fmtNum(n) {
   if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + 'B';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';

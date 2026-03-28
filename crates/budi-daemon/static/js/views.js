@@ -43,7 +43,7 @@ function renderStatsView(content) {
       </div>
       <div class="panel">
         <h2>Branches</h2>
-        ${renderBarChart((branches || []).slice(0, DEFAULT_CHART_ROWS),
+        ${renderBarChart(branches || [],
           (b, full) => {
             const branch = b.git_branch ? b.git_branch.replace(/^refs\/heads\//, '') : '';
             if (branch === '(untagged)' || !branch) return '(untagged)';

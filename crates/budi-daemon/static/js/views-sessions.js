@@ -326,13 +326,10 @@ function bindSessionsHandlers(content) {
     if (moreBtn) {
       moreBtn.textContent = 'Loading...';
       moreBtn.disabled = true;
-      const range = dateRange(currentPeriod);
-      const q = qs(range);
-      const params = q + (q ? '&' : '?') + 'limit=50&offset=' + sessionsPageData.length
-        + '&sort_by=' + sessionsPageSortCol + '&sort_asc=' + sessionsPageSortAsc
-        + (sessionsPageSearchTerm ? '&search=' + encodeURIComponent(sessionsPageSearchTerm) : '');
+      const extra = { limit: 50, offset: sessionsPageData.length, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
+      if (sessionsPageSearchTerm) extra.search = sessionsPageSearchTerm;
       const ok = r => r.json();
-      const result = await fetch('/analytics/sessions' + params).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
+      const result = await fetch(buildUrl('/analytics/sessions', extra)).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
       sessionsPageData = sessionsPageData.concat(result.sessions || []);
       sessionsPageTotalCount = result.total_count || sessionsPageTotalCount;
       container.innerHTML = renderSessionsList(sessionsPageData);
@@ -355,12 +352,10 @@ function bindSessionsHandlers(content) {
 }
 
 async function reloadSessionsPage(content) {
-  const range = dateRange(currentPeriod);
-  const q = qs(range);
-  const params = q + (q ? '&' : '?') + 'limit=50&sort_by=' + sessionsPageSortCol + '&sort_asc=' + sessionsPageSortAsc
-    + (sessionsPageSearchTerm ? '&search=' + encodeURIComponent(sessionsPageSearchTerm) : '');
+  const extra = { limit: 50, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
+  if (sessionsPageSearchTerm) extra.search = sessionsPageSearchTerm;
   const ok = r => r.json();
-  const result = await fetch('/analytics/sessions' + params).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
+  const result = await fetch(buildUrl('/analytics/sessions', extra)).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
   sessionsPageData = result.sessions || [];
   sessionsPageTotalCount = result.total_count || 0;
   $('#sessionsPageContainer').innerHTML = renderSessionsList(sessionsPageData);
