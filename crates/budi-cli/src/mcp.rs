@@ -91,7 +91,9 @@ impl BudiMcpServer {
 
     // ─── Analytics tools ────────────────────────────────────────────
 
-    #[tool(description = "Get AI coding cost summary: total cost, tokens, and messages for a time period. Returns estimated cost with breakdown by input/output/cache tokens.")]
+    #[tool(
+        description = "Get AI coding cost summary: total cost, tokens, and messages for a time period. Returns estimated cost with breakdown by input/output/cache tokens."
+    )]
     async fn get_cost_summary(
         &self,
         params: Parameters<PeriodRequest>,
@@ -164,16 +166,30 @@ impl BudiMcpServer {
 
         let mut text = format!("Cost Summary ({period_label})\n");
         text.push_str(&format!("Total cost:     {}\n", format_dollars(total_cost)));
-        text.push_str(&format!("Total messages: {msgs} ({user_msgs} user, {asst_msgs} assistant)\n"));
-        text.push_str(&format!("Total tokens:   {}\n", format_tokens(input_tok + output_tok + cache_create + cache_read)));
+        text.push_str(&format!(
+            "Total messages: {msgs} ({user_msgs} user, {asst_msgs} assistant)\n"
+        ));
+        text.push_str(&format!(
+            "Total tokens:   {}\n",
+            format_tokens(input_tok + output_tok + cache_create + cache_read)
+        ));
         text.push('\n');
         text.push_str("Cost breakdown:\n");
         text.push_str(&format!("  Input:       {}\n", format_dollars(input_cost)));
         text.push_str(&format!("  Output:      {}\n", format_dollars(output_cost)));
-        text.push_str(&format!("  Cache write: {}\n", format_dollars(cache_write_cost)));
-        text.push_str(&format!("  Cache read:  {}\n", format_dollars(cache_read_cost)));
+        text.push_str(&format!(
+            "  Cache write: {}\n",
+            format_dollars(cache_write_cost)
+        ));
+        text.push_str(&format!(
+            "  Cache read:  {}\n",
+            format_dollars(cache_read_cost)
+        ));
         if cache_savings > 0.0 {
-            text.push_str(&format!("  Cache savings: {}\n", format_dollars(cache_savings)));
+            text.push_str(&format!(
+                "  Cache savings: {}\n",
+                format_dollars(cache_savings)
+            ));
         }
         text.push('\n');
         text.push_str("Token breakdown:\n");
@@ -185,7 +201,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get cost breakdown by AI model (e.g. Claude Opus, Sonnet, Haiku, GPT-4, etc). Shows message count, tokens, and cost per model.")]
+    #[tool(
+        description = "Get cost breakdown by AI model (e.g. Claude Opus, Sonnet, Haiku, GPT-4, etc). Shows message count, tokens, and cost per model."
+    )]
     async fn get_model_breakdown(
         &self,
         params: Parameters<PeriodRequest>,
@@ -224,7 +242,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get cost breakdown by project/repository. Shows which repos are consuming the most AI tokens and money.")]
+    #[tool(
+        description = "Get cost breakdown by project/repository. Shows which repos are consuming the most AI tokens and money."
+    )]
     async fn get_project_costs(
         &self,
         params: Parameters<PeriodRequest>,
@@ -257,7 +277,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get cost breakdown by git branch. Shows which branches are consuming the most AI tokens and money. Useful for understanding cost per feature.")]
+    #[tool(
+        description = "Get cost breakdown by git branch. Shows which branches are consuming the most AI tokens and money. Useful for understanding cost per feature."
+    )]
     async fn get_branch_costs(
         &self,
         params: Parameters<PeriodRequest>,
@@ -279,10 +301,7 @@ impl BudiMcpServer {
                 "BRANCH", "SESSIONS", "MSGS", "COST"
             ));
             for b in &branches {
-                let branch = b
-                    .get("git_branch")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let branch = b.get("git_branch").and_then(|v| v.as_str()).unwrap_or("?");
                 let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
                 let sessions = b.get("session_count").and_then(|v| v.as_u64()).unwrap_or(0);
                 let msgs = b.get("message_count").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -300,7 +319,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get detailed cost info for a specific git branch, including sessions, messages, tokens, and cost.")]
+    #[tool(
+        description = "Get detailed cost info for a specific git branch, including sessions, messages, tokens, and cost."
+    )]
     async fn get_branch_detail(
         &self,
         params: Parameters<BranchRequest>,
@@ -318,7 +339,8 @@ impl BudiMcpServer {
                         "No data found for branch '{branch}' ({period_label}). Run `budi sync` if you haven't synced recently."
                     ))]));
                 }
-                resp.json().map_err(|e| McpError::internal_error(e.to_string(), None))?
+                resp.json()
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
             Err(e) => return Err(e),
         };
@@ -336,21 +358,32 @@ impl BudiMcpServer {
         }
         text.push_str(&format!(
             "Sessions: {}\n",
-            result.get("session_count").and_then(|v| v.as_u64()).unwrap_or(0)
+            result
+                .get("session_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
         ));
         text.push_str(&format!(
             "Messages: {}\n",
-            result.get("message_count").and_then(|v| v.as_u64()).unwrap_or(0)
+            result
+                .get("message_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
         ));
         let tok = sum_tokens(&result);
         text.push_str(&format!("Tokens:   {}\n", format_tokens(tok)));
-        let cost = result.get("cost_cents").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let cost = result
+            .get("cost_cents")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         text.push_str(&format!("Cost:     {}\n", format_dollars(cost / 100.0)));
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get cost breakdown by tag. Tags include: ticket_id, activity (bugfix/feature/refactor/question/ops), user, composer_mode, permission_mode, duration (short/medium/long), dominant_tool, cost_confidence, and custom tags.")]
+    #[tool(
+        description = "Get cost breakdown by tag. Tags include: ticket_id, activity (bugfix/feature/refactor/question/ops), user, composer_mode, permission_mode, duration (short/medium/long), dominant_tool, cost_confidence, and custom tags."
+    )]
     async fn get_tag_breakdown(
         &self,
         params: Parameters<TagRequest>,
@@ -388,7 +421,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get cost breakdown by AI coding agent/provider (e.g. Claude Code, Cursor). Shows tokens, messages, and cost per provider.")]
+    #[tool(
+        description = "Get cost breakdown by AI coding agent/provider (e.g. Claude Code, Cursor). Shows tokens, messages, and cost per provider."
+    )]
     async fn get_provider_breakdown(
         &self,
         params: Parameters<PeriodRequest>,
@@ -417,13 +452,22 @@ impl BudiMcpServer {
                 let msgs = p.get("message_count").and_then(|v| v.as_u64()).unwrap_or(0);
                 let tok = p.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
                     + p.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                    + p.get("cache_creation_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                    + p.get("cache_read_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let cost = p.get("total_cost_cents").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    + p.get("cache_creation_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                    + p.get("cache_read_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                let cost = p
+                    .get("total_cost_cents")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 let cost = if cost > 0.0 {
                     cost / 100.0
                 } else {
-                    p.get("estimated_cost").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                    p.get("estimated_cost")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0)
                 };
                 text.push_str(&format!(
                     "{:<16} {:>8} {:>10} {:>10}\n",
@@ -438,7 +482,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get tool call frequency stats from hook events. Shows which tools (Read, Edit, Bash, etc.) are used most.")]
+    #[tool(
+        description = "Get tool call frequency stats from hook events. Shows which tools (Read, Edit, Bash, etc.) are used most."
+    )]
     async fn get_tool_usage(
         &self,
         params: Parameters<PeriodRequest>,
@@ -482,7 +528,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get daily activity chart data: messages and cost per day for the selected period.")]
+    #[tool(
+        description = "Get daily activity chart data: messages and cost per day for the selected period."
+    )]
     async fn get_activity(
         &self,
         params: Parameters<PeriodRequest>,
@@ -499,14 +547,17 @@ impl BudiMcpServer {
         if activity.is_empty() {
             text.push_str("No activity data for this period.");
         } else {
-            text.push_str(&format!(
-                "{:<12} {:>8} {:>10}\n",
-                "DATE", "MSGS", "COST"
-            ));
+            text.push_str(&format!("{:<12} {:>8} {:>10}\n", "DATE", "MSGS", "COST"));
             for day in &activity {
                 let date = day.get("date").and_then(|v| v.as_str()).unwrap_or("?");
-                let msgs = day.get("message_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                let cost = day.get("cost_cents").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let msgs = day
+                    .get("message_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let cost = day
+                    .get("cost_cents")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 text.push_str(&format!(
                     "{:<12} {:>8} {:>10}\n",
                     date,
@@ -521,7 +572,9 @@ impl BudiMcpServer {
 
     // ─── Configuration tools ────────────────────────────────────────
 
-    #[tool(description = "Get current budi configuration, including daemon host/port, statusline config, tag rules, and installed hook status.")]
+    #[tool(
+        description = "Get current budi configuration, including daemon host/port, statusline config, tag rules, and installed hook status."
+    )]
     async fn get_config(&self) -> Result<CallToolResult, McpError> {
         let mut text = String::from("Budi Configuration\n\n");
 
@@ -563,10 +616,7 @@ impl BudiMcpServer {
                     tags_config.rules.len()
                 ));
                 for rule in &tags_config.rules {
-                    text.push_str(&format!(
-                        "  {} = \"{}\"",
-                        rule.key, rule.value
-                    ));
+                    text.push_str(&format!("  {} = \"{}\"", rule.key, rule.value));
                     if let Some(ref repo) = rule.match_repo {
                         text.push_str(&format!(" (repo: {repo})"));
                     }
@@ -591,7 +641,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Set custom tag rules in ~/.config/budi/tags.toml. Tag rules automatically tag messages matching repo patterns. Example TOML:\n[[rules]]\nkey = \"team\"\nvalue = \"backend\"\nmatch_repo = \"*api*\"")]
+    #[tool(
+        description = "Set custom tag rules in ~/.config/budi/tags.toml. Tag rules automatically tag messages matching repo patterns. Example TOML:\n[[rules]]\nkey = \"team\"\nvalue = \"backend\"\nmatch_repo = \"*api*\""
+    )]
     async fn set_tag_rules(
         &self,
         params: Parameters<TagRulesRequest>,
@@ -617,15 +669,16 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Configure the statusline in ~/.config/budi/statusline.toml. Controls which cost slots are shown in your shell prompt. Available slots: today, week, month, session, branch, project, provider. Example TOML:\nslots = [\"today\", \"week\", \"month\"]\nformat = \"{today} | {week} | {month}\"")]
+    #[tool(
+        description = "Configure the statusline in ~/.config/budi/statusline.toml. Controls which cost slots are shown in your shell prompt. Available slots: today, week, month, session, branch, project, provider. Example TOML:\nslots = [\"today\", \"week\", \"month\"]\nformat = \"{today} | {week} | {month}\""
+    )]
     async fn set_statusline_config(
         &self,
         params: Parameters<StatuslineConfigRequest>,
     ) -> Result<CallToolResult, McpError> {
         // Validate TOML
-        let config: budi_core::config::StatuslineConfig =
-            toml::from_str(&params.0.toml_content)
-                .map_err(|e| McpError::invalid_params(format!("Invalid TOML: {e}"), None))?;
+        let config: budi_core::config::StatuslineConfig = toml::from_str(&params.0.toml_content)
+            .map_err(|e| McpError::invalid_params(format!("Invalid TOML: {e}"), None))?;
 
         let path = budi_core::config::statusline_config_path()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -644,7 +697,9 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Trigger a data sync to refresh analytics with latest transcripts. Use force=true to re-ingest from scratch (after upgrades).")]
+    #[tool(
+        description = "Trigger a data sync to refresh analytics with latest transcripts. Use force=true to re-ingest from scratch (after upgrades)."
+    )]
     async fn sync_data(&self) -> Result<CallToolResult, McpError> {
         let resp = self
             .client
@@ -672,7 +727,9 @@ impl BudiMcpServer {
         ))]))
     }
 
-    #[tool(description = "Get budi health status: daemon, database, schema version, and sync state.")]
+    #[tool(
+        description = "Get budi health status: daemon, database, schema version, and sync state."
+    )]
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
         let mut text = String::from("Budi Status\n\n");
 
@@ -691,7 +748,10 @@ impl BudiMcpServer {
 
         // Sync status
         if let Ok(sync) = self.daemon_get::<Value>("/sync/status", &[]) {
-            let syncing = sync.get("syncing").and_then(|v| v.as_bool()).unwrap_or(false);
+            let syncing = sync
+                .get("syncing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             text.push_str(&format!(
                 "Sync: {}\n",
                 if syncing { "in progress" } else { "idle" }
@@ -882,8 +942,12 @@ fn format_tokens(n: u64) -> String {
 fn sum_tokens(v: &Value) -> u64 {
     v.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
         + v.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-        + v.get("cache_read_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-        + v.get("cache_creation_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+        + v.get("cache_read_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+        + v.get("cache_creation_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
 }
 
 /// Simple URL encoding for path segments (branch names can contain /).

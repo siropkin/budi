@@ -649,9 +649,7 @@ fn install_mcp_server() {
         }
 
         let obj = settings.as_object_mut().unwrap();
-        let mcp_servers = obj
-            .entry("mcpServers")
-            .or_insert_with(|| json!({}));
+        let mcp_servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
         if !mcp_servers.is_object() {
             *mcp_servers = json!({});
         }
