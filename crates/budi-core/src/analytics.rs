@@ -3341,7 +3341,7 @@ mod tests {
     #[test]
     fn session_messages_returns_assistant_only() {
         let mut conn = test_db();
-        let mut msgs = sample_messages();
+        let msgs = sample_messages();
         // sample_messages: u1 (user, sess-abc), a1 (assistant, sess-abc), u2 (user, sess-def)
         ingest_messages(&mut conn, &msgs, None).unwrap();
 
