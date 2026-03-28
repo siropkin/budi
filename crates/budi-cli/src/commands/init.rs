@@ -50,6 +50,7 @@ pub fn cmd_init(
     let hook_warnings = install_hooks();
     let had_hook_warnings = !hook_warnings.is_empty();
 
+    install_mcp_server();
     install_otel_env_vars(&config);
     if had_hook_warnings {
         eprintln!("  Warning: hook installation had issues:");
@@ -623,6 +624,89 @@ pub fn install_otel_env_vars(config: &config::BudiConfig) {
         let reset = super::ansi("\x1b[0m");
         eprintln!("{yellow}  Warning:{reset} OTEL setup failed: {e}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP server installation
+// ---------------------------------------------------------------------------
+
+/// Install the budi MCP server in ~/.claude/settings.json.
+/// Adds to mcpServers so Claude Code can discover and use budi tools.
+fn install_mcp_server() {
+    let result = (|| -> Result<()> {
+        let home = budi_core::config::home_dir()?;
+        let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
+
+        let mut settings = if settings_path.exists() {
+            let raw = fs::read_to_string(&settings_path)
+                .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+            serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}))
+        } else {
+            json!({})
+        };
+        if !settings.is_object() {
+            settings = json!({});
+        }
+
+        let obj = settings.as_object_mut().unwrap();
+        let mcp_servers = obj
+            .entry("mcpServers")
+            .or_insert_with(|| json!({}));
+        if !mcp_servers.is_object() {
+            *mcp_servers = json!({});
+        }
+        let mcp_obj = mcp_servers.as_object_mut().unwrap();
+
+        // Resolve the budi binary path
+        let budi_path = which_budi();
+
+        let desired = json!({
+            "command": budi_path,
+            "args": ["mcp-serve"],
+            "type": "stdio"
+        });
+
+        // Check if already installed with same config
+        if mcp_obj.get("budi") == Some(&desired) {
+            println!("  MCP: budi server already configured");
+            return Ok(());
+        }
+
+        mcp_obj.insert("budi".to_string(), desired);
+
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let out = serde_json::to_string_pretty(&settings)?;
+        fs::write(&settings_path, out)
+            .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+        println!(
+            "  MCP: installed budi server in {}",
+            settings_path.display()
+        );
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        eprintln!("{yellow}  Warning:{reset} MCP server setup failed: {e}");
+    }
+}
+
+/// Find the budi binary path, preferring the same directory as the running binary.
+fn which_budi() -> String {
+    // Try to use the same directory as the running binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("budi");
+            if candidate.exists() {
+                return candidate.display().to_string();
+            }
+        }
+    }
+    // Fall back to PATH lookup
+    "budi".to_string()
 }
 
 /// Check if a Claude Code hook entry is a legacy budi hook (without `|| true`).

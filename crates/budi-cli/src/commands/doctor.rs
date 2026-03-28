@@ -357,6 +357,19 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         );
     }
 
+    // Check MCP server configuration in Claude Code settings
+    {
+        let mcp_ok = check_mcp_config(&claude_settings);
+        if mcp_ok {
+            println!("  {green}\u{2713}{reset} MCP: budi server configured");
+        } else {
+            let yellow = super::ansi("\x1b[33m");
+            println!(
+                "  {yellow}!{reset} MCP: budi server not configured. Run `budi init` to enable AI agent integration"
+            );
+        }
+    }
+
     // Check OTEL configuration in Claude Code settings
     {
         let otel_ok = check_otel_config(&claude_settings, &config);
@@ -571,6 +584,22 @@ fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
             .and_then(|v| v.as_str())
             .is_some_and(|v| expected_val.is_none_or(|exp| v == exp))
     })
+}
+
+/// Check if the budi MCP server is configured in Claude Code settings.
+fn check_mcp_config(settings_path: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(settings_path) else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    settings
+        .get("mcpServers")
+        .and_then(|m| m.get("budi"))
+        .and_then(|b| b.get("command"))
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.contains("budi"))
 }
 
 /// Check available disk space in MB. Uses `df -k` on Unix, skips on Windows.

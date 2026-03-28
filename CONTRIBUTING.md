@@ -56,6 +56,15 @@ Compares Budi's cost calculations against raw JSONL transcript data. Reports per
 3. Register in `Pipeline::new()` in `crates/budi-core/src/pipeline/mod.rs`
 4. Enricher order matters: Hook → Identity → Git → Cost → Tag
 
+## Testing MCP server
+
+```bash
+# Send initialize + tools/list via stdin:
+printf '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/list","id":2}\n' | cargo run --bin budi -- mcp-serve 2>/dev/null
+```
+
+The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTTP client to the daemon — make sure `budi-daemon` is running first.
+
 ## Releasing
 
 ```bash

@@ -5,6 +5,7 @@ use budi_core::config;
 pub mod doctor;
 pub mod hook;
 pub mod init;
+pub mod mcp;
 pub mod open;
 pub mod stats;
 pub mod statusline;

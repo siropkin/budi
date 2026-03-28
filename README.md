@@ -143,6 +143,7 @@ budi update                   # check for updates (detects Homebrew)
 budi update --version 7.1.0  # update to a specific version
 budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
+budi mcp-serve                # run MCP server (used by Claude Code, not called directly)
 ```
 
 All data commands support `--period today|week|month|all` and `--json`.
@@ -164,6 +165,39 @@ key = "team"
 value = "backend"
 match_repo = "*Backend*"
 ```
+
+## MCP server
+
+Budi includes an MCP (Model Context Protocol) server so AI agents can query your cost data and configure budi directly from conversation. Installed automatically by `budi init` into `~/.claude/settings.json`.
+
+**Example prompts:**
+- "What's my AI coding cost this week?"
+- "Which model is costing me the most?"
+- "Show me cost per branch this month"
+- "Set up tag rules for my team repos"
+
+**Available tools (14):**
+
+| Tool | Description |
+|------|-------------|
+| `get_cost_summary` | Total cost, tokens, messages for a period |
+| `get_model_breakdown` | Cost breakdown by model |
+| `get_project_costs` | Cost breakdown by repo/project |
+| `get_branch_costs` | Cost breakdown by git branch |
+| `get_branch_detail` | Detailed stats for a specific branch |
+| `get_tag_breakdown` | Cost breakdown by any tag key |
+| `get_provider_breakdown` | Cost breakdown by agent (Claude Code, Cursor) |
+| `get_tool_usage` | Tool call frequency + MCP server stats |
+| `get_activity` | Daily activity chart data |
+| `get_config` | Current budi configuration |
+| `set_tag_rules` | Configure custom tag rules |
+| `set_statusline_config` | Configure statusline slots |
+| `sync_data` | Trigger data sync |
+| `get_status` | Daemon health, schema, sync state |
+
+All analytics tools accept a `period` parameter: `today`, `week`, `month`, `all` (default: `month`).
+
+The MCP server is a thin HTTP client to the daemon — it never touches the database directly. Communication uses stdio (JSON-RPC), and all logging goes to stderr.
 
 ## Privacy
 
@@ -205,7 +239,10 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 │ Dashboard│ ──────────▶ │  - 30s sync  │ ──────────────────┘
 └──────────┘             │  - analytics │    Extract → Normalize
                          │  - hooks     │      → Enrich → Load
-                         └──────────────┘
+┌──────────┐    HTTP     └──────────────┘
+│ MCP      │ ──────────▶ (stdio JSON-RPC, 14 tools)
+│ Server   │  thin client
+└──────────┘
                           ▲   ▲   ▲   ▲
              OTEL ────────┘   │   │   └───── Cursor API
          (exact cost)         │   │       (usage events)

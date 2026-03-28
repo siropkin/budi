@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 mod client;
 mod commands;
 mod daemon;
+mod mcp;
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 
@@ -124,6 +125,9 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         _args: Vec<String>,
     },
+    /// Run the MCP server (stdio transport) for AI agent integration
+    #[command(name = "mcp-serve")]
+    McpServe,
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -241,6 +245,13 @@ fn main() -> Result<()> {
             // Hooks must NEVER block the host agent. Swallow all errors silently.
             let _ = commands::hook::cmd_hook();
             Ok(())
+        }
+        Commands::McpServe => {
+            // MCP server uses async — stdout is reserved for JSON-RPC.
+            // Reinitialize logging to stderr only (the default tracing init above
+            // uses stderr already, but with ANSI colors that could leak into stdio).
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::mcp::run_mcp_server())
         }
         Commands::Statusline { install, format } => {
             if install {

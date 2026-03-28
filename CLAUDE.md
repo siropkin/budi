@@ -22,7 +22,7 @@ After installing: `pkill -f "budi-daemon serve" && budi sync`
 ### Crates
 
 - **budi-core** — Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, OTEL ingestion, hooks, config, migrations
-- **budi-cli** — Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate
+- **budi-cli** — Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate, mcp-serve
 - **budi-daemon** — axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard, analytics API, hook ingestion, OTEL ingestion
 
 ### Data flow
@@ -80,13 +80,16 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync endpoints
 - `crates/budi-daemon/src/routes/otel.rs` — /v1/logs OTLP ingestion
 - `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering + installation
+- `crates/budi-cli/src/mcp.rs` — MCP server handler (14 tools: analytics + config)
+- `crates/budi-cli/src/commands/mcp.rs` — `mcp-serve` subcommand (stdio transport)
 - `crates/budi-daemon/static/js/` — Dashboard JS (vanilla, no framework)
 
 ## Dev notes
 
 - CLI never touches SQLite directly — all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost — sets cost_cents during pipeline. Skips if cost already set (API data)
-- `budi init` installs hooks in `~/.claude/settings.json` (CC) and `~/.cursor/hooks.json` (Cursor), plus OTEL env vars
+- `budi init` installs hooks in `~/.claude/settings.json` (CC) and `~/.cursor/hooks.json` (Cursor), plus OTEL env vars and MCP server
+- **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 14 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity) and config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status). Thin HTTP client to daemon — stdout is JSON-RPC only, logging to stderr
 - Tags are auto-detected (provider, model, repo, ticket_id, etc.) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - Dashboard is a single page at /dashboard with vanilla JS

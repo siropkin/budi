@@ -70,7 +70,15 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
 
-        // 5. Remove status line from Claude Code
+        // 5. Remove MCP server from Claude Code
+        print!("Removing MCP server... ");
+        match remove_mcp_server(&home) {
+            Ok(true) => println!("{green}✓{reset} removed"),
+            Ok(false) => println!("none found"),
+            Err(e) => println!("{yellow}warning: {e}{reset}"),
+        }
+
+        // 6. Remove status line from Claude Code
         print!("Removing status line... ");
         match remove_statusline(&home) {
             Ok(true) => println!("{green}✓{reset} removed"),
@@ -235,6 +243,38 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
     }
 
     Ok(changed)
+}
+
+fn remove_mcp_server(home: &str) -> Result<bool> {
+    let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+
+    let raw = fs::read_to_string(&settings_path)?;
+    let mut settings: Value = serde_json::from_str(&raw)?;
+
+    let Some(mcp_servers) = settings
+        .get_mut("mcpServers")
+        .and_then(|m| m.as_object_mut())
+    else {
+        return Ok(false);
+    };
+
+    if mcp_servers.remove("budi").is_none() {
+        return Ok(false);
+    }
+
+    // Remove empty mcpServers object
+    if mcp_servers.is_empty() {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("mcpServers");
+        }
+    }
+
+    let out = serde_json::to_string_pretty(&settings)?;
+    fs::write(&settings_path, out)?;
+    Ok(true)
 }
 
 fn remove_statusline(home: &str) -> Result<bool> {
