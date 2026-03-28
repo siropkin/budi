@@ -33,10 +33,7 @@ pub async fn health() -> Json<HealthResponse> {
 }
 
 pub async fn health_check_update()
--> Result<
-    Json<super::analytics::CheckUpdateResponse>,
-    (StatusCode, Json<serde_json::Value>),
-> {
+-> Result<Json<super::analytics::CheckUpdateResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::analytics::CheckUpdateResponse;
 
     let result = tokio::task::spawn_blocking(|| -> anyhow::Result<CheckUpdateResponse> {
@@ -83,10 +80,7 @@ pub async fn health_check_update()
 }
 
 pub async fn health_integrations()
--> Result<
-    Json<super::analytics::IntegrationsResponse>,
-    (StatusCode, Json<serde_json::Value>),
-> {
+-> Result<Json<super::analytics::IntegrationsResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::analytics::{DatabaseStats, IntegrationPaths, IntegrationsResponse};
 
     let result = tokio::task::spawn_blocking(|| -> IntegrationsResponse {
@@ -214,7 +208,10 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
     .await
     .ok()
     .flatten();
-    Json(SyncStatusResponse { syncing, last_synced })
+    Json(SyncStatusResponse {
+        syncing,
+        last_synced,
+    })
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -412,4 +409,3 @@ pub async fn hooks_ingest(
 
     Ok(Json(json!({"ok": true})))
 }
-

@@ -146,7 +146,12 @@ pub async fn analytics_models(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::model_usage(&conn, params.since.as_deref(), params.until.as_deref(), limit)
+        analytics::model_usage(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            limit,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -162,7 +167,12 @@ pub async fn analytics_branches(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::branch_cost(&conn, params.since.as_deref(), params.until.as_deref(), limit)
+        analytics::branch_cost(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            limit,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

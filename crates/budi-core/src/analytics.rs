@@ -3294,8 +3294,14 @@ mod tests {
         let msg1 = assistant_msg("ts-1", "s1", 10.0);
         let msg2 = assistant_msg("ts-2", "s2", 6.0);
         let tags = vec![
-            vec![Tag { key: "repo".to_string(), value: "proj-a".to_string() }],
-            vec![Tag { key: "repo".to_string(), value: "proj-b".to_string() }],
+            vec![Tag {
+                key: "repo".to_string(),
+                value: "proj-a".to_string(),
+            }],
+            vec![Tag {
+                key: "repo".to_string(),
+                value: "proj-b".to_string(),
+            }],
         ];
         ingest_messages(&mut conn, &[msg1, msg2], Some(&tags)).unwrap();
 
@@ -3312,12 +3318,16 @@ mod tests {
         let mut conn = test_db();
         // One session with two tag values — cost should be split evenly
         let msg = assistant_msg("ts-split", "s-split", 10.0);
-        let tags = vec![
-            vec![
-                Tag { key: "ticket".to_string(), value: "ABC-1".to_string() },
-                Tag { key: "ticket".to_string(), value: "DEF-2".to_string() },
-            ],
-        ];
+        let tags = vec![vec![
+            Tag {
+                key: "ticket".to_string(),
+                value: "ABC-1".to_string(),
+            },
+            Tag {
+                key: "ticket".to_string(),
+                value: "DEF-2".to_string(),
+            },
+        ]];
         ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
 
         let stats = tag_stats(&conn, Some("ticket"), None, None, 10).unwrap();
@@ -3345,12 +3355,16 @@ mod tests {
     fn session_tags_returns_distinct_tags() {
         let mut conn = test_db();
         let msg = assistant_msg("st-1", "sess-tags", 1.0);
-        let tags = vec![
-            vec![
-                Tag { key: "repo".to_string(), value: "my-repo".to_string() },
-                Tag { key: "activity".to_string(), value: "feature".to_string() },
-            ],
-        ];
+        let tags = vec![vec![
+            Tag {
+                key: "repo".to_string(),
+                value: "my-repo".to_string(),
+            },
+            Tag {
+                key: "activity".to_string(),
+                value: "feature".to_string(),
+            },
+        ]];
         ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
 
         let result = session_tags(&conn, "sess-tags").unwrap();
