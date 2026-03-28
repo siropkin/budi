@@ -135,23 +135,9 @@ mod tests {
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE messages (
-                uuid TEXT PRIMARY KEY,
-                session_id TEXT,
-                role TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                model TEXT,
-                input_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                cost_cents REAL NOT NULL DEFAULT 0,
-                cwd TEXT,
-                provider TEXT DEFAULT 'claude_code'
-            );",
-        )
-        .unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .unwrap();
+        crate::migration::migrate(&conn).unwrap();
         conn
     }
 

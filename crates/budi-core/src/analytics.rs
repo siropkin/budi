@@ -2418,7 +2418,7 @@ mod tests {
         assert_eq!(repos[1].message_count, 1);
     }
 
-    fn messages_with_tools() -> Vec<ParsedMessage> {
+    fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
         vec![
             ParsedMessage {
                 uuid: "t1".to_string(),
@@ -2505,7 +2505,7 @@ mod tests {
     #[test]
     fn cache_stats_computes_hit_rate() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
+        ingest_messages(&mut conn, &messages_with_cache_patterns(), None).unwrap();
 
         let cs = cache_stats(&conn, None, None).unwrap();
         // total_input = (500+200) + (300+150) + (50000+0) = 51150
@@ -2955,7 +2955,7 @@ mod tests {
     #[test]
     fn cache_efficiency_computes_savings() {
         let mut conn = test_db();
-        ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
+        ingest_messages(&mut conn, &messages_with_cache_patterns(), None).unwrap();
 
         let ce = cache_efficiency(&conn, None, None).unwrap();
         assert_eq!(ce.total_cache_read_tokens, 350);
@@ -3157,5 +3157,212 @@ mod tests {
         // sample_messages has 1 assistant message in sess-abc
         assert!(!result.sessions.is_empty());
         assert!(result.total_count >= 1);
+    }
+
+    /// Helper: create a minimal assistant ParsedMessage, overriding only what matters.
+    fn assistant_msg(uuid: &str, session_id: &str, cost_cents: f64) -> ParsedMessage {
+        ParsedMessage {
+            uuid: uuid.to_string(),
+            session_id: Some(session_id.to_string()),
+            timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some("claude-opus-4-6".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(cost_cents),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "exact".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+        }
+    }
+
+    #[test]
+    fn activity_chart_groups_by_day() {
+        let mut conn = test_db();
+        let mut msg1 = assistant_msg("act-1", "s1", 2.0);
+        msg1.timestamp = "2026-03-14T10:00:00Z".parse().unwrap();
+        let mut msg2 = assistant_msg("act-2", "s1", 3.0);
+        msg2.timestamp = "2026-03-15T14:00:00Z".parse().unwrap();
+        ingest_messages(&mut conn, &[msg1, msg2], None).unwrap();
+
+        let chart = activity_chart(&conn, None, None, "day", 0).unwrap();
+        assert_eq!(chart.len(), 2);
+        assert_eq!(chart[0].label, "2026-03-14");
+        assert_eq!(chart[0].message_count, 1);
+        assert_eq!(chart[1].label, "2026-03-15");
+        assert_eq!(chart[1].message_count, 1);
+    }
+
+    #[test]
+    fn activity_chart_hour_granularity() {
+        let mut conn = test_db();
+        let msg = assistant_msg("act-h1", "s1", 1.0);
+        ingest_messages(&mut conn, &[msg], None).unwrap();
+
+        let chart = activity_chart(&conn, None, None, "hour", 0).unwrap();
+        assert_eq!(chart.len(), 1);
+        assert_eq!(chart[0].label, "10:00");
+    }
+
+    #[test]
+    fn branch_cost_groups_by_branch() {
+        let mut conn = test_db();
+        let mut msg1 = assistant_msg("br-1", "s1", 5.0);
+        msg1.git_branch = Some("main".to_string());
+        msg1.repo_id = Some("my-repo".to_string());
+        let mut msg2 = assistant_msg("br-2", "s2", 3.0);
+        msg2.git_branch = Some("feature".to_string());
+        msg2.repo_id = Some("my-repo".to_string());
+        let mut msg3 = assistant_msg("br-3", "s1", 2.0);
+        msg3.git_branch = Some("main".to_string());
+        msg3.repo_id = Some("my-repo".to_string());
+        ingest_messages(&mut conn, &[msg1, msg2, msg3], None).unwrap();
+
+        let branches = branch_cost(&conn, None, None, 10).unwrap();
+        assert_eq!(branches.len(), 2);
+        // Ordered by cost DESC: main (7.0) > feature (3.0)
+        assert_eq!(branches[0].git_branch, "main");
+        assert!((branches[0].cost_cents - 7.0).abs() < 0.01);
+        assert_eq!(branches[0].message_count, 2);
+        assert_eq!(branches[1].git_branch, "feature");
+        assert!((branches[1].cost_cents - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn branch_cost_single_finds_branch() {
+        let mut conn = test_db();
+        let mut msg = assistant_msg("brs-1", "s1", 4.0);
+        msg.git_branch = Some("fix/bug-123".to_string());
+        msg.repo_id = Some("repo".to_string());
+        ingest_messages(&mut conn, &[msg], None).unwrap();
+
+        let result = branch_cost_single(&conn, "fix/bug-123", None, None).unwrap();
+        assert!(result.is_some());
+        let bc = result.unwrap();
+        assert_eq!(bc.git_branch, "fix/bug-123");
+        assert!((bc.cost_cents - 4.0).abs() < 0.01);
+
+        // Non-existent branch returns None
+        let none = branch_cost_single(&conn, "nonexistent", None, None).unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn branch_cost_untagged() {
+        let mut conn = test_db();
+        // Message with no git_branch
+        let msg = assistant_msg("br-untagged", "s1", 6.0);
+        ingest_messages(&mut conn, &[msg], None).unwrap();
+
+        let branches = branch_cost(&conn, None, None, 10).unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].git_branch, "(untagged)");
+    }
+
+    #[test]
+    fn model_usage_groups_by_model() {
+        let mut conn = test_db();
+        let msg1 = assistant_msg("mu-1", "s1", 5.0);
+        let mut msg2 = assistant_msg("mu-2", "s1", 3.0);
+        msg2.model = Some("claude-sonnet-4-6".to_string());
+        ingest_messages(&mut conn, &[msg1, msg2], None).unwrap();
+
+        let models = model_usage(&conn, None, None, 10).unwrap();
+        assert_eq!(models.len(), 2);
+        // Ordered by cost DESC
+        assert_eq!(models[0].model, "claude-opus-4-6");
+        assert!((models[0].cost_cents - 5.0).abs() < 0.01);
+        assert_eq!(models[1].model, "claude-sonnet-4-6");
+        assert!((models[1].cost_cents - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn tag_stats_groups_by_tag() {
+        let mut conn = test_db();
+        let msg1 = assistant_msg("ts-1", "s1", 10.0);
+        let msg2 = assistant_msg("ts-2", "s2", 6.0);
+        let tags = vec![
+            vec![Tag { key: "repo".to_string(), value: "proj-a".to_string() }],
+            vec![Tag { key: "repo".to_string(), value: "proj-b".to_string() }],
+        ];
+        ingest_messages(&mut conn, &[msg1, msg2], Some(&tags)).unwrap();
+
+        let stats = tag_stats(&conn, Some("repo"), None, None, 10).unwrap();
+        // Should have proj-a, proj-b, and (untagged) entries
+        let proj_a = stats.iter().find(|s| s.value == "proj-a").unwrap();
+        assert!((proj_a.cost_cents - 10.0).abs() < 0.01);
+        let proj_b = stats.iter().find(|s| s.value == "proj-b").unwrap();
+        assert!((proj_b.cost_cents - 6.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn tag_stats_even_split_across_values() {
+        let mut conn = test_db();
+        // One session with two tag values — cost should be split evenly
+        let msg = assistant_msg("ts-split", "s-split", 10.0);
+        let tags = vec![
+            vec![
+                Tag { key: "ticket".to_string(), value: "ABC-1".to_string() },
+                Tag { key: "ticket".to_string(), value: "DEF-2".to_string() },
+            ],
+        ];
+        ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+        let stats = tag_stats(&conn, Some("ticket"), None, None, 10).unwrap();
+        let abc = stats.iter().find(|s| s.value == "ABC-1").unwrap();
+        let def = stats.iter().find(|s| s.value == "DEF-2").unwrap();
+        // 10 cents split evenly = 5 each
+        assert!((abc.cost_cents - 5.0).abs() < 0.01);
+        assert!((def.cost_cents - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn session_messages_returns_assistant_only() {
+        let mut conn = test_db();
+        let mut msgs = sample_messages();
+        // sample_messages: u1 (user, sess-abc), a1 (assistant, sess-abc), u2 (user, sess-def)
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+
+        let result = session_messages(&conn, "sess-abc").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].uuid, "a1");
+        assert_eq!(result[0].role, "assistant");
+    }
+
+    #[test]
+    fn session_tags_returns_distinct_tags() {
+        let mut conn = test_db();
+        let msg = assistant_msg("st-1", "sess-tags", 1.0);
+        let tags = vec![
+            vec![
+                Tag { key: "repo".to_string(), value: "my-repo".to_string() },
+                Tag { key: "activity".to_string(), value: "feature".to_string() },
+            ],
+        ];
+        ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+        let result = session_tags(&conn, "sess-tags").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&("activity".to_string(), "feature".to_string())));
+        assert!(result.contains(&("repo".to_string(), "my-repo".to_string())));
+    }
+
+    #[test]
+    fn session_tags_empty_for_unknown_session() {
+        let conn = test_db();
+        let result = session_tags(&conn, "nonexistent").unwrap();
+        assert!(result.is_empty());
     }
 }
