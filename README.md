@@ -259,6 +259,17 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 
 The daemon is the single source of truth — the CLI never opens the database directly. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user).
 
+**Data model** — six tables, four data entities + two supporting:
+
+| Table | Role |
+|-------|------|
+| **messages** | Single cost entity — all token/cost data lives here (one row per API call) |
+| **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
+| **hook_events** | Raw event log for tool stats and MCP tracking |
+| **otel_events** | Raw OpenTelemetry event storage for debugging/audit |
+| **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
+| **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
+
 </details>
 
 <details>

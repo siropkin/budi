@@ -39,11 +39,13 @@ Enricher order is critical — each depends on prior enrichers. Do not reorder.
 
 ### Database (SQLite, WAL mode, schema v13)
 
-Four entities:
-- **messages** — One row per API call. Primary cost entity. Fields: uuid, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
-- **tags** — Key-value pairs per message (repo, ticket_id, activity, user, etc.)
-- **sessions** — One row per conversation. Lifecycle metadata from hooks (started_at, ended_at, composer_mode, permission_mode)
-- **otel_events** — Raw OpenTelemetry event storage
+Six tables, four data entities + two supporting:
+- **messages** — Single cost entity. One row per API call. All token/cost data lives here. Fields: uuid, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
+- **sessions** — Lifecycle context (start/end, duration, mode) without mixing cost concerns. One row per conversation from hooks
+- **hook_events** — Raw event log for tool stats and MCP tracking. One row per hook event
+- **otel_events** — Raw OpenTelemetry event storage for debugging/audit
+- **tags** — Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) with FK to messages
+- **sync_state** — Tracks incremental ingestion progress per file for progressive sync
 
 ### Cost sources
 

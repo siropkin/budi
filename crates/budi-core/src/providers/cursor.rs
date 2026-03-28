@@ -876,8 +876,9 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            // User messages have no cost, so cost_confidence is not applicable.
-            cost_confidence: String::new(),
+            // User messages have no cost — use "n/a" to distinguish from
+            // assistant messages whose confidence hasn't been set yet (empty string).
+            cost_confidence: "n/a".to_string(),
             request_id: None,
             speed: None,
             cache_creation_1h_tokens: 0,
