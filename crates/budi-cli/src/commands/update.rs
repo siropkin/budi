@@ -192,6 +192,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
             None => config::BudiConfig::default(),
         };
         crate::commands::init::install_otel_env_vars(&config);
+        crate::commands::init::install_mcp_server();
 
         // Restart daemon with new version
         println!("Restarting daemon...");

@@ -632,7 +632,7 @@ pub fn install_otel_env_vars(config: &config::BudiConfig) {
 
 /// Install the budi MCP server in ~/.claude/settings.json.
 /// Adds to mcpServers so Claude Code can discover and use budi tools.
-fn install_mcp_server() {
+pub fn install_mcp_server() {
     let result = (|| -> Result<()> {
         let home = budi_core::config::home_dir()?;
         let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
