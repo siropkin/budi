@@ -3127,7 +3127,7 @@ mod tests {
         )
         .unwrap();
         // sample_messages has 1 assistant message in sess-abc
-        assert!(result.sessions.len() >= 1);
+        assert!(!result.sessions.is_empty());
         assert!(result.total_count >= 1);
     }
 }
