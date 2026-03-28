@@ -266,10 +266,10 @@ fn remove_mcp_server(home: &str) -> Result<bool> {
     }
 
     // Remove empty mcpServers object
-    if mcp_servers.is_empty() {
-        if let Some(obj) = settings.as_object_mut() {
-            obj.remove("mcpServers");
-        }
+    if mcp_servers.is_empty()
+        && let Some(obj) = settings.as_object_mut()
+    {
+        obj.remove("mcpServers");
     }
 
     let out = serde_json::to_string_pretty(&settings)?;

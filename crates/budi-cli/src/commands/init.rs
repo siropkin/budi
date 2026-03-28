@@ -695,12 +695,12 @@ fn install_mcp_server() {
 /// Find the budi binary path, preferring the same directory as the running binary.
 fn which_budi() -> String {
     // Try to use the same directory as the running binary
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("budi");
-            if candidate.exists() {
-                return candidate.display().to_string();
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("budi");
+        if candidate.exists() {
+            return candidate.display().to_string();
         }
     }
     // Fall back to PATH lookup
