@@ -14,8 +14,31 @@ brew install siropkin/budi/budi && budi init
 No cloud. No uploads. Everything stays on your machine.
 
 <p align="center">
-  <img src="assets/dashboard-stats.png" alt="budi dashboard" width="800">
+  <img src="assets/dashboard-overview.png" alt="budi dashboard — cost overview" width="800">
 </p>
+
+<details>
+<summary>More dashboard pages</summary>
+
+**Insights** — cache efficiency, session cost curve, tool usage, subagent costs
+
+<p align="center">
+  <img src="assets/dashboard-insights.png" alt="budi insights" width="800">
+</p>
+
+**Sessions** — searchable session list with drill-down to individual messages
+
+<p align="center">
+  <img src="assets/dashboard-sessions.png" alt="budi sessions" width="800">
+</p>
+
+**Settings** — integration status, database info, sync controls
+
+<p align="center">
+  <img src="assets/dashboard-settings.png" alt="budi settings" width="800">
+</p>
+
+</details>
 
 ## What it does
 
@@ -79,13 +102,9 @@ Run `budi doctor` to verify everything is set up correctly.
 
 ## Status line
 
-Budi adds a live cost display to Claude Code, installed automatically by `budi init`.
+Budi adds a live cost display to Claude Code, installed automatically by `budi init`:
 
-<p align="center">
-  <img src="assets/statusline.png" alt="budi status line in Claude Code">
-</p>
-
-Example: `📊 budi · $12.50 today · $87.30 week · $1.2K month`
+`📊 budi · $12.50 today · $87.30 week · $1.2K month`
 
 Customize slots in `~/.config/budi/statusline.toml`:
 
