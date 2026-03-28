@@ -76,9 +76,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/providers/cursor.rs` — Cursor provider (Usage API, auth from state.vscdb)
 - `crates/budi-core/src/migration.rs` — Schema v13, all migration paths
 - `crates/budi-core/src/config.rs` — BudiConfig, StatuslineConfig, TagsConfig
-- `crates/budi-daemon/src/main.rs` — HTTP server, ~35 routes
-- `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /health/integrations, /health/check-update endpoints
-- `crates/budi-daemon/src/routes/analytics.rs` — All analytics endpoints including insights (cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions)
+- `crates/budi-daemon/src/main.rs` — HTTP server, ~38 routes
+- `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update endpoints
+- `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, admin/providers, admin/schema, admin/migrate)
 - `crates/budi-daemon/src/routes/otel.rs` — /v1/logs OTLP ingestion
 - `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering + installation
 - `crates/budi-cli/src/mcp.rs` — MCP server handler (14 tools: analytics + config)
@@ -99,5 +99,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
   - `/dashboard/sessions` — Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, input token growth chart, message table
   - `/dashboard/settings` — Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
 - Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
-- Analytics endpoints: `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`
-- Health endpoints: `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)
+- Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`
+- Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration)
+- Sync endpoints: `/sync` (7-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
+- Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)

@@ -605,34 +605,35 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         where_clause, p.limit, p.offset
     );
 
+    // Count total matching rows separately so it's correct even when offset exceeds data
+    let count_sql = format!(
+        "SELECT COUNT(*)
+         FROM messages
+         LEFT JOIN sessions s ON s.conversation_id = messages.session_id
+         {where_clause}"
+    );
+    let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |row| row.get(0))?;
+
     let mut stmt = conn.prepare(&sql)?;
-    let mut total_count: u64 = 0;
     let messages: Vec<MessageRow> = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, u64>(0)?,
-                MessageRow {
-                    uuid: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    role: row.get(3)?,
-                    model: row.get(4)?,
-                    provider: row.get(5)?,
-                    repo_id: row.get(6)?,
-                    input_tokens: row.get(7)?,
-                    output_tokens: row.get(8)?,
-                    cache_creation_tokens: row.get(9)?,
-                    cache_read_tokens: row.get(10)?,
-                    cost_cents: row.get(11)?,
-                    cost_confidence: row.get(12)?,
-                    git_branch: row.get(13)?,
-                },
-            ))
+            Ok(MessageRow {
+                uuid: row.get(1)?,
+                timestamp: row.get(2)?,
+                role: row.get(3)?,
+                model: row.get(4)?,
+                provider: row.get(5)?,
+                repo_id: row.get(6)?,
+                input_tokens: row.get(7)?,
+                output_tokens: row.get(8)?,
+                cache_creation_tokens: row.get(9)?,
+                cache_read_tokens: row.get(10)?,
+                cost_cents: row.get(11)?,
+                cost_confidence: row.get(12)?,
+                git_branch: row.get(13)?,
+            })
         })?
         .filter_map(|r| r.ok())
-        .map(|(tc, row)| {
-            total_count = tc;
-            row
-        })
         .collect();
 
     Ok(PaginatedMessages {
@@ -1862,6 +1863,26 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    // Count total matching sessions using only the filter params (no limit/offset)
+    let count_param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let count_sql = format!(
+        "WITH session_agg AS (
+             SELECT m.session_id
+             FROM messages m
+             LEFT JOIN sessions s ON s.conversation_id = m.session_id
+             {where_clause}
+             AND m.session_id IS NOT NULL
+             GROUP BY m.session_id
+         )
+         SELECT COUNT(*) FROM session_agg"
+    );
+    let total_count: u64 =
+        conn.query_row(&count_sql, count_param_refs.as_slice(), |row| row.get(0))?;
+
     param_values.push(p.limit.to_string());
     let limit_idx = param_values.len();
     param_values.push(p.offset.to_string());
@@ -1941,32 +1962,24 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let mut total_count: u64 = 0;
     let sessions: Vec<SessionListEntry> = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, u64>(0)?,
-                SessionListEntry {
-                    session_id: row.get(1)?,
-                    started_at: row.get(2)?,
-                    ended_at: row.get(3)?,
-                    duration_ms: row.get(4)?,
-                    message_count: row.get(5)?,
-                    cost_cents: row.get(6)?,
-                    model: row.get(7)?,
-                    provider: row.get::<_, String>(8)?,
-                    repo_id: row.get(9)?,
-                    git_branch: row.get(10)?,
-                    input_tokens: row.get(11)?,
-                    output_tokens: row.get(12)?,
-                },
-            ))
+            Ok(SessionListEntry {
+                session_id: row.get(1)?,
+                started_at: row.get(2)?,
+                ended_at: row.get(3)?,
+                duration_ms: row.get(4)?,
+                message_count: row.get(5)?,
+                cost_cents: row.get(6)?,
+                model: row.get(7)?,
+                provider: row.get::<_, String>(8)?,
+                repo_id: row.get(9)?,
+                git_branch: row.get(10)?,
+                input_tokens: row.get(11)?,
+                output_tokens: row.get(12)?,
+            })
         })?
         .filter_map(|r| r.ok())
-        .map(|(tc, entry)| {
-            total_count = tc;
-            entry
-        })
         .collect();
 
     Ok(PaginatedSessions {
