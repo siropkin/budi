@@ -254,7 +254,7 @@ impl BudiMcpServer {
 
         let mut query = build_params(since.as_deref(), until.as_deref());
         query.push(("limit".to_string(), "30".to_string()));
-        let repos: Vec<Value> = self.daemon_get("/analytics/repos", &query)?;
+        let repos: Vec<Value> = self.daemon_get("/analytics/projects", &query)?;
 
         let mut text = format!("Project Costs ({period_label})\n");
         if repos.is_empty() {

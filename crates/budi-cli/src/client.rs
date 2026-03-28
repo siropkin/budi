@@ -216,7 +216,7 @@ impl DaemonClient {
         params.push(("limit", limit.to_string()));
         let resp = self
             .client
-            .get(format!("{}/analytics/repos", self.base_url))
+            .get(format!("{}/analytics/projects", self.base_url))
             .query(&params)
             .send()
             .map_err(describe_send_error)?;

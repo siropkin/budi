@@ -52,7 +52,7 @@ pub struct MessagesParams {
     pub offset: Option<usize>,
 }
 
-const VALID_SORT_BY: &[&str] = &[
+const VALID_MESSAGE_SORT_BY: &[&str] = &[
     "timestamp",
     "cost",
     "model",
@@ -64,16 +64,28 @@ const VALID_SORT_BY: &[&str] = &[
     "repo_id",
 ];
 
+const VALID_SESSION_SORT_BY: &[&str] = &[
+    "started_at",
+    "duration",
+    "cost",
+    "model",
+    "tokens",
+    "provider",
+    "repo_id",
+    "branch",
+    "git_branch",
+];
+
 pub async fn analytics_messages(
     Query(params): Query<MessagesParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
     if let Some(ref sort) = params.sort_by
-        && !VALID_SORT_BY.contains(&sort.as_str())
+        && !VALID_MESSAGE_SORT_BY.contains(&sort.as_str())
     {
         return Err(bad_request(format!(
             "invalid sort_by '{}'; valid values: {}",
             sort,
-            VALID_SORT_BY.join(", ")
+            VALID_MESSAGE_SORT_BY.join(", ")
         )));
     }
     let result = tokio::task::spawn_blocking(move || {
@@ -109,7 +121,7 @@ pub struct ProjectsParams {
 pub async fn analytics_projects(
     Query(params): Query<ProjectsParams>,
 ) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(20).min(200);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -128,12 +140,13 @@ pub async fn analytics_projects(
 }
 
 pub async fn analytics_models(
-    Query(params): Query<DateRangeParams>,
+    Query(params): Query<ProjectsParams>,
 ) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = params.limit.unwrap_or(50).min(200);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::model_usage(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::model_usage(&conn, params.since.as_deref(), params.until.as_deref(), limit)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -143,12 +156,13 @@ pub async fn analytics_models(
 }
 
 pub async fn analytics_branches(
-    Query(params): Query<DateRangeParams>,
+    Query(params): Query<ProjectsParams>,
 ) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = params.limit.unwrap_or(50).min(200);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::branch_cost(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::branch_cost(&conn, params.since.as_deref(), params.until.as_deref(), limit)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -288,7 +302,7 @@ pub struct TagParams {
 pub async fn analytics_tags(
     Query(params): Query<TagParams>,
 ) -> Result<Json<Vec<analytics::TagCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(20).min(200);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -306,15 +320,9 @@ pub async fn analytics_tags(
     Ok(Json(result))
 }
 
-#[derive(serde::Deserialize)]
-pub struct BranchDetailParams {
-    pub since: Option<String>,
-    pub until: Option<String>,
-}
-
 pub async fn analytics_branch_detail(
     Path(branch): Path<String>,
-    Query(params): Query<BranchDetailParams>,
+    Query(params): Query<DateRangeParams>,
 ) -> Result<Json<analytics::BranchCost>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -424,6 +432,15 @@ pub struct SessionsQueryParams {
 pub async fn analytics_sessions(
     Query(params): Query<SessionsQueryParams>,
 ) -> Result<Json<analytics::PaginatedSessions>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(ref sort) = params.sort_by
+        && !VALID_SESSION_SORT_BY.contains(&sort.as_str())
+    {
+        return Err(bad_request(format!(
+            "invalid sort_by '{}'; valid values: {}",
+            sort,
+            VALID_SESSION_SORT_BY.join(", ")
+        )));
+    }
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -448,14 +465,14 @@ pub async fn analytics_sessions(
 
 pub async fn analytics_session_tags(
     Path(session_id): Path<String>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<Vec<analytics::SessionTag>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         let tags = analytics::session_tags(&conn, &session_id)?;
         Ok::<_, anyhow::Error>(
             tags.into_iter()
-                .map(|(k, v)| json!({ "key": k, "value": v }))
+                .map(|(k, v)| analytics::SessionTag { key: k, value: v })
                 .collect::<Vec<_>>(),
         )
     })
@@ -503,5 +520,45 @@ pub async fn analytics_migrate(
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_tools(
+    Query(params): Query<ProjectsParams>,
+) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        budi_core::hooks::query_tool_stats(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            params.limit.unwrap_or(20).min(200),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+pub async fn analytics_mcp(
+    Query(params): Query<ProjectsParams>,
+) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        budi_core::hooks::query_mcp_stats(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            params.limit.unwrap_or(20).min(200),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
     Ok(Json(result))
 }

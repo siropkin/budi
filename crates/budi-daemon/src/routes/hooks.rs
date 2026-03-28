@@ -1,15 +1,35 @@
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::internal_error;
 use crate::AppState;
 
-pub async fn health() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    Ok(Json(
-        json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }),
-    ))
+#[derive(serde::Serialize)]
+pub struct HealthResponse {
+    pub ok: bool,
+    pub version: &'static str,
+}
+
+#[derive(serde::Serialize)]
+pub struct SyncResponse {
+    pub files_synced: usize,
+    pub messages_ingested: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SyncStatusResponse {
+    pub syncing: bool,
+    pub last_synced: Option<String>,
+}
+
+pub async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        ok: true,
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 pub async fn health_check_update()
@@ -160,7 +180,7 @@ pub async fn health_integrations()
     Ok(Json(result))
 }
 
-pub async fn sync_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusResponse> {
     let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
     let last_synced = tokio::task::spawn_blocking(|| {
         let db_path = budi_core::analytics::db_path().ok()?;
@@ -174,7 +194,7 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<serde_json::Valu
     .await
     .ok()
     .flatten();
-    Json(json!({ "syncing": syncing, "last_synced": last_synced }))
+    Json(SyncStatusResponse { syncing, last_synced })
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -186,7 +206,7 @@ pub struct SyncParams {
 pub async fn analytics_sync(
     State(state): State<AppState>,
     body: Option<Json<SyncParams>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<SyncResponse>, (StatusCode, Json<serde_json::Value>)> {
     let params = body.map(|Json(p)| p).unwrap_or_default();
     if state
         .syncing
@@ -220,11 +240,11 @@ pub async fn analytics_sync(
             };
             let (files_synced, messages_ingested, warnings) =
                 budi_core::analytics::sync_all(&mut conn)?;
-            Ok(json!({
-                "files_synced": files_synced,
-                "messages_ingested": messages_ingested,
-                "warnings": warnings,
-            }))
+            Ok(SyncResponse {
+                files_synced,
+                messages_ingested,
+                warnings,
+            })
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
         r
@@ -238,7 +258,7 @@ pub async fn analytics_sync(
 
 pub async fn analytics_sync_reset(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<SyncResponse>, (StatusCode, Json<serde_json::Value>)> {
     if state
         .syncing
         .compare_exchange(
@@ -262,11 +282,11 @@ pub async fn analytics_sync_reset(
             budi_core::analytics::reset_sync_state(&conn)?;
             let (files_synced, messages_ingested, warnings) =
                 budi_core::analytics::sync_history(&mut conn)?;
-            Ok(json!({
-                "files_synced": files_synced,
-                "messages_ingested": messages_ingested,
-                "warnings": warnings,
-            }))
+            Ok(SyncResponse {
+                files_synced,
+                messages_ingested,
+                warnings,
+            })
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
         r
@@ -280,7 +300,7 @@ pub async fn analytics_sync_reset(
 
 pub async fn analytics_history(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<SyncResponse>, (StatusCode, Json<serde_json::Value>)> {
     if state
         .syncing
         .compare_exchange(
@@ -303,11 +323,11 @@ pub async fn analytics_history(
             let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
             let (files_synced, messages_ingested, warnings) =
                 budi_core::analytics::sync_history(&mut conn)?;
-            Ok(json!({
-                "files_synced": files_synced,
-                "messages_ingested": messages_ingested,
-                "warnings": warnings,
-            }))
+            Ok(SyncResponse {
+                files_synced,
+                messages_ingested,
+                warnings,
+            })
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
         r
@@ -373,53 +393,3 @@ pub async fn hooks_ingest(
     Ok(Json(json!({"ok": true})))
 }
 
-// ---------------------------------------------------------------------------
-// Session & tool analytics endpoints
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ListParams {
-    pub since: Option<String>,
-    pub until: Option<String>,
-    pub limit: Option<usize>,
-}
-
-pub async fn analytics_tools(
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = budi_core::analytics::db_path()?;
-        let conn = budi_core::analytics::open_db(&db_path)?;
-        budi_core::hooks::query_tool_stats(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            params.limit.unwrap_or(20),
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}
-
-pub async fn analytics_mcp(
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = budi_core::analytics::db_path()?;
-        let conn = budi_core::analytics::open_db(&db_path)?;
-        budi_core::hooks::query_mcp_stats(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            params.limit.unwrap_or(20),
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}

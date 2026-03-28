@@ -49,7 +49,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/sync/status", get(h::sync_status))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))
-        .route("/analytics/repos", get(a::analytics_projects))
+        .route("/analytics/projects", get(a::analytics_projects))
         .route("/analytics/cost", get(a::analytics_cost))
         .route("/analytics/models", get(a::analytics_models))
         .route("/analytics/activity", get(a::analytics_activity))
@@ -70,8 +70,8 @@ fn build_router(app_state: AppState) -> Router {
             get(a::analytics_schema_version),
         )
         .route("/analytics/migrate", post(a::analytics_migrate))
-        .route("/analytics/tools", get(h::analytics_tools))
-        .route("/analytics/mcp", get(h::analytics_mcp))
+        .route("/analytics/tools", get(a::analytics_tools))
+        .route("/analytics/mcp", get(a::analytics_mcp))
         .route(
             "/analytics/cache-efficiency",
             get(a::analytics_cache_efficiency),

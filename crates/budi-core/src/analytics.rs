@@ -828,6 +828,7 @@ pub fn branch_cost(
     conn: &Connection,
     since: Option<&str>,
     until: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<BranchCost>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
@@ -843,6 +844,8 @@ pub fn branch_cost(
         conditions.push(format!("timestamp < ?{idx}"));
         param_values.push(u.to_string());
     }
+    param_values.push(limit.to_string());
+    let limit_idx = param_values.len();
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     // Single-query approach: COALESCE NULL/empty branches into "(untagged)"
@@ -861,7 +864,7 @@ pub fn branch_cost(
          {where_clause}
          GROUP BY branch, repo
          ORDER BY cost DESC
-         LIMIT 50",
+         LIMIT ?{limit_idx}",
     );
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -958,6 +961,13 @@ pub fn branch_cost_single(
         Some(Err(e)) => Err(e.into()),
         None => Ok(None),
     }
+}
+
+/// A single tag key-value pair.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionTag {
+    pub key: String,
+    pub value: String,
 }
 
 /// Tag-based cost breakdown: cost grouped by tag key+value.
@@ -1180,9 +1190,13 @@ pub fn model_usage(
     conn: &Connection,
     since: Option<&str>,
     until: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<ModelUsage>> {
     let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+    let mut param_values: Vec<String> = date_params;
+    param_values.push(limit.to_string());
+    let limit_idx = param_values.len();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
@@ -1201,7 +1215,8 @@ pub fn model_usage(
          FROM messages
          {} {} role = 'assistant'
          GROUP BY m, p
-         ORDER BY 8 DESC",
+         ORDER BY 8 DESC
+         LIMIT ?{limit_idx}",
         where_clause,
         if where_clause.is_empty() {
             "WHERE"

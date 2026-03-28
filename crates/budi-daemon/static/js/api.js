@@ -17,7 +17,7 @@ async function loadStatsData(signal) {
   const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
   const [summary, cwds, cost, models, activityChart, providers, branches, tickets, activityTags] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(ok),
-    fetch('/analytics/repos' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/projects' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
     fetch('/analytics/cost' + q, opts).then(ok),
     fetch('/analytics/models' + q, opts).then(ok).catch(() => []),
     fetch('/analytics/activity' + q + (q ? '&' : '?') + 'granularity=' + gran + '&tz_offset=' + tzOffset, opts).then(ok).catch(() => []),
