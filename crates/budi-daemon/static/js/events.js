@@ -1,14 +1,37 @@
 async function render() {
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
+  // Hide period tabs on settings page
+  const periodBar = $('.period-tabs');
+  if (periodBar) periodBar.style.display = currentPage === 'settings' ? 'none' : '';
 
   try {
     await loadAllData();
-    renderStatsView(content);
-    bindAllHandlers();
+    await renderCurrentPage(content);
   } catch (err) {
     content.innerHTML = renderError(err);
     bindErrorHandlers();
+  }
+}
+
+async function renderCurrentPage(content) {
+  if (currentPage === 'insights') {
+    if (!insightsData) await loadInsightsData();
+    renderInsightsView(content);
+  } else if (currentPage === 'sessions') {
+    if (selectedSessionId) {
+      await renderSessionDetail(selectedSessionId, content);
+    } else {
+      if (!sessionsPageData) await loadSessionsPageData();
+      renderSessionsView(content);
+      bindSessionsHandlers(content);
+    }
+  } else if (currentPage === 'settings') {
+    if (!settingsData) await loadSettingsData();
+    renderSettingsView(content);
+  } else {
+    renderStatsView(content);
+    // Overview has no interactive handlers
   }
 }
 
@@ -48,58 +71,6 @@ function bindErrorHandlers() {
   });
 }
 
-function bindSearchHandlers() {
-  // Sessions search — debounced, server-side
-  let sessionsSearchTimeout = null;
-  const sessionsSearchEl = $('#sessionsSearch');
-  if (sessionsSearchEl) {
-    sessionsSearchEl.addEventListener('input', (e) => {
-      sessionsSearchTerm = e.target.value;
-      clearTimeout(sessionsSearchTimeout);
-      sessionsSearchTimeout = setTimeout(async () => {
-        const result = await fetchMessages(DEFAULT_TABLE_ROWS, 0);
-        lastSessionData = result.messages || [];
-        sessionTotalCount = result.total_count || 0;
-        $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
-        bindTableHandlers();
-      }, 300);
-    });
-  }
-}
-
-function bindAllHandlers() {
-  bindSearchHandlers();
-  bindTableHandlers();
-}
-
-function bindTableHandlers() {
-  // Sessions table sort — re-fetch from server
-  $$('#sessionsTable th[data-col]').forEach(th => {
-    th.addEventListener('click', async () => {
-      const col = th.dataset.col;
-      if (sessionSortCol === col) sessionSortAsc = !sessionSortAsc;
-      else { sessionSortCol = col; sessionSortAsc = col === 'session_id' || col === 'repo_id'; }
-      const result = await fetchMessages(DEFAULT_TABLE_ROWS, 0);
-      lastSessionData = result.messages || [];
-      sessionTotalCount = result.total_count || 0;
-      $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
-      bindTableHandlers();
-    });
-  });
-  $$('.show-more-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const table = btn.dataset.table;
-      if (table === 'sessionsTable') {
-        // Fetch next page from server and append
-        const result = await fetchMessages(DEFAULT_TABLE_ROWS, lastSessionData.length);
-        lastSessionData = lastSessionData.concat(result.messages || []);
-        sessionTotalCount = result.total_count || sessionTotalCount;
-        $('#sessionsContainer').innerHTML = renderMessagesSection(lastSessionData);
-      }
-      bindTableHandlers();
-    });
-  });
-}
 
 // Request sequencing — cancel in-flight fetches when period changes
 let currentAbort = null;
@@ -111,11 +82,34 @@ async function switchAndReload() {
   currentAbort = abort;
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
+  // Clear cached data for pages that need refresh
+  insightsData = null;
+  sessionsPageData = null;
+  settingsData = null;
+  selectedSessionId = null;
+  // Hide period tabs on settings page
+  const periodBar = $('.period-tabs');
+  if (periodBar) periodBar.style.display = currentPage === 'settings' ? 'none' : '';
   try {
-    await loadStatsData(abort.signal);
-    if (abort.signal.aborted) return;
-    renderStatsView(content);
-    bindAllHandlers();
+    if (currentPage === 'insights') {
+      await loadInsightsData(abort.signal);
+      if (abort.signal.aborted) return;
+      renderInsightsView(content);
+    } else if (currentPage === 'sessions') {
+      await loadSessionsPageData(abort.signal);
+      if (abort.signal.aborted) return;
+      renderSessionsView(content);
+      bindSessionsHandlers(content);
+    } else if (currentPage === 'settings') {
+      await loadSettingsData();
+      if (abort.signal.aborted) return;
+      renderSettingsView(content);
+    } else {
+      await loadStatsData(abort.signal);
+      if (abort.signal.aborted) return;
+      renderStatsView(content);
+      // Overview has no interactive handlers
+    }
   } catch (err) {
     if (abort.signal.aborted) return;
     content.innerHTML = renderError(err);
@@ -138,12 +132,54 @@ $$('.period-tabs button').forEach(btn => {
   });
 });
 
+// Page tab switching — use real URL paths
+$$('.page-tabs button').forEach(btn => {
+  if (btn.dataset.page === currentPage) {
+    $$('.page-tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+  btn.addEventListener('click', () => {
+    $$('.page-tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPage = btn.dataset.page;
+    const url = currentPage === 'overview' ? '/dashboard' : '/dashboard/' + currentPage;
+    history.pushState(null, '', url);
+    selectedSessionId = null;
+    switchAndReload();
+  });
+});
+
+// Handle browser back/forward
+window.addEventListener('popstate', () => {
+  const path = location.pathname.replace(/^\/dashboard\/?/, '');
+  // Check for session detail URL: sessions/:id
+  const sessionMatch = path.match(/^sessions\/(.+)$/);
+  if (sessionMatch) {
+    currentPage = 'sessions';
+    selectedSessionId = decodeURIComponent(sessionMatch[1]);
+  } else {
+    const newPage = VALID_PAGES.includes(path) ? path : 'overview';
+    currentPage = newPage;
+    selectedSessionId = null;
+  }
+  $$('.page-tabs button').forEach(b => {
+    b.classList.toggle('active', b.dataset.page === currentPage);
+  });
+  switchAndReload();
+});
+
 render();
 
-// Auto-refresh: poll every 30s to keep dashboard data fresh (skip if tab is hidden)
+// Auto-refresh: poll every 30s for overview, every 5s for settings sync status
 setInterval(async () => {
   if (document.hidden || !dataLoaded) return;
-  await loadStatsData();
-  renderStatsView($('#content'));
-  bindAllHandlers();
+  if (currentPage === 'overview') {
+    await loadStatsData();
+    renderStatsView($('#content'));
+  }
 }, 30000);
+
+setInterval(async () => {
+  if (document.hidden || currentPage !== 'settings') return;
+  await refreshSettingsStatus();
+}, 5000);

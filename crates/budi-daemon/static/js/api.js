@@ -1,11 +1,3 @@
-async function fetchMessages(limit, offset) {
-  const range = dateRange(currentPeriod);
-  const params = { ...range, sort_by: sessionSortCol, sort_asc: sessionSortAsc, limit, offset };
-  if (sessionsSearchTerm) params.search = sessionsSearchTerm;
-  const result = await fetch('/analytics/messages' + qs(params)).then(r => r.json()).catch(() => ({messages:[],total_count:0}));
-  return result;
-}
-
 async function loadAllData() {
   // Fetch registered providers once (lightweight, doesn't change per period).
   if (registeredProviders.length === 0) {
@@ -22,11 +14,9 @@ async function loadStatsData(signal) {
   const tzOffset = -new Date().getTimezoneOffset();
   const opts = signal ? { signal } : {};
 
-  const sessionsQ = q + (q ? '&' : '?') + `sort_by=${sessionSortCol}&sort_asc=${sessionSortAsc}&limit=${DEFAULT_TABLE_ROWS}${sessionsSearchTerm ? '&search=' + encodeURIComponent(sessionsSearchTerm) : ''}`;
   const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
-  const [summary, sessionsResult, cwds, cost, models, activityChart, providers, branches, tickets, tools, mcp] = await Promise.all([
+  const [summary, cwds, cost, models, activityChart, providers, branches, tickets, activityTags] = await Promise.all([
     fetch('/analytics/summary' + q, opts).then(ok),
-    fetch('/analytics/messages' + sessionsQ, opts).then(ok).catch(() => ({messages:[],total_count:0})),
     fetch('/analytics/repos' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
     fetch('/analytics/cost' + q, opts).then(ok),
     fetch('/analytics/models' + q, opts).then(ok).catch(() => []),
@@ -34,16 +24,10 @@ async function loadStatsData(signal) {
     fetch('/analytics/providers' + qs(dateRange(currentPeriod)), opts).then(ok).catch(() => []),
     fetch('/analytics/branches' + q, opts).then(ok).catch(() => []),
     fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=ticket_id&limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
-    fetch('/analytics/tools' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
-    fetch('/analytics/mcp' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=activity&limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
   ]);
 
-  const sessions = sessionsResult.messages || [];
-  sessionTotalCount = sessionsResult.total_count || 0;
-  toolsData = tools;
-  mcpData = mcp;
-  statsData = { summary, sessions, cwds, cost, models, activityChart, branches, tickets };
-  lastSessionData = sessions;
+  statsData = { summary, cwds, cost, models, activityChart, branches, tickets, activityTags };
   providersData = providers;
 
   // Merge models with same normalized display name per provider
@@ -73,3 +57,44 @@ async function loadStatsData(signal) {
 
 }
 
+async function loadInsightsData(signal) {
+  const range = dateRange(currentPeriod);
+  const q = qs(range);
+  const opts = signal ? { signal } : {};
+  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
+
+  const [cacheEff, sessionCurve, costConf, subagent, speedTags, tools, mcp] = await Promise.all([
+    fetch('/analytics/cache-efficiency' + q, opts).then(ok).catch(() => null),
+    fetch('/analytics/session-cost-curve' + q, opts).then(ok).catch(() => []),
+    fetch('/analytics/cost-confidence' + q, opts).then(ok).catch(() => []),
+    fetch('/analytics/subagent-cost' + q, opts).then(ok).catch(() => []),
+    fetch('/analytics/tags' + q + (q ? '&' : '?') + 'key=speed&limit=10', opts).then(ok).catch(() => []),
+    fetch('/analytics/tools' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+    fetch('/analytics/mcp' + q + (q ? '&' : '?') + 'limit=' + DEFAULT_CHART_ROWS, opts).then(ok).catch(() => []),
+  ]);
+
+  insightsData = { cacheEff, sessionCurve, costConf, subagent, speedTags, tools, mcp };
+}
+
+async function loadSessionsPageData(signal) {
+  const range = dateRange(currentPeriod);
+  const q = qs(range);
+  const opts = signal ? { signal } : {};
+  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
+
+  const extra = 'limit=50&sort_by=' + sessionsPageSortCol + '&sort_asc=' + sessionsPageSortAsc
+    + (sessionsPageSearchTerm ? '&search=' + encodeURIComponent(sessionsPageSearchTerm) : '');
+  const result = await fetch('/analytics/sessions' + q + (q ? '&' : '?') + extra, opts).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
+  sessionsPageData = result.sessions || [];
+  sessionsPageTotalCount = result.total_count || 0;
+}
+
+async function loadSessionMessages(sessionId) {
+  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
+  return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/messages').then(ok).catch(() => []);
+}
+
+async function loadSessionTags(sessionId) {
+  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
+  return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/tags').then(ok).catch(() => []);
+}

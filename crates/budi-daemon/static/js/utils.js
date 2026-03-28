@@ -57,7 +57,10 @@ function fmtDate(iso) {
   const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   if (diff === 0) return `Today ${time}`;
   if (diff === 1) return `Yesterday ${time}`;
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+  const opts = d.getFullYear() !== now.getFullYear()
+    ? { month: 'short', day: 'numeric', year: 'numeric' }
+    : { month: 'short', day: 'numeric' };
+  return d.toLocaleDateString([], opts) + ' ' + time;
 }
 function repoName(id) { if (!id) return '--'; return id.split('/').pop() || id; }
 

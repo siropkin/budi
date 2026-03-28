@@ -19,7 +19,7 @@ function renderCards(s, cost) {
   return `
   <div class="cards">
     <div class="card">
-      <div class="label">Est. Cost</div>
+      <div class="label">Total Cost</div>
       <div class="value cost-value" title="Includes both exact (API/OTEL) and estimated costs">${fmtCost(cost.total_cost)}</div>
       <div class="sub">${fmtCost(cost.input_cost + cost.cache_write_cost + cost.cache_read_cost)} input+cache / ${fmtCost(cost.output_cost)} output</div>
     </div>

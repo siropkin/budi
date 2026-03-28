@@ -848,7 +848,8 @@ pub fn branch_cost(
     // Single-query approach: COALESCE NULL/empty branches into "(untagged)"
     let sql = format!(
         "SELECT COALESCE(NULLIF(git_branch, ''), '(untagged)') as branch,
-                COALESCE(repo_id, '') as repo,
+                CASE WHEN COALESCE(NULLIF(git_branch, ''), '(untagged)') = '(untagged)'
+                     THEN '' ELSE COALESCE(repo_id, '') END as repo,
                 COUNT(DISTINCT session_id) as sess,
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
@@ -1520,51 +1521,514 @@ pub fn usage_summary_filtered(
     })
 }
 
+/// Cache efficiency stats for a date range.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CacheEfficiency {
+    pub total_input_tokens: u64,
+    pub total_cache_read_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    pub cache_hit_rate: f64,
+    pub cache_savings_cents: f64,
+}
+
+/// Query cache efficiency stats, optionally filtered by date range.
+pub fn cache_efficiency(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<CacheEfficiency> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE");
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let role_filter = if where_clause.is_empty() {
+        "WHERE role = 'assistant'"
+    } else {
+        "AND role = 'assistant'"
+    };
+
+    let sql = format!(
+        "SELECT COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                provider,
+                COALESCE(model, 'unknown')
+         FROM messages {where_clause} {role_filter}
+         GROUP BY provider, COALESCE(model, 'unknown')",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+
+    let mut total_input: u64 = 0;
+    let mut total_cache_read: u64 = 0;
+    let mut total_cache_creation: u64 = 0;
+    let mut total_savings_cents: f64 = 0.0;
+
+    for (input, cache_read, cache_creation, prov, model) in &rows {
+        total_input += input;
+        total_cache_read += cache_read;
+        total_cache_creation += cache_creation;
+        let pricing = match prov.as_str() {
+            "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
+            _ => crate::providers::claude_code::claude_pricing_for_model(model),
+        };
+        // Savings: what cache reads would have cost at full input price minus what they actually cost
+        let savings = *cache_read as f64 * (pricing.input - pricing.cache_read) / 1_000_000.0;
+        total_savings_cents += savings * 100.0;
+    }
+
+    let denominator = total_input + total_cache_read;
+    let cache_hit_rate = if denominator > 0 {
+        total_cache_read as f64 / denominator as f64
+    } else {
+        0.0
+    };
+
+    Ok(CacheEfficiency {
+        total_input_tokens: total_input + total_cache_read,
+        total_cache_read_tokens: total_cache_read,
+        total_cache_creation_tokens: total_cache_creation,
+        cache_hit_rate,
+        cache_savings_cents: (total_savings_cents * 100.0).round() / 100.0,
+    })
+}
+
+/// Session cost curve: average cost per message by session length bucket.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionCostBucket {
+    pub bucket: String,
+    pub session_count: u64,
+    pub avg_messages: f64,
+    pub avg_cost_per_message_cents: f64,
+    pub total_cost_cents: f64,
+}
+
+/// Query session cost curve: average cost per message grouped by session length.
+pub fn session_cost_curve(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<SessionCostBucket>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    if let Some(s) = since {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    // First compute per-session stats, then bucket by message count
+    let sql = format!(
+        "WITH session_stats AS (
+             SELECT session_id,
+                    COUNT(*) as msg_count,
+                    COALESCE(SUM(cost_cents), 0.0) as total_cost
+             FROM messages
+             {where_clause}
+             AND session_id IS NOT NULL
+             GROUP BY session_id
+         )
+         SELECT CASE
+                    WHEN msg_count <= 5 THEN '1-5'
+                    WHEN msg_count <= 15 THEN '6-15'
+                    WHEN msg_count <= 30 THEN '16-30'
+                    WHEN msg_count <= 60 THEN '31-60'
+                    WHEN msg_count <= 100 THEN '61-100'
+                    ELSE '100+'
+                END as bucket,
+                COUNT(*) as session_count,
+                AVG(msg_count) as avg_messages,
+                AVG(total_cost / msg_count) as avg_cost_per_msg,
+                SUM(total_cost) as total_cost
+         FROM session_stats
+         GROUP BY bucket
+         ORDER BY MIN(msg_count)",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(SessionCostBucket {
+                bucket: row.get(0)?,
+                session_count: row.get(1)?,
+                avg_messages: row.get(2)?,
+                avg_cost_per_message_cents: row.get(3)?,
+                total_cost_cents: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(rows)
+}
+
+/// Cost confidence distribution.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CostConfidenceStat {
+    pub confidence: String,
+    pub message_count: u64,
+    pub cost_cents: f64,
+}
+
+/// Query cost breakdown by cost_confidence level.
+pub fn cost_confidence_stats(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<CostConfidenceStat>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE");
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let role_filter = if where_clause.is_empty() {
+        "WHERE role = 'assistant'"
+    } else {
+        "AND role = 'assistant'"
+    };
+
+    let sql = format!(
+        "SELECT COALESCE(cost_confidence, 'estimated') as conf,
+                COUNT(*) as cnt,
+                COALESCE(SUM(cost_cents), 0.0) as cost
+         FROM messages {where_clause} {role_filter}
+         GROUP BY conf
+         ORDER BY cost DESC",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(CostConfidenceStat {
+                confidence: row.get(0)?,
+                message_count: row.get(1)?,
+                cost_cents: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(rows)
+}
+
+/// Subagent vs main conversation cost breakdown.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SubagentCostStat {
+    pub category: String,
+    pub message_count: u64,
+    pub cost_cents: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Query cost split between main conversation and subagent messages.
+pub fn subagent_cost_stats(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<SubagentCostStat>> {
+    let (where_clause, date_params) = date_filter(since, until, "WHERE");
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let role_filter = if where_clause.is_empty() {
+        "WHERE role = 'assistant'"
+    } else {
+        "AND role = 'assistant'"
+    };
+
+    let sql = format!(
+        "SELECT CASE WHEN parent_uuid IS NOT NULL THEN 'subagent' ELSE 'main' END as category,
+                COUNT(*) as cnt,
+                COALESCE(SUM(cost_cents), 0.0) as cost,
+                COALESCE(SUM(input_tokens), 0) as inp,
+                COALESCE(SUM(output_tokens), 0) as outp
+         FROM messages {where_clause} {role_filter}
+         GROUP BY category
+         ORDER BY cost DESC",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(SubagentCostStat {
+                category: row.get(0)?,
+                message_count: row.get(1)?,
+                cost_cents: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(rows)
+}
+
+/// Session list entry for the Sessions page.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionListEntry {
+    pub session_id: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub message_count: u64,
+    pub cost_cents: f64,
+    pub model: Option<String>,
+    pub provider: String,
+    pub repo_id: Option<String>,
+    pub git_branch: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Paginated session list result.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PaginatedSessions {
+    pub sessions: Vec<SessionListEntry>,
+    pub total_count: u64,
+}
+
+/// Parameters for session list queries.
+pub struct SessionListParams<'a> {
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+    pub search: Option<&'a str>,
+    pub sort_by: Option<&'a str>,
+    pub sort_asc: bool,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// Query sessions with cost aggregated from messages.
+pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<PaginatedSessions> {
+    let mut conditions = vec!["m.role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    if let Some(s) = p.since {
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = p.until {
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{}", param_values.len()));
+    }
+    if let Some(q) = p.search
+        && !q.is_empty()
+    {
+        param_values.push(format!("%{q}%"));
+        let idx = param_values.len();
+        conditions.push(format!(
+            "(m.model LIKE ?{idx} OR m.repo_id LIKE ?{idx} OR m.provider LIKE ?{idx} OR COALESCE(m.git_branch, s.git_branch) LIKE ?{idx})"
+        ));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    param_values.push(p.limit.to_string());
+    let limit_idx = param_values.len();
+    param_values.push(p.offset.to_string());
+    let offset_idx = param_values.len();
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let dir = if p.sort_asc { "ASC" } else { "DESC" };
+    let order_expr = match p.sort_by.unwrap_or("started_at") {
+        "started_at" => format!("sa.started_at {dir}"),
+        "duration" => {
+            // duration_ms from hooks, fallback to computed from timestamps
+            let col = "COALESCE(sa.duration_ms, (julianday(sa.ended_at) - julianday(sa.started_at)) * 86400000)";
+            if p.sort_asc {
+                format!("({col} IS NULL) ASC, {col} {dir}")
+            } else {
+                format!("{col} {dir}")
+            }
+        }
+        "model" => format!("sa.models_by_cost {dir}"),
+        "provider" => format!("sa.provider {dir}"),
+        "repo_id" => {
+            if p.sort_asc {
+                format!("(sa.repo_id IS NULL OR sa.repo_id = '') ASC, sa.repo_id {dir}")
+            } else {
+                format!("sa.repo_id {dir}")
+            }
+        }
+        "git_branch" | "branch" => {
+            if p.sort_asc {
+                format!("(sa.git_branch IS NULL OR sa.git_branch = '') ASC, sa.git_branch {dir}")
+            } else {
+                format!("sa.git_branch {dir}")
+            }
+        }
+        "tokens" => format!("(sa.inp + sa.outp) {dir}"),
+        _ => format!("sa.cost {dir}"),
+    };
+
+    let sql = format!(
+        "WITH session_agg AS (
+             SELECT m.session_id,
+                    MIN(m.timestamp) as started_at,
+                    MAX(m.timestamp) as ended_at,
+                    COUNT(*) as msg_count,
+                    COALESCE(SUM(m.cost_cents), 0.0) as cost,
+                    (SELECT GROUP_CONCAT(sub.model, ',') FROM (
+                         SELECT m2.model FROM messages m2
+                         WHERE m2.session_id = m.session_id AND m2.role = 'assistant'
+                           AND m2.model IS NOT NULL AND m2.model != '' AND SUBSTR(m2.model, 1, 1) != '<'
+                         GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
+                     ) sub) as models_by_cost,
+                    COALESCE(MAX(m.provider), 'claude_code') as provider,
+                    COALESCE(MAX(m.repo_id), MAX(s.repo_id)) as repo_id,
+                    COALESCE(MAX(m.git_branch), MAX(s.git_branch)) as git_branch,
+                    COALESCE(SUM(m.input_tokens), 0) as inp,
+                    COALESCE(SUM(m.output_tokens), 0) as outp,
+                    COALESCE(s.duration_ms,
+                        CAST((julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400000 AS INTEGER)
+                    ) as duration_ms
+             FROM messages m
+             LEFT JOIN sessions s ON s.conversation_id = m.session_id
+             {where_clause}
+             AND m.session_id IS NOT NULL
+             GROUP BY m.session_id
+         )
+         SELECT COUNT(*) OVER() as total,
+                sa.session_id, sa.started_at, sa.ended_at, sa.duration_ms,
+                sa.msg_count, sa.cost, sa.models_by_cost, sa.provider, sa.repo_id, sa.git_branch,
+                sa.inp, sa.outp
+         FROM session_agg sa
+         ORDER BY {order_expr}
+         LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut total_count: u64 = 0;
+    let sessions: Vec<SessionListEntry> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                SessionListEntry {
+                    session_id: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
+                    duration_ms: row.get(4)?,
+                    message_count: row.get(5)?,
+                    cost_cents: row.get(6)?,
+                    model: row.get(7)?,
+                    provider: row.get::<_, String>(8)?,
+                    repo_id: row.get(9)?,
+                    git_branch: row.get(10)?,
+                    input_tokens: row.get(11)?,
+                    output_tokens: row.get(12)?,
+                },
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|(tc, entry)| {
+            total_count = tc;
+            entry
+        })
+        .collect();
+
+    Ok(PaginatedSessions {
+        sessions,
+        total_count,
+    })
+}
+
+/// Messages within a specific session for drill-down.
+/// Get distinct tags for a session.
+pub fn session_tags(conn: &Connection, session_id: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT t.key, t.value
+         FROM tags t
+         JOIN messages m ON t.message_uuid = m.uuid
+         WHERE m.session_id = ?1
+         ORDER BY t.key, t.value",
+    )?;
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Messages within a specific session for drill-down.
+pub fn session_messages(conn: &Connection, session_id: &str) -> Result<Vec<MessageRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT uuid, timestamp, role, model,
+                COALESCE(provider, 'claude_code'),
+                repo_id,
+                input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens,
+                COALESCE(cost_cents, 0.0),
+                COALESCE(cost_confidence, 'estimated'),
+                git_branch
+         FROM messages
+         WHERE session_id = ?1 AND role = 'assistant'
+         ORDER BY timestamp ASC",
+    )?;
+
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            Ok(MessageRow {
+                uuid: row.get(0)?,
+                timestamp: row.get(1)?,
+                role: row.get(2)?,
+                model: row.get(3)?,
+                provider: row.get(4)?,
+                repo_id: row.get(5)?,
+                input_tokens: row.get(6)?,
+                output_tokens: row.get(7)?,
+                cache_creation_tokens: row.get(8)?,
+                cache_read_tokens: row.get(9)?,
+                cost_cents: row.get(10)?,
+                cost_confidence: row.get(11)?,
+                git_branch: row.get(12)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Cache efficiency stats for a date range.
-    #[derive(Debug, Clone)]
-    struct CacheStats {
-        total_input_tokens: u64,
-        total_cache_read_tokens: u64,
-        hit_rate: f64,
-    }
 
     fn cache_stats(
         conn: &Connection,
         since: Option<&str>,
         until: Option<&str>,
-    ) -> Result<CacheStats> {
-        let (where_clause, date_params) = date_filter(since, until, "WHERE");
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
-            .iter()
-            .map(|s| s as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let (total_input, cache_read): (u64, u64) = conn.query_row(
-            &format!(
-                "SELECT COALESCE(SUM(input_tokens + cache_read_tokens), 0),
-                        COALESCE(SUM(cache_read_tokens), 0)
-                 FROM messages {}",
-                where_clause
-            ),
-            param_refs.as_slice(),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-
-        let hit_rate = if total_input > 0 {
-            cache_read as f64 / total_input as f64
-        } else {
-            0.0
-        };
-
-        Ok(CacheStats {
-            total_input_tokens: total_input,
-            total_cache_read_tokens: cache_read,
-            hit_rate,
-        })
+    ) -> Result<CacheEfficiency> {
+        cache_efficiency(conn, since, until)
     }
 
     fn test_db() -> Connection {
@@ -2021,7 +2485,7 @@ mod tests {
         assert_eq!(cs.total_input_tokens, 51150);
         // cache_read = 200 + 150 + 0 = 350
         assert_eq!(cs.total_cache_read_tokens, 350);
-        assert!((cs.hit_rate - 350.0 / 51150.0).abs() < 0.001);
+        assert!((cs.cache_hit_rate - 350.0 / 51150.0).abs() < 0.001);
     }
 
     #[test]
@@ -2458,5 +2922,212 @@ mod tests {
             count, 2,
             "messages without request_id should both be inserted"
         );
+    }
+
+    #[test]
+    fn cache_efficiency_computes_savings() {
+        let mut conn = test_db();
+        ingest_messages(&mut conn, &messages_with_tools(), None).unwrap();
+
+        let ce = cache_efficiency(&conn, None, None).unwrap();
+        assert_eq!(ce.total_cache_read_tokens, 350);
+        assert!(ce.cache_hit_rate > 0.0);
+        assert!(ce.cache_savings_cents > 0.0);
+    }
+
+    #[test]
+    fn session_cost_curve_buckets() {
+        let mut conn = test_db();
+        // Create messages in a session
+        let mut msgs = Vec::new();
+        for i in 0..10 {
+            msgs.push(ParsedMessage {
+                uuid: format!("curve-{}", i),
+                session_id: Some("curve-sess".to_string()),
+                timestamp: format!("2026-03-14T10:{:02}:00Z", i).parse().unwrap(),
+                cwd: None,
+                role: "assistant".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: Some(1.0),
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "exact".to_string(),
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+            });
+        }
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+
+        let curve = session_cost_curve(&conn, None, None).unwrap();
+        assert!(!curve.is_empty());
+        // 10 messages -> bucket "6-15"
+        let bucket = curve.iter().find(|b| b.bucket == "6-15").unwrap();
+        assert_eq!(bucket.session_count, 1);
+    }
+
+    #[test]
+    fn cost_confidence_stats_groups_correctly() {
+        let mut conn = test_db();
+        let msgs = vec![
+            ParsedMessage {
+                uuid: "conf-1".to_string(),
+                session_id: Some("s1".to_string()),
+                timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
+                cwd: None,
+                role: "assistant".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: Some(1.0),
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "otel_exact".to_string(),
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+            },
+            ParsedMessage {
+                uuid: "conf-2".to_string(),
+                session_id: Some("s1".to_string()),
+                timestamp: "2026-03-14T10:01:00Z".parse().unwrap(),
+                cwd: None,
+                role: "assistant".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: Some(2.0),
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "estimated".to_string(),
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+            },
+        ];
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+
+        let stats = cost_confidence_stats(&conn, None, None).unwrap();
+        assert_eq!(stats.len(), 2);
+        let otel = stats.iter().find(|s| s.confidence == "otel_exact").unwrap();
+        assert_eq!(otel.message_count, 1);
+        let est = stats.iter().find(|s| s.confidence == "estimated").unwrap();
+        assert_eq!(est.message_count, 1);
+    }
+
+    #[test]
+    fn subagent_cost_stats_splits_correctly() {
+        let mut conn = test_db();
+        let msgs = vec![
+            ParsedMessage {
+                uuid: "main-1".to_string(),
+                session_id: Some("s1".to_string()),
+                timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
+                cwd: None,
+                role: "assistant".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: Some(3.0),
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "exact".to_string(),
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+            },
+            ParsedMessage {
+                uuid: "sub-1".to_string(),
+                session_id: Some("s1".to_string()),
+                timestamp: "2026-03-14T10:01:00Z".parse().unwrap(),
+                cwd: None,
+                role: "assistant".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+                input_tokens: 200,
+                output_tokens: 100,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: None,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: Some(5.0),
+                session_title: None,
+                parent_uuid: Some("main-1".to_string()),
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "exact".to_string(),
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+            },
+        ];
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+
+        let stats = subagent_cost_stats(&conn, None, None).unwrap();
+        assert_eq!(stats.len(), 2);
+        let main = stats.iter().find(|s| s.category == "main").unwrap();
+        assert_eq!(main.message_count, 1);
+        assert!((main.cost_cents - 3.0).abs() < 0.01);
+        let sub = stats.iter().find(|s| s.category == "subagent").unwrap();
+        assert_eq!(sub.message_count, 1);
+        assert!((sub.cost_cents - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn session_list_returns_sessions() {
+        let mut conn = test_db();
+        ingest_messages(&mut conn, &sample_messages(), None).unwrap();
+
+        let result = session_list(
+            &conn,
+            &SessionListParams {
+                since: None,
+                until: None,
+                search: None,
+                sort_by: None,
+                sort_asc: false,
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        // sample_messages has 1 assistant message in sess-abc
+        assert!(result.sessions.len() >= 1);
+        assert!(result.total_count >= 1);
     }
 }

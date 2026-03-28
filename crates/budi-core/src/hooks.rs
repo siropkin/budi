@@ -414,6 +414,7 @@ pub fn query_tool_stats(
     let mut conditions = vec![
         "event = 'post_tool_use'".to_string(),
         "tool_name IS NOT NULL".to_string(),
+        "tool_name NOT LIKE 'mcp_%'".to_string(),
     ];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
@@ -496,12 +497,12 @@ pub fn query_mcp_stats(
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     let sql = format!(
-        "SELECT mcp_server, COUNT(*) as call_count,
+        "SELECT tool_name, mcp_server, COUNT(*) as call_count,
                 AVG(tool_duration_ms) as avg_duration_ms,
                 SUM(tool_duration_ms) as total_duration_ms
          FROM hook_events
          {where_clause}
-         GROUP BY mcp_server
+         GROUP BY tool_name
          ORDER BY call_count DESC
          LIMIT ?{idx}",
     );
@@ -513,10 +514,11 @@ pub fn query_mcp_stats(
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(McpStats {
-                mcp_server: row.get(0)?,
-                call_count: row.get(1)?,
-                avg_duration_ms: row.get(2)?,
-                total_duration_ms: row.get(3)?,
+                tool_name: row.get(0)?,
+                mcp_server: row.get(1)?,
+                call_count: row.get(2)?,
+                avg_duration_ms: row.get(3)?,
+                total_duration_ms: row.get(4)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -527,6 +529,7 @@ pub fn query_mcp_stats(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpStats {
+    pub tool_name: String,
     pub mcp_server: String,
     pub call_count: i64,
     pub avg_duration_ms: Option<f64>,

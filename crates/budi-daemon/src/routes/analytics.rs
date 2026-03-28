@@ -354,6 +354,131 @@ pub async fn analytics_schema_version()
     Ok(Json(result))
 }
 
+pub async fn analytics_cache_efficiency(
+    Query(params): Query<DateRangeParams>,
+) -> Result<Json<analytics::CacheEfficiency>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::cache_efficiency(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_session_cost_curve(
+    Query(params): Query<DateRangeParams>,
+) -> Result<Json<Vec<analytics::SessionCostBucket>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_cost_curve(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_cost_confidence(
+    Query(params): Query<DateRangeParams>,
+) -> Result<Json<Vec<analytics::CostConfidenceStat>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::cost_confidence_stats(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_subagent_cost(
+    Query(params): Query<DateRangeParams>,
+) -> Result<Json<Vec<analytics::SubagentCostStat>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::subagent_cost_stats(&conn, params.since.as_deref(), params.until.as_deref())
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SessionsQueryParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub search: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_asc: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+pub async fn analytics_sessions(
+    Query(params): Query<SessionsQueryParams>,
+) -> Result<Json<analytics::PaginatedSessions>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_list(
+            &conn,
+            &analytics::SessionListParams {
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                search: params.search.as_deref(),
+                sort_by: params.sort_by.as_deref(),
+                sort_asc: params.sort_asc.unwrap_or(false),
+                limit: params.limit.unwrap_or(50).min(200),
+                offset: params.offset.unwrap_or(0),
+            },
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_session_tags(
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        let tags = analytics::session_tags(&conn, &session_id)?;
+        Ok::<_, anyhow::Error>(
+            tags.into_iter()
+                .map(|(k, v)| json!({ "key": k, "value": v }))
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_session_messages(
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<analytics::MessageRow>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_messages(&conn, &session_id)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
 pub async fn analytics_migrate(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {

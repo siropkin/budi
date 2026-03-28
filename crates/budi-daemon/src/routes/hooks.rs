@@ -12,9 +12,169 @@ pub async fn health() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde
     ))
 }
 
+pub async fn health_check_update()
+-> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(|| -> anyhow::Result<serde_json::Value> {
+        let current = env!("CARGO_PKG_VERSION");
+        let output = std::process::Command::new("curl")
+            .args([
+                "-sf",
+                "--max-time",
+                "10",
+                "-H",
+                &format!("User-Agent: budi/{current}"),
+                "https://api.github.com/repos/siropkin/budi/releases/latest",
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(json!({ "current": current, "error": "Could not reach GitHub API" }));
+        }
+
+        let release: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let latest = release
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_start_matches('v')
+            .to_string();
+        let up_to_date = latest == current;
+        Ok(json!({
+            "current": current,
+            "latest": latest,
+            "up_to_date": up_to_date,
+        }))
+    })
+    .await
+    .map_err(|e| super::internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(super::internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn health_integrations()
+-> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(|| -> serde_json::Value {
+        let home = budi_core::config::home_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // Check Claude Code settings
+        let claude_path = format!("{home}/.claude/settings.json");
+        let claude_settings: Option<serde_json::Value> = std::fs::read_to_string(&claude_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+        let hooks_installed = claude_settings
+            .as_ref()
+            .and_then(|s| s.get("hooks"))
+            .map(|h| !h.as_object().map(|o| o.is_empty()).unwrap_or(true))
+            .unwrap_or(false);
+
+        let mcp_installed = claude_settings
+            .as_ref()
+            .and_then(|s| s.get("mcpServers"))
+            .and_then(|m| m.get("budi"))
+            .is_some();
+
+        let otel_installed = claude_settings
+            .as_ref()
+            .and_then(|s| s.get("env"))
+            .and_then(|e| e.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+            .is_some();
+
+        let statusline_installed = claude_settings
+            .as_ref()
+            .and_then(|s| s.get("statusLine"))
+            .and_then(|sl| sl.get("command"))
+            .and_then(|c| c.as_str())
+            .map(|c| c.contains("budi"))
+            .unwrap_or(false);
+
+        // Cursor hooks
+        let cursor_path = format!("{home}/.cursor/hooks.json");
+        let cursor_hooks = std::fs::read_to_string(&cursor_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("hooks").cloned())
+            .map(|h| !h.as_object().map(|o| o.is_empty()).unwrap_or(true))
+            .unwrap_or(false);
+
+        // DB stats + paths
+        let db_path = budi_core::analytics::db_path()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let db_stats = budi_core::analytics::db_path()
+            .ok()
+            .and_then(|p| {
+                let size_mb = std::fs::metadata(&p)
+                    .ok()
+                    .map(|m| m.len() as f64 / 1_048_576.0);
+                let conn = budi_core::analytics::open_db(&p).ok()?;
+                let msg_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM messages WHERE role = 'assistant'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let first_record: Option<String> = conn
+                    .query_row(
+                        "SELECT MIN(timestamp) FROM messages WHERE role = 'assistant'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                Some(json!({
+                    "size_mb": (size_mb.unwrap_or(0.0) * 10.0).round() / 10.0,
+                    "records": msg_count,
+                    "first_record": first_record,
+                }))
+            })
+            .unwrap_or(json!(null));
+
+        let config_dir = budi_core::config::budi_home_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        json!({
+            "claude_code_hooks": hooks_installed,
+            "cursor_hooks": cursor_hooks,
+            "mcp_server": mcp_installed,
+            "otel": otel_installed,
+            "statusline": statusline_installed,
+            "database": db_stats,
+            "paths": {
+                "database": db_path,
+                "config": config_dir,
+                "claude_settings": claude_path,
+                "cursor_hooks": cursor_path,
+            },
+        })
+    })
+    .await
+    .map_err(|e| super::internal_error(anyhow::anyhow!("{e}")))?;
+
+    Ok(Json(result))
+}
+
 pub async fn sync_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
-    Json(json!({ "syncing": syncing }))
+    let last_synced = tokio::task::spawn_blocking(|| {
+        let db_path = budi_core::analytics::db_path().ok()?;
+        let conn = budi_core::analytics::open_db(&db_path).ok()?;
+        conn.query_row("SELECT MAX(last_synced) FROM sync_state", [], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .ok()
+        .flatten()
+    })
+    .await
+    .ok()
+    .flatten();
+    Json(json!({ "syncing": syncing, "last_synced": last_synced }))
 }
 
 #[derive(serde::Deserialize, Default)]

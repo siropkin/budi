@@ -39,6 +39,8 @@ fn build_router(app_state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(h::health))
+        .route("/health/integrations", get(h::health_integrations))
+        .route("/health/check-update", get(h::health_check_update))
         .route("/v1/logs", post(o::otel_logs_ingest))
         .route("/v1/metrics", post(o::otel_metrics_ingest))
         .route("/sync", post(h::analytics_sync))
@@ -70,8 +72,35 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/migrate", post(a::analytics_migrate))
         .route("/analytics/tools", get(h::analytics_tools))
         .route("/analytics/mcp", get(h::analytics_mcp))
+        .route(
+            "/analytics/cache-efficiency",
+            get(a::analytics_cache_efficiency),
+        )
+        .route(
+            "/analytics/session-cost-curve",
+            get(a::analytics_session_cost_curve),
+        )
+        .route(
+            "/analytics/cost-confidence",
+            get(a::analytics_cost_confidence),
+        )
+        .route("/analytics/subagent-cost", get(a::analytics_subagent_cost))
+        .route("/analytics/sessions", get(a::analytics_sessions))
+        .route(
+            "/analytics/sessions/{session_id}/messages",
+            get(a::analytics_session_messages),
+        )
+        .route(
+            "/analytics/sessions/{session_id}/tags",
+            get(a::analytics_session_tags),
+        )
         .route("/hooks/ingest", post(h::hooks_ingest))
         .route("/dashboard", get(d::dashboard))
+        .route("/dashboard/overview", get(d::dashboard))
+        .route("/dashboard/insights", get(d::dashboard))
+        .route("/dashboard/sessions", get(d::dashboard))
+        .route("/dashboard/settings", get(d::dashboard))
+        .route("/dashboard/sessions/{session_id}", get(d::dashboard))
         .route("/static/dashboard.css", get(d::dashboard_css))
         .route("/static/dashboard.js", get(d::dashboard_js))
         .with_state(app_state)

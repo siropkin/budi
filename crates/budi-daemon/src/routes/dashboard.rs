@@ -23,6 +23,12 @@ pub async fn dashboard_js() -> impl IntoResponse {
         "\n",
         include_str!("../../static/js/views.js"),
         "\n",
+        include_str!("../../static/js/views-insights.js"),
+        "\n",
+        include_str!("../../static/js/views-sessions.js"),
+        "\n",
+        include_str!("../../static/js/views-settings.js"),
+        "\n",
         include_str!("../../static/js/events.js"),
     );
     (

@@ -7,7 +7,7 @@ Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks to
 ```bash
 cargo build                                    # dev build
 cargo build --release                          # release build
-cargo test                                     # all tests (167: 151 core + 14 cli + 2 daemon)
+cargo test                                     # all tests (172: 156 core + 14 cli + 2 daemon)
 cargo test -p budi-core                        # core tests only
 ./scripts/install.sh                           # build release + install to ~/.local/bin/
 python3 scripts/validate-cost.py               # validate cost accuracy vs raw data
@@ -76,8 +76,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/providers/cursor.rs` — Cursor provider (Usage API, auth from state.vscdb)
 - `crates/budi-core/src/migration.rs` — Schema v13, all migration paths
 - `crates/budi-core/src/config.rs` — BudiConfig, StatuslineConfig, TagsConfig
-- `crates/budi-daemon/src/main.rs` — HTTP server, ~26 routes
-- `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync endpoints
+- `crates/budi-daemon/src/main.rs` — HTTP server, ~35 routes
+- `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /health/integrations, /health/check-update endpoints
+- `crates/budi-daemon/src/routes/analytics.rs` — All analytics endpoints including insights (cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions)
 - `crates/budi-daemon/src/routes/otel.rs` — /v1/logs OTLP ingestion
 - `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering + installation
 - `crates/budi-cli/src/mcp.rs` — MCP server handler (14 tools: analytics + config)
@@ -92,4 +93,11 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 14 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity) and config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status). Thin HTTP client to daemon — stdout is JSON-RPC only, logging to stderr
 - Tags are auto-detected (provider, model, repo, ticket_id, etc.) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
-- Dashboard is a single page at /dashboard with vanilla JS
+- **Dashboard** is multi-page at `/dashboard` with URL-based routing (vanilla JS, no framework):
+  - `/dashboard` (Overview) — Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
+  - `/dashboard/insights` — Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools, MCP servers
+  - `/dashboard/sessions` — Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, input token growth chart, message table
+  - `/dashboard/settings` — Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
+- Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
+- Analytics endpoints: `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`
+- Health endpoints: `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)
