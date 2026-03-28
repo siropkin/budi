@@ -60,7 +60,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - **cost_confidence**: determines `~` prefix in dashboard for non-exact costs
 - **Session context propagation**: git_branch/repo_id flow from user → assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
-- **Sync split**: `budi sync` = 7-day window (fast), `budi sync --all` = full history
+- **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
 - **Hook system**: `budi hook` reads stdin JSON, POSTs to daemon. Fire-and-forget, <50ms
 
 ## Key files
@@ -101,5 +101,5 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
 - Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`
 - Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration)
-- Sync endpoints: `/sync` (7-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
+- Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
 - Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)

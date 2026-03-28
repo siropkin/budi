@@ -146,7 +146,7 @@ budi uninstall --keep-data    # uninstall but keep analytics database
 budi mcp-serve                # run MCP server (used by Claude Code, not called directly)
 ```
 
-All data commands support `--period today|week|month|all` and `--json`.
+All data commands support `--period today|week|month|all` and `--format json`.
 
 ## Tags & cost attribution
 
@@ -324,9 +324,13 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
-| POST | `/sync` | Sync recent data (last 7 days) |
+| POST | `/sync` | Sync recent data (last 30 days) |
 | POST | `/sync/all` | Load full transcript history |
+| POST | `/sync/reset` | Wipe sync state + full re-sync |
+| GET | `/sync/status` | Syncing flag + last_synced |
 | POST | `/hooks/ingest` | Receive hook events |
+| GET | `/health/integrations` | Hooks/MCP/OTEL/statusline status + DB stats |
+| GET | `/health/check-update` | Check for updates via GitHub |
 | POST | `/v1/logs` | OTLP logs ingestion (exact cost from Claude Code) |
 | POST | `/v1/metrics` | OTLP metrics ingestion (stub for future use) |
 
@@ -347,6 +351,16 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | GET | `/analytics/tools` | Tool usage frequency and duration |
 | GET | `/analytics/mcp` | MCP server usage stats |
 | GET | `/analytics/statusline` | Status line data |
+| GET | `/analytics/cache-efficiency` | Cache hit rates and savings |
+| GET | `/analytics/session-cost-curve` | Cost per message by session length |
+| GET | `/analytics/cost-confidence` | Breakdown by cost confidence level |
+| GET | `/analytics/subagent-cost` | Subagent vs main agent cost |
+| GET | `/analytics/sessions` | Session list (paginated, searchable) |
+| GET | `/analytics/sessions/{id}/messages` | Messages for a specific session |
+| GET | `/analytics/sessions/{id}/tags` | Tags for a specific session |
+| GET | `/admin/providers` | Registered providers |
+| GET | `/admin/schema` | Database schema version |
+| POST | `/admin/migrate` | Run database migration |
 
 Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 

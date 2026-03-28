@@ -77,8 +77,8 @@ Examples:
         /// Show model usage breakdown
         #[arg(long, default_value_t = false)]
         models: bool,
-        /// Filter by provider (e.g. claude_code, cursor)
-        #[arg(long)]
+        /// Filter by provider (e.g. claude_code, cursor). Only works with the default summary view.
+        #[arg(long, conflicts_with = "view")]
         provider: Option<String>,
         /// Show cost breakdown by tag key (e.g. --tag ticket_id, --tag activity)
         #[arg(long)]
