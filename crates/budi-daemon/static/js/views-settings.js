@@ -6,7 +6,7 @@ async function loadSettingsData() {
   const ok = r => r.json();
   const [health, schema, syncStatus, integrations] = await Promise.all([
     fetch('/health').then(ok).catch(() => ({ ok: false })),
-    fetch('/analytics/schema-version').then(ok).catch(() => ({ current: '?', target: '?' })),
+    fetch('/admin/schema').then(ok).catch(() => ({ current: '?', target: '?' })),
     fetch('/sync/status').then(ok).catch(() => ({ syncing: false })),
     fetch('/health/integrations').then(ok).catch(() => ({})),
   ]);
@@ -263,7 +263,7 @@ function bindSettingsHandlers(content) {
     migrateBtn.disabled = true;
     settingsLog('Running migration...');
     try {
-      const r = await fetch('/analytics/migrate', { method: 'POST' }).then(r => r.json());
+      const r = await fetch('/admin/migrate', { method: 'POST' }).then(r => r.json());
       if (r.migrated) {
         settingsLog('Migrated from v' + r.from + ' to v' + r.current);
       } else {

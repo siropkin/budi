@@ -1,7 +1,7 @@
 async function loadAllData() {
   // Fetch registered providers once (lightweight, doesn't change per period).
   if (registeredProviders.length === 0) {
-    registeredProviders = await fetch('/analytics/registered-providers').then(r => r.json()).catch(() => []);
+    registeredProviders = await fetch('/admin/providers').then(r => r.json()).catch(() => []);
   }
   await loadStatsData();
   dataLoaded = true;

@@ -99,7 +99,7 @@ pub async fn analytics_messages(
                 search: params.search.as_deref(),
                 sort_by: params.sort_by.as_deref(),
                 sort_asc: params.sort_asc.unwrap_or(false),
-                limit: params.limit.unwrap_or(50).min(1000),
+                limit: params.limit.unwrap_or(50).min(200),
                 offset: params.offset.unwrap_or(0),
             },
         )
@@ -112,14 +112,14 @@ pub async fn analytics_messages(
 }
 
 #[derive(serde::Deserialize)]
-pub struct ProjectsParams {
+pub struct ListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
 }
 
 pub async fn analytics_projects(
-    Query(params): Query<ProjectsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20).min(200);
     let result = tokio::task::spawn_blocking(move || {
@@ -140,9 +140,9 @@ pub async fn analytics_projects(
 }
 
 pub async fn analytics_models(
-    Query(params): Query<ProjectsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(50).min(200);
+    let limit = params.limit.unwrap_or(20).min(200);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -156,9 +156,9 @@ pub async fn analytics_models(
 }
 
 pub async fn analytics_branches(
-    Query(params): Query<ProjectsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(50).min(200);
+    let limit = params.limit.unwrap_or(20).min(200);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -240,6 +240,61 @@ pub async fn analytics_providers(
 pub(crate) struct ProviderInfo {
     name: String,
     display_name: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct SchemaVersionResponse {
+    pub current: u32,
+    pub target: u32,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_migration: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+pub struct MigrateResponse {
+    pub current: u32,
+    pub target: u32,
+    pub migrated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<u32>,
+}
+
+#[derive(serde::Serialize)]
+pub struct IntegrationsResponse {
+    pub claude_code_hooks: bool,
+    pub cursor_hooks: bool,
+    pub mcp_server: bool,
+    pub otel: bool,
+    pub statusline: bool,
+    pub database: DatabaseStats,
+    pub paths: IntegrationPaths,
+}
+
+#[derive(serde::Serialize)]
+pub struct DatabaseStats {
+    pub size_mb: f64,
+    pub records: i64,
+    pub first_record: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct IntegrationPaths {
+    pub database: String,
+    pub config: String,
+    pub claude_settings: String,
+    pub cursor_hooks: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct CheckUpdateResponse {
+    pub current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub up_to_date: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub async fn analytics_registered_providers()
@@ -345,16 +400,26 @@ pub async fn analytics_branch_detail(
 }
 
 pub async fn analytics_schema_version()
--> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+-> Result<Json<SchemaVersionResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<SchemaVersionResponse> {
         let db_path = analytics::db_path()?;
         if !db_path.exists() {
-            return Ok(json!({ "current": 0, "target": budi_core::migration::SCHEMA_VERSION, "exists": false }));
+            return Ok(SchemaVersionResponse {
+                current: 0,
+                target: budi_core::migration::SCHEMA_VERSION,
+                exists: false,
+                needs_migration: None,
+            });
         }
         let conn = analytics::open_db(&db_path)?;
         let current = budi_core::migration::current_version(&conn);
         let target = budi_core::migration::SCHEMA_VERSION;
-        Ok(json!({ "current": current, "target": target, "exists": true, "needs_migration": current < target }))
+        Ok(SchemaVersionResponse {
+            current,
+            target,
+            exists: true,
+            needs_migration: Some(current < target),
+        })
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -498,24 +563,34 @@ pub async fn analytics_session_messages(
 
 pub async fn analytics_migrate(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<MigrateResponse>, (StatusCode, Json<serde_json::Value>)> {
     if state.syncing.load(std::sync::atomic::Ordering::SeqCst) {
         return Err((
             StatusCode::CONFLICT,
             Json(json!({ "ok": false, "error": "cannot migrate while sync is running" })),
         ));
     }
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<MigrateResponse> {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         let current = budi_core::migration::current_version(&conn);
         let target = budi_core::migration::SCHEMA_VERSION;
         if current >= target {
-            return Ok(json!({ "current": current, "target": target, "migrated": false }));
+            return Ok(MigrateResponse {
+                current,
+                target,
+                migrated: false,
+                from: None,
+            });
         }
         drop(conn);
         analytics::open_db_with_migration(&db_path)?;
-        Ok(json!({ "current": target, "target": target, "migrated": true, "from": current }))
+        Ok(MigrateResponse {
+            current: target,
+            target,
+            migrated: true,
+            from: Some(current),
+        })
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -524,7 +599,7 @@ pub async fn analytics_migrate(
 }
 
 pub async fn analytics_tools(
-    Query(params): Query<ProjectsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -544,7 +619,7 @@ pub async fn analytics_tools(
 }
 
 pub async fn analytics_mcp(
-    Query(params): Query<ProjectsParams>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;

@@ -594,7 +594,7 @@ impl BudiMcpServer {
         }
 
         // Schema version
-        if let Ok(sv) = self.daemon_get::<Value>("/analytics/schema-version", &[]) {
+        if let Ok(sv) = self.daemon_get::<Value>("/admin/schema", &[]) {
             let current = sv.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
             text.push_str(&format!("Schema: v{current}\n"));
         }
@@ -759,7 +759,7 @@ impl BudiMcpServer {
         }
 
         // Schema
-        if let Ok(sv) = self.daemon_get::<Value>("/analytics/schema-version", &[]) {
+        if let Ok(sv) = self.daemon_get::<Value>("/admin/schema", &[]) {
             let current = sv.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
             let target = sv.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
             if current >= target {

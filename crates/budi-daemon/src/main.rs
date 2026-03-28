@@ -60,16 +60,10 @@ fn build_router(app_state: AppState) -> Router {
             get(a::analytics_branch_detail),
         )
         .route("/analytics/providers", get(a::analytics_providers))
-        .route(
-            "/analytics/registered-providers",
-            get(a::analytics_registered_providers),
-        )
         .route("/analytics/statusline", get(a::analytics_statusline))
-        .route(
-            "/analytics/schema-version",
-            get(a::analytics_schema_version),
-        )
-        .route("/analytics/migrate", post(a::analytics_migrate))
+        .route("/admin/providers", get(a::analytics_registered_providers))
+        .route("/admin/schema", get(a::analytics_schema_version))
+        .route("/admin/migrate", post(a::analytics_migrate))
         .route("/analytics/tools", get(a::analytics_tools))
         .route("/analytics/mcp", get(a::analytics_mcp))
         .route(

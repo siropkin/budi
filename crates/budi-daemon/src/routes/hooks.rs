@@ -33,9 +33,14 @@ pub async fn health() -> Json<HealthResponse> {
 }
 
 pub async fn health_check_update()
--> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(|| -> anyhow::Result<serde_json::Value> {
-        let current = env!("CARGO_PKG_VERSION");
+-> Result<
+    Json<super::analytics::CheckUpdateResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    use super::analytics::CheckUpdateResponse;
+
+    let result = tokio::task::spawn_blocking(|| -> anyhow::Result<CheckUpdateResponse> {
+        let current = env!("CARGO_PKG_VERSION").to_string();
         let output = std::process::Command::new("curl")
             .args([
                 "-sf",
@@ -48,7 +53,12 @@ pub async fn health_check_update()
             .output()?;
 
         if !output.status.success() {
-            return Ok(json!({ "current": current, "error": "Could not reach GitHub API" }));
+            return Ok(CheckUpdateResponse {
+                current,
+                latest: None,
+                up_to_date: None,
+                error: Some("Could not reach GitHub API".to_string()),
+            });
         }
 
         let release: serde_json::Value = serde_json::from_slice(&output.stdout)?;
@@ -59,11 +69,12 @@ pub async fn health_check_update()
             .trim_start_matches('v')
             .to_string();
         let up_to_date = latest == current;
-        Ok(json!({
-            "current": current,
-            "latest": latest,
-            "up_to_date": up_to_date,
-        }))
+        Ok(CheckUpdateResponse {
+            current,
+            latest: Some(latest),
+            up_to_date: Some(up_to_date),
+            error: None,
+        })
     })
     .await
     .map_err(|e| super::internal_error(anyhow::anyhow!("{e}")))?
@@ -72,8 +83,13 @@ pub async fn health_check_update()
 }
 
 pub async fn health_integrations()
--> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(|| -> serde_json::Value {
+-> Result<
+    Json<super::analytics::IntegrationsResponse>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    use super::analytics::{DatabaseStats, IntegrationPaths, IntegrationsResponse};
+
+    let result = tokio::task::spawn_blocking(|| -> IntegrationsResponse {
         let home = budi_core::config::home_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
@@ -120,7 +136,7 @@ pub async fn health_integrations()
             .unwrap_or(false);
 
         // DB stats + paths
-        let db_path = budi_core::analytics::db_path()
+        let db_path_str = budi_core::analytics::db_path()
             .ok()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
@@ -146,33 +162,37 @@ pub async fn health_integrations()
                     )
                     .ok()
                     .flatten();
-                Some(json!({
-                    "size_mb": (size_mb.unwrap_or(0.0) * 10.0).round() / 10.0,
-                    "records": msg_count,
-                    "first_record": first_record,
-                }))
+                Some(DatabaseStats {
+                    size_mb: (size_mb.unwrap_or(0.0) * 10.0).round() / 10.0,
+                    records: msg_count,
+                    first_record,
+                })
             })
-            .unwrap_or(json!(null));
+            .unwrap_or(DatabaseStats {
+                size_mb: 0.0,
+                records: 0,
+                first_record: None,
+            });
 
         let config_dir = budi_core::config::budi_home_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        json!({
-            "claude_code_hooks": hooks_installed,
-            "cursor_hooks": cursor_hooks,
-            "mcp_server": mcp_installed,
-            "otel": otel_installed,
-            "statusline": statusline_installed,
-            "database": db_stats,
-            "paths": {
-                "database": db_path,
-                "config": config_dir,
-                "claude_settings": claude_path,
-                "cursor_hooks": cursor_path,
+        IntegrationsResponse {
+            claude_code_hooks: hooks_installed,
+            cursor_hooks,
+            mcp_server: mcp_installed,
+            otel: otel_installed,
+            statusline: statusline_installed,
+            database: db_stats,
+            paths: IntegrationPaths {
+                database: db_path_str,
+                config: config_dir,
+                claude_settings: claude_path,
+                cursor_hooks: cursor_path,
             },
-        })
+        }
     })
     .await
     .map_err(|e| super::internal_error(anyhow::anyhow!("{e}")))?;

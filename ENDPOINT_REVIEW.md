@@ -1,19 +1,18 @@
-# Endpoint Review — 2026-03-28
+# Endpoint Consistency Review — 2026-03-28
 
-## Critical
+## Must Fix
 
-- [x] 1. Validate `sort_by` in `/analytics/sessions` (SQL injection risk)
-- [x] 2. Add max limit cap to repos/tags/tools/mcp endpoints (capped at 200)
+- [x] 1. Rename `ProjectsParams` → `ListParams` (reused by models, branches, tools, mcp — naming is misleading)
+- [x] 2. Standardize `limit` max: all endpoints now max 200, defaults 20 for chart endpoints, 50 for paginated
+- [x] 3. Add typed response structs for `health_integrations`, `health_check_update`, `schema_version`, `migrate`
+- [x] 4. ~~Wrap bare array responses~~ — Skipped: these are top-N chart endpoints, not paginated lists. Wrapping adds complexity for no real benefit. Only messages/sessions need pagination (already have it).
+- [x] 5. ~~Add `offset` to list endpoints~~ — Skipped: same as #4. Chart endpoints are top-N, not paginated. Adding offset would be unused code.
+- [x] 6. Move non-analytics endpoints to `/admin/` namespace: schema-version → `/admin/schema`, migrate → `/admin/migrate`, registered-providers → `/admin/providers`. Updated: router, dashboard JS, CLI client, MCP client.
 
-## High (consistency)
+## Won't Fix
 
-- [x] 3. Rename `/analytics/repos` → `/analytics/projects` (router, client, dashboard JS, MCP)
-- [x] 4. Move tools/mcp handlers from `hooks.rs` to `analytics.rs`
-- [x] 5. ~~Add `offset` + `total_count` wrapper~~ — Skipped: projects/tags/tools/mcp are top-N chart endpoints, not paginated lists. Only messages and sessions need pagination (already have it). Adding offset/total_count would be overengineering.
-- [x] 6. Add `limit` to `/analytics/models` (default 50, max 200), `/analytics/branches` (default 50, max 200). Skipped `/analytics/providers` — only 2-3 rows ever (one per provider).
-
-## Medium (cleanup)
-
-- [x] 7. Typed response struct for session tags (`SessionTag` struct replaces `json!()`)
-- [x] 8. Consolidate param structs: removed `BranchDetailParams` (→ `DateRangeParams`), removed `ListParams` (→ `ProjectsParams`). 9 → 7 structs.
-- [x] 9. Typed structs for `health` (`HealthResponse`), `sync_status` (`SyncStatusResponse`), and all sync endpoints (`SyncResponse`). Kept `health_integrations`/`health_check_update`/`schema_version`/`migrate` as untyped JSON (complex/admin-only).
+- Hyphen convention in multi-word names — consistent pattern for multi-word
+- `since/until` on all data endpoints — already consistent
+- Error format `{ ok: false, error }` — already consistent
+- Session sub-resources without pagination — bounded by session size
+- `provider` filter only on summary/cost — not needed elsewhere currently

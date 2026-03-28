@@ -128,7 +128,7 @@ impl DaemonClient {
     pub fn migrate(&self) -> Result<Value> {
         let resp = self
             .client
-            .post(format!("{}/analytics/migrate", self.base_url))
+            .post(format!("{}/admin/migrate", self.base_url))
             .timeout(std::time::Duration::from_secs(600))
             .send()
             .map_err(describe_send_error)?;
@@ -139,7 +139,7 @@ impl DaemonClient {
     pub fn schema_version(&self) -> Result<Value> {
         let resp = self
             .client
-            .get(format!("{}/analytics/schema-version", self.base_url))
+            .get(format!("{}/admin/schema", self.base_url))
             .send()
             .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
