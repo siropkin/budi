@@ -127,18 +127,12 @@ shell = ["sh"]
 
 ## Update
 
-**Homebrew:**
-
-```bash
-brew upgrade budi && budi init
-```
-
-**Shell script / Windows / from source:**
-
 ```bash
 budi update                      # downloads latest release, migrates DB, restarts daemon
 budi update --version 7.1.0     # update to a specific version
 ```
+
+Works for all installation methods — automatically detects Homebrew and runs `brew upgrade` when appropriate.
 
 **Restart Claude Code and Cursor** after updating to pick up any changes.
 
@@ -158,7 +152,7 @@ budi stats --tag ticket_prefix # cost per team prefix
 budi sync                     # sync recent data (last 30 days)
 budi sync --all               # load full history (all time)
 budi sync --force             # re-ingest all data from scratch (use after upgrades)
-budi update                   # check for updates (detects Homebrew)
+budi update                   # check for updates (auto-detects Homebrew)
 budi update --version 7.1.0  # update to a specific version
 budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database

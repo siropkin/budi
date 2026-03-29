@@ -11,17 +11,7 @@ use serde_json::Value;
 use crate::daemon::ensure_daemon_running;
 
 pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
-    // Detect Homebrew installation and redirect.
-    if is_homebrew_install() {
-        let bold = super::ansi("\x1b[1m");
-        let reset = super::ansi("\x1b[0m");
-        println!("budi was installed via {bold}Homebrew{reset}.");
-        println!();
-        println!("To update, run:");
-        println!("  brew upgrade budi");
-        println!("  budi init        # restart daemon + re-sync");
-        return Ok(());
-    }
+    let is_brew = is_homebrew_install();
 
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: v{}", current);
@@ -32,6 +22,10 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     let yellow = super::ansi("\x1b[33m");
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
+
+    // --version with Homebrew: fall through to standalone installer since
+    // brew doesn't support installing arbitrary versions.
+    let use_brew = is_brew && version.is_none();
 
     // Resolve target version — either from --version flag or GitHub API.
     let (latest_tag, latest) = if let Some(ref v) = version {
@@ -90,7 +84,8 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     }
 
     if !yes {
-        println!("This will download and run the budi installer from GitHub.");
+        let method = if use_brew { "Homebrew" } else { "the budi installer from GitHub" };
+        println!("This will update budi via {}.", method);
         if std::io::stdin().is_terminal() {
             eprint!("Continue? [y/N] ");
             let mut answer = String::new();
@@ -116,53 +111,75 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
     println!("Updating...");
 
-    // Pin the installer to the exact version we resolved to avoid race conditions
-    // (a new release published between version check and download).
-    // Also pin the installer script itself to the target tag so the script format
-    // matches the version being installed.
-    let installer_tag = &latest_tag;
-    let status = if cfg!(target_os = "windows") {
-        let script_url = format!(
-            "irm https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.ps1 | iex",
-            installer_tag
-        );
-        Command::new("powershell")
-            .env("VERSION", &latest_tag)
-            .env("BUDI_SKIP_INIT", "1")
-            .args(["-ExecutionPolicy", "Bypass", "-Command", &script_url])
+    if use_brew {
+        let status = Command::new("brew")
+            .args(["upgrade", "budi"])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
-            .context("Failed to run PowerShell installer")?
-    } else {
-        let script_url = format!(
-            "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.sh | bash",
-            installer_tag
-        );
-        Command::new("bash")
-            .env("VERSION", &latest_tag)
-            .env("BUDI_SKIP_INIT", "1")
-            .args(["-c", &script_url])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to run installer")?
-    };
+            .context("Failed to run brew upgrade")?;
 
-    if !status.success() {
-        // Installer failed — try to restart the daemon so the old version keeps working
-        eprintln!("Installer failed. Attempting to restart daemon with current binaries...");
-        let repo_root = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| config::find_repo_root(&cwd).ok());
-        let cfg = match &repo_root {
-            Some(root) => config::load_or_default(root).unwrap_or_default(),
-            None => config::BudiConfig::default(),
+        if !status.success() {
+            eprintln!("brew upgrade failed. Attempting to restart daemon with current binaries...");
+            let repo_root = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| config::find_repo_root(&cwd).ok());
+            let cfg = match &repo_root {
+                Some(root) => config::load_or_default(root).unwrap_or_default(),
+                None => config::BudiConfig::default(),
+            };
+            let _ = ensure_daemon_running(repo_root.as_deref(), &cfg);
+            anyhow::bail!("brew upgrade exited with {}", status);
+        }
+    } else {
+        // Pin the installer to the exact version we resolved to avoid race conditions
+        // (a new release published between version check and download).
+        // Also pin the installer script itself to the target tag so the script format
+        // matches the version being installed.
+        let installer_tag = &latest_tag;
+        let status = if cfg!(target_os = "windows") {
+            let script_url = format!(
+                "irm https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.ps1 | iex",
+                installer_tag
+            );
+            Command::new("powershell")
+                .env("VERSION", &latest_tag)
+                .env("BUDI_SKIP_INIT", "1")
+                .args(["-ExecutionPolicy", "Bypass", "-Command", &script_url])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("Failed to run PowerShell installer")?
+        } else {
+            let script_url = format!(
+                "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.sh | bash",
+                installer_tag
+            );
+            Command::new("bash")
+                .env("VERSION", &latest_tag)
+                .env("BUDI_SKIP_INIT", "1")
+                .args(["-c", &script_url])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("Failed to run installer")?
         };
-        let _ = ensure_daemon_running(repo_root.as_deref(), &cfg);
-        anyhow::bail!("Installer exited with {}", status);
+
+        if !status.success() {
+            eprintln!("Installer failed. Attempting to restart daemon with current binaries...");
+            let repo_root = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| config::find_repo_root(&cwd).ok());
+            let cfg = match &repo_root {
+                Some(root) => config::load_or_default(root).unwrap_or_default(),
+                None => config::BudiConfig::default(),
+            };
+            let _ = ensure_daemon_running(repo_root.as_deref(), &cfg);
+            anyhow::bail!("Installer exited with {}", status);
+        }
     }
 
     // Clean up legacy hooks from settings.json

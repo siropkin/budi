@@ -48,12 +48,13 @@ main() {
   command -v tar >/dev/null 2>&1 || fail "tar is required"
 
   # Warn if budi is already installed via Homebrew (check binary path, fast).
+  # Skip when called from `budi update --version` (BUDI_SKIP_INIT is set).
   local existing_budi
   existing_budi="$(command -v budi 2>/dev/null || true)"
-  if [ -n "$existing_budi" ] && case "$existing_budi" in */Cellar/*|*/homebrew/*|*/Homebrew/*) true;; *) false;; esac; then
+  if [ -z "${BUDI_SKIP_INIT:-}" ] && [ -n "$existing_budi" ] && case "$existing_budi" in */Cellar/*|*/homebrew/*|*/Homebrew/*) true;; *) false;; esac; then
     log "WARNING: budi is already installed via Homebrew at $existing_budi."
     log "This will install a second copy in $BIN_DIR."
-    log "Consider using 'brew upgrade budi' instead."
+    log "Consider using 'budi update' instead."
     log ""
   fi
 
