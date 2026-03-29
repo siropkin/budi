@@ -84,7 +84,11 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     }
 
     if !yes {
-        let method = if use_brew { "Homebrew" } else { "the budi installer from GitHub" };
+        let method = if use_brew {
+            "Homebrew"
+        } else {
+            "the budi installer from GitHub"
+        };
         println!("This will update budi via {}.", method);
         if std::io::stdin().is_terminal() {
             eprint!("Continue? [y/N] ");
