@@ -190,6 +190,9 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             })
         }
         TranscriptEntry::Assistant(a) => {
+            if a.message.model.as_deref() == Some("<synthetic>") {
+                return None;
+            }
             let usage = a.message.usage.as_ref();
             // Extract 1-hour cache tier tokens from cache_creation breakdown
             let cache_1h = usage
