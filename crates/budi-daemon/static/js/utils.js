@@ -140,10 +140,7 @@ function fmtDurationMs(ms) {
   return ms + 'ms';
 }
 function fmtToolCalls(_, item) {
-  const count = item.call_count || 0;
-  const avg = item.avg_duration_ms;
-  if (avg != null && avg > 0) return fmtNum(count) + ' calls \u00b7 ' + fmtDurationMs(avg) + ' avg';
-  return fmtNum(count) + ' calls';
+  return fmtNum(item.call_count || 0) + ' calls';
 }
 
 const TOOL_COLORS = {
