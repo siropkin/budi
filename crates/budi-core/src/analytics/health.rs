@@ -138,7 +138,7 @@ pub fn session_health_batch(
     let sql = format!(
         "SELECT session_id, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0)
+                COALESCE(cost_cents, 0.0), model
          FROM messages
          WHERE session_id IN ({in_clause}) AND role = 'assistant'
          ORDER BY session_id, timestamp ASC"
@@ -152,6 +152,7 @@ pub fn session_health_batch(
 
     struct MiniMsg {
         session_id: String,
+        model: Option<String>,
         input_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
@@ -162,6 +163,7 @@ pub fn session_health_batch(
         .query_map(params.as_slice(), |row| {
             Ok(MiniMsg {
                 session_id: row.get(0)?,
+                model: row.get(6)?,
                 input_tokens: row.get(1)?,
                 cache_read_tokens: row.get(4)?,
                 cache_creation_tokens: row.get(3)?,
@@ -184,38 +186,79 @@ pub fn session_health_batch(
         let total_cost: f64 = msgs.iter().map(|m| m.cost_cents).sum();
         let n = msgs.len();
 
-        // Context drag (lightweight — just check input growth)
-        let cd = if n >= 5 {
-            let window = 3.min(n);
-            let first_avg = msgs[..window]
+        // Context drag — filter to dominant model to avoid cross-model false positives
+        let cd = {
+            let mut model_count: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for m in msgs.iter() {
+                if let Some(ref model) = m.model {
+                    *model_count.entry(model.as_str()).or_default() += 1;
+                }
+            }
+            let dominant = model_count
                 .iter()
-                .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
-                .sum::<f64>()
-                / window as f64;
-            let last_avg = msgs[n - window..]
-                .iter()
-                .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
-                .sum::<f64>()
-                / window as f64;
-            if first_avg > 0.0 {
-                let ratio = last_avg / first_avg;
-                Some(vital_state_from_ratio(ratio, 3.0, 8.0))
+                .max_by_key(|(_, c)| **c)
+                .map(|(m, _)| *m);
+            let model_msgs: Vec<&&MiniMsg> = if let Some(dom) = dominant {
+                msgs.iter().filter(|m| m.model.as_deref() == Some(dom)).collect()
+            } else {
+                msgs.iter().collect()
+            };
+            let mn = model_msgs.len();
+            if mn >= 5 {
+                let window = 3.min(mn);
+                let first_avg = model_msgs[..window]
+                    .iter()
+                    .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
+                    .sum::<f64>()
+                    / window as f64;
+                let last_avg = model_msgs[mn - window..]
+                    .iter()
+                    .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
+                    .sum::<f64>()
+                    / window as f64;
+                if first_avg > 0.0 {
+                    let ratio = last_avg / first_avg;
+                    Some(vital_state_from_ratio(ratio, 3.0, 8.0))
+                } else {
+                    None
+                }
             } else {
                 None
             }
-        } else {
-            None
         };
 
-        // Cost acceleration (lightweight)
+        // Cost acceleration — filter to dominant model (by cost) like calc_cost_acceleration does
         let ca = if n >= 8 && total_cost >= 10.0 {
-            let half = n / 2;
-            let first_avg = msgs[..half].iter().map(|m| m.cost_cents).sum::<f64>() / half as f64;
-            let second_avg =
-                msgs[half..].iter().map(|m| m.cost_cents).sum::<f64>() / (n - half) as f64;
-            if first_avg > 0.0 {
-                let ratio = second_avg / first_avg;
-                Some(vital_state_from_ratio(ratio, 2.0, 4.0))
+            let mut model_cost: std::collections::HashMap<&str, f64> =
+                std::collections::HashMap::new();
+            for m in msgs.iter() {
+                if let Some(ref model) = m.model {
+                    *model_cost.entry(model.as_str()).or_default() += m.cost_cents;
+                }
+            }
+            let dominant = model_cost
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(m, _)| *m);
+            let main_msgs: Vec<&&MiniMsg> = if let Some(dom) = dominant {
+                msgs.iter().filter(|m| m.model.as_deref() == Some(dom)).collect()
+            } else {
+                msgs.iter().collect()
+            };
+            let mn = main_msgs.len();
+            if mn >= 6 {
+                let half = mn / 2;
+                let first_avg =
+                    main_msgs[..half].iter().map(|m| m.cost_cents).sum::<f64>() / half as f64;
+                let second_avg = main_msgs[half..].iter().map(|m| m.cost_cents).sum::<f64>()
+                    / (mn - half) as f64;
+                if first_avg > 0.0 {
+                    let ratio = second_avg / first_avg;
+                    Some(vital_state_from_ratio(ratio, 2.0, 4.0))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -268,7 +311,6 @@ fn calc_context_drag(
     messages: &[MessageRow],
 ) -> Option<VitalScore> {
     // If a compact happened, only consider messages after the last compact.
-    // This resets the baseline so post-compact sessions start fresh.
     let last_compact_ts: Option<String> = conn
         .query_row(
             "SELECT MAX(timestamp) FROM hook_events
@@ -289,19 +331,42 @@ fn calc_context_drag(
         messages
     };
 
-    if effective.len() < 5 {
+    // Use the dominant model (most messages) to avoid false positives from
+    // cross-model comparisons. Subagent models have independent context windows
+    // and their token counts are not comparable to the main model's.
+    let mut model_count: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for m in effective {
+        if let Some(ref model) = m.model {
+            *model_count.entry(model.as_str()).or_default() += 1;
+        }
+    }
+    let dominant = model_count
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map(|(model, _)| *model);
+
+    let model_msgs: Vec<&MessageRow> = if let Some(dom) = dominant {
+        effective
+            .iter()
+            .filter(|m| m.model.as_deref() == Some(dom))
+            .collect()
+    } else {
+        effective.iter().collect()
+    };
+
+    if model_msgs.len() < 5 {
         return None;
     }
-    let window = 3.min(effective.len());
+    let window = 3.min(model_msgs.len());
     let total_input =
-        |m: &MessageRow| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64;
+        |m: &&MessageRow| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64;
 
-    let first_avg = effective[..window]
+    let first_avg = model_msgs[..window]
         .iter()
         .map(total_input)
         .sum::<f64>()
         / window as f64;
-    let last_avg = effective[effective.len() - window..]
+    let last_avg = model_msgs[model_msgs.len() - window..]
         .iter()
         .map(total_input)
         .sum::<f64>()
