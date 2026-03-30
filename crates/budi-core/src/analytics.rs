@@ -1251,8 +1251,8 @@ pub fn tag_stats(
     // Build the untagged UNION clause for single-key queries.
     // This computes untagged cost in the same query instead of a separate total_assistant_cost() call.
     let untagged_union = if let Some(k) = tag_key {
-        // Build date conditions for the untagged subquery using the same param indices
         let mut untagged_date_parts = Vec::new();
+        let mut tagged_date_parts = Vec::new();
         {
             let mut uidx = 0usize;
             if tag_key.is_some() {
@@ -1261,10 +1261,12 @@ pub fn tag_stats(
             if since.is_some() {
                 uidx += 1;
                 untagged_date_parts.push(format!("m.timestamp >= ?{uidx}"));
+                tagged_date_parts.push(format!("tm2.timestamp >= ?{uidx}"));
             }
             if until.is_some() {
                 uidx += 1;
                 untagged_date_parts.push(format!("m.timestamp < ?{uidx}"));
+                tagged_date_parts.push(format!("tm2.timestamp < ?{uidx}"));
             }
         }
         let untagged_date_filter = if untagged_date_parts.is_empty() {
@@ -1272,41 +1274,25 @@ pub fn tag_stats(
         } else {
             format!("AND {}", untagged_date_parts.join(" AND "))
         };
-        // Build matching date filter for the tagged sessions subquery
-        // so we only consider tags within the same date range
-        let mut tagged_date_parts = Vec::new();
-        {
-            let mut tidx = 0usize;
-            if tag_key.is_some() {
-                tidx += 1;
-            }
-            if since.is_some() {
-                tidx += 1;
-                tagged_date_parts.push(format!("tm2.timestamp >= ?{tidx}"));
-            }
-            if until.is_some() {
-                tidx += 1;
-                tagged_date_parts.push(format!("tm2.timestamp < ?{tidx}"));
-            }
-        }
         let tagged_date_filter = if tagged_date_parts.is_empty() {
             String::new()
         } else {
             format!("AND {}", tagged_date_parts.join(" AND "))
         };
+        // Use NOT IN instead of LEFT JOIN ... IS NULL — SQLite builds a hash
+        // table for the subquery, avoiding an O(N*M) nested-loop scan.
         format!(
             "UNION ALL
              SELECT '{k}' as key, '(untagged)' as value, 0 as session_count,
                     COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
              FROM messages m
-             LEFT JOIN (
+             WHERE m.role = 'assistant' {untagged_date_filter}
+               AND m.session_id NOT IN (
                  SELECT DISTINCT tm2.session_id
                  FROM tags t2
                  JOIN messages tm2 ON t2.message_uuid = tm2.uuid
                  WHERE t2.key = ?1 {tagged_date_filter}
-             ) tagged ON tagged.session_id = m.session_id
-             WHERE m.role = 'assistant' {untagged_date_filter}
-               AND tagged.session_id IS NULL"
+               )"
         )
     } else {
         String::new()
