@@ -80,6 +80,10 @@ fn build_router(app_state: AppState) -> Router {
         )
         .route("/analytics/subagent-cost", get(a::analytics_subagent_cost))
         .route("/analytics/session-audit", get(a::analytics_session_audit))
+        .route(
+            "/analytics/session-health",
+            get(a::analytics_session_health),
+        )
         .route("/analytics/sessions", get(a::analytics_sessions))
         .route(
             "/analytics/sessions/{session_id}/messages",

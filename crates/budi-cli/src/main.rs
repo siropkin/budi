@@ -125,6 +125,12 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         _args: Vec<String>,
     },
+    /// Show session health vitals (context drag, cache efficiency, thrashing, cost acceleration)
+    Health {
+        /// Session ID to check (default: most recent session)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Run the MCP server (stdio transport) for AI agent integration
     #[command(name = "mcp-serve")]
     McpServe,
@@ -246,6 +252,7 @@ fn main() -> Result<()> {
             let _ = commands::hook::cmd_hook();
             Ok(())
         }
+        Commands::Health { session } => commands::health::cmd_health(session),
         Commands::McpServe => {
             // MCP server uses async — stdout is reserved for JSON-RPC.
             // Reinitialize logging to stderr only (the default tracing init above

@@ -36,7 +36,14 @@ pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 
 /// Known statusline slot names.
 pub const STATUSLINE_SLOTS: &[&str] = &[
-    "today", "week", "month", "session", "branch", "project", "provider",
+    "today", "week", "month", "session", "branch", "project", "provider", "health",
+];
+
+/// Named presets for common statusline layouts.
+pub const STATUSLINE_PRESETS: &[(&str, &[&str])] = &[
+    ("cost", &["today", "week", "month"]),
+    ("coach", &["session", "health"]),
+    ("full", &["session", "health", "today"]),
 ];
 
 /// User-configurable statusline layout.
@@ -44,22 +51,28 @@ pub const STATUSLINE_SLOTS: &[&str] = &[
 /// Loaded from `~/.config/budi/statusline.toml`.
 /// Example:
 /// ```toml
-/// slots = ["today", "week", "month", "branch"]
+/// preset = "coach"
+/// # Or customize directly:
+/// # slots = ["today", "week", "month", "branch"]
 /// # format = "{today} | {week} | {month}"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatuslineConfig {
+    /// Named preset: "cost" (today/week/month), "coach" (session+health), "full" (session+health+today).
+    /// When set, overrides `slots`. Ignored if `format` is set.
+    pub preset: Option<String>,
     /// Ordered list of data slots to display. Default: ["today", "week", "month"].
     pub slots: Vec<String>,
-    /// Optional custom format template. Overrides `slots` when set.
-    /// Placeholders: {today}, {week}, {month}, {session}, {branch}, {project}, {provider}
+    /// Optional custom format template. Overrides `slots` and `preset` when set.
+    /// Placeholders: {today}, {week}, {month}, {session}, {branch}, {project}, {provider}, {health}
     pub format: Option<String>,
 }
 
 impl Default for StatuslineConfig {
     fn default() -> Self {
         Self {
+            preset: None,
             slots: vec!["today".to_string(), "week".to_string(), "month".to_string()],
             format: None,
         }
@@ -67,10 +80,22 @@ impl Default for StatuslineConfig {
 }
 
 impl StatuslineConfig {
-    /// Resolve which slots are needed (from format template or explicit slots list).
+    /// Resolve the effective slots list, considering preset → slots → format priority.
+    pub fn effective_slots(&self) -> Vec<String> {
+        if let Some(ref preset_name) = self.preset {
+            if let Some((_, preset_slots)) = STATUSLINE_PRESETS
+                .iter()
+                .find(|(name, _)| *name == preset_name.as_str())
+            {
+                return preset_slots.iter().map(|s| s.to_string()).collect();
+            }
+        }
+        self.slots.clone()
+    }
+
+    /// Resolve which slots are needed (from format template, preset, or explicit slots list).
     pub fn required_slots(&self) -> Vec<String> {
         if let Some(ref fmt) = self.format {
-            // Extract {placeholder} names from the format string
             let mut slots = Vec::new();
             let mut rest = fmt.as_str();
             while let Some(start) = rest.find('{') {
@@ -86,7 +111,7 @@ impl StatuslineConfig {
             }
             slots
         } else {
-            self.slots.clone()
+            self.effective_slots()
         }
     }
 }
@@ -394,6 +419,7 @@ mod tests {
     #[test]
     fn statusline_config_required_slots_from_slots() {
         let config = StatuslineConfig {
+            preset: None,
             slots: vec!["today".to_string(), "branch".to_string()],
             format: None,
         };
@@ -403,6 +429,7 @@ mod tests {
     #[test]
     fn statusline_config_required_slots_from_format() {
         let config = StatuslineConfig {
+            preset: None,
             slots: vec![],
             format: Some("{today} | {branch} | {provider}".to_string()),
         };
@@ -413,11 +440,33 @@ mod tests {
     #[test]
     fn statusline_config_required_slots_ignores_unknown() {
         let config = StatuslineConfig {
+            preset: None,
             slots: vec![],
             format: Some("{today} | {unknown} | {week}".to_string()),
         };
         let required = config.required_slots();
         assert_eq!(required, vec!["today", "week"]);
+    }
+
+    #[test]
+    fn statusline_preset_overrides_slots() {
+        let config = StatuslineConfig {
+            preset: Some("coach".to_string()),
+            slots: vec!["today".to_string()],
+            format: None,
+        };
+        assert_eq!(config.effective_slots(), vec!["session", "health"]);
+        assert_eq!(config.required_slots(), vec!["session", "health"]);
+    }
+
+    #[test]
+    fn statusline_format_overrides_preset() {
+        let config = StatuslineConfig {
+            preset: Some("coach".to_string()),
+            slots: vec![],
+            format: Some("{today} | {week}".to_string()),
+        };
+        assert_eq!(config.required_slots(), vec!["today", "week"]);
     }
 
     #[test]

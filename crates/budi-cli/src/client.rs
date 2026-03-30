@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    BranchCost, ModelUsage, ProviderStats, RepoUsage, TagCost, UsageSummary,
+    BranchCost, ModelUsage, ProviderStats, RepoUsage, SessionHealth, TagCost, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -334,6 +334,21 @@ impl DaemonClient {
         let resp = self
             .client
             .get(format!("{}/analytics/providers", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    pub fn session_health(&self, session_id: Option<&str>) -> Result<SessionHealth> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(s) = session_id {
+            params.push(("session_id", s));
+        }
+        let resp = self
+            .client
+            .get(format!("{}/analytics/session-health", self.base_url))
             .query(&params)
             .send()
             .map_err(describe_send_error)?;

@@ -5,9 +5,11 @@ function esc(s) { if (s == null) return ''; const d = document.createElement('di
 let currentPeriod = localStorage.getItem('budi_period') || 'today';
 const VALID_PAGES = ['overview', 'insights', 'sessions', 'settings'];
 let currentPage = (function() {
-  // Parse from URL path: /dashboard/insights -> insights
+  // Parse from URL path: /dashboard/insights -> insights, /dashboard/sessions/:id -> sessions
   const path = location.pathname.replace(/^\/dashboard\/?/, '');
   if (VALID_PAGES.includes(path)) return path;
+  const base = path.split('/')[0];
+  if (VALID_PAGES.includes(base)) return base;
   // Fallback to hash for backwards compat
   const hash = location.hash.replace('#', '');
   if (VALID_PAGES.includes(hash)) return hash;

@@ -519,7 +519,7 @@ pub async fn analytics_sessions(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_list(
+        let mut paginated = analytics::session_list(
             &conn,
             &analytics::SessionListParams {
                 since: params.since.as_deref(),
@@ -530,7 +530,20 @@ pub async fn analytics_sessions(
                 limit: params.limit.unwrap_or(50).min(200),
                 offset: params.offset.unwrap_or(0),
             },
-        )
+        )?;
+
+        let sids: Vec<&str> = paginated
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        if let Ok(health_map) = analytics::session_health_batch(&conn, &sids) {
+            for session in &mut paginated.sessions {
+                session.health_state = health_map.get(&session.session_id).cloned();
+            }
+        }
+
+        Ok::<_, anyhow::Error>(paginated)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -564,6 +577,25 @@ pub async fn analytics_session_messages(
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::session_messages(&conn, &session_id)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SessionHealthParams {
+    pub session_id: Option<String>,
+}
+
+pub async fn analytics_session_health(
+    Query(params): Query<SessionHealthParams>,
+) -> Result<Json<analytics::SessionHealth>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_health(&conn, params.session_id.as_deref())
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

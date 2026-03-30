@@ -63,6 +63,12 @@ pub struct StatuslineConfigRequest {
     pub toml_content: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionHealthRequest {
+    /// Session ID to check. If omitted, uses the most recent session.
+    pub session_id: Option<String>,
+}
+
 // ─── MCP Server ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -780,6 +786,22 @@ impl BudiMcpServer {
         text.push_str(&format!("Dashboard: {}/dashboard\n", self.base_url));
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Check session health: context drag, cache efficiency, agent thrashing, and cost acceleration. Returns overall state (green/yellow/red), vitals breakdown, and actionable tips. Use to decide when to compact context or start a new session."
+    )]
+    async fn session_health(
+        &self,
+        params: Parameters<SessionHealthRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut query: Vec<(String, String)> = Vec::new();
+        if let Some(ref sid) = params.0.session_id {
+            query.push(("session_id".to_string(), sid.clone()));
+        }
+        let health: Value = self.daemon_get("/analytics/session-health", &query)?;
+        let pretty = serde_json::to_string_pretty(&health).unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(pretty)]))
     }
 }
 

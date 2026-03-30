@@ -164,12 +164,73 @@ function groupMessagesForChart(messages, maxBuckets) {
   return buckets;
 }
 
+function healthIcon(state) {
+  switch (state) {
+    case 'red': return '🔴';
+    case 'yellow': return '🟡';
+    case 'gray': return '⚪';
+    default: return '🟢';
+  }
+}
+
+function renderHealthPanel(health) {
+  if (!health) return '';
+  const icon = healthIcon(health.state);
+  const tipText = health.tip || '';
+  const stateClass = health.state || 'green';
+
+  const vitalNames = {
+    context_drag: 'Context Drag',
+    cache_efficiency: 'Cache Efficiency',
+    thrashing: 'Agent Thrashing',
+    cost_acceleration: 'Cost Acceleration',
+  };
+
+  const detailMap = {};
+  for (const d of (health.details || [])) detailMap[d.vital] = d;
+
+  const vitals = health.vitals || {};
+  const vitalKeys = ['context_drag', 'cache_efficiency', 'thrashing', 'cost_acceleration'];
+
+  const cards = vitalKeys.map(key => {
+    const v = vitals[key];
+    if (!v) return `<div class="vital-card">
+      <div class="vital-header"><span class="vital-name">${vitalNames[key]}</span><span class="vital-state">⚪</span></div>
+      <div class="vital-label" style="color:var(--text-muted)">Not enough data</div>
+    </div>`;
+
+    return `<div class="vital-card">
+      <div class="vital-header"><span class="vital-name">${vitalNames[key]}</span><span class="vital-state">${healthIcon(v.state)}</span></div>
+      <div class="vital-label">${esc(v.label)}</div>
+    </div>`;
+  }).join('');
+
+  const tips = (health.details || []).map(d => {
+    const name = vitalNames[d.vital] || d.vital;
+    const icon = healthIcon(d.state);
+    return `<div class="health-tip-card">
+      <div class="health-tip-body">${icon} <strong>${esc(name)}:</strong> ${esc(d.tip)}</div>
+    </div>`;
+  }).join('');
+
+  return `<div class="panel section-mb" id="health">
+    <h2>Health</h2>
+    <div class="vitals-grid">${cards}</div>
+    ${tips ? `<div class="health-tips"><h3 class="health-tips-title">Tips</h3>${tips}</div>` : ''}
+  </div>`;
+}
+
 async function renderSessionDetail(sessionId, content) {
   content.innerHTML = '<div class="loading">Loading session</div>';
-  const [msgs, tags] = await Promise.all([
+
+  const fetches = [
     loadSessionMessages(sessionId),
     loadSessionTags(sessionId),
-  ]);
+    loadSessionHealth(sessionId),
+  ];
+  if (!sessionsPageData) fetches.push(loadSessionsPageData());
+
+  const [msgs, tags, health] = await Promise.all(fetches);
   sessionDetailMessages = msgs;
   sessionDetailSortCol = 'timestamp';
   sessionDetailSortAsc = false;
@@ -178,7 +239,6 @@ async function renderSessionDetail(sessionId, content) {
 
   const totalCost = sessionDetailMessages.reduce((s, m) => s + (m.cost_cents || 0), 0) / 100;
   const totalTokens = sessionDetailMessages.reduce((s, m) => s + m.input_tokens + m.output_tokens, 0);
-  const bloat = contextBloatLevel(sessionDetailMessages);
 
   let duration = '--';
   if (session) {
@@ -214,7 +274,7 @@ async function renderSessionDetail(sessionId, content) {
           <div class="meta-item"><span class="meta-label">Messages: </span><span class="meta-value">${sessionDetailMessages.length}</span></div>
           <div class="meta-item"><span class="meta-label">Tokens: </span><span class="meta-value">${fmtNum(totalTokens)}</span></div>
           <div class="meta-item"><span class="meta-label">Cost: </span><span class="meta-value">${fmtCost(totalCost)}</span></div>
-          ${bloat ? `<div class="meta-item"><span class="meta-label">Context growth: </span><span class="bloat-indicator ${bloat}">${bloat === 'high' ? 'High' : bloat === 'medium' ? 'Moderate' : 'Low'}</span></div>` : ''}
+          ${health ? `<div class="meta-item"><span class="meta-label">Health: </span><span class="meta-value">${healthIcon(health.state)} ${esc(health.tip || '')}</span></div>` : ''}
         </div>
       </div>
     </div>
@@ -242,9 +302,12 @@ async function renderSessionDetail(sessionId, content) {
     </div>`;
   }
 
+  const healthPanel = renderHealthPanel(health);
+
   content.innerHTML = `
     <button class="btn btn-secondary" id="backToSessions" style="margin-bottom:12px">Back to sessions</button>
     ${meta}
+    ${healthPanel}
     ${bloatChart}
     <div class="panel section-mb">
       <h2>Messages</h2>
@@ -254,6 +317,11 @@ async function renderSessionDetail(sessionId, content) {
   `;
 
   bindSessionDetailHandlers(content);
+
+  if (location.hash) {
+    const target = document.querySelector(location.hash);
+    if (target) target.scrollIntoView({ behavior: 'smooth' });
+  }
 }
 
 function bindSessionDetailHandlers(content) {

@@ -26,7 +26,7 @@ No cloud. No uploads. Everything stays on your machine.
   <img src="assets/dashboard-insights.png" alt="budi insights" width="800">
 </p>
 
-**Sessions** — searchable session list with drill-down to individual messages
+**Sessions** — searchable session list with drill-down to individual messages and session health
 
 <p align="center">
   <img src="assets/dashboard-sessions.png" alt="budi sessions" width="800">
@@ -45,8 +45,9 @@ No cloud. No uploads. Everything stays on your machine.
 - Tracks tokens, costs, and usage per message across AI coding agents
 - **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
+- **Session health** — detects context bloat, cache degradation, cost acceleration, and agent thrashing with actionable tips
 - Web dashboard at `http://localhost:7878/dashboard`
-- Live cost status line in Claude Code
+- Live cost + health status line in Claude Code
 - Background sync every 30 seconds — no workflow changes needed
 - ~6 MB Rust binary, minimal footprint
 
@@ -104,7 +105,11 @@ Run `budi doctor` to verify everything is set up correctly.
 
 Budi adds a live cost display to Claude Code, installed automatically by `budi init`:
 
-`📊 budi · $12.50 today · $87.30 week · $1.2K month`
+`🟢 budi · $4.92 session · session healthy`
+
+The default "coach" mode shows your current session cost plus a health indicator. When issues are detected, you get actionable tips:
+
+`🟡 budi · $12.50 session · context growing — consider /compact`
 
 Customize slots in `~/.config/budi/statusline.toml`:
 
@@ -212,6 +217,19 @@ All analytics tools accept a `period` parameter: `today`, `week`, `month`, `all`
 
 The MCP server is a thin HTTP client to the daemon — it never touches the database directly. Communication uses stdio (JSON-RPC), and all logging goes to stderr.
 
+## Session health
+
+Budi monitors four vitals for every active session and provides provider-aware tips (different advice for Claude Code vs Cursor):
+
+| Vital | What it detects | Yellow | Red |
+|-------|----------------|--------|-----|
+| **Context Drag** | Input tokens growing vs session start | 3x+ growth | 6x+ growth |
+| **Cache Efficiency** | Prompt cache hit rate dropping | Below 85% | Below 70% |
+| **Cost Acceleration** | Per-message cost rising (dominant model) | 2.5x+ ratio | 5x+ ratio |
+| **Agent Thrashing** | Rapid-fire tool calls (loops) | 2+ rapid sequences | 5+ rapid sequences |
+
+Health state shows in the status line and on the session detail page in the dashboard. When issues are detected, tips suggest concrete actions — `/compact` for Claude Code, new composer session for Cursor.
+
 ## Privacy
 
 Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on your machine in `~/.local/share/budi/`. Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
@@ -231,7 +249,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 | Exact cost (incl. thinking tokens) | **Yes** (via OTEL) | No | Approximate |
 | Cost history | **Per-message + daily** | Per-session | Current session |
 | Web dashboard | **Yes** | No | No |
-| Status line | **Yes** (Claude Code + Starship) | No | No |
+| Status line + session health | **Yes** (with actionable tips) | No | No |
 | Per-repo breakdown | **Yes** | No | No |
 | Cost attribution (branch/ticket) | **Yes** | No | No |
 | Privacy | 100% local | Local | Built-in |
@@ -382,6 +400,7 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | GET | `/analytics/sessions` | Session list (paginated, searchable) |
 | GET | `/analytics/sessions/{id}/messages` | Messages for a specific session |
 | GET | `/analytics/sessions/{id}/tags` | Tags for a specific session |
+| GET | `/analytics/session-health` | Session health vitals and tips |
 | GET | `/admin/providers` | Registered providers |
 | GET | `/admin/schema` | Database schema version |
 | POST | `/admin/migrate` | Run database migration |

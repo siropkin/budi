@@ -7,7 +7,7 @@ Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks to
 ```bash
 cargo build                                    # dev build
 cargo build --release                          # release build
-cargo test                                     # all tests (172: 156 core + 14 cli + 2 daemon)
+cargo test                                     # all tests (196: 180 core + 14 cli + 2 daemon)
 cargo test -p budi-core                        # core tests only
 ./scripts/install.sh                           # build release + install to ~/.local/bin/
 python3 scripts/validate-cost.py               # validate cost accuracy vs raw data
@@ -67,7 +67,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 
 ## Key files
 
-- `crates/budi-core/src/analytics.rs` — SQLite storage, sync pipeline, all query functions
+- `crates/budi-core/src/analytics.rs` — SQLite storage, sync pipeline, all query functions, session health (vitals + tips)
 - `crates/budi-core/src/pipeline/mod.rs` — Pipeline struct, Enricher trait, default_pipeline()
 - `crates/budi-core/src/pipeline/enrichers.rs` — All 5 enricher implementations
 - `crates/budi-core/src/cost.rs` — Cost estimation, ModelPricing, per-provider pricing tables
@@ -80,9 +80,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/config.rs` — BudiConfig, StatuslineConfig, TagsConfig
 - `crates/budi-daemon/src/main.rs` — HTTP server, ~38 routes
 - `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update endpoints
-- `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, admin/providers, admin/schema, admin/migrate)
+- `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, admin/providers, admin/schema, admin/migrate)
 - `crates/budi-daemon/src/routes/otel.rs` — /v1/logs OTLP ingestion
-- `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering + installation
+- `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering (coach mode with health tips) + installation
 - `crates/budi-cli/src/mcp.rs` — MCP server handler (14 tools: analytics + config)
 - `crates/budi-cli/src/commands/mcp.rs` — `mcp-serve` subcommand (stdio transport)
 - `crates/budi-daemon/static/js/` — Dashboard JS (vanilla, no framework)
@@ -95,13 +95,14 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 14 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity) and config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status). Thin HTTP client to daemon — stdout is JSON-RPC only, logging to stderr
 - Tags are auto-detected (provider, model, repo, ticket_id, etc.) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
+- **Session health**: Four vitals computed per session — context drag (input token growth), cache efficiency (cache hit rate), cost acceleration (dominant-model cost ratio 2nd half vs 1st half), agent thrashing (rapid-fire tool sequences from hook_events). Each vital has green/yellow/red state. Tips are provider-aware (Claude Code gets `/compact` suggestions, Cursor gets "new composer session"). Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Dashboard** is multi-page at `/dashboard` with URL-based routing (vanilla JS, no framework):
   - `/dashboard` (Overview) — Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
   - `/dashboard/insights` — Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools, MCP servers
-  - `/dashboard/sessions` — Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, input token growth chart, message table
+  - `/dashboard/sessions` — Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` — Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
 - Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
-- Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`
+- Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`
 - Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration)
 - Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
 - Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)

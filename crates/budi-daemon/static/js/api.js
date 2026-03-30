@@ -92,3 +92,8 @@ async function loadSessionTags(sessionId) {
   const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
   return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/tags').then(ok).catch(() => []);
 }
+
+async function loadSessionHealth(sessionId) {
+  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
+  return fetch('/analytics/session-health?session_id=' + encodeURIComponent(sessionId)).then(ok).catch(() => null);
+}

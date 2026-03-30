@@ -57,6 +57,24 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
         vals.insert("provider".to_string(), v.to_string());
     }
 
+    if let Some(state) = data.get("health_state").and_then(|v| v.as_str()) {
+        let icon = match state {
+            "red" => "🔴",
+            "yellow" => "🟡",
+            "gray" => "⚪",
+            _ => "🟢",
+        };
+        let tip = data
+            .get("health_tip")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if tip.is_empty() {
+            vals.insert("health".to_string(), icon.to_string());
+        } else {
+            vals.insert("health".to_string(), format!("{icon} {tip}"));
+        }
+    }
+
     vals
 }
 
@@ -76,6 +94,60 @@ fn render_slots(slots: &[String], values: &HashMap<String, String>, sep: &str) -
         .filter_map(|slot| values.get(slot).map(|v| format!("{v} {slot}")))
         .collect::<Vec<_>>()
         .join(sep)
+}
+
+/// Health-aware rendering for coach/full presets.
+/// Green:       🟢 budi · $4.92 · session healthy · {extra}
+/// Yellow/Red:  🟡 budi · $5.42 · {tip} · {extra}
+///
+/// `budi_label` is pre-formatted (may include ANSI/OSC 8 for Claude format).
+fn render_coach(
+    data: &Value,
+    extra_slots: &[(&str, &HashMap<String, String>)],
+    ansi: bool,
+    budi_label: &str,
+) -> Option<String> {
+    let state = data.get("health_state")?.as_str()?;
+    let icon = match state {
+        "red" => "🔴",
+        "yellow" => "🟡",
+        "gray" => "⚪",
+        _ => "🟢",
+    };
+
+    let (dim, reset) = if ansi {
+        ("\x1b[90m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+
+    if state == "gray" {
+        let tip = data.get("health_tip").and_then(|v| v.as_str()).unwrap_or("session starting");
+        let sep = format!(" {dim}·{reset} ");
+        return Some(format!("{icon} {budi_label}{sep}{}", tip.to_lowercase()));
+    }
+
+    let session_cost = data.get("session_cost").and_then(|v| v.as_f64())?;
+    let cost_str = format!("{} session", fmt_cost(session_cost));
+
+    let mut parts: Vec<String> = vec![
+        format!("{icon} {budi_label}"),
+        cost_str,
+    ];
+
+    let tip = data.get("health_tip").and_then(|v| v.as_str()).unwrap_or("");
+    if !tip.is_empty() {
+        parts.push(tip.to_lowercase());
+    }
+
+    for (slot_name, values) in extra_slots {
+        if let Some(v) = values.get(*slot_name) {
+            parts.push(format!("{v} {slot_name}"));
+        }
+    }
+
+    let sep = format!(" {dim}·{reset} ");
+    Some(parts.join(&sep))
 }
 
 pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
@@ -122,8 +194,10 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 
     // Build query params for the daemon
     let mut query_params: Vec<(&str, String)> = Vec::new();
+    let needs_session = needed.contains(&"session".to_string())
+        || needed.contains(&"health".to_string());
     if let Some(ref sid) = session_id
-        && needed.contains(&"session".to_string())
+        && needs_session
     {
         query_params.push(("session_id", sid.clone()));
     }
@@ -143,8 +217,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
     };
     let Ok(client) = daemon_client_with_timeout(timeout) else {
         if format == StatuslineFormat::Claude {
-            let budi_label = "\x1b[36m📊 budi\x1b[0m";
-            println!("{} \x1b[90m--\x1b[0m", budi_label);
+            println!("\x1b[36mbudi\x1b[0m \x1b[90m--\x1b[0m");
         }
         return Ok(());
     };
@@ -159,6 +232,29 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         .unwrap_or_else(|| json!({}));
 
     let values = build_slot_values(&statusline_data);
+    let has_health = statusline_data.get("health_state").is_some();
+
+    // Extra slots for coach rendering (slots beyond session+health, e.g. "today" in "full" preset)
+    let effective = sl_config.effective_slots();
+    let extra: Vec<(&str, &HashMap<String, String>)> = effective
+        .iter()
+        .filter(|s| *s != "session" && *s != "health")
+        .map(|s| (s.as_str(), &values))
+        .collect();
+
+    // Session-aware link target: session details if session exists, otherwise main dashboard
+    let budi_url = session_id
+        .as_ref()
+        .map(|sid| {
+            let encoded = sid
+                .replace('%', "%25")
+                .replace('/', "%2F")
+                .replace(' ', "%20")
+                .replace('#', "%23")
+                .replace('?', "%3F");
+            format!("{}/dashboard/sessions/{}", base, encoded)
+        })
+        .unwrap_or_else(|| format!("{}/dashboard", base));
 
     match format {
         StatuslineFormat::Json => {
@@ -170,38 +266,55 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         StatuslineFormat::Custom => {
             if let Some(ref template) = sl_config.format {
                 println!("{}", render_template(template, &values));
+            } else if has_health {
+                if let Some(line) =
+                    render_coach(&statusline_data, &extra, false, "budi")
+                {
+                    println!("{line}");
+                }
             } else {
-                // No template — render configured slots with " · " separator
-                println!("{}", render_slots(&sl_config.slots, &values, " · "));
+                println!("{}", render_slots(&effective, &values, " · "));
             }
         }
         StatuslineFormat::Starship => {
-            // Use config slots if configured (non-default), otherwise default behavior
-            println!("{}", render_slots(&sl_config.slots, &values, " · "));
+            if has_health {
+                if let Some(line) =
+                    render_coach(&statusline_data, &extra, false, "budi")
+                {
+                    println!("{line}");
+                }
+            } else {
+                println!("{}", render_slots(&effective, &values, " · "));
+            }
         }
         StatuslineFormat::Claude => {
-            let dashboard_url = format!("{}/dashboard", base);
-            // "budi" text is a clickable dashboard link, emoji is not
-            let budi_label = format!(
-                "\x1b[36m📊 \x1b]8;;{}\x1b\\budi\x1b]8;;\x1b\\\x1b[0m",
-                dashboard_url,
+            let budi_link = format!(
+                "\x1b[36m\x1b]8;;{}\x1b\\budi\x1b]8;;\x1b\\\x1b[0m",
+                budi_url,
             );
             let dim = "\x1b[90m";
             let reset = "\x1b[0m";
             let yellow = "\x1b[33m";
 
-            let parts: Vec<String> = sl_config
-                .slots
-                .iter()
-                .filter_map(|slot| {
-                    values
-                        .get(slot)
-                        .map(|v| format!("{yellow}{v}{reset} {slot}"))
-                })
-                .collect();
+            if has_health {
+                if let Some(coach_line) =
+                    render_coach(&statusline_data, &extra, true, &budi_link)
+                {
+                    println!("{coach_line}");
+                }
+            } else {
+                let parts: Vec<String> = effective
+                    .iter()
+                    .filter_map(|slot| {
+                        values
+                            .get(slot)
+                            .map(|v| format!("{yellow}{v}{reset} {slot}"))
+                    })
+                    .collect();
 
-            let joined = parts.join(&format!(" {dim}·{reset} "));
-            println!("{budi_label} {dim}·{reset} {joined}");
+                let joined = parts.join(&format!(" {dim}·{reset} "));
+                println!("{budi_link} {dim}·{reset} {joined}");
+            }
         }
     }
 

@@ -199,6 +199,18 @@ a:hover { text-decoration: underline; }
 .bloat-indicator.medium { background: rgba(240,136,62,0.15); color: var(--accent4); }
 .bloat-indicator.high { background: rgba(248,81,73,0.15); color: var(--danger); }
 
+/* Session health panel */
+.vitals-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.vital-card { padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); }
+.vital-card .vital-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.vital-card .vital-name { font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.vital-card .vital-state { font-size: 0.85rem; }
+.vital-card .vital-label { font-size: 0.85rem; color: var(--text); font-weight: 500; }
+.health-tips { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.health-tips-title { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 4px 0; }
+.health-tip-card { padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); }
+.health-tip-body { font-size: 0.78rem; color: var(--text-muted); line-height: 1.5; white-space: pre-line; }
+
 /* Tag chips */
 .tag-chip {
   display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem;
