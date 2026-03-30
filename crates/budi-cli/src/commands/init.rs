@@ -40,7 +40,7 @@ pub fn cmd_init(
         None => config::BudiConfig::default(),
     };
 
-    warn_duplicate_binaries();
+    clean_duplicate_binaries();
     check_daemon_binary();
     check_daemon_version();
 
@@ -492,9 +492,15 @@ fn check_daemon_version() {
     }
 }
 
-/// Warn if there are multiple `budi` or `budi-daemon` binaries in PATH
-/// (e.g. ~/.local/bin shadows Homebrew).
-fn warn_duplicate_binaries() {
+/// Detect and auto-remove duplicate budi binaries from the non-active install source.
+///
+/// Handles two cases:
+/// - Active source is Homebrew → removes `~/.local/bin` copies and `.bak` files
+/// - Active source is `~/.local/bin` → runs `brew uninstall budi` if installed
+///
+/// Skips cleanup for dev builds (binary not in a known install location).
+/// Called from `budi init` and `budi update`.
+pub(crate) fn clean_duplicate_binaries() {
     let Ok(path_var) = std::env::var("PATH") else {
         return;
     };
@@ -502,7 +508,8 @@ fn warn_duplicate_binaries() {
         return;
     };
 
-    for bin_name in &["budi", "budi-daemon"] {
+    // Check whether duplicates actually exist before doing anything.
+    let has_duplicates = ["budi", "budi-daemon"].iter().any(|bin_name| {
         let mut found: Vec<PathBuf> = Vec::new();
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join(bin_name);
@@ -513,27 +520,113 @@ fn warn_duplicate_binaries() {
                 found.push(resolved);
             }
         }
+        found.len() > 1
+    });
+    if !has_duplicates {
+        clean_backup_files();
+        return;
+    }
 
-        if found.len() > 1 {
-            let yellow = super::ansi("\x1b[33m");
-            let bold = super::ansi("\x1b[1m");
-            let reset = super::ansi("\x1b[0m");
-            eprintln!("{yellow}  Warning:{reset} multiple {bin_name} binaries found in PATH:");
-            for path in &found {
-                let marker = if *bin_name == "budi" && *path == current_exe {
-                    " (active)"
-                } else {
-                    ""
-                };
-                eprintln!("    - {}{marker}", path.display());
+    let exe_str = current_exe.to_string_lossy();
+    let exe_lower = exe_str.to_lowercase();
+    let is_brew = exe_lower.contains("/cellar/") || exe_lower.contains("/homebrew/");
+    let is_standalone = exe_str.contains("/.local/bin/");
+
+    let green = super::ansi("\x1b[32m");
+    let yellow = super::ansi("\x1b[33m");
+    let reset = super::ansi("\x1b[0m");
+
+    if is_brew {
+        if let Ok(home) = config::home_dir() {
+            let bin_dir = home.join(".local").join("bin");
+            if bin_dir.is_dir() {
+                for name in &["budi", "budi-daemon"] {
+                    let target = bin_dir.join(name);
+                    if target.exists() {
+                        let is_different = target
+                            .canonicalize()
+                            .map(|r| r != current_exe)
+                            .unwrap_or(true);
+                        if is_different {
+                            match fs::remove_file(&target) {
+                                Ok(()) => {
+                                    eprintln!(
+                                        "  {green}✓{reset} Removed stale standalone binary: {}",
+                                        target.display()
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  {yellow}!{reset} Could not remove {}: {e}",
+                                        target.display()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            eprintln!("  Pick one install source (Homebrew, ~/.local/bin, or another) and remove");
-            eprintln!("  the other copies from PATH so CLI and daemon always match.");
-            eprintln!(
-                "  {bold}Tip:{reset} if you use Homebrew only, remove ~/.local/bin/budi and ~/.local/bin/budi-daemon"
-            );
+        }
+    } else if is_standalone {
+        if brew_has_budi() {
+            eprintln!("  Removing Homebrew copy of budi...");
+            let status = Command::new("brew")
+                .args(["uninstall", "budi", "--force"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    eprintln!("  {green}✓{reset} Uninstalled Homebrew copy of budi");
+                }
+                Ok(_) | Err(_) => {
+                    eprintln!(
+                        "  {yellow}!{reset} Could not uninstall Homebrew copy. \
+                         Run `brew uninstall budi` manually."
+                    );
+                }
+            }
+        }
+    } else {
+        // Dev build or unknown location — warn but don't auto-clean.
+        eprintln!(
+            "{yellow}  Warning:{reset} multiple budi binaries found in PATH. \
+             Remove stale copies to avoid version mismatch."
+        );
+    }
+
+    clean_backup_files();
+}
+
+/// Remove leftover `.bak.*` files from `~/.local/bin` created by install.sh.
+fn clean_backup_files() {
+    let Ok(home) = config::home_dir() else {
+        return;
+    };
+    let bin_dir = home.join(".local").join("bin");
+    let Ok(entries) = fs::read_dir(&bin_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let fname = fname.to_string_lossy();
+        if (fname.starts_with("budi.bak") || fname.starts_with("budi-daemon.bak"))
+            && entry.path().is_file()
+        {
+            let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+/// Check if Homebrew has budi installed.
+fn brew_has_budi() -> bool {
+    Command::new("brew")
+        .args(["list", "budi"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

@@ -189,6 +189,9 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     // Clean up legacy hooks from settings.json
     crate::commands::statusline::remove_legacy_hooks();
 
+    // Remove stale binaries from the other install source (Homebrew vs standalone)
+    crate::commands::init::clean_duplicate_binaries();
+
     // Run database migration before restarting daemon — migration in a
     // standalone process is fast vs slow inside the daemon's Tokio runtime.
     println!("Running database migration...");
