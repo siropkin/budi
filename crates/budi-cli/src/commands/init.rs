@@ -527,9 +527,10 @@ fn warn_duplicate_binaries() {
                 };
                 eprintln!("    - {}{marker}", path.display());
             }
-            eprintln!("  Remove the unused one to avoid version conflicts.");
+            eprintln!("  Pick one install source (Homebrew, ~/.local/bin, or another) and remove");
+            eprintln!("  the other copies from PATH so CLI and daemon always match.");
             eprintln!(
-                "  {bold}Tip:{reset} if you switched to Homebrew, run: rm ~/.local/bin/budi ~/.local/bin/budi-daemon"
+                "  {bold}Tip:{reset} if you use Homebrew only, remove ~/.local/bin/budi and ~/.local/bin/budi-daemon"
             );
         }
     }

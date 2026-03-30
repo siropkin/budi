@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
 
 /// Kill any existing budi-daemon process listening on the given port.
 /// This allows a new binary to take over seamlessly after an upgrade.
+#[cfg(unix)]
 fn kill_existing_daemon(port: u16) {
     use std::process::Command;
 
@@ -226,6 +227,63 @@ fn kill_existing_daemon(port: u16) {
         }
     }
 }
+
+#[cfg(windows)]
+fn kill_existing_daemon(port: u16) {
+    use std::collections::HashSet;
+    use std::process::Command;
+
+    let script = format!(
+        "Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue \
+         | ForEach-Object {{ $_.OwningProcess }}"
+    );
+    let Ok(output) = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let my_pid = std::process::id();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let Ok(pid) = line.trim().parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 || pid == my_pid || !seen.insert(pid) {
+            continue;
+        }
+        let Ok(tasklist) = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+        else {
+            continue;
+        };
+        let listing = String::from_utf8_lossy(&tasklist.stdout).to_lowercase();
+        if !listing.contains("budi-daemon") {
+            continue;
+        }
+        tracing::info!("Killing old budi-daemon (pid {pid})");
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill_existing_daemon(_port: u16) {}
 
 #[cfg(test)]
 mod tests {

@@ -51,6 +51,10 @@ No cloud. No uploads. Everything stays on your machine.
 - Background sync every 30 seconds — no workflow changes needed
 - ~6 MB Rust binary, minimal footprint
 
+## Platforms
+
+budi targets **macOS**, **Linux** (glibc), and **Windows 10+** (x86_64 and ARM64 where Rust tier-1 builds exist). Paths follow OS conventions (`HOME` / `USERPROFILE`, XDG-style data under `~/.local/share/budi` on Unix, `%LOCALAPPDATA%\budi` on Windows). Daemon port takeover after upgrade uses `lsof`/`ps`/`kill` on Unix and **PowerShell `Get-NetTCPConnection`** plus `tasklist`/`taskkill` on Windows (requires PowerShell, which is default on supported Windows versions).
+
 ## Supported agents
 
 | Agent | Status | How |
@@ -81,7 +85,7 @@ curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-
 irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standalone.ps1 | iex
 ```
 
-Windows notes: binaries install to `%LOCALAPPDATA%\budi\bin`. The daemon uses `taskkill` instead of `pkill`. PATH is updated in the user environment — restart your terminal after install.
+Windows notes: binaries install to `%LOCALAPPDATA%\budi\bin`. Stopping or upgrading the daemon uses `taskkill` (or PowerShell) instead of Unix `pkill`. On startup, budi-daemon asks PowerShell for listeners on its port and terminates another `budi-daemon` if present. PATH is updated in the user environment — restart your terminal after install.
 
 **From source:** requires [Rust toolchain](https://rustup.rs/) — clones the repo and builds release binaries
 
@@ -94,6 +98,8 @@ git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.s
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
 All installers automatically run `budi init` after installation. Homebrew users need to run `budi init` manually.
+
+**One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
 `budi init` starts the daemon, installs hooks for Claude Code and Cursor, configures OpenTelemetry for exact cost tracking, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks, telemetry, and the status line. The daemon uses port 7878 by default — make sure it's available (customize in `~/.config/budi/config.toml` with `daemon_port`).
 

@@ -5,17 +5,20 @@ Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks to
 ## Build & Test
 
 ```bash
-cargo build                                    # dev build
-cargo build --release                          # release build
-cargo test                                     # all tests (196: 180 core + 14 cli + 2 daemon)
-cargo test -p budi-core                        # core tests only
-./scripts/install.sh                           # build release + install to ~/.local/bin/
-python3 scripts/validate-cost.py               # validate cost accuracy vs raw data
+cargo build              # dev build
+cargo build --release    # release build
+cargo test               # all tests (196: 180 core + 14 cli + 2 daemon)
+cargo test -p budi-core  # core tests only
+./scripts/install.sh     # build release + install to ~/.local/bin/
 ```
 
-**Important**: Always install both `budi` and `budi-daemon` together. Version mismatch causes daemon restart failure.
+**Important**: Install **`budi` and `budi-daemon` from the same build** and keep **only one copy on PATH** (do not mix Homebrew with `~/.local/bin` or another prefix). Version mismatch breaks daemon restarts; `budi init` warns if multiple binaries are found.
 
-After installing: `pkill -f "budi-daemon serve" && budi sync`
+After upgrading: restart the daemon (stop the old process, then `budi init` or `budi sync`). On Unix you can use `pkill -f budi-daemon`; on Windows use `taskkill /IM budi-daemon.exe /F` if needed.
+
+## Platforms
+
+macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to replace an existing listener on the same port. Windows uses PowerShell **`Get-NetTCPConnection`** and **`taskkill`** for the same behavior. Unsupported or minimal environments may skip automatic takeover — stop the old daemon manually if the new one cannot bind.
 
 ## Architecture
 
@@ -80,7 +83,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/config.rs` — BudiConfig, StatuslineConfig, TagsConfig
 - `crates/budi-daemon/src/main.rs` — HTTP server, ~38 routes
 - `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update endpoints
-- `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, admin/providers, admin/schema, admin/migrate)
+- `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate)
 - `crates/budi-daemon/src/routes/otel.rs` — /v1/logs OTLP ingestion
 - `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering (coach mode with health tips) + installation
 - `crates/budi-cli/src/mcp.rs` — MCP server handler (14 tools: analytics + config)
@@ -102,7 +105,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
   - `/dashboard/sessions` — Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` — Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
 - Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
-- Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`
+- Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion — not used by dashboard/MCP)
 - Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration)
 - Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
 - Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)

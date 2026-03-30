@@ -124,8 +124,12 @@ fn rebuild_sessions_from_hooks(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Audit session coverage: reports NULL-session assistant rows,
-/// orphan sessions (metadata but no messages), and per-provider percentages.
+/// Session attribution diagnostics (ingestion quality).
+///
+/// Summarizes: assistant messages missing `session_id`, sessions with no messages,
+/// and per-provider share of assistant rows that have a session. Intended for
+/// debugging provider/hook coverage — exposed over HTTP as `GET /analytics/session-audit`
+/// (not used by the dashboard or CLI today).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionAudit {
     pub assistant_rows_total: u64,
