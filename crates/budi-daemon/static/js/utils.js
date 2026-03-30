@@ -12,6 +12,7 @@ function dateRange(period) {
     }
     case 'month': return { since: toISO(new Date(y, m, 1)), until: toISO(new Date(y, m + 1, 1)) };
     case 'all': return {};
+    default: return { since: toISO(new Date(y, m, d)), until: toISO(new Date(y, m, d + 1)) };
   }
 }
 
@@ -21,6 +22,7 @@ function granularityForPeriod(period) {
     case 'week': return 'day';
     case 'month': return 'day';
     case 'all': return 'month';
+    default: return 'day';
   }
 }
 

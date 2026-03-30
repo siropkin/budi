@@ -120,6 +120,9 @@ fn get_attr_u64(attrs: &[KeyValue], key: &str) -> Option<u64> {
 
 fn parse_timestamp_nano(nano_str: &str) -> Option<DateTime<Utc>> {
     let nanos: i64 = nano_str.parse().ok()?;
+    if nanos < 0 {
+        return None;
+    }
     let secs = nanos / 1_000_000_000;
     let nsecs = (nanos % 1_000_000_000) as u32;
     DateTime::from_timestamp(secs, nsecs)

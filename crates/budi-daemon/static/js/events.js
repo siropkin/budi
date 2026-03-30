@@ -174,8 +174,10 @@ render();
 setInterval(async () => {
   if (document.hidden || !dataLoaded) return;
   if (currentPage === 'overview') {
-    await loadStatsData();
-    renderStatsView($('#content'));
+    try {
+      await loadStatsData();
+      renderStatsView($('#content'));
+    } catch (_) { /* poll failure is non-fatal */ }
   }
 }, 30000);
 

@@ -725,8 +725,11 @@ impl BudiMcpServer {
         let body: Value = resp
             .json()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let files = body.get("files").and_then(|v| v.as_u64()).unwrap_or(0);
-        let messages = body.get("messages").and_then(|v| v.as_u64()).unwrap_or(0);
+        let files = body.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
+        let messages = body
+            .get("messages_ingested")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Sync complete: {files} files processed, {messages} messages ingested."

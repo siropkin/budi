@@ -40,7 +40,6 @@ function renderSettingsView(content) {
 
   const h = d.health;
   const s = d.schema;
-  const daemonOk = h && h.ok;
   const needsMigration = s && s.needs_migration;
   const syncing = d.syncStatus.syncing;
   const lastSynced = d.syncStatus.last_synced;
@@ -72,7 +71,7 @@ function renderSettingsView(content) {
         </div>
         <div class="settings-item">
           <span class="settings-key">Providers</span>
-          <span class="settings-val">${registeredProviders.map(p => p.display_name).join(', ') || '--'}</span>
+          <span class="settings-val">${registeredProviders.map(p => esc(p.display_name)).join(', ') || '--'}</span>
         </div>
       </div>
       <div class="panel">
@@ -105,7 +104,7 @@ function renderSettingsView(content) {
         <h2>Database</h2>
         <div class="settings-item">
           <span class="settings-key">Schema</span>
-          <span class="settings-val ${needsMigration ? 'warn' : ''}">v${esc(String(s.current || '?'))}${needsMigration ? ' (needs v' + s.target + ')' : ''}</span>
+          <span class="settings-val ${needsMigration ? 'warn' : ''}">v${esc(String(s.current || '?'))}${needsMigration ? ' (needs v' + esc(String(s.target)) + ')' : ''}</span>
         </div>
         <div class="settings-item">
           <span class="settings-key">Size</span>
@@ -154,7 +153,7 @@ function renderSettingsView(content) {
     </div>
   `;
 
-  bindSettingsHandlers(content);
+  bindSettingsHandlers();
 }
 
 function clearSettingsLog() {
@@ -199,9 +198,7 @@ async function refreshSettingsStatus() {
   }
 }
 
-function bindSettingsHandlers(content) {
-  const version = settingsData && settingsData.health ? settingsData.health.version : '?';
-
+function bindSettingsHandlers() {
   const syncRecentBtn = $('#syncRecentBtn');
   if (syncRecentBtn) syncRecentBtn.addEventListener('click', async () => {
     clearSettingsLog();
@@ -238,6 +235,8 @@ function bindSettingsHandlers(content) {
       const resetResp = await fetch('/sync/reset', { method: 'POST' });
       if (resetResp.status === 409) {
         settingsLog('Sync already in progress. Try again in a moment.');
+      } else if (!resetResp.ok) {
+        settingsLog('Reset failed: ' + resetResp.statusText);
       } else {
         settingsLog('Re-ingesting all history...');
         const resp = await fetch('/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"migrate":true}' });
@@ -263,8 +262,11 @@ function bindSettingsHandlers(content) {
     migrateBtn.disabled = true;
     settingsLog('Running migration...');
     try {
-      const r = await fetch('/admin/migrate', { method: 'POST' }).then(r => r.json());
-      if (r.migrated) {
+      const resp = await fetch('/admin/migrate', { method: 'POST' });
+      const r = await resp.json();
+      if (resp.status === 409) {
+        settingsLog('Another operation in progress. Try again in a moment.');
+      } else if (r.migrated) {
         settingsLog('Migrated from v' + r.from + ' to v' + r.current);
       } else {
         settingsLog('Already up to date (v' + r.current + ')');
@@ -272,6 +274,8 @@ function bindSettingsHandlers(content) {
     } catch (e) {
       settingsLog('Failed: ' + e.message);
     }
+    migrateBtn.textContent = 'Migrate Database';
+    migrateBtn.disabled = false;
     await refreshSettingsStatus();
   });
 

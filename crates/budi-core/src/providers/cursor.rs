@@ -323,8 +323,11 @@ fn extract_cursor_auth() -> CursorAuthResult {
 /// Parse a single usage event JSON value into a CursorUsageEvent.
 /// Returns None if the event should be skipped.
 fn parse_usage_event(ev: &Value) -> Option<CursorUsageEvent> {
-    let ts_str = ev.get("timestamp").and_then(|v| v.as_str()).unwrap_or("0");
-    let ts: i64 = ts_str.parse().unwrap_or(0);
+    let ts: i64 = ev
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .filter(|&t: &i64| t > 0)?;
 
     let model = ev
         .get("model")

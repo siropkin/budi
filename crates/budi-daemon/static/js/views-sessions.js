@@ -5,17 +5,6 @@ let sessionsPageSortCol = 'started_at';
 let sessionsPageSortAsc = false;
 let sessionsPageSearchTerm = '';
 
-function contextBloatLevel(messages) {
-  if (!messages || messages.length < 3) return null;
-  const first = messages[0].input_tokens || 0;
-  const last = messages[messages.length - 1].input_tokens || 0;
-  if (first === 0) return null;
-  const ratio = last / first;
-  if (ratio > 10) return 'high';
-  if (ratio > 4) return 'medium';
-  return 'low';
-}
-
 function renderSessionsList(sessions) {
   const multiProvider = registeredProviders.length > 1;
   const cols = [
@@ -100,7 +89,7 @@ function renderSessionDetailMessages(messages) {
   const sorted = [...filtered];
   sorted.sort((a, b) => {
     let va, vb;
-    if (col === 'tokens') { va = a.input_tokens + a.output_tokens; vb = b.input_tokens + b.output_tokens; }
+    if (col === 'tokens') { va = (a.input_tokens || 0) + (a.output_tokens || 0); vb = (b.input_tokens || 0) + (b.output_tokens || 0); }
     else if (col === 'cost') { va = a.cost_cents || 0; vb = b.cost_cents || 0; }
     else if (col === 'model') { va = a.model || ''; vb = b.model || ''; }
     else if (col === 'provider') { va = a.provider || ''; vb = b.provider || ''; }
@@ -120,7 +109,7 @@ function renderSessionDetailMessages(messages) {
   ];
 
   const rows = sorted.map(m => {
-    const totalTok = m.input_tokens + m.output_tokens;
+    const totalTok = (m.input_tokens || 0) + (m.output_tokens || 0);
     const costVal = (m.cost_cents || 0) / 100;
     const isExact = !m.cost_confidence || m.cost_confidence === 'exact' || m.cost_confidence === 'exact_cost' || m.cost_confidence === 'otel_exact';
     const costDisplay = isExact ? fmtCost(costVal) : `~${fmtCost(costVal)}`;
@@ -176,8 +165,6 @@ function healthIcon(state) {
 function renderHealthPanel(health) {
   if (!health) return '';
   const icon = healthIcon(health.state);
-  const tipText = health.tip || '';
-  const stateClass = health.state || 'green';
 
   const vitalNames = {
     context_drag: 'Context Drag',
@@ -185,9 +172,6 @@ function renderHealthPanel(health) {
     thrashing: 'Agent Thrashing',
     cost_acceleration: 'Cost Acceleration',
   };
-
-  const detailMap = {};
-  for (const d of (health.details || [])) detailMap[d.vital] = d;
 
   const vitals = health.vitals || {};
   const vitalKeys = ['context_drag', 'cache_efficiency', 'thrashing', 'cost_acceleration'];
@@ -207,9 +191,9 @@ function renderHealthPanel(health) {
 
   const tips = (health.details || []).map(d => {
     const name = vitalNames[d.vital] || d.vital;
-    const icon = healthIcon(d.state);
+    const tipIcon = healthIcon(d.state);
     return `<div class="health-tip-card">
-      <div class="health-tip-body">${icon} <strong>${esc(name)}:</strong> ${esc(d.tip)}</div>
+      <div class="health-tip-body">${tipIcon} <strong>${esc(name)}:</strong> ${esc(d.tip)}</div>
     </div>`;
   }).join('');
 
@@ -238,7 +222,7 @@ async function renderSessionDetail(sessionId, content) {
   const session = (sessionsPageData || []).find(s => s.session_id === sessionId);
 
   const totalCost = sessionDetailMessages.reduce((s, m) => s + (m.cost_cents || 0), 0) / 100;
-  const totalTokens = sessionDetailMessages.reduce((s, m) => s + m.input_tokens + m.output_tokens, 0);
+  const totalTokens = sessionDetailMessages.reduce((s, m) => s + (m.input_tokens || 0) + (m.output_tokens || 0), 0);
 
   let duration = '--';
   if (session) {
@@ -325,7 +309,8 @@ async function renderSessionDetail(sessionId, content) {
 }
 
 function bindSessionDetailHandlers(content) {
-  $('#backToSessions').addEventListener('click', () => {
+  const backBtn = $('#backToSessions');
+  if (backBtn) backBtn.addEventListener('click', () => {
     selectedSessionId = null;
     history.pushState(null, '', '/dashboard/sessions');
     renderSessionsView(content);

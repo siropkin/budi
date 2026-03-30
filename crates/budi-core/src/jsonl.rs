@@ -305,12 +305,13 @@ fn dedup_by_request_id(messages: &mut Vec<ParsedMessage>) {
         return;
     }
 
-    // Sort descending so we can remove from the end without invalidating indices
-    to_remove.sort_unstable_by(|a, b| b.cmp(a));
-    to_remove.dedup();
-    for idx in to_remove {
-        messages.remove(idx);
-    }
+    let remove_set: std::collections::HashSet<usize> = to_remove.into_iter().collect();
+    let mut i = 0;
+    messages.retain(|_| {
+        let keep = !remove_set.contains(&i);
+        i += 1;
+        keep
+    });
 }
 
 #[cfg(test)]

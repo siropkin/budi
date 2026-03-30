@@ -329,7 +329,7 @@ const BUDI_STATUSLINE_SUFFIX: &str = r#"; budi_out=$(budi statusline 2>/dev/null
 
 /// Check if a statusLine command already includes budi.
 fn statusline_has_budi(cmd: &str) -> bool {
-    cmd.contains("budi statusline") || cmd.contains("budi statusline")
+    cmd.contains("budi statusline") || cmd.contains("budi_out=$(budi")
 }
 
 pub fn cmd_statusline_install() -> Result<()> {

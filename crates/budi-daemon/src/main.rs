@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use budi_core::analytics;
 use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
@@ -99,6 +100,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/dashboard/{*rest}", get(d::dashboard))
         .route("/static/dashboard.css", get(d::dashboard_css))
         .route("/static/dashboard.js", get(d::dashboard_js))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .with_state(app_state)
 }
 

@@ -130,13 +130,12 @@ pub async fn health_integrations()
             .unwrap_or(false);
 
         // DB stats + paths
-        let db_path_str = budi_core::analytics::db_path()
-            .ok()
+        let db_path = budi_core::analytics::db_path().ok();
+        let db_path_str = db_path
+            .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let db_stats = budi_core::analytics::db_path()
-            .ok()
-            .and_then(|p| {
+        let db_stats = db_path.and_then(|p| {
                 let size_mb = std::fs::metadata(&p)
                     .ok()
                     .map(|m| m.len() as f64 / 1_048_576.0);

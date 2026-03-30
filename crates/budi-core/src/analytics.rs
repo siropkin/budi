@@ -302,8 +302,8 @@ pub fn ingest_messages_with_sync(
         if let Some(ref request_id) = msg.request_id {
             let existing: Option<(String, i64)> = tx
                 .query_row(
-                    "SELECT uuid, output_tokens FROM messages WHERE request_id = ?1 LIMIT 1",
-                    params![request_id],
+                    "SELECT uuid, output_tokens FROM messages WHERE request_id = ?1 AND (?2 IS NULL OR session_id = ?2) LIMIT 1",
+                    params![request_id, msg.session_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .ok();
@@ -735,10 +735,11 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     if let Some(q) = p.search
         && !q.is_empty()
     {
-        param_values.push(format!("%{q}%"));
+        let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        param_values.push(format!("%{escaped}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(messages.model LIKE ?{idx} OR messages.repo_id LIKE ?{idx} OR messages.provider LIKE ?{idx} OR COALESCE(messages.git_branch, s.git_branch) LIKE ?{idx} OR EXISTS (SELECT 1 FROM tags WHERE tags.message_uuid = messages.uuid AND tags.key = 'ticket_id' AND tags.value LIKE ?{idx}))"
+            "(messages.model LIKE ?{idx} ESCAPE '\\' OR messages.repo_id LIKE ?{idx} ESCAPE '\\' OR messages.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(messages.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\' OR EXISTS (SELECT 1 FROM tags WHERE tags.message_uuid = messages.uuid AND tags.key = 'ticket_id' AND tags.value LIKE ?{idx} ESCAPE '\\'))"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -780,8 +781,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     };
 
     let sql = format!(
-        "SELECT COUNT(*) OVER() as total_count,
-                messages.uuid, messages.timestamp, messages.role, messages.model,
+        "SELECT messages.uuid, messages.timestamp, messages.role, messages.model,
                 COALESCE(messages.provider, 'claude_code'),
                 COALESCE(messages.repo_id, s.repo_id),
                 messages.input_tokens, messages.output_tokens,
@@ -810,19 +810,19 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let messages: Vec<MessageRow> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(MessageRow {
-                uuid: row.get(1)?,
-                timestamp: row.get(2)?,
-                role: row.get(3)?,
-                model: row.get(4)?,
-                provider: row.get(5)?,
-                repo_id: row.get(6)?,
-                input_tokens: row.get(7)?,
-                output_tokens: row.get(8)?,
-                cache_creation_tokens: row.get(9)?,
-                cache_read_tokens: row.get(10)?,
-                cost_cents: row.get(11)?,
-                cost_confidence: row.get(12)?,
-                git_branch: row.get(13)?,
+                uuid: row.get(0)?,
+                timestamp: row.get(1)?,
+                role: row.get(2)?,
+                model: row.get(3)?,
+                provider: row.get(4)?,
+                repo_id: row.get(5)?,
+                input_tokens: row.get(6)?,
+                output_tokens: row.get(7)?,
+                cache_creation_tokens: row.get(8)?,
+                cache_read_tokens: row.get(9)?,
+                cost_cents: row.get(10)?,
+                cost_confidence: row.get(11)?,
+                git_branch: row.get(12)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -2080,10 +2080,11 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     if let Some(q) = p.search
         && !q.is_empty()
     {
-        param_values.push(format!("%{q}%"));
+        let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        param_values.push(format!("%{escaped}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(m.model LIKE ?{idx} OR m.repo_id LIKE ?{idx} OR m.provider LIKE ?{idx} OR COALESCE(m.git_branch, s.git_branch) LIKE ?{idx})"
+            "(m.model LIKE ?{idx} ESCAPE '\\' OR m.repo_id LIKE ?{idx} ESCAPE '\\' OR m.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(m.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\')"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));

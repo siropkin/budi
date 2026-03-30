@@ -61,7 +61,6 @@ impl Pipeline {
             "machine",
             "composer_mode",
             "permission_mode",
-            "activity",
             "user_email",
             "duration",
             "dominant_tool",
@@ -169,21 +168,18 @@ impl Pipeline {
 }
 
 /// Simple glob matching supporting `*` (any chars) and `?` (single char).
+/// Operates on bytes for zero-allocation matching (suitable for ASCII paths/branches).
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    glob_match_inner(&pat, &txt)
-}
-
-fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
+    let pat = pattern.as_bytes();
+    let txt = text.as_bytes();
     let (mut pi, mut ti) = (0, 0);
     let (mut star_pi, mut star_ti) = (usize::MAX, 0);
 
     while ti < txt.len() {
-        if pi < pat.len() && (pat[pi] == '?' || pat[pi] == txt[ti]) {
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
             pi += 1;
             ti += 1;
-        } else if pi < pat.len() && pat[pi] == '*' {
+        } else if pi < pat.len() && pat[pi] == b'*' {
             star_pi = pi;
             star_ti = ti;
             pi += 1;
@@ -196,7 +192,7 @@ fn glob_match_inner(pat: &[char], txt: &[char]) -> bool {
         }
     }
 
-    while pi < pat.len() && pat[pi] == '*' {
+    while pi < pat.len() && pat[pi] == b'*' {
         pi += 1;
     }
 

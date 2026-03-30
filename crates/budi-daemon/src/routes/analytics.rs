@@ -615,33 +615,47 @@ pub async fn analytics_session_health(
 pub async fn analytics_migrate(
     State(state): State<AppState>,
 ) -> Result<Json<MigrateResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if state.syncing.load(std::sync::atomic::Ordering::SeqCst) {
+    if state
+        .syncing
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "cannot migrate while sync is running" })),
+            Json(json!({ "ok": false, "error": "another operation is in progress" })),
         ));
     }
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<MigrateResponse> {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        let current = budi_core::migration::current_version(&conn);
-        let target = budi_core::migration::SCHEMA_VERSION;
-        if current >= target {
-            return Ok(MigrateResponse {
-                current,
+    let flag = state.syncing.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let r = (|| -> anyhow::Result<MigrateResponse> {
+            let db_path = analytics::db_path()?;
+            let conn = analytics::open_db(&db_path)?;
+            let current = budi_core::migration::current_version(&conn);
+            let target = budi_core::migration::SCHEMA_VERSION;
+            if current >= target {
+                return Ok(MigrateResponse {
+                    current,
+                    target,
+                    migrated: false,
+                    from: None,
+                });
+            }
+            drop(conn);
+            analytics::open_db_with_migration(&db_path)?;
+            Ok(MigrateResponse {
+                current: target,
                 target,
-                migrated: false,
-                from: None,
-            });
-        }
-        drop(conn);
-        analytics::open_db_with_migration(&db_path)?;
-        Ok(MigrateResponse {
-            current: target,
-            target,
-            migrated: true,
-            from: Some(current),
-        })
+                migrated: true,
+                from: Some(current),
+            })
+        })();
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        r
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
