@@ -1,7 +1,6 @@
-//! `budi hook` — receive hook events from Claude Code and Cursor via stdin,
-//! POST them to the daemon. Fire-and-forget: never errors or slows the host editor.
-//!
-//! Set BUDI_HOOK_DEBUG=1 to log failures to ~/.local/share/budi/hook-debug.log.
+//! `budi hook` — read hook JSON from stdin and POST it to the daemon.
+//! Exits 0 quickly so the editor is not blocked; delivery failures are appended to
+//! `~/.local/share/budi/hook-debug.log` (used by `budi doctor`).
 
 use std::io::Read;
 
@@ -17,7 +16,7 @@ pub fn cmd_hook() -> anyhow::Result<()> {
     let base_url = load_daemon_url();
     let url = format!("{base_url}/hooks/ingest");
 
-    // Fire-and-forget with a short timeout. Silent on all errors unless debug mode.
+    // Short timeout; failures are recorded below (not printed to stdout).
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build();

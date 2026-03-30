@@ -916,9 +916,14 @@ pub struct ActivityBucket {
     pub cost_cents: f64,
 }
 
-/// Query activity data with adaptive time granularity.
-/// `granularity`: "hour", "day", "week", or "month"
-/// `tz_offset_min`: timezone offset in minutes (e.g. -420 for PDT)
+/// Query activity data bucketed in local time (see `tz_offset_min`).
+///
+/// `granularity`:
+/// - `"hour"` — bucket label is hour of day (`strftime('%H:00', …)`).
+/// - `"month"` — bucket is calendar month (`'%Y-%m'`).
+/// - `"day"` and `"week"` — both use **calendar-day** buckets (`date(…)`); there is no ISO-week rollup yet.
+///
+/// `tz_offset_min`: timezone offset in minutes from UTC for grouping (e.g. -420 for PDT).
 pub fn activity_chart(
     conn: &Connection,
     since: Option<&str>,
@@ -947,10 +952,11 @@ pub fn activity_chart(
         "timestamp".to_string()
     };
 
-    // Validate granularity to prevent any future SQL injection risk
+    // Only fixed literals reach SQL here (daemon HTTP layer allowlists granularity).
     let group_expr = match granularity {
         "hour" => format!("strftime('%H:00', {})", tz_adjust),
         "month" => format!("strftime('%Y-%m', {})", tz_adjust),
+        // "day", "week", and internal callers: calendar-day buckets
         _ => format!("date({})", tz_adjust),
     };
 

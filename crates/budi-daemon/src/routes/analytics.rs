@@ -76,6 +76,8 @@ const VALID_SESSION_SORT_BY: &[&str] = &[
     "git_branch",
 ];
 
+const VALID_ACTIVITY_GRANULARITY: &[&str] = &["hour", "day", "week", "month"];
+
 pub async fn analytics_messages(
     Query(params): Query<MessagesParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
@@ -213,6 +215,13 @@ pub async fn analytics_activity(
     Query(params): Query<ActivityChartParams>,
 ) -> Result<Json<Vec<analytics::ActivityBucket>>, (StatusCode, Json<serde_json::Value>)> {
     let granularity = params.granularity.unwrap_or_else(|| "day".to_string());
+    if !VALID_ACTIVITY_GRANULARITY.contains(&granularity.as_str()) {
+        return Err(bad_request(format!(
+            "invalid granularity '{}'; valid values: {}",
+            granularity,
+            VALID_ACTIVITY_GRANULARITY.join(", ")
+        )));
+    }
     let tz_offset = params.tz_offset.unwrap_or(0);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;

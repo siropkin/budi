@@ -368,16 +368,7 @@ pub async fn analytics_history(
 // sufficient to prevent data corruption.
 // ---------------------------------------------------------------------------
 
-pub async fn hooks_ingest(
-    State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
-    if state.syncing.load(std::sync::atomic::Ordering::Acquire) {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "ok": false, "error": "Sync in progress, try again shortly" })),
-        ));
-    }
+pub async fn hooks_ingest(Json(payload): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
     tokio::task::spawn_blocking(move || {
         let event = budi_core::hooks::parse_hook_event(&payload)?;
 

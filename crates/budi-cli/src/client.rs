@@ -16,6 +16,19 @@ use serde_json::Value;
 
 use crate::daemon::{daemon_health, ensure_daemon_running};
 
+/// Build `GET .../analytics/branches/{branch}` with correct path encoding (slashes, spaces, etc.).
+fn analytics_branch_detail_url(base_url: &str, branch: &str) -> Result<String> {
+    let normalized = format!("{}/", base_url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&normalized)
+        .with_context(|| format!("invalid daemon base URL: {base_url}"))?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid daemon base URL: {base_url}"))?
+        .push("analytics")
+        .push("branches")
+        .push(branch);
+    Ok(url.to_string())
+}
+
 /// Produce a user-friendly error message based on the kind of reqwest error.
 fn describe_send_error(e: reqwest::Error) -> anyhow::Error {
     if e.is_connect() {
@@ -255,9 +268,11 @@ impl DaemonClient {
         if let Some(u) = until {
             params.push(("until", u));
         }
+        let url = analytics_branch_detail_url(&self.base_url, branch)
+            .with_context(|| format!("invalid daemon base URL or branch: {branch:?}"))?;
         let resp = self
             .client
-            .get(format!("{}/analytics/branches/{}", self.base_url, branch))
+            .get(url)
             .query(&params)
             .send()
             .map_err(describe_send_error)?;
