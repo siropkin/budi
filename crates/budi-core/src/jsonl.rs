@@ -37,6 +37,7 @@ pub(crate) struct AssistantEntry {
     pub session_id: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub cwd: Option<String>,
+    pub git_branch: Option<String>,
     pub message: AssistantMessage,
     pub parent_uuid: Option<String>,
 }
@@ -189,10 +190,10 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                     .and_then(|u| u.cache_creation_input_tokens)
                     .unwrap_or(0),
                 cache_read_tokens: usage.and_then(|u| u.cache_read_input_tokens).unwrap_or(0),
-                git_branch: None,
+                git_branch: a.git_branch,
                 repo_id: None,
                 provider: "claude_code".to_string(),
-                cost_cents: None, // Calculated during ingest from tokens × pricing
+                cost_cents: None,
                 session_title: None,
                 parent_uuid: a.parent_uuid,
                 user_name: None,

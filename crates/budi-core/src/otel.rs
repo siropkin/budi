@@ -241,7 +241,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         // Look up session context (repo_id, git_branch, cwd)
         let session_ctx: Option<(Option<String>, Option<String>, Option<String>)> = tx
             .query_row(
-                "SELECT repo_id, git_branch, workspace_root FROM sessions WHERE conversation_id = ?1",
+                "SELECT repo_id, git_branch, workspace_root FROM sessions WHERE session_id = ?1",
                 params![event.session_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -370,7 +370,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
 
         // Insert stub session if it doesn't exist yet (hooks may arrive later)
         tx.execute(
-            "INSERT OR IGNORE INTO sessions (conversation_id, provider) VALUES (?1, 'claude_code')",
+            "INSERT OR IGNORE INTO sessions (session_id, provider) VALUES (?1, 'claude_code')",
             params![event.session_id],
         )?;
 
@@ -730,7 +730,7 @@ mod tests {
 
         // Create a session with git context (as hooks would)
         conn.execute(
-            "INSERT INTO sessions (conversation_id, provider, repo_id, git_branch, workspace_root)
+            "INSERT INTO sessions (session_id, provider, repo_id, git_branch, workspace_root)
             VALUES ('sess-git', 'claude_code', 'github.com/user/repo', 'feature/otel', '/home/user/repo')",
             [],
         )

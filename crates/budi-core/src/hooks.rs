@@ -14,7 +14,7 @@ use serde_json::Value;
 pub struct HookEvent {
     pub provider: String,
     pub event: String,
-    pub conversation_id: Option<String>,
+    pub session_id: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub model: Option<String>,
     // Session lifecycle
@@ -51,8 +51,8 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         .unwrap_or("unknown");
     let event = normalize_event_name(raw_event);
 
-    // Conversation ID: CC uses session_id, Cursor uses conversation_id
-    let conversation_id = json
+    // Session ID: CC uses session_id, Cursor uses conversation_id
+    let session_id = json
         .get("session_id")
         .or_else(|| json.get("conversation_id"))
         .and_then(|v| v.as_str())
@@ -136,7 +136,7 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
     Ok(HookEvent {
         provider: provider.to_string(),
         event,
-        conversation_id,
+        session_id,
         timestamp: Utc::now(),
         model,
         duration_ms,
@@ -159,14 +159,14 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
 pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
     conn.execute(
         "INSERT INTO hook_events (
-            provider, event, conversation_id, timestamp, model,
+            provider, event, session_id, timestamp, model,
             tool_name, tool_duration_ms, tool_call_count,
             raw_json, mcp_server
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             event.provider,
             event.event,
-            event.conversation_id,
+            event.session_id,
             event.timestamp.to_rfc3339(),
             event.model,
             event.tool_name,
@@ -181,25 +181,45 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
 }
 
 /// Upsert a session record based on a hook event.
-/// - On session_start: INSERT new session with metadata.
-/// - On session_end: UPDATE ended_at, duration_ms, end_reason.
-/// - On other events: UPDATE model if present and not already set.
+/// Ensures a session row exists for every event (not just session_start),
+/// since some providers (e.g. Cursor) may not send session_start at all.
+/// Then applies event-specific updates on top.
 pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
-    let Some(ref conv_id) = event.conversation_id else {
-        return Ok(()); // No conversation_id → can't create session
+    let Some(ref sid) = event.session_id else {
+        return Ok(()); // No session_id → can't create session
     };
+
+    // Ensure a session row exists regardless of which event arrives first.
+    // Cursor often sends post_tool_use before (or instead of) session_start.
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions (session_id, provider, started_at, workspace_root, repo_id, git_branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            sid,
+            event.provider,
+            event.timestamp.to_rfc3339(),
+            event.workspace_root,
+            event.repo_id,
+            event.git_branch,
+        ],
+    )?;
 
     match event.event.as_str() {
         "session_start" => {
             conn.execute(
-                "INSERT OR IGNORE INTO sessions (
-                    conversation_id, provider, started_at, composer_mode,
-                    permission_mode, user_email, workspace_root, model, raw_json,
-                    repo_id, git_branch
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "UPDATE sessions SET
+                    started_at = ?2,
+                    composer_mode = COALESCE(?3, composer_mode),
+                    permission_mode = COALESCE(?4, permission_mode),
+                    user_email = COALESCE(?5, NULLIF(user_email, '')),
+                    workspace_root = COALESCE(?6, NULLIF(workspace_root, '')),
+                    model = COALESCE(?7, model),
+                    raw_json = ?8,
+                    repo_id = COALESCE(?9, NULLIF(NULLIF(repo_id, ''), 'unknown')),
+                    git_branch = COALESCE(?10, NULLIF(git_branch, ''))
+                WHERE session_id = ?1",
                 params![
-                    conv_id,
-                    event.provider,
+                    sid,
                     event.timestamp.to_rfc3339(),
                     event.composer_mode,
                     event.permission_mode,
@@ -219,12 +239,12 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     duration_ms = ?3,
                     end_reason = ?4,
                     model = COALESCE(?5, model),
-                    user_email = COALESCE(?6, user_email),
-                    repo_id = COALESCE(?7, repo_id),
-                    git_branch = COALESCE(?8, git_branch)
-                WHERE conversation_id = ?1",
+                    user_email = COALESCE(?6, NULLIF(user_email, '')),
+                    repo_id = COALESCE(?7, NULLIF(NULLIF(repo_id, ''), 'unknown')),
+                    git_branch = COALESCE(?8, NULLIF(git_branch, ''))
+                WHERE session_id = ?1",
                 params![
-                    conv_id,
+                    sid,
                     event.timestamp.to_rfc3339(),
                     event.duration_ms,
                     event.end_reason,
@@ -236,18 +256,21 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
             )?;
         }
         _ => {
-            // Single UPDATE: always update model to latest, fill NULLs for email/repo/branch
             conn.execute(
                 "UPDATE sessions SET
-                    model = COALESCE(?2, model),
-                    user_email = COALESCE(user_email, ?3),
-                    repo_id = COALESCE(repo_id, ?4),
-                    git_branch = COALESCE(git_branch, ?5)
-                 WHERE conversation_id = ?1",
+                    started_at = MIN(started_at, ?2),
+                    model = COALESCE(?3, model),
+                    user_email = COALESCE(NULLIF(user_email, ''), ?4),
+                    workspace_root = COALESCE(NULLIF(workspace_root, ''), ?5),
+                    repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?6),
+                    git_branch = COALESCE(NULLIF(git_branch, ''), ?7)
+                 WHERE session_id = ?1",
                 params![
-                    conv_id,
+                    sid,
+                    event.timestamp.to_rfc3339(),
                     event.model,
                     event.user_email,
+                    event.workspace_root,
                     event.repo_id,
                     event.git_branch,
                 ],
@@ -260,11 +283,11 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
 
 /// Update a session's prompt_category.
 pub fn update_session_category(conn: &Connection, event: &HookEvent, category: &str) -> Result<()> {
-    if let Some(ref conv_id) = event.conversation_id {
+    if let Some(ref sid) = event.session_id {
         conn.execute(
             "UPDATE sessions SET prompt_category = ?2
-             WHERE conversation_id = ?1 AND prompt_category IS NULL",
-            params![conv_id, category],
+             WHERE session_id = ?1 AND prompt_category IS NULL",
+            params![sid, category],
         )?;
     }
     Ok(())
@@ -315,7 +338,7 @@ pub fn classify_prompt(text: &str) -> Option<String> {
 }
 
 /// Query aggregated session metadata for the HookEnricher.
-/// Returns a map of conversation_id → SessionMeta.
+/// Returns a map of session_id → SessionMeta.
 /// When `max_age_days` is Some(N), only sessions started in the last N days are loaded.
 pub fn load_session_meta(
     conn: &Connection,
@@ -323,7 +346,6 @@ pub fn load_session_meta(
 ) -> Result<std::collections::HashMap<String, SessionMeta>> {
     let mut map = std::collections::HashMap::new();
 
-    // Load sessions
     let (date_clause, date_param) = match max_age_days {
         Some(days) => (
             " AND started_at >= datetime('now', ?1)".to_string(),
@@ -332,10 +354,10 @@ pub fn load_session_meta(
         None => (String::new(), None),
     };
     let sql = format!(
-        "SELECT conversation_id, composer_mode, permission_mode, prompt_category,
+        "SELECT session_id, composer_mode, permission_mode, prompt_category,
                 user_email, duration_ms, model, repo_id, git_branch
          FROM sessions
-         WHERE conversation_id IS NOT NULL{}",
+         WHERE session_id IS NOT NULL{}",
         date_clause
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -364,14 +386,14 @@ pub fn load_session_meta(
     drop(rows);
     drop(stmt);
 
-    // Load dominant tool per conversation from hook_events using window function
+    // Load dominant tool per session from hook_events using window function
     let mut tool_stmt = conn.prepare(
-        "SELECT conversation_id, tool_name FROM (
-             SELECT conversation_id, tool_name, COUNT(*) as cnt,
-                    ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY COUNT(*) DESC) as rn
+        "SELECT session_id, tool_name FROM (
+             SELECT session_id, tool_name, COUNT(*) as cnt,
+                    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY COUNT(*) DESC) as rn
              FROM hook_events
-             WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND conversation_id IS NOT NULL
-             GROUP BY conversation_id, tool_name
+             WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND session_id IS NOT NULL
+             GROUP BY session_id, tool_name
          ) WHERE rn = 1",
     )?;
 
@@ -380,8 +402,8 @@ pub fn load_session_meta(
     })?;
 
     for row in tool_rows {
-        if let Ok((conv_id, tool)) = row
-            && let Some(meta) = map.get_mut(&conv_id)
+        if let Ok((sid, tool)) = row
+            && let Some(meta) = map.get_mut(&sid)
         {
             meta.dominant_tool = Some(tool);
         }
@@ -619,7 +641,7 @@ mod tests {
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.provider, "claude_code");
         assert_eq!(event.event, "session_start");
-        assert_eq!(event.conversation_id.as_deref(), Some("abc-123"));
+        assert_eq!(event.session_id.as_deref(), Some("abc-123"));
         assert_eq!(event.permission_mode.as_deref(), Some("default"));
         assert_eq!(event.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(event.workspace_root.as_deref(), Some("/Users/test/project"));
@@ -643,7 +665,7 @@ mod tests {
         let event = parse_hook_event(&json).unwrap();
         assert_eq!(event.provider, "cursor");
         assert_eq!(event.event, "session_start");
-        assert_eq!(event.conversation_id.as_deref(), Some("conv-456"));
+        assert_eq!(event.session_id.as_deref(), Some("conv-456"));
         assert_eq!(event.composer_mode.as_deref(), Some("agent"));
         assert_eq!(event.user_email.as_deref(), Some("test@example.com"));
         assert_eq!(event.workspace_root.as_deref(), Some("/Users/test/project"));
@@ -686,7 +708,7 @@ mod tests {
         assert_eq!(event.event, "pre_compact");
         // context_tokens, context_window_size, context_usage_pct, message_count
         // are no longer stored as fields — they remain in raw_json if needed
-        assert_eq!(event.conversation_id.as_deref(), Some("abc-123"));
+        assert_eq!(event.session_id.as_deref(), Some("abc-123"));
     }
 
     #[test]
@@ -830,7 +852,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE sessions (
-                conversation_id TEXT PRIMARY KEY,
+                session_id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL DEFAULT 'claude_code',
                 started_at TEXT, ended_at TEXT, duration_ms INTEGER,
                 composer_mode TEXT, permission_mode TEXT, user_email TEXT,
@@ -844,7 +866,7 @@ mod tests {
         let start_event = HookEvent {
             provider: "claude_code".to_string(),
             event: "session_start".to_string(),
-            conversation_id: Some("sess-1".to_string()),
+            session_id: Some("sess-1".to_string()),
             timestamp: Utc::now(),
             model: Some("claude-opus-4-6".to_string()),
             permission_mode: Some("auto".to_string()),
@@ -866,7 +888,7 @@ mod tests {
         // Verify session created
         let mode: String = conn
             .query_row(
-                "SELECT permission_mode FROM sessions WHERE conversation_id = 'sess-1'",
+                "SELECT permission_mode FROM sessions WHERE session_id = 'sess-1'",
                 [],
                 |r| r.get(0),
             )
@@ -876,7 +898,7 @@ mod tests {
         // Session end
         let end_event = HookEvent {
             event: "session_end".to_string(),
-            conversation_id: Some("sess-1".to_string()),
+            session_id: Some("sess-1".to_string()),
             end_reason: Some("completed".to_string()),
             duration_ms: Some(60000),
             ..start_event
@@ -885,7 +907,7 @@ mod tests {
 
         let (reason, dur): (String, i64) = conn
             .query_row(
-                "SELECT end_reason, duration_ms FROM sessions WHERE conversation_id = 'sess-1'",
+                "SELECT end_reason, duration_ms FROM sessions WHERE session_id = 'sess-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )

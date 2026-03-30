@@ -74,7 +74,7 @@ impl Pipeline {
         });
 
         // Propagate git_branch, repo_id, cwd from user messages to subsequent
-        // assistant messages in the same session (JSONL only has gitBranch on user entries).
+        // assistant messages in the same session.
         // Uses temporal propagation: each message inherits from the most recent
         // preceding message in the same session that has the field set.
         let mut session_branch: std::collections::HashMap<String, String> =

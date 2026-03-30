@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -485,7 +485,7 @@ fn fetch_usage_events(
 struct SessionContext {
     start_ms: i64,
     end_ms: i64, // i64::MAX if session still open
-    conversation_id: String,
+    session_id: String,
     workspace_root: Option<String>,
     repo_id: Option<String>,
     git_branch: Option<String>,
@@ -496,7 +496,7 @@ fn load_session_contexts(conn: &Connection) -> Vec<SessionContext> {
     // Only load sessions from the last 30 days to avoid stale attribution.
     // Without this filter, API events could match sessions from months ago.
     let mut stmt = match conn.prepare(
-        "SELECT conversation_id, started_at, ended_at, workspace_root, repo_id, git_branch
+        "SELECT session_id, started_at, ended_at, workspace_root, repo_id, git_branch
          FROM sessions WHERE provider = 'cursor'
            AND started_at >= datetime('now', '-30 days')
          ORDER BY started_at ASC",
@@ -522,7 +522,7 @@ fn load_session_contexts(conn: &Connection) -> Vec<SessionContext> {
         Ok(SessionContext {
             start_ms,
             end_ms,
-            conversation_id: cid,
+            session_id: cid,
             workspace_root: row.get(3)?,
             repo_id: row.get(4)?,
             git_branch: row.get(5)?,
@@ -564,13 +564,13 @@ fn usage_events_to_messages(
                     tracing::warn!(
                         "Cursor session correlation: clock-skew fallback used for event at ts={}, matched session '{}'",
                         ev.timestamp_ms,
-                        s.conversation_id
+                        s.session_id
                     );
                 }
                 fallback
             });
 
-            let session_id = matched.map(|s| s.conversation_id.clone());
+            let session_id = matched.map(|s| s.session_id.clone());
 
             let timestamp =
                 DateTime::from_timestamp_millis(ev.timestamp_ms).unwrap_or_else(Utc::now);
@@ -662,11 +662,51 @@ fn sync_from_usage_api(
         Err(e) => return Some(Err(e)),
     };
 
+    // Repair sessions whose started_at was set by a late-arriving hook instead
+    // of the earliest hook. Use MIN(hook_events.timestamp) as the true start.
+    let _ = conn.execute(
+        "UPDATE sessions SET started_at = (
+            SELECT MIN(h.timestamp) FROM hook_events h WHERE h.session_id = sessions.session_id
+         )
+         WHERE provider = 'cursor'
+           AND EXISTS (
+             SELECT 1 FROM hook_events h
+             WHERE h.session_id = sessions.session_id AND h.timestamp < sessions.started_at
+           )",
+        [],
+    );
+
+    // Always run backfill for orphaned messages (ingested before their session
+    // row existed). Must run even when there are no new API events.
+    let sessions = load_session_contexts(conn);
+    if !sessions.is_empty() {
+        let orphaned = backfill_cursor_session_ids(conn, &sessions);
+        if orphaned > 0 {
+            tracing::info!("Cursor session backfill: assigned session_id to {orphaned} orphaned messages");
+        }
+    }
+
+    // Repair messages that have a session_id but stale metadata (repo_id=unknown,
+    // missing cwd/branch) — propagate from the now-correct session row.
+    let _ = conn.execute(
+        "UPDATE messages SET
+            cwd = COALESCE(cwd, (SELECT workspace_root FROM sessions WHERE session_id = messages.session_id)),
+            repo_id = (SELECT COALESCE(repo_id, 'unknown') FROM sessions WHERE session_id = messages.session_id),
+            git_branch = COALESCE(git_branch, (SELECT git_branch FROM sessions WHERE session_id = messages.session_id))
+         WHERE provider = 'cursor'
+           AND session_id IS NOT NULL
+           AND (repo_id IS NULL OR repo_id = 'unknown')
+           AND EXISTS (
+             SELECT 1 FROM sessions s
+             WHERE s.session_id = messages.session_id AND s.repo_id IS NOT NULL AND s.repo_id != 'unknown'
+           )",
+        [],
+    );
+
     if events.is_empty() {
         return Some(Ok((0, 0, warnings)));
     }
 
-    let sessions = load_session_contexts(conn);
     let mut messages = usage_events_to_messages(&events, &sessions);
     let tags = pipeline.process(&mut messages);
     let count = match analytics::ingest_messages(conn, &messages, Some(&tags)) {
@@ -675,18 +715,80 @@ fn sync_from_usage_api(
     };
 
     // Update watermark to latest event timestamp.
-    // Use the max timestamp from events (they're sorted ascending, so last is newest).
     if let Some(newest_ts) = events.iter().map(|e| e.timestamp_ms).max() {
         let _ = analytics::set_sync_offset(conn, watermark_key, newest_ts as usize);
     }
 
     let api_calls = if paginate_all {
-        // Approximate: ceil(events / 100)
         events.len().div_ceil(100).max(1)
     } else {
         1
     };
     Some(Ok((api_calls, count, warnings)))
+}
+
+/// Retroactively assign session_id to Cursor messages that have NULL session_id.
+/// Uses the same timestamp-overlap logic as `usage_events_to_messages`.
+fn backfill_cursor_session_ids(conn: &Connection, sessions: &[SessionContext]) -> usize {
+    let mut stmt = match conn.prepare(
+        "SELECT uuid, timestamp FROM messages
+         WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'",
+    ) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    let orphans: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    let mut updated = 0;
+    for (uuid, ts_str) in &orphans {
+        let Ok(ts) = ts_str.parse::<DateTime<Utc>>() else {
+            continue;
+        };
+        let ts_ms = ts.timestamp_millis();
+
+        const CLOCK_SKEW_MS: i64 = 5000;
+        let matched = sessions
+            .iter()
+            .filter(|s| ts_ms >= s.start_ms && ts_ms <= s.end_ms)
+            .min_by_key(|s| (ts_ms - s.start_ms).abs())
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .filter(|s| {
+                        ts_ms >= (s.start_ms - CLOCK_SKEW_MS)
+                            && ts_ms <= (s.end_ms + CLOCK_SKEW_MS)
+                    })
+                    .min_by_key(|s| {
+                        let d_start = (ts_ms - s.start_ms).abs();
+                        let d_end = (ts_ms - s.end_ms).abs();
+                        d_start.min(d_end)
+                    })
+            });
+
+        if let Some(session) = matched {
+            let _ = conn.execute(
+                "UPDATE messages SET session_id = ?1,
+                 cwd = COALESCE(NULLIF(cwd, ''), ?2),
+                 repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?3),
+                 git_branch = COALESCE(NULLIF(git_branch, ''), ?4)
+                 WHERE uuid = ?5",
+                params![
+                    session.session_id,
+                    session.workspace_root,
+                    session.repo_id,
+                    session.git_branch,
+                    uuid,
+                ],
+            );
+            updated += 1;
+        }
+    }
+    updated
 }
 
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.
@@ -848,9 +950,10 @@ fn parse_cursor_line(
         .and_then(parse_timestamp)
         .unwrap_or(fallback_ts);
 
+    let request_id = entry.request_id;
     let uuid = entry
         .uuid
-        .or(entry.request_id)
+        .or_else(|| request_id.clone())
         .unwrap_or_else(|| format!("{}-{}", session_id, line_index));
 
     let msg_session_id = entry.session_id.unwrap_or_else(|| session_id.to_string());
@@ -876,10 +979,8 @@ fn parse_cursor_line(
             parent_uuid: None,
             user_name: None,
             machine_name: None,
-            // User messages have no cost — use "n/a" to distinguish from
-            // assistant messages whose confidence hasn't been set yet (empty string).
             cost_confidence: "n/a".to_string(),
-            request_id: None,
+            request_id: request_id.clone(),
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
@@ -906,7 +1007,7 @@ fn parse_cursor_line(
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
-                request_id: None,
+                request_id,
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
@@ -1420,7 +1521,7 @@ mod tests {
         let session_ranges = vec![SessionContext {
             start_ms: 1774455900000,
             end_ms: 1774455920000,
-            conversation_id: "session-abc".to_string(),
+                session_id: "session-abc".to_string(),
             workspace_root: Some("/projects/webapp".to_string()),
             repo_id: Some("github.com/acme/webapp".to_string()),
             git_branch: Some("feature/PROJ-42-fix".to_string()),

@@ -608,6 +608,19 @@ pub async fn analytics_migrate(
     Ok(Json(result))
 }
 
+pub async fn analytics_session_audit(
+) -> Result<Json<analytics::SessionAudit>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_audit(&conn)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
 pub async fn analytics_tools(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {

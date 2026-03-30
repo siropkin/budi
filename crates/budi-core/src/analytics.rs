@@ -78,6 +78,79 @@ pub fn reset_sync_state(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Audit session coverage: reports NULL-session assistant rows,
+/// orphan sessions (metadata but no messages), and per-provider percentages.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionAudit {
+    pub assistant_rows_total: u64,
+    pub assistant_rows_no_session: u64,
+    pub sessions_total: u64,
+    pub sessions_orphaned: u64,
+    pub provider_coverage: Vec<ProviderCoverage>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderCoverage {
+    pub provider: String,
+    pub assistant_total: u64,
+    pub with_session: u64,
+    pub coverage_pct: f64,
+}
+
+pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
+    let assistant_rows_total: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE role = 'assistant'",
+        [],
+        |r| r.get(0),
+    )?;
+    let assistant_rows_no_session: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE role = 'assistant' AND session_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let sessions_total: u64 =
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+    let sessions_orphaned: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM sessions s
+         WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.session_id)",
+        [],
+        |r| r.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(provider, 'claude_code'),
+                COUNT(*),
+                SUM(CASE WHEN session_id IS NOT NULL THEN 1 ELSE 0 END)
+         FROM messages WHERE role = 'assistant'
+         GROUP BY COALESCE(provider, 'claude_code')",
+    )?;
+    let provider_coverage = stmt
+        .query_map([], |row| {
+            let total: u64 = row.get(1)?;
+            let with_session: u64 = row.get(2)?;
+            Ok(ProviderCoverage {
+                provider: row.get(0)?,
+                assistant_total: total,
+                with_session,
+                coverage_pct: if total > 0 {
+                    with_session as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                },
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(SessionAudit {
+        assistant_rows_total,
+        assistant_rows_no_session,
+        sessions_total,
+        sessions_orphaned,
+        provider_coverage,
+    })
+}
+
 /// A tag to be stored alongside a message.
 #[derive(Debug, Clone)]
 pub struct Tag {
@@ -139,13 +212,13 @@ pub fn ingest_messages_with_sync(
                 )
                 .ok();
             if let Some(otel_id) = otel_uuid {
-                // Enrich the OTEL row with JSONL context (only fill NULLs)
+                // Enrich the OTEL row with JSONL context (fill NULLs and empty sentinels)
                 tx.execute(
                     "UPDATE messages SET
                         parent_uuid = COALESCE(parent_uuid, ?1),
-                        cwd = COALESCE(cwd, ?2),
-                        git_branch = COALESCE(git_branch, ?3),
-                        repo_id = COALESCE(repo_id, ?4),
+                        cwd = COALESCE(NULLIF(cwd, ''), ?2),
+                        git_branch = COALESCE(NULLIF(git_branch, ''), ?3),
+                        repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?4),
                         request_id = COALESCE(request_id, ?5)
                      WHERE uuid = ?6",
                     params![
@@ -249,6 +322,25 @@ pub fn ingest_messages_with_sync(
                     )?;
                 }
             }
+        }
+    }
+
+    // Ensure stub session rows exist for every session_id we just ingested.
+    // This makes `sessions` a merged metadata table populated from any source,
+    // not only hooks. Hooks/OTEL will later enrich these stubs with metadata.
+    {
+        let mut seen_sessions: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for msg in messages {
+            if let Some(ref sid) = msg.session_id {
+                seen_sessions.insert((sid.clone(), msg.provider.clone()));
+            }
+        }
+        for (sid, provider) in &seen_sessions {
+            tx.execute(
+                "INSERT OR IGNORE INTO sessions (session_id, provider) VALUES (?1, ?2)",
+                params![sid, provider],
+            )?;
         }
     }
 
@@ -371,6 +463,44 @@ fn sync_with_max_age(
                 total_messages += count;
             }
         }
+    }
+
+    // Repair messages with NULL git_branch from two sources:
+    // 1) The session row itself (populated by hooks or earlier ingestion)
+    // 2) Sibling messages in the same session (e.g., user entries in CC JSONL
+    //    carry gitBranch but assistant entries may not if parsed by older code)
+    let repaired_from_session = conn.execute(
+        "UPDATE messages SET git_branch = (
+            SELECT s.git_branch FROM sessions s WHERE s.session_id = messages.session_id
+         )
+         WHERE git_branch IS NULL
+           AND session_id IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM sessions s
+             WHERE s.session_id = messages.session_id
+               AND s.git_branch IS NOT NULL AND s.git_branch != ''
+           )",
+        [],
+    ).unwrap_or(0);
+    let repaired_from_siblings = conn.execute(
+        "UPDATE messages SET git_branch = (
+            SELECT m2.git_branch FROM messages m2
+            WHERE m2.session_id = messages.session_id
+              AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
+            LIMIT 1
+         )
+         WHERE git_branch IS NULL
+           AND session_id IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM messages m2
+             WHERE m2.session_id = messages.session_id
+               AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
+           )",
+        [],
+    ).unwrap_or(0);
+    let repaired = repaired_from_session + repaired_from_siblings;
+    if repaired > 0 {
+        tracing::info!("Repaired git_branch on {repaired} messages ({repaired_from_session} from sessions, {repaired_from_siblings} from siblings)");
     }
 
     Ok((total_files, total_messages, warnings))
@@ -598,7 +728,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 COALESCE(messages.cost_confidence, 'estimated'),
                 COALESCE(messages.git_branch, s.git_branch)
          FROM messages
-         LEFT JOIN sessions s ON s.conversation_id = messages.session_id
+         LEFT JOIN sessions s ON s.session_id = messages.session_id
          {}
          ORDER BY {order_expr}
          LIMIT {} OFFSET {}",
@@ -609,7 +739,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let count_sql = format!(
         "SELECT COUNT(*)
          FROM messages
-         LEFT JOIN sessions s ON s.conversation_id = messages.session_id
+         LEFT JOIN sessions s ON s.session_id = messages.session_id
          {where_clause}"
     );
     let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |row| row.get(0))?;
@@ -1873,7 +2003,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         "WITH session_agg AS (
              SELECT m.session_id
              FROM messages m
-             LEFT JOIN sessions s ON s.conversation_id = m.session_id
+             LEFT JOIN sessions s ON s.session_id = m.session_id
              {where_clause}
              AND m.session_id IS NOT NULL
              GROUP BY m.session_id
@@ -1947,7 +2077,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                         CAST((julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400000 AS INTEGER)
                     ) as duration_ms
              FROM messages m
-             LEFT JOIN sessions s ON s.conversation_id = m.session_id
+             LEFT JOIN sessions s ON s.session_id = m.session_id
              {where_clause}
              AND m.session_id IS NOT NULL
              GROUP BY m.session_id

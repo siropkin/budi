@@ -11,7 +11,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -70,6 +70,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     }
     if current_version(conn) == 12 {
         migrate_v12_to_v13(conn)?;
+    }
+    if current_version(conn) == 13 {
+        migrate_v13_to_v14(conn)?;
     }
 
     Ok(())
@@ -140,13 +143,13 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
 /// Create sessions and hook_events tables.
 ///
 /// Note: `repo_id` and `git_branch` are denormalized on both `messages` (canonical
-/// for cost queries) and `sessions` (derived from hooks for metadata context).
+/// for cost queries) and `sessions` (metadata context from any source).
 /// Messages are the source of truth for cost queries.
 fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS sessions (
-            conversation_id    TEXT PRIMARY KEY,
+            session_id         TEXT PRIMARY KEY,
             provider           TEXT NOT NULL DEFAULT 'claude_code',
             started_at         TEXT,
             ended_at           TEXT,
@@ -167,7 +170,7 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             provider            TEXT NOT NULL,
             event               TEXT NOT NULL,
-            conversation_id     TEXT,
+            session_id          TEXT,
             timestamp           TEXT NOT NULL,
             model               TEXT,
             tool_name           TEXT,
@@ -271,6 +274,125 @@ fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.pragma_update(None, "user_version", 13u32)?;
+    Ok(())
+}
+
+/// Incremental migration from v13 to v14: rename conversation_id → session_id
+/// in sessions and hook_events tables for unified session identity.
+fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
+    tracing::info!(
+        "Migrating schema v13 → v14: renaming conversation_id → session_id in sessions and hook_events"
+    );
+
+    // Recreate sessions with session_id as the PK
+    conn.execute_batch(
+        "
+        CREATE TABLE sessions_new (
+            session_id         TEXT PRIMARY KEY,
+            provider           TEXT NOT NULL DEFAULT 'claude_code',
+            started_at         TEXT,
+            ended_at           TEXT,
+            duration_ms        INTEGER,
+            composer_mode      TEXT,
+            permission_mode    TEXT,
+            user_email         TEXT,
+            workspace_root     TEXT,
+            end_reason         TEXT,
+            prompt_category    TEXT,
+            model              TEXT,
+            raw_json           TEXT,
+            repo_id            TEXT,
+            git_branch         TEXT
+        );
+        INSERT INTO sessions_new (session_id, provider, started_at, ended_at, duration_ms,
+            composer_mode, permission_mode, user_email, workspace_root, end_reason,
+            prompt_category, model, raw_json, repo_id, git_branch)
+        SELECT conversation_id, provider, started_at, ended_at, duration_ms,
+            composer_mode, permission_mode, user_email, workspace_root, end_reason,
+            prompt_category, model, raw_json, repo_id, git_branch
+        FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_new RENAME TO sessions;
+        ",
+    )?;
+
+    // Recreate hook_events with session_id
+    conn.execute_batch(
+        "
+        CREATE TABLE hook_events_new (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider            TEXT NOT NULL,
+            event               TEXT NOT NULL,
+            session_id          TEXT,
+            timestamp           TEXT NOT NULL,
+            model               TEXT,
+            tool_name           TEXT,
+            tool_duration_ms    INTEGER,
+            tool_call_count     INTEGER,
+            raw_json            TEXT,
+            mcp_server          TEXT
+        );
+        INSERT INTO hook_events_new (id, provider, event, session_id, timestamp,
+            model, tool_name, tool_duration_ms, tool_call_count, raw_json, mcp_server)
+        SELECT id, provider, event, conversation_id, timestamp,
+            model, tool_name, tool_duration_ms, tool_call_count, raw_json, mcp_server
+        FROM hook_events;
+        DROP TABLE hook_events;
+        ALTER TABLE hook_events_new RENAME TO hook_events;
+        ",
+    )?;
+
+    // Rebuild indexes for both tables
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+
+        CREATE INDEX IF NOT EXISTS idx_hook_events_session ON hook_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_timestamp ON hook_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_session ON hook_events(event, session_id);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_session_ts ON hook_events(event, session_id, timestamp);
+        ",
+    )?;
+
+    // Backfill: create stub session rows from messages that have a session_id
+    // but no corresponding row in sessions.
+    let from_messages: usize = conn.execute(
+        "INSERT OR IGNORE INTO sessions (session_id, provider)
+         SELECT DISTINCT m.session_id, COALESCE(m.provider, 'claude_code')
+         FROM messages m
+         WHERE m.session_id IS NOT NULL
+           AND m.session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    if from_messages > 0 {
+        tracing::info!("Session backfill: created {from_messages} stub rows from messages");
+    }
+
+    // Backfill: create stub session rows from hook_events that recorded a session_id
+    // but never had a session_start event (e.g. Cursor only sends post_tool_use).
+    let from_hooks: usize = conn.execute(
+        "INSERT OR IGNORE INTO sessions (session_id, provider, started_at)
+         SELECT h.session_id, h.provider, MIN(h.timestamp)
+         FROM hook_events h
+         WHERE h.session_id IS NOT NULL
+           AND h.session_id NOT IN (SELECT session_id FROM sessions)
+         GROUP BY h.session_id, h.provider",
+        [],
+    )?;
+    if from_hooks > 0 {
+        tracing::info!("Session backfill: created {from_hooks} stub rows from hook_events");
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -306,22 +428,22 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_request_id ON messages(request_id) WHERE request_id IS NOT NULL;
 
         -- sessions
-        CREATE INDEX IF NOT EXISTS idx_sessions_conversation_id ON sessions(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 
         -- hook_events
-        CREATE INDEX IF NOT EXISTS idx_hook_events_conversation ON hook_events(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_session ON hook_events(session_id);
         CREATE INDEX IF NOT EXISTS idx_hook_events_timestamp ON hook_events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);
         CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation ON hook_events(event, conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_session ON hook_events(event, session_id);
         CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_conversation_ts ON hook_events(event, conversation_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_event_session_ts ON hook_events(event, session_id, timestamp);
 
         -- otel_events
         CREATE INDEX IF NOT EXISTS idx_otel_events_session ON otel_events(session_id);
