@@ -2284,7 +2284,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     let msg_count = messages.len() as u64;
     let total_cost: f64 = messages.iter().map(|m| m.cost_cents).sum();
 
-    let context_drag = calc_context_drag(&messages);
+    let context_drag = calc_context_drag(conn, &sid, &messages);
     let cache_eff = calc_cache_efficiency(&messages);
     let thrashing = calc_thrashing(conn, &sid);
     let cost_accel = calc_cost_acceleration(&messages, total_cost);
@@ -2460,16 +2460,46 @@ fn vital_state_from_ratio(ratio: f64, yellow_threshold: f64, red_threshold: f64)
     }
 }
 
-fn calc_context_drag(messages: &[MessageRow]) -> Option<VitalScore> {
-    if messages.len() < 5 {
+fn calc_context_drag(
+    conn: &Connection,
+    session_id: &str,
+    messages: &[MessageRow],
+) -> Option<VitalScore> {
+    // If a compact happened, only consider messages after the last compact.
+    // This resets the baseline so post-compact sessions start fresh.
+    let last_compact_ts: Option<String> = conn
+        .query_row(
+            "SELECT MAX(timestamp) FROM hook_events
+             WHERE session_id = ?1 AND event = 'pre_compact'",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let effective: &[MessageRow] = if let Some(ref ts) = last_compact_ts {
+        let start = messages.iter().position(|m| m.timestamp.as_str() > ts.as_str());
+        match start {
+            Some(idx) => &messages[idx..],
+            None => messages,
+        }
+    } else {
+        messages
+    };
+
+    if effective.len() < 5 {
         return None;
     }
-    let window = 3.min(messages.len());
+    let window = 3.min(effective.len());
     let total_input =
         |m: &MessageRow| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64;
 
-    let first_avg = messages[..window].iter().map(total_input).sum::<f64>() / window as f64;
-    let last_avg = messages[messages.len() - window..]
+    let first_avg = effective[..window]
+        .iter()
+        .map(total_input)
+        .sum::<f64>()
+        / window as f64;
+    let last_avg = effective[effective.len() - window..]
         .iter()
         .map(total_input)
         .sum::<f64>()
