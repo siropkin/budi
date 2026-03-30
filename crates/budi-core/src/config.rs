@@ -101,7 +101,7 @@ impl StatuslineConfig {
             while let Some(start) = rest.find('{') {
                 if let Some(end) = rest[start..].find('}') {
                     let name = &rest[start + 1..start + end];
-                    if STATUSLINE_SLOTS.contains(&name) && !slots.contains(&name.to_string()) {
+                    if STATUSLINE_SLOTS.contains(&name) && !slots.iter().any(|s| s == name) {
                         slots.push(name.to_string());
                     }
                     rest = &rest[start + end + 1..];

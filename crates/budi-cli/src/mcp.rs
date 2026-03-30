@@ -339,13 +339,13 @@ impl BudiMcpServer {
         let query = build_params(since.as_deref(), until.as_deref());
         let url = format!("/analytics/branches/{}", urlencoding_simple(branch));
         let result: Value = match self.daemon_get_raw(&url, &query) {
-            Ok(resp) => {
-                if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok((status, body)) => {
+                if status == reqwest::StatusCode::NOT_FOUND {
                     return Ok(CallToolResult::success(vec![Content::text(format!(
                         "No data found for branch '{branch}' ({period_label}). Run `budi sync` if you haven't synced recently."
                     ))]));
                 }
-                resp.json()
+                serde_json::from_str(&body)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
             Err(e) => return Err(e),
@@ -589,9 +589,9 @@ impl BudiMcpServer {
 
         // Health check
         match self.daemon_get_raw("/health", &[]) {
-            Ok(resp) if resp.status().is_success() => {
-                let body: Value = resp.json().unwrap_or_default();
-                let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+            Ok((status, body)) if status.is_success() => {
+                let val: Value = serde_json::from_str(&body).unwrap_or_default();
+                let version = val.get("version").and_then(|v| v.as_str()).unwrap_or("?");
                 text.push_str(&format!("Status: running (v{version})\n"));
             }
             _ => {
@@ -707,23 +707,28 @@ impl BudiMcpServer {
         description = "Trigger a data sync to refresh analytics with latest transcripts."
     )]
     async fn sync_data(&self) -> Result<CallToolResult, McpError> {
-        let resp = self
-            .client
-            .post(format!("{}/sync", self.base_url))
-            .json(&serde_json::json!({ "migrate": false }))
-            .timeout(Duration::from_secs(120))
-            .send()
-            .map_err(|e| McpError::internal_error(format!("Daemon not reachable: {e}"), None))?;
+        let (status, response_body) = tokio::task::block_in_place(|| {
+            let resp = self
+                .client
+                .post(format!("{}/sync", self.base_url))
+                .json(&serde_json::json!({ "migrate": false }))
+                .timeout(Duration::from_secs(120))
+                .send()
+                .map_err(|e| {
+                    McpError::internal_error(format!("Daemon not reachable: {e}"), None)
+                })?;
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            Ok::<_, McpError>((status, text))
+        })?;
 
-        if !resp.status().is_success() {
-            let body = resp.text().unwrap_or_default();
+        if !status.is_success() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Sync failed: {body}"
+                "Sync failed: {response_body}"
             ))]));
         }
 
-        let body: Value = resp
-            .json()
+        let body: Value = serde_json::from_str(&response_body)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let files = body.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
         let messages = body
@@ -744,9 +749,9 @@ impl BudiMcpServer {
 
         // Health
         match self.daemon_get_raw("/health", &[]) {
-            Ok(resp) if resp.status().is_success() => {
-                let body: Value = resp.json().unwrap_or_default();
-                let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+            Ok((status, body)) if status.is_success() => {
+                let val: Value = serde_json::from_str(&body).unwrap_or_default();
+                let version = val.get("version").and_then(|v| v.as_str()).unwrap_or("?");
                 text.push_str(&format!("Daemon: running (v{version})\n"));
             }
             _ => {
@@ -832,52 +837,60 @@ impl BudiMcpServer {
         path: &str,
         params: &[(String, String)],
     ) -> Result<T, McpError> {
-        let resp = self
-            .client
-            .get(format!("{}{}", self.base_url, path))
-            .query(params)
-            .send()
-            .map_err(|e| {
-                McpError::internal_error(
-                    format!(
-                        "budi daemon not reachable at {}. Run `budi init` to start it. Error: {e}",
-                        self.base_url
-                    ),
+        tokio::task::block_in_place(|| {
+            let resp = self
+                .client
+                .get(format!("{}{}", self.base_url, path))
+                .query(params)
+                .send()
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!(
+                            "budi daemon not reachable at {}. Run `budi init` to start it. Error: {e}",
+                            self.base_url
+                        ),
+                        None,
+                    )
+                })?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                return Err(McpError::internal_error(
+                    format!("Daemon returned {status}: {body}"),
                     None,
-                )
-            })?;
+                ));
+            }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
-            return Err(McpError::internal_error(
-                format!("Daemon returned {status}: {body}"),
-                None,
-            ));
-        }
-
-        resp.json()
-            .map_err(|e| McpError::internal_error(format!("Invalid response: {e}"), None))
+            resp.json()
+                .map_err(|e| McpError::internal_error(format!("Invalid response: {e}"), None))
+        })
     }
 
     fn daemon_get_raw(
         &self,
         path: &str,
         params: &[(String, String)],
-    ) -> Result<reqwest::blocking::Response, McpError> {
-        self.client
-            .get(format!("{}{}", self.base_url, path))
-            .query(params)
-            .send()
-            .map_err(|e| {
-                McpError::internal_error(
-                    format!(
-                        "budi daemon not reachable at {}. Run `budi init` to start it. Error: {e}",
-                        self.base_url
-                    ),
-                    None,
-                )
-            })
+    ) -> Result<(reqwest::StatusCode, String), McpError> {
+        tokio::task::block_in_place(|| {
+            let resp = self
+                .client
+                .get(format!("{}{}", self.base_url, path))
+                .query(params)
+                .send()
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!(
+                            "budi daemon not reachable at {}. Run `budi init` to start it. Error: {e}",
+                            self.base_url
+                        ),
+                        None,
+                    )
+                })?;
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            Ok((status, body))
+        })
     }
 }
 

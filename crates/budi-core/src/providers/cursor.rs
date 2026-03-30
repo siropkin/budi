@@ -385,7 +385,10 @@ fn parse_usage_event(ev: &Value) -> Option<CursorUsageEvent> {
         None => None,
     };
 
-    let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
+    let total_tokens = input_tokens
+        .saturating_add(output_tokens)
+        .saturating_add(cache_creation_tokens)
+        .saturating_add(cache_read_tokens);
     if total_tokens == 0 && total_cents.is_none() {
         return None;
     }

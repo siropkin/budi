@@ -45,7 +45,9 @@ pub async fn otel_logs_ingest(Json(payload): Json<serde_json::Value>) -> StatusC
         if result.is_none() {
             tracing::debug!("OTEL: could not open database");
         }
-    });
+    })
+    .await
+    .ok();
 
     StatusCode::OK
 }

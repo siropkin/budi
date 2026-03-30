@@ -25,7 +25,7 @@ pub fn cmd_open() -> Result<()> {
         }
         #[cfg(target_os = "windows")]
         {
-            Command::new("cmd").args(["/C", "start", &url]).spawn()
+            Command::new("cmd").args(["/C", "start", "", &url]).spawn()
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {

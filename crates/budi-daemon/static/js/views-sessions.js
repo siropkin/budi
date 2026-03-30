@@ -164,7 +164,6 @@ function healthIcon(state) {
 
 function renderHealthPanel(health) {
   if (!health) return '';
-  const icon = healthIcon(health.state);
 
   const vitalNames = {
     context_drag: 'Context Drag',

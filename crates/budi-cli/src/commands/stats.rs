@@ -465,7 +465,7 @@ fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: boo
 
     let yellow = ansi("\x1b[33m");
 
-    let max_msgs = models.first().map(|m| m.message_count).unwrap_or(1);
+    let max_msgs = models.iter().map(|m| m.message_count).max().unwrap_or(1).max(1);
     for m in &models {
         let bar_len = ((m.message_count as f64 / max_msgs as f64) * 16.0) as usize;
         let bar: String = "█".repeat(bar_len);

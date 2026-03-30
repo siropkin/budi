@@ -47,7 +47,7 @@ pub fn get_sync_offset(conn: &Connection, file_path: &str) -> Result<usize> {
         |row| row.get::<_, i64>(0),
     );
     match result {
-        Ok(offset) => Ok(offset as usize),
+        Ok(offset) => Ok(offset.max(0) as usize),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
         Err(e) => Err(e.into()),
     }
@@ -2325,6 +2325,10 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
 
 /// Batch compute health states for a list of sessions (for the sessions list view).
 /// Returns session_id → overall health state.
+/// Lightweight batch health check for the sessions list view.
+/// Computes only context_drag and cost_acceleration (not cache_efficiency or thrashing)
+/// to keep the list query fast. The full `session_health()` computes all four vitals,
+/// so list and detail views may show different health states.
 pub fn session_health_batch(
     conn: &Connection,
     session_ids: &[&str],

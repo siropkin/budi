@@ -556,7 +556,7 @@ pub fn query_mcp_stats(
                 SUM(tool_duration_ms) as total_duration_ms
          FROM hook_events
          {where_clause}
-         GROUP BY tool_name
+         GROUP BY tool_name, mcp_server
          ORDER BY call_count DESC
          LIMIT ?{idx}",
     );

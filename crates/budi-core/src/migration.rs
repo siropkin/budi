@@ -91,7 +91,8 @@ fn drop_all_tables(conn: &Connection) -> Result<()> {
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     for table in tables {
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table}\";"))?;
+        let safe_name = table.replace('"', "\"\"");
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{safe_name}\";"))?;
     }
     Ok(())
 }

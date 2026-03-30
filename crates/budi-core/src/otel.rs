@@ -73,6 +73,9 @@ pub struct OtelApiRequest {
     pub timestamp: DateTime<Utc>,
     pub timestamp_nano: String,
     pub model: String,
+    /// Parsed from OTEL attributes but intentionally not used for ingestion —
+    /// cost_cents is recomputed from tokens x pricing because cost_usd
+    /// systematically underreports (~10%). Kept for tests and debugging.
     pub cost_usd: f64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -160,7 +163,15 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
                 }
 
                 let timestamp_nano = record.time_unix_nano.as_deref().unwrap_or("0").to_string();
-                let timestamp = parse_timestamp_nano(&timestamp_nano).unwrap_or_else(Utc::now);
+                let timestamp = match parse_timestamp_nano(&timestamp_nano) {
+                    Some(ts) => ts,
+                    None => {
+                        tracing::warn!(
+                            "OTEL: skipping event with unparseable timestamp: {timestamp_nano}"
+                        );
+                        continue;
+                    }
+                };
 
                 let model = get_attr_str(attrs, "model").unwrap_or_default();
                 let cost_usd = get_attr_double(attrs, "cost_usd").unwrap_or(0.0);

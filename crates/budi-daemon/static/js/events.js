@@ -86,7 +86,9 @@ async function switchAndReload() {
   insightsData = null;
   sessionsPageData = null;
   settingsData = null;
-  selectedSessionId = null;
+  // Preserve selectedSessionId from URL when on session detail page
+  const sessionUrlMatch = location.pathname.match(/^\/dashboard\/sessions\/(.+)$/);
+  selectedSessionId = sessionUrlMatch ? decodeURIComponent(sessionUrlMatch[1]) : null;
   // Hide period tabs on settings page
   const periodBar = $('.period-tabs');
   if (periodBar) periodBar.style.display = currentPage === 'settings' ? 'none' : '';
@@ -96,10 +98,14 @@ async function switchAndReload() {
       if (abort.signal.aborted) return;
       renderInsightsView(content);
     } else if (currentPage === 'sessions') {
-      await loadSessionsPageData(abort.signal);
-      if (abort.signal.aborted) return;
-      renderSessionsView(content);
-      bindSessionsHandlers(content);
+      if (selectedSessionId) {
+        await renderSessionDetail(selectedSessionId, content);
+      } else {
+        await loadSessionsPageData(abort.signal);
+        if (abort.signal.aborted) return;
+        renderSessionsView(content);
+        bindSessionsHandlers(content);
+      }
     } else if (currentPage === 'settings') {
       await loadSettingsData();
       if (abort.signal.aborted) return;
@@ -178,7 +184,7 @@ setInterval(async () => {
     overviewRefreshing = true;
     try {
       await loadStatsData();
-      renderStatsView($('#content'));
+      if (currentPage === 'overview') renderStatsView($('#content'));
     } catch (_) { /* poll failure is non-fatal */ }
     overviewRefreshing = false;
   }
