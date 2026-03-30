@@ -382,6 +382,7 @@ fn install_cursor_hooks() -> Result<()> {
         "preCompact",
         "stop",
         "afterFileEdit",
+        "beforeSubmitPrompt",
     ];
 
     let budi_hook_entry = json!({

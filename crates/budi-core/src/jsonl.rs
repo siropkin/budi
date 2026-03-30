@@ -28,6 +28,19 @@ pub(crate) struct UserEntry {
     pub cwd: Option<String>,
     pub git_branch: Option<String>,
     pub parent_uuid: Option<String>,
+    pub message: Option<UserMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UserMessage {
+    pub content: Option<UserContent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum UserContent {
+    Text(String),
+    Blocks(()),
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +136,9 @@ pub struct ParsedMessage {
     pub cache_creation_1h_tokens: u64,
     /// Number of web search requests (billed separately).
     pub web_search_requests: u64,
+    /// Classified activity type from user prompt text (e.g. "bugfix", "feature").
+    /// Set during JSONL parsing or from hook events. Propagated user→assistant in pipeline.
+    pub prompt_category: Option<String>,
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -139,33 +155,40 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
         }
     };
     match entry {
-        TranscriptEntry::User(u) => Some(ParsedMessage {
-            uuid: u.uuid,
-            session_id: u.session_id,
-            timestamp: u.timestamp,
-            cwd: u.cwd,
-            role: "user".to_string(),
-            model: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            git_branch: u.git_branch,
-            repo_id: None,
-            provider: "claude_code".to_string(),
-            cost_cents: None,
-            session_title: None,
-            parent_uuid: u.parent_uuid,
-            user_name: None,
-            machine_name: None,
-            // User messages have no cost — use "n/a" to distinguish from
-            // assistant messages whose confidence hasn't been set yet (empty string).
-            cost_confidence: "n/a".to_string(),
-            request_id: None,
-            speed: None,
-            cache_creation_1h_tokens: 0,
-            web_search_requests: 0,
-        }),
+        TranscriptEntry::User(u) => {
+            let prompt_text = u.message.as_ref().and_then(|m| match &m.content {
+                Some(UserContent::Text(s)) => Some(s.as_str()),
+                _ => None,
+            });
+            let prompt_category =
+                prompt_text.and_then(crate::hooks::classify_prompt);
+            Some(ParsedMessage {
+                uuid: u.uuid,
+                session_id: u.session_id,
+                timestamp: u.timestamp,
+                cwd: u.cwd,
+                role: "user".to_string(),
+                model: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: u.git_branch,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: None,
+                session_title: None,
+                parent_uuid: u.parent_uuid,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "n/a".to_string(),
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+                prompt_category,
+            })
+        }
         TranscriptEntry::Assistant(a) => {
             let usage = a.message.usage.as_ref();
             // Extract 1-hour cache tier tokens from cache_creation breakdown
@@ -203,6 +226,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 speed: usage.and_then(|u| u.speed.clone()),
                 cache_creation_1h_tokens: cache_1h,
                 web_search_requests: web_searches,
+                prompt_category: None,
             })
         }
         TranscriptEntry::Other => None,

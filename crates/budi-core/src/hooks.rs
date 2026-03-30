@@ -294,13 +294,39 @@ pub fn update_session_category(conn: &Connection, event: &HookEvent, category: &
 }
 
 /// Classify a user prompt into a category using keyword heuristics.
-/// Returns None if no category matches.
+/// Returns None if no category matches (system commands, very short, or ambiguous).
 pub fn classify_prompt(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
+
+    // Skip system commands and tool results
+    if lower.starts_with('<') || lower.starts_with('/') || lower.len() < 5 {
+        return None;
+    }
 
     // Check in priority order (most specific first)
     let bugfix_words = [
         "fix", "bug", "broken", "error", "crash", "issue", "debug", "failing", "wrong",
+    ];
+    let refactor_words = [
+        "refactor", "rename", "clean up", "extract", "reorganize", "simplify", "restructure",
+    ];
+    let review_words = [
+        "review",
+        "check",
+        "audit",
+        "validate",
+        "verify",
+        "inspect",
+        "look at",
+        "address",
+    ];
+    let ops_words = [
+        "deploy", "release", "migrate", "upgrade", "bump", "publish", "install", "update",
+        "commit", "push", "merge", "rebase",
+    ];
+    let question_words = [
+        "why", "how does", "how do", "how much", "how often", "what is", "what does", "can you tell",
+        "explain", "understand", "show me", "discover", "research",
     ];
     let feature_words = [
         "add",
@@ -309,27 +335,30 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         "build",
         "new feature",
         "integrate",
+        "introduce",
+        "design",
     ];
-    let refactor_words = [
-        "refactor",
-        "rename",
-        "move",
-        "clean",
-        "extract",
-        "reorganize",
-        "simplify",
+    let writing_words = [
+        "write", "draft", "article", "post", "document", "blog", "readme",
     ];
-    let question_words = ["why", "how does", "what is", "explain", "understand"];
-    let ops_words = ["deploy", "release", "migrate", "upgrade"];
+    let plan_words = [
+        "plan", "the plan", "implement the plan", "read and implement",
+    ];
 
     if bugfix_words.iter().any(|w| lower.contains(w)) {
         Some("bugfix".to_string())
     } else if refactor_words.iter().any(|w| lower.contains(w)) {
         Some("refactor".to_string())
+    } else if plan_words.iter().any(|w| lower.contains(w)) {
+        Some("feature".to_string())
+    } else if review_words.iter().any(|w| lower.contains(w)) {
+        Some("review".to_string())
     } else if ops_words.iter().any(|w| lower.contains(w)) {
         Some("ops".to_string())
     } else if question_words.iter().any(|w| lower.contains(w)) || lower.ends_with('?') {
         Some("question".to_string())
+    } else if writing_words.iter().any(|w| lower.contains(w)) {
+        Some("writing".to_string())
     } else if feature_words.iter().any(|w| lower.contains(w)) {
         Some("feature".to_string())
     } else {
@@ -811,6 +840,10 @@ mod tests {
             classify_prompt("extract this into a helper"),
             Some("refactor".to_string())
         );
+        assert_eq!(
+            classify_prompt("clean up the utils module"),
+            Some("refactor".to_string())
+        );
     }
 
     #[test]
@@ -842,9 +875,43 @@ mod tests {
     }
 
     #[test]
+    fn classify_review() {
+        assert_eq!(
+            classify_prompt("review the PR"),
+            Some("review".to_string())
+        );
+        assert_eq!(
+            classify_prompt("audit the codebase"),
+            Some("review".to_string())
+        );
+        assert_eq!(
+            classify_prompt("validate the endpoint responses"),
+            Some("review".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_writing() {
+        assert_eq!(
+            classify_prompt("draft the article"),
+            Some("writing".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_plan() {
+        assert_eq!(
+            classify_prompt("read and implement the plan ~/.claude/plans/foo.md"),
+            Some("feature".to_string())
+        );
+    }
+
+    #[test]
     fn classify_unknown() {
-        assert_eq!(classify_prompt("hello"), None);
+        assert_eq!(classify_prompt("hi"), None);
         assert_eq!(classify_prompt("thanks"), None);
+        assert_eq!(classify_prompt("<command>/clear</command>"), None);
+        assert_eq!(classify_prompt("/exit"), None);
     }
 
     #[test]

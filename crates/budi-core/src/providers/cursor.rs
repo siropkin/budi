@@ -617,6 +617,7 @@ fn usage_events_to_messages(
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+                prompt_category: None,
             }
         })
         .collect()
@@ -984,6 +985,7 @@ fn parse_cursor_line(
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+            prompt_category: None,
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -1011,6 +1013,7 @@ fn parse_cursor_line(
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+                prompt_category: None,
             })
         }
         _ => None,

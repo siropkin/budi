@@ -57,6 +57,7 @@ impl Pipeline {
             "repo",
             "session_title",
             "user",
+            "activity",
             "machine",
             "composer_mode",
             "permission_mode",
@@ -83,6 +84,8 @@ impl Pipeline {
             std::collections::HashMap::new();
         let mut session_cwd: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut session_category: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages.iter_mut() {
             // Use session_id for grouping. Unsessionized messages use their own uuid
             // as the key so they don't share context with other unsessionized messages.
@@ -97,7 +100,6 @@ impl Pipeline {
             // An explicit empty string (Some("")) does not overwrite an existing
             // non-empty value but is kept as-is on the message (no inheritance).
             if let Some(b) = &msg.git_branch {
-                // Non-empty overwrites; empty is stored only if no prior value exists.
                 if !b.is_empty() || !session_branch.contains_key(&key) {
                     session_branch.insert(key.clone(), b.clone());
                 }
@@ -118,6 +120,15 @@ impl Pipeline {
             } else if let Some(c) = session_cwd.get(&key) {
                 msg.cwd = Some(c.clone());
             }
+            // prompt_category: first classified user prompt wins for the session,
+            // then propagates to all subsequent messages (including assistants).
+            if let Some(cat) = &msg.prompt_category {
+                if !session_category.contains_key(&key) {
+                    session_category.insert(key.clone(), cat.clone());
+                }
+            } else if let Some(cat) = session_category.get(&key) {
+                msg.prompt_category = Some(cat.clone());
+            }
         }
 
         for msg in messages.iter_mut() {
@@ -125,7 +136,6 @@ impl Pipeline {
             for enricher in &mut self.enrichers {
                 for tag in enricher.enrich(msg) {
                     if session_level_keys.contains(&tag.key.as_str()) {
-                        // Use session_id for dedup, or message uuid for unsessionized messages
                         let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
                         let key = (dedup_id, tag.key.clone(), tag.value.clone());
                         if !seen_session_tags.insert(key) {
@@ -138,6 +148,18 @@ impl Pipeline {
                         }
                     }
                     msg_tags.push(tag);
+                }
+            }
+            // Add "activity" tag from prompt_category (classified from user prompt text
+            // during JSONL parsing or from hook events). Only emit once per session.
+            if let Some(ref cat) = msg.prompt_category {
+                let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
+                let key = (dedup_id, "activity".to_string(), cat.clone());
+                if seen_session_tags.insert(key) {
+                    msg_tags.push(crate::analytics::Tag {
+                        key: "activity".to_string(),
+                        value: cat.clone(),
+                    });
                 }
             }
             all_tags.push(msg_tags);
@@ -329,6 +351,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+            prompt_category: None,
         }
     }
 }

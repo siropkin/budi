@@ -438,6 +438,7 @@ const CURSOR_EXPECTED_EVENTS: &[&str] = &[
     "sessionEnd",
     "postToolUse",
     "subagentStop",
+    "beforeSubmitPrompt",
     "preCompact",
     "stop",
     "afterFileEdit",

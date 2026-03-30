@@ -65,16 +65,62 @@ pub fn set_sync_offset(conn: &Connection, file_path: &str, offset: usize) -> Res
     Ok(())
 }
 
-/// Reset all sync state and data so the next sync re-ingests everything from scratch.
+/// Reset sync state and re-ingested data so the next sync starts from scratch.
 /// Used by `budi sync --force` after schema/parser changes.
+///
+/// Preserves `hook_events` — they come from real-time stdin hooks and cannot be
+/// reconstructed from source files. Sessions are rebuilt from the preserved
+/// hook_events so Cursor session attribution survives the reset.
 pub fn reset_sync_state(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "DELETE FROM sync_state;
          DELETE FROM tags;
          DELETE FROM messages;
-         DELETE FROM sessions;
-         DELETE FROM hook_events;",
+         DELETE FROM sessions;",
     )?;
+    rebuild_sessions_from_hooks(conn)?;
+    Ok(())
+}
+
+/// Replay all hook_events to rebuild the sessions table.
+/// Re-parses each event's raw_json and calls `upsert_session`, preserving
+/// the original timestamp ordering so session metadata accumulates correctly.
+fn rebuild_sessions_from_hooks(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT raw_json, provider, timestamp FROM hook_events
+         WHERE session_id IS NOT NULL
+         ORDER BY timestamp ASC",
+    )?;
+
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .context("Failed to query hook_events for session rebuild")?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut rebuilt = 0;
+    for (raw_json, _provider, stored_ts) in &rows {
+        let json: serde_json::Value = match serde_json::from_str(raw_json) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut event = match crate::hooks::parse_hook_event(&json) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        // Use the stored timestamp (when the hook was originally received)
+        // instead of Utc::now() which parse_hook_event would set.
+        if let Ok(ts) = stored_ts.parse::<chrono::DateTime<chrono::Utc>>() {
+            event.timestamp = ts;
+        }
+        if crate::hooks::upsert_session(conn, &event).is_ok() {
+            rebuilt += 1;
+        }
+    }
+
+    if rebuilt > 0 {
+        tracing::info!("Rebuilt sessions from {rebuilt} hook events");
+    }
     Ok(())
 }
 
@@ -331,15 +377,27 @@ pub fn ingest_messages_with_sync(
     {
         let mut seen_sessions: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
+        let mut session_categories: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages {
             if let Some(ref sid) = msg.session_id {
                 seen_sessions.insert((sid.clone(), msg.provider.clone()));
+                if let Some(ref cat) = msg.prompt_category {
+                    session_categories.entry(sid.clone()).or_insert_with(|| cat.clone());
+                }
             }
         }
         for (sid, provider) in &seen_sessions {
             tx.execute(
                 "INSERT OR IGNORE INTO sessions (session_id, provider) VALUES (?1, ?2)",
                 params![sid, provider],
+            )?;
+        }
+        for (sid, category) in &session_categories {
+            tx.execute(
+                "UPDATE sessions SET prompt_category = ?2
+                 WHERE session_id = ?1 AND (prompt_category IS NULL OR prompt_category = '')",
+                params![sid, category],
             )?;
         }
     }
@@ -2247,6 +2305,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -2272,6 +2331,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ];
 
@@ -2320,6 +2380,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         // CostEnricher is the single source of truth for cost_cents
         CostEnricher.enrich(&mut msg);
@@ -2377,6 +2438,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "m2".to_string(),
@@ -2402,6 +2464,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ];
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -2443,6 +2506,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "a1".to_string(),
@@ -2470,6 +2534,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "u2".to_string(),
@@ -2496,6 +2561,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ]
     }
@@ -2575,6 +2641,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "t2".to_string(),
@@ -2601,6 +2668,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             // Token-heavy session: input >> output
             ParsedMessage {
@@ -2628,6 +2696,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ]
     }
@@ -2729,6 +2798,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "cc-a1".to_string(),
@@ -2755,6 +2825,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ];
 
@@ -2785,6 +2856,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "cu-a1".to_string(),
@@ -2811,6 +2883,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ];
 
@@ -2880,6 +2953,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -2914,6 +2988,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -2966,6 +3041,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -2994,6 +3070,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -3042,6 +3119,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         ingest_messages(&mut conn, &[msg1], None).unwrap();
 
@@ -3069,6 +3147,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+        prompt_category: None,
         };
         ingest_messages(&mut conn, &[msg2], None).unwrap();
 
@@ -3123,6 +3202,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             });
         }
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -3162,6 +3242,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "conf-2".to_string(),
@@ -3187,6 +3268,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+                prompt_category: None,
             },
         ];
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -3227,6 +3309,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
             ParsedMessage {
                 uuid: "sub-1".to_string(),
@@ -3252,6 +3335,7 @@ mod tests {
                 speed: None,
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
+            prompt_category: None,
             },
         ];
         ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -3315,6 +3399,7 @@ mod tests {
             speed: None,
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
+            prompt_category: None,
         }
     }
 
