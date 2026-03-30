@@ -94,12 +94,9 @@ fn build_router(app_state: AppState) -> Router {
             get(a::analytics_session_tags),
         )
         .route("/hooks/ingest", post(h::hooks_ingest))
+        // SPA: all /dashboard/* paths serve the same HTML; JS handles client-side routing
         .route("/dashboard", get(d::dashboard))
-        .route("/dashboard/overview", get(d::dashboard))
-        .route("/dashboard/insights", get(d::dashboard))
-        .route("/dashboard/sessions", get(d::dashboard))
-        .route("/dashboard/settings", get(d::dashboard))
-        .route("/dashboard/sessions/{session_id}", get(d::dashboard))
+        .route("/dashboard/{*rest}", get(d::dashboard))
         .route("/static/dashboard.css", get(d::dashboard_css))
         .route("/static/dashboard.js", get(d::dashboard_js))
         .with_state(app_state)
