@@ -25,7 +25,9 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     let home = budi_core::config::home_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    if !home.is_empty() {
+    if home.is_empty() {
+        eprintln!("{yellow}warning: could not determine home directory — skipping hook/config cleanup{reset}");
+    } else {
         print!("Removing Claude Code hooks... ");
         match remove_claude_code_hooks(&home) {
             Ok(true) => {
@@ -452,7 +454,7 @@ fn verify_no_budi_hooks_cc(path: &PathBuf) -> bool {
         return true; // file gone = hooks gone
     };
     let Ok(settings) = serde_json::from_str::<Value>(&raw) else {
-        return true;
+        return false; // malformed JSON — cannot verify
     };
     let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) else {
         return true;
@@ -470,7 +472,7 @@ fn verify_no_budi_hooks_cursor(path: &PathBuf) -> bool {
         return true;
     };
     let Ok(config) = serde_json::from_str::<Value>(&raw) else {
-        return true;
+        return false; // malformed JSON — cannot verify
     };
     let Some(hooks) = config.get("hooks").and_then(|h| h.as_object()) else {
         return true;

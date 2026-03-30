@@ -508,7 +508,10 @@ pub fn query_tool_stats(
                 total_duration_ms: row.get(4)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            r.inspect_err(|e| tracing::warn!("Failed to map tool stats row: {e}"))
+                .ok()
+        })
         .collect();
 
     Ok(rows)
@@ -572,7 +575,10 @@ pub fn query_mcp_stats(
                 total_duration_ms: row.get(4)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            r.inspect_err(|e| tracing::warn!("Failed to map MCP stats row: {e}"))
+                .ok()
+        })
         .collect();
 
     Ok(rows)

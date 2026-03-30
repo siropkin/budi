@@ -116,6 +116,7 @@ jobs:
         run: |
           scripts/uninstall.sh --bin-dir "$RUNNER_TEMP/budi-bin" --keep-daemons
           ! test -f "$RUNNER_TEMP/budi-bin/budi"
+          ! test -f "$RUNNER_TEMP/budi-bin/budi-daemon"
           echo "Uninstall verified: binaries removed"
 
   windows-build:

@@ -704,7 +704,7 @@ impl BudiMcpServer {
     }
 
     #[tool(
-        description = "Trigger a data sync to refresh analytics with latest transcripts. Use force=true to re-ingest from scratch (after upgrades)."
+        description = "Trigger a data sync to refresh analytics with latest transcripts."
     )]
     async fn sync_data(&self) -> Result<CallToolResult, McpError> {
         let resp = self
@@ -901,8 +901,8 @@ fn period_to_dates(period: &str) -> (Option<String>, Option<String>) {
             (Some(since), None)
         }
         "all" => (None, None),
-        _ => {
-            // Default to month
+        other => {
+            tracing::warn!("Unknown period '{other}', defaulting to month");
             let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
                 .expect("valid first-of-month date");
             let since = local_midnight_to_utc(first);

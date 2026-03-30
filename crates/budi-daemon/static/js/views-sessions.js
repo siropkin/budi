@@ -207,14 +207,13 @@ function renderHealthPanel(health) {
 async function renderSessionDetail(sessionId, content) {
   content.innerHTML = '<div class="loading">Loading session</div>';
 
-  const fetches = [
+  const sessionsListPromise = sessionsPageData ? Promise.resolve() : loadSessionsPageData();
+  const [msgs, tags, health] = await Promise.all([
     loadSessionMessages(sessionId),
     loadSessionTags(sessionId),
     loadSessionHealth(sessionId),
-  ];
-  if (!sessionsPageData) fetches.push(loadSessionsPageData());
-
-  const [msgs, tags, health] = await Promise.all(fetches);
+  ]);
+  await sessionsListPromise;
   sessionDetailMessages = msgs;
   sessionDetailSortCol = 'timestamp';
   sessionDetailSortAsc = false;

@@ -3,7 +3,7 @@
 let settingsData = null;
 
 async function loadSettingsData() {
-  const ok = r => r.json();
+  const ok = r => { if (!r.ok) throw new Error(r.statusText); return r.json(); };
   const [health, schema, syncStatus, integrations] = await Promise.all([
     fetch('/health').then(ok).catch(() => ({ ok: false })),
     fetch('/admin/schema').then(ok).catch(() => ({ current: '?', target: '?' })),

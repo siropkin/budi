@@ -90,11 +90,11 @@ Examples:
     /// Sync recent transcripts (last 30 days). Use --all for full history, --force to re-ingest from scratch.
     Sync {
         /// Load full transcript history (all time — may take a while)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "force")]
         all: bool,
         /// Force re-sync: clears all data and re-ingests from scratch.
         /// Use after upgrading budi when the cost calculation has changed.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         force: bool,
     },
     /// Open the budi dashboard in the browser

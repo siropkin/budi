@@ -171,13 +171,16 @@ window.addEventListener('popstate', () => {
 render();
 
 // Auto-refresh: poll every 30s for overview, every 5s for settings sync status
+let overviewRefreshing = false;
 setInterval(async () => {
-  if (document.hidden || !dataLoaded) return;
+  if (document.hidden || !dataLoaded || overviewRefreshing) return;
   if (currentPage === 'overview') {
+    overviewRefreshing = true;
     try {
       await loadStatsData();
       renderStatsView($('#content'));
     } catch (_) { /* poll failure is non-fatal */ }
+    overviewRefreshing = false;
   }
 }, 30000);
 

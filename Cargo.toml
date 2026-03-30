@@ -9,6 +9,7 @@ resolver = "2"
 [workspace.package]
 version = "7.4.2"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 authors = ["Ivan Seredkin"]
 repository = "https://github.com/siropkin/budi"

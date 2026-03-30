@@ -40,7 +40,7 @@ Sources (JSONL files, OTEL spans, Cursor API, Hooks)
 
 Enricher order is critical — each depends on prior enrichers. Do not reorder.
 
-### Database (SQLite, WAL mode, schema v13)
+### Database (SQLite, WAL mode, schema v14)
 
 Six tables, four data entities + two supporting:
 - **messages** — Single cost entity. One row per API call. All token/cost data lives here. Fields: uuid, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id

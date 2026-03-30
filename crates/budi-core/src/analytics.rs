@@ -95,7 +95,10 @@ fn rebuild_sessions_from_hooks(conn: &Connection) -> Result<()> {
     let rows: Vec<(String, String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .context("Failed to query hook_events for session rebuild")?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            r.inspect_err(|e| tracing::warn!("Failed to map hook_event row: {e}"))
+                .ok()
+        })
         .collect();
 
     let mut rebuilt = 0;

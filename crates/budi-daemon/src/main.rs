@@ -42,8 +42,14 @@ fn build_router(app_state: AppState) -> Router {
         .route("/health", get(h::health))
         .route("/health/integrations", get(h::health_integrations))
         .route("/health/check-update", get(h::health_check_update))
-        .route("/v1/logs", post(o::otel_logs_ingest))
-        .route("/v1/metrics", post(o::otel_metrics_ingest))
+        .route(
+            "/v1/logs",
+            post(o::otel_logs_ingest).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/metrics",
+            post(o::otel_metrics_ingest).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .route("/sync", post(h::analytics_sync))
         .route("/sync/all", post(h::analytics_history))
         .route("/sync/reset", post(h::analytics_sync_reset))
@@ -100,7 +106,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/dashboard/{*rest}", get(d::dashboard))
         .route("/static/dashboard.css", get(d::dashboard_css))
         .route("/static/dashboard.js", get(d::dashboard_js))
-        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(app_state)
 }
 

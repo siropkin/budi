@@ -25,10 +25,16 @@ pub fn needs_migration(conn: &Connection) -> bool {
 }
 
 /// Check if a database file needs migration without keeping the connection open.
+/// Returns `true` if migration is needed, `false` if not, or `true` if the
+/// database cannot be opened (erring on the side of attempting migration).
 pub fn needs_migration_at(db_path: &std::path::Path) -> bool {
-    Connection::open(db_path)
-        .map(|conn| needs_migration(&conn))
-        .unwrap_or(false)
+    match Connection::open(db_path) {
+        Ok(conn) => needs_migration(&conn),
+        Err(e) => {
+            tracing::warn!("Cannot open database at {}: {e}", db_path.display());
+            true
+        }
+    }
 }
 
 /// Run all pending migrations up to SCHEMA_VERSION.
@@ -83,8 +89,7 @@ fn drop_all_tables(conn: &Connection) -> Result<()> {
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
         .query_map([], |r| r.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<std::result::Result<_, _>>()?;
     for table in tables {
         conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table}\";"))?;
     }

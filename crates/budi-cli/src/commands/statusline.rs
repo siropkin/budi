@@ -351,6 +351,12 @@ pub fn cmd_statusline_install() -> Result<()> {
     }
 
     if let Some(existing) = settings.get("statusLine") {
+        if !existing.is_object() {
+            anyhow::bail!(
+                "statusLine in {} is not an object — fix it manually before installing",
+                settings_path.display()
+            );
+        }
         // Already has a statusLine — check if budi is already there
         let existing_cmd = existing
             .get("command")

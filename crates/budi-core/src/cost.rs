@@ -45,11 +45,8 @@ pub fn estimate_cost_filtered(
         param_values.push(p.to_string());
         conditions.push(format!("provider = ?{}", param_values.len()));
     }
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
+    debug_assert!(!conditions.is_empty(), "conditions always starts with role filter");
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
