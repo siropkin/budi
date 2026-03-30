@@ -165,6 +165,8 @@ budi sync --all               # load full history (all time)
 budi sync --force             # re-ingest all data from scratch (use after upgrades)
 budi update                   # check for updates (auto-detects Homebrew)
 budi update --version 7.1.0  # update to a specific version
+budi health                  # show session health vitals for most recent session
+budi health --session <id>   # health vitals for a specific session
 budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
 budi mcp-serve                # run MCP server (used by Claude Code, not called directly)
@@ -200,7 +202,7 @@ Budi includes an MCP (Model Context Protocol) server so AI agents can query your
 - "Show me cost per branch this month"
 - "Set up tag rules for my team repos"
 
-**Available tools (14):**
+**Available tools (15):**
 
 | Tool | Description |
 |------|-------------|
@@ -218,6 +220,7 @@ Budi includes an MCP (Model Context Protocol) server so AI agents can query your
 | `set_statusline_config` | Configure statusline slots |
 | `sync_data` | Trigger data sync |
 | `get_status` | Daemon health, schema, sync state |
+| `session_health` | Session health vitals, tips, and overall state |
 
 All analytics tools accept a `period` parameter: `today`, `week`, `month`, `all` (default: `month`).
 

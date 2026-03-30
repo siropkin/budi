@@ -25,7 +25,7 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 ### Crates
 
 - **budi-core** — Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, OTEL ingestion, hooks, config, migrations
-- **budi-cli** — Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate, mcp-serve
+- **budi-cli** — Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate, health, mcp-serve
 - **budi-daemon** — axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard, analytics API, hook ingestion, OTEL ingestion
 
 ### Data flow
@@ -79,14 +79,14 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/jsonl.rs` — JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` — Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` — Cursor provider (Usage API, auth from state.vscdb)
-- `crates/budi-core/src/migration.rs` — Schema v13, all migration paths
+- `crates/budi-core/src/migration.rs` — Schema v14, all migration paths
 - `crates/budi-core/src/config.rs` — BudiConfig, StatuslineConfig, TagsConfig
 - `crates/budi-daemon/src/main.rs` — HTTP server, ~38 routes
 - `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update endpoints
 - `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate)
 - `crates/budi-daemon/src/routes/otel.rs` — /v1/logs OTLP ingestion
 - `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering (coach mode with health tips) + installation
-- `crates/budi-cli/src/mcp.rs` — MCP server handler (14 tools: analytics + config)
+- `crates/budi-cli/src/mcp.rs` — MCP server handler (15 tools: analytics + config + health)
 - `crates/budi-cli/src/commands/mcp.rs` — `mcp-serve` subcommand (stdio transport)
 - `crates/budi-daemon/static/js/` — Dashboard JS (vanilla, no framework)
 
@@ -95,7 +95,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - CLI never touches SQLite directly — all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost — sets cost_cents during pipeline. Skips if cost already set (API data)
 - `budi init` installs hooks in `~/.claude/settings.json` (CC) and `~/.cursor/hooks.json` (Cursor), plus OTEL env vars and MCP server
-- **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 14 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity) and config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status). Thin HTTP client to daemon — stdout is JSON-RPC only, logging to stderr
+- **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 15 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity), config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status), and health (session_health). Thin HTTP client to daemon — stdout is JSON-RPC only, logging to stderr
 - Tags are auto-detected (provider, model, repo, ticket_id, etc.) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session — context drag (input token growth), cache efficiency (cache hit rate), cost acceleration (dominant-model cost ratio 2nd half vs 1st half), agent thrashing (rapid-fire tool sequences from hook_events). Each vital has green/yellow/red state. Tips are provider-aware (Claude Code gets `/compact` suggestions, Cursor gets "new composer session"). Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
