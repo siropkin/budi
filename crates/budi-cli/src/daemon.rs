@@ -57,15 +57,9 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
         if !daemon_version_matches(config) {
             eprintln!("budi: restarting daemon (version mismatch)");
             tracing::info!("Daemon version mismatch — restarting with current binary");
-            // Kill ALL budi-daemon processes to avoid DB lock conflicts.
-            // SIGTERM first, wait, then SIGKILL stragglers.
-            let _ = Command::new("pkill")
-                .args(["-f", "budi-daemon serve"])
-                .status();
+            kill_all_daemons();
             if !wait_for_port_release(config, 40, Duration::from_millis(150)) {
-                let _ = Command::new("pkill")
-                    .args(["-9", "-f", "budi-daemon serve"])
-                    .status();
+                force_kill_all_daemons();
                 let _ = wait_for_port_release(config, 20, Duration::from_millis(150));
             }
         } else {
@@ -205,6 +199,30 @@ fn wait_for_port_release(config: &BudiConfig, retries: usize, sleep_interval: Du
 }
 
 fn daemon_listener_pids(port: u16) -> Result<Vec<u32>> {
+    if cfg!(target_os = "windows") {
+        let output = match Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue).OwningProcess"
+                ),
+            ])
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err).context("Failed to inspect listener pids"),
+        };
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect());
+    }
+
     let output = match Command::new("lsof")
         .arg("-nP")
         .arg(format!("-tiTCP:{port}"))
@@ -252,6 +270,23 @@ pub fn is_budi_daemon_command_for_port(command: &str, port: u16) -> bool {
 }
 
 fn kill_process(pid: u32, signal: &str) -> Result<bool> {
+    if cfg!(target_os = "windows") {
+        let status = match Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) => status,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to kill pid {pid} via taskkill"));
+            }
+        };
+        return Ok(status.success());
+    }
+
     let status = match Command::new("kill")
         .arg(signal)
         .arg(pid.to_string())
@@ -264,6 +299,36 @@ fn kill_process(pid: u32, signal: &str) -> Result<bool> {
         }
     };
     Ok(status.success())
+}
+
+/// Kill all budi-daemon processes using platform-appropriate methods (SIGTERM / taskkill).
+fn kill_all_daemons() {
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "budi-daemon.exe"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        let _ = Command::new("pkill")
+            .args(["-f", "budi-daemon serve"])
+            .status();
+    }
+}
+
+/// Force-kill all budi-daemon processes (SIGKILL on Unix, taskkill /F on Windows).
+fn force_kill_all_daemons() {
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "budi-daemon.exe"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        let _ = Command::new("pkill")
+            .args(["-9", "-f", "budi-daemon serve"])
+            .status();
+    }
 }
 
 fn daemon_port_is_listening(config: &BudiConfig) -> bool {

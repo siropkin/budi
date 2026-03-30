@@ -421,30 +421,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// All expected Claude Code hook events.
-const CC_EXPECTED_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "PostToolUse",
-    "SubagentStop",
-    "PreCompact",
-    "Stop",
-    "UserPromptSubmit",
-];
+use super::{CC_HOOK_EVENTS, CURSOR_HOOK_EVENTS};
 
-/// All expected Cursor hook events.
-const CURSOR_EXPECTED_EVENTS: &[&str] = &[
-    "sessionStart",
-    "sessionEnd",
-    "postToolUse",
-    "subagentStop",
-    "beforeSubmitPrompt",
-    "preCompact",
-    "stop",
-    "afterFileEdit",
-];
-
-/// Validate Claude Code hooks: check all expected events have a budi hook with type "command".
+/// Validate Claude Code hooks: check all expected events have a budi hook entry.
 /// Returns (ok, missing_events) — ok is true only when all events are correctly configured.
 fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
     let content = match std::fs::read_to_string(path) {
@@ -461,31 +440,11 @@ fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
     };
 
     let mut missing = Vec::new();
-    for event in CC_EXPECTED_EVENTS {
+    for event in CC_HOOK_EVENTS {
         let ok = hooks
             .get(*event)
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|inner| {
-                            inner.iter().any(|h| {
-                                let is_cmd_type = h
-                                    .get("type")
-                                    .and_then(|t| t.as_str())
-                                    .is_some_and(|t| t == "command");
-                                let has_budi = h
-                                    .get("command")
-                                    .and_then(|c| c.as_str())
-                                    .is_some_and(is_budi_hook_cmd);
-                                is_cmd_type && has_budi
-                            })
-                        })
-                        .unwrap_or(false)
-                })
-            })
+            .map(|arr| arr.iter().any(super::is_budi_cc_hook_entry))
             .unwrap_or(false);
         if !ok {
             missing.push((*event).to_string());
@@ -494,7 +453,7 @@ fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
     (missing.is_empty(), missing)
 }
 
-/// Validate Cursor hooks: check all expected events have a budi hook with type "command".
+/// Validate Cursor hooks: check all expected events have a budi hook entry.
 /// Returns (ok, missing_events) — ok is true only when all events are correctly configured.
 fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
     let content = match std::fs::read_to_string(path) {
@@ -511,34 +470,17 @@ fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
     };
 
     let mut missing = Vec::new();
-    for event in CURSOR_EXPECTED_EVENTS {
+    for event in CURSOR_HOOK_EVENTS {
         let ok = hooks
             .get(*event)
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|entry| {
-                    let is_cmd_type = entry
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .is_some_and(|t| t == "command");
-                    let has_budi = entry
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(is_budi_hook_cmd);
-                    is_cmd_type && has_budi
-                })
-            })
+            .map(|arr| arr.iter().any(super::is_budi_cursor_hook_entry))
             .unwrap_or(false);
         if !ok {
             missing.push((*event).to_string());
         }
     }
     (missing.is_empty(), missing)
-}
-
-/// Match any variant of the budi hook command (with or without `|| true` wrapper).
-fn is_budi_hook_cmd(cmd: &str) -> bool {
-    super::is_budi_hook_cmd(cmd)
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {

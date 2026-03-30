@@ -88,7 +88,7 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
 
-        // 6. Remove data
+        // 7. Remove data
         if !keep_data {
             if !yes {
                 if !std::io::stdin().is_terminal() {
@@ -167,8 +167,7 @@ fn remove_claude_code_hooks(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let raw = fs::read_to_string(&settings_path)?;
-    let mut settings: Value = serde_json::from_str(&raw)?;
+    let mut settings = super::read_json_or_default(&settings_path)?;
 
     let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return Ok(false);
@@ -182,18 +181,16 @@ fn remove_claude_code_hooks(home: &str) -> Result<bool> {
         };
 
         let before = arr.len();
-        arr.retain(|entry| !is_budi_hook_entry_cc(entry));
+        arr.retain(|entry| !super::is_budi_cc_hook_entry(entry));
         if arr.len() < before {
             changed = true;
         }
 
-        // Remove empty event arrays
         if arr.is_empty() {
             hooks.remove(&event);
         }
     }
 
-    // Remove empty hooks object
     if hooks.is_empty()
         && let Some(obj) = settings.as_object_mut()
     {
@@ -201,8 +198,7 @@ fn remove_claude_code_hooks(home: &str) -> Result<bool> {
     }
 
     if changed {
-        let out = serde_json::to_string_pretty(&settings)?;
-        fs::write(&settings_path, out)?;
+        super::atomic_write_json(&settings_path, &settings)?;
     }
 
     Ok(changed)
@@ -214,8 +210,7 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let raw = fs::read_to_string(&hooks_path)?;
-    let mut config: Value = serde_json::from_str(&raw)?;
+    let mut config = super::read_json_or_default(&hooks_path)?;
 
     let Some(hooks) = config.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return Ok(false);
@@ -229,7 +224,7 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
         };
 
         let before = arr.len();
-        arr.retain(|entry| !is_budi_hook_entry_cursor(entry));
+        arr.retain(|entry| !super::is_budi_cursor_hook_entry(entry));
         if arr.len() < before {
             changed = true;
         }
@@ -240,8 +235,7 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
     }
 
     if changed {
-        let out = serde_json::to_string_pretty(&config)?;
-        fs::write(&hooks_path, out)?;
+        super::atomic_write_json(&hooks_path, &config)?;
     }
 
     Ok(changed)
@@ -253,8 +247,7 @@ fn remove_mcp_server(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let raw = fs::read_to_string(&settings_path)?;
-    let mut settings: Value = serde_json::from_str(&raw)?;
+    let mut settings = super::read_json_or_default(&settings_path)?;
 
     let Some(mcp_servers) = settings
         .get_mut("mcpServers")
@@ -267,15 +260,13 @@ fn remove_mcp_server(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    // Remove empty mcpServers object
     if mcp_servers.is_empty()
         && let Some(obj) = settings.as_object_mut()
     {
         obj.remove("mcpServers");
     }
 
-    let out = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_path, out)?;
+    super::atomic_write_json(&settings_path, &settings)?;
     Ok(true)
 }
 
@@ -285,8 +276,7 @@ fn remove_statusline(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let raw = fs::read_to_string(&settings_path)?;
-    let mut settings: Value = serde_json::from_str(&raw)?;
+    let mut settings = super::read_json_or_default(&settings_path)?;
 
     let obj = settings
         .as_object_mut()
@@ -295,8 +285,7 @@ fn remove_statusline(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let out = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_path, out)?;
+    super::atomic_write_json(&settings_path, &settings)?;
     Ok(true)
 }
 
@@ -350,15 +339,12 @@ fn remove_otel_env_vars(home: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let raw = fs::read_to_string(&settings_path)?;
-    let mut settings: Value = serde_json::from_str(&raw)?;
+    let mut settings = super::read_json_or_default(&settings_path)?;
 
     let Some(env) = settings.get_mut("env").and_then(|e| e.as_object_mut()) else {
         return Ok(false);
     };
 
-    // Only remove OTEL vars if the endpoint points to budi's daemon (localhost + budi port).
-    // If it points elsewhere, the user configured it independently — don't touch.
     let is_budi_endpoint = env
         .get("OTEL_EXPORTER_OTLP_ENDPOINT")
         .and_then(|v| v.as_str())
@@ -389,7 +375,6 @@ fn remove_otel_env_vars(home: &str) -> Result<bool> {
         }
     }
 
-    // Remove empty env object
     if env.is_empty()
         && let Some(obj) = settings.as_object_mut()
     {
@@ -397,8 +382,7 @@ fn remove_otel_env_vars(home: &str) -> Result<bool> {
     }
 
     if changed {
-        let out = serde_json::to_string_pretty(&settings)?;
-        fs::write(&settings_path, out)?;
+        super::atomic_write_json(&settings_path, &settings)?;
     }
 
     Ok(changed)
@@ -420,34 +404,6 @@ fn print_binary_removal_hint() {
     }
 }
 
-/// Check if a Claude Code hook entry contains a budi hook command (any variant).
-fn is_budi_hook_entry_cc(entry: &Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(is_budi_cmd)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Check if a Cursor hook entry is a budi hook command (any variant).
-fn is_budi_hook_entry_cursor(entry: &Value) -> bool {
-    entry
-        .get("command")
-        .and_then(|c| c.as_str())
-        .is_some_and(is_budi_cmd)
-}
-
-/// Match any variant of the budi hook command (with or without `|| true` wrapper).
-fn is_budi_cmd(cmd: &str) -> bool {
-    super::is_budi_hook_cmd(cmd)
-}
-
 /// Re-read Claude Code settings and confirm no budi hooks remain.
 fn verify_no_budi_hooks_cc(path: &PathBuf) -> bool {
     let Ok(raw) = fs::read_to_string(path) else {
@@ -461,7 +417,7 @@ fn verify_no_budi_hooks_cc(path: &PathBuf) -> bool {
     };
     !hooks.values().any(|arr| {
         arr.as_array()
-            .map(|a| a.iter().any(is_budi_hook_entry_cc))
+            .map(|a| a.iter().any(super::is_budi_cc_hook_entry))
             .unwrap_or(false)
     })
 }
@@ -472,14 +428,14 @@ fn verify_no_budi_hooks_cursor(path: &PathBuf) -> bool {
         return true;
     };
     let Ok(config) = serde_json::from_str::<Value>(&raw) else {
-        return false; // malformed JSON — cannot verify
+        return false;
     };
     let Some(hooks) = config.get("hooks").and_then(|h| h.as_object()) else {
         return true;
     };
     !hooks.values().any(|arr| {
         arr.as_array()
-            .map(|a| a.iter().any(is_budi_hook_entry_cursor))
+            .map(|a| a.iter().any(super::is_budi_cursor_hook_entry))
             .unwrap_or(false)
     })
 }

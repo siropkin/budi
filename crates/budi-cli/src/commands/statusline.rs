@@ -322,10 +322,10 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 }
 
 /// The budi statusline command string used in settings.
-const BUDI_STATUSLINE_CMD: &str = "budi statusline";
+pub(crate) const BUDI_STATUSLINE_CMD: &str = "budi statusline";
 
 /// Suffix appended to an existing command to merge budi output after it.
-const BUDI_STATUSLINE_SUFFIX: &str = r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#;
+pub(crate) const BUDI_STATUSLINE_SUFFIX: &str = r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#;
 
 /// Check if a statusLine command already includes budi.
 fn statusline_has_budi(cmd: &str) -> bool {
@@ -429,7 +429,7 @@ pub fn remove_legacy_hooks() {
 
 /// Remove old-style budi hooks (with subcommand args) from a settings Value.
 /// Returns true if any changes were made.
-fn remove_legacy_budi_hooks_from_value(settings: &mut Value) -> bool {
+pub(crate) fn remove_legacy_budi_hooks_from_value(settings: &mut Value) -> bool {
     let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return false;
     };
@@ -485,12 +485,6 @@ fn is_legacy_budi_hook(cmd: &str) -> bool {
     } else {
         false
     }
-}
-
-/// Testable alias for `remove_legacy_budi_hooks_from_value`.
-#[cfg(test)]
-fn remove_budi_hooks_from_value(settings: &mut Value) -> bool {
-    remove_legacy_budi_hooks_from_value(settings)
 }
 
 #[cfg(test)]
@@ -574,7 +568,7 @@ mod tests {
             },
             "statusLine": {"type": "command", "command": "budi statusline"}
         });
-        assert!(remove_budi_hooks_from_value(&mut settings));
+        assert!(remove_legacy_budi_hooks_from_value(&mut settings));
         // hooks object removed entirely since all entries were budi
         assert!(settings.get("hooks").is_none());
         // statusLine untouched
@@ -591,7 +585,7 @@ mod tests {
                 ]
             }
         });
-        assert!(remove_budi_hooks_from_value(&mut settings));
+        assert!(remove_legacy_budi_hooks_from_value(&mut settings));
         let hooks = settings.get("hooks").unwrap();
         let arr = hooks.get("UserPromptSubmit").unwrap().as_array().unwrap();
         assert_eq!(arr.len(), 1);
@@ -601,7 +595,7 @@ mod tests {
     #[test]
     fn remove_legacy_hooks_noop_without_hooks() {
         let mut settings = json!({"statusLine": {"type": "command"}});
-        assert!(!remove_budi_hooks_from_value(&mut settings));
+        assert!(!remove_legacy_budi_hooks_from_value(&mut settings));
     }
 
     #[test]
@@ -616,7 +610,7 @@ mod tests {
                 ]
             }
         });
-        assert!(remove_budi_hooks_from_value(&mut settings));
+        assert!(remove_legacy_budi_hooks_from_value(&mut settings));
         let hooks = settings.get("hooks").unwrap();
         // PostToolUse with new-style "budi hook" should be preserved
         let arr = hooks.get("PostToolUse").unwrap().as_array().unwrap();
