@@ -44,21 +44,22 @@ impl Pipeline {
 
     /// Process a batch of messages through all enrichers.
     /// Returns a parallel Vec of tags for each message.
-    /// Session-level tags (ticket_id, ticket_prefix, repo, etc.) are
-    /// deduplicated and attached to the first **assistant** message in each
-    /// session. This is critical because analytics queries filter on
-    /// `role = 'assistant'` (where cost lives) — tags on user messages are
-    /// invisible to those queries.
+    ///
+    /// Two kinds of tags:
+    /// - **Identity tags** (user, machine, composer_mode, …): constant for the
+    ///   whole session → deduplicated, emitted once on the first assistant msg.
+    /// - **Context tags** (repo, ticket_id, activity, …): can change mid-session
+    ///   → emitted on every assistant message so cost attribution is accurate.
+    ///
+    /// All tags land on assistant messages only (queries filter `role='assistant'`).
     pub fn process(&mut self, messages: &mut [ParsedMessage]) -> Vec<Vec<Tag>> {
         use std::collections::{HashMap, HashSet};
         let mut all_tags = Vec::with_capacity(messages.len());
-        let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
-        let session_level_keys = tk::SESSION_LEVEL_KEYS;
 
-        // Buffer session-level tags and activity from non-assistant messages.
-        // Flushed onto the next assistant message in the same session.
-        let mut pending_session_tags: HashMap<String, Vec<Tag>> = HashMap::new();
-        let mut pending_activity: HashMap<String, String> = HashMap::new();
+        // Identity tags: dedup per session, buffer from user→assistant.
+        let identity_keys = tk::SESSION_IDENTITY_KEYS;
+        let mut seen_identity: HashSet<(String, String, String)> = HashSet::new();
+        let mut pending_identity: HashMap<String, Vec<Tag>> = HashMap::new();
 
         // Sort by (session_id, timestamp) to handle out-of-order batches.
         messages.sort_by(|a, b| {
@@ -75,44 +76,37 @@ impl Pipeline {
 
             for enricher in &mut self.enrichers {
                 for tag in enricher.enrich(msg) {
-                    if session_level_keys.contains(&tag.key.as_str()) {
+                    if identity_keys.contains(&tag.key.as_str()) {
                         let key = (dedup_id.clone(), tag.key.clone(), tag.value.clone());
-                        if !seen_session_tags.insert(key) {
+                        if !seen_identity.insert(key) {
                             continue;
                         }
                         if msg.role != "assistant" {
-                            pending_session_tags
+                            pending_identity
                                 .entry(dedup_id.clone())
                                 .or_default()
                                 .push(tag);
                             continue;
                         }
                     }
-                    msg_tags.push(tag);
+                    if msg.role == "assistant" {
+                        msg_tags.push(tag);
+                    }
                 }
-            }
-
-            // Buffer activity from user messages for the next assistant message.
-            if let Some(ref cat) = msg.prompt_category {
-                pending_activity
-                    .entry(dedup_id.clone())
-                    .or_insert_with(|| cat.clone());
             }
 
             if msg.role == "assistant" {
-                // Flush any buffered session-level tags from prior user messages.
-                if let Some(buffered) = pending_session_tags.remove(&dedup_id) {
+                // Flush buffered identity tags from prior user messages.
+                if let Some(buffered) = pending_identity.remove(&dedup_id) {
                     msg_tags.extend(buffered);
                 }
-                // Emit activity tag.
-                if let Some(cat) = pending_activity.remove(&dedup_id) {
-                    let key = (dedup_id, tk::ACTIVITY.to_string(), cat.clone());
-                    if seen_session_tags.insert(key) {
-                        msg_tags.push(Tag {
-                            key: tk::ACTIVITY.to_string(),
-                            value: cat,
-                        });
-                    }
+
+                // Activity tag from prompt_category (propagated from user msg).
+                if let Some(ref cat) = msg.prompt_category {
+                    msg_tags.push(Tag {
+                        key: tk::ACTIVITY.to_string(),
+                        value: cat.clone(),
+                    });
                 }
             }
 
@@ -366,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn session_level_tags_land_on_assistant_messages() {
+    fn no_tags_on_user_messages() {
         use crate::config::TagsConfig;
         let mut pipeline = Pipeline::default_pipeline(
             Some(TagsConfig::default()),
@@ -377,7 +371,6 @@ mod tests {
         user_msg.uuid = "u1".into();
         user_msg.session_id = Some("sess-1".into());
         user_msg.role = "user".into();
-        user_msg.cwd = Some("/tmp/test".into());
         user_msg.repo_id = Some("github.com/test/repo".into());
         user_msg.git_branch = Some("PROJ-123-feature".into());
         user_msg.prompt_category = Some("bugfix".into());
@@ -394,35 +387,92 @@ mod tests {
         let mut msgs = vec![user_msg, asst_msg];
         let all_tags = pipeline.process(&mut msgs);
 
-        let user_tags = &all_tags[0];
-        let asst_tags = &all_tags[1];
+        assert!(
+            all_tags[0].is_empty(),
+            "user message should have zero tags, got: {:?}",
+            all_tags[0]
+        );
 
-        let session_keys: Vec<&str> = crate::tag_keys::SESSION_LEVEL_KEYS.to_vec();
-
-        for tag in user_tags {
-            assert!(
-                !session_keys.contains(&tag.key.as_str()),
-                "session-level tag '{}' should NOT be on user message, got value '{}'",
-                tag.key,
-                tag.value,
-            );
-        }
-
-        let asst_keys: Vec<&str> = asst_tags.iter().map(|t| t.key.as_str()).collect();
+        let asst_keys: Vec<&str> = all_tags[1].iter().map(|t| t.key.as_str()).collect();
         assert!(
             asst_keys.contains(&"repo"),
-            "assistant message should have 'repo' tag, got: {:?}",
-            asst_keys
+            "missing repo, got: {asst_keys:?}"
         );
         assert!(
             asst_keys.contains(&"ticket_id"),
-            "assistant message should have 'ticket_id' tag, got: {:?}",
-            asst_keys
+            "missing ticket_id, got: {asst_keys:?}"
         );
         assert!(
             asst_keys.contains(&"activity"),
-            "assistant message should have 'activity' tag, got: {:?}",
-            asst_keys
+            "missing activity, got: {asst_keys:?}"
+        );
+    }
+
+    #[test]
+    fn context_tags_on_every_assistant_message() {
+        use crate::config::TagsConfig;
+        let mut pipeline = Pipeline::default_pipeline(
+            Some(TagsConfig::default()),
+            std::collections::HashMap::new(),
+        );
+
+        let mut u1 = test_msg();
+        u1.uuid = "u1".into();
+        u1.session_id = Some("sess-1".into());
+        u1.role = "user".into();
+        u1.repo_id = Some("github.com/test/repo".into());
+        u1.git_branch = Some("PROJ-123-feature".into());
+        u1.prompt_category = Some("bugfix".into());
+        u1.timestamp = "2026-03-14T18:13:42Z".parse().unwrap();
+
+        let mut a1 = test_msg();
+        a1.uuid = "a1".into();
+        a1.session_id = Some("sess-1".into());
+        a1.role = "assistant".into();
+        a1.model = Some("claude-opus".into());
+        a1.output_tokens = 100;
+        a1.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut u2 = test_msg();
+        u2.uuid = "u2".into();
+        u2.session_id = Some("sess-1".into());
+        u2.role = "user".into();
+        u2.timestamp = "2026-03-14T18:14:00Z".parse().unwrap();
+
+        let mut a2 = test_msg();
+        a2.uuid = "a2".into();
+        a2.session_id = Some("sess-1".into());
+        a2.role = "assistant".into();
+        a2.model = Some("claude-opus".into());
+        a2.output_tokens = 200;
+        a2.timestamp = "2026-03-14T18:14:01Z".parse().unwrap();
+
+        let mut msgs = vec![u1, a1, u2, a2];
+        let all_tags = pipeline.process(&mut msgs);
+
+        // Both assistant messages should have repo and ticket_id (context tags).
+        for (idx, label) in [(1, "a1"), (3, "a2")] {
+            let keys: Vec<&str> = all_tags[idx].iter().map(|t| t.key.as_str()).collect();
+            assert!(
+                keys.contains(&"repo"),
+                "{label} should have 'repo' tag, got: {keys:?}"
+            );
+            assert!(
+                keys.contains(&"ticket_id"),
+                "{label} should have 'ticket_id' tag, got: {keys:?}"
+            );
+        }
+
+        // Identity tags (user, machine) should appear only once across all messages.
+        let all_user_tags: Vec<_> = all_tags
+            .iter()
+            .flat_map(|t| t.iter())
+            .filter(|t| t.key == "user")
+            .collect();
+        assert!(
+            all_user_tags.len() <= 1,
+            "identity tag 'user' should be deduplicated, found {} occurrences",
+            all_user_tags.len()
         );
     }
 }

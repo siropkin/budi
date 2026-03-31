@@ -798,8 +798,11 @@ pub fn tag_stats(
 
     // When a specific key is requested, use proportional splitting so that
     // multi-value tags (e.g. two ticket IDs on one message) split cost fairly.
-    // For the all-keys overview, use a direct sum — 2x faster on 500K+ rows
-    // and most keys have exactly one value per message.
+    // The all-keys overview uses a direct sum — 2x faster on 500K+ rows.
+    // NOTE: the all-keys path shows per-key totals; since one message carries
+    // multiple keys (provider, model, repo, …), cost appears under each key
+    // independently. This is intentional — callers should filter by key for
+    // accurate per-value cost attribution.
     let sql = if tag_key.is_some() {
         format!(
             "WITH msg_val_counts AS (

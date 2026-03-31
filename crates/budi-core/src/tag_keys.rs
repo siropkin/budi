@@ -21,19 +21,15 @@ pub const USER_EMAIL: &str = "user_email";
 pub const DURATION: &str = "duration";
 pub const DOMINANT_TOOL: &str = "dominant_tool";
 
-/// Tag keys that are session-level: only emitted once per session (first
-/// message wins) to avoid duplicate rows in the tags table.
-pub const SESSION_LEVEL_KEYS: &[&str] = &[
-    TICKET_ID,
-    TICKET_PREFIX,
-    REPO,
-    SESSION_TITLE,
+/// Identity tags: constant for the entire session, deduplicated to one
+/// assistant message per session.
+pub const SESSION_IDENTITY_KEYS: &[&str] = &[
     USER,
-    ACTIVITY,
     MACHINE,
+    USER_EMAIL,
     COMPOSER_MODE,
     PERMISSION_MODE,
-    USER_EMAIL,
     DURATION,
     DOMINANT_TOOL,
+    SESSION_TITLE,
 ];
