@@ -151,5 +151,69 @@ fn sync_with_max_age(
         );
     }
 
+    // Backfill ticket_id / ticket_prefix tags for messages that have a
+    // git_branch containing a ticket pattern but no ticket_id tag yet.
+    let tickets_backfilled = backfill_ticket_tags(conn);
+    if tickets_backfilled > 0 {
+        tracing::info!("Backfilled ticket_id tags on {tickets_backfilled} messages");
+    }
+
     Ok((total_files, total_messages, warnings))
+}
+
+/// Scan assistant messages with a git_branch but no ticket_id tag,
+/// extract ticket IDs, and insert the missing tags.
+fn backfill_ticket_tags(conn: &mut Connection) -> usize {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT m.uuid, m.git_branch
+             FROM messages m
+             WHERE m.role = 'assistant'
+               AND m.git_branch IS NOT NULL AND m.git_branch != ''
+               AND NOT EXISTS (
+                 SELECT 1 FROM tags t
+                 WHERE t.message_uuid = m.uuid AND t.key = 'ticket_id'
+               )",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+
+    if rows.is_empty() {
+        return 0;
+    }
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(_) => return 0,
+    };
+
+    let mut count = 0usize;
+    for (uuid, branch) in &rows {
+        if let Some(ticket) = crate::pipeline::extract_ticket_id(branch) {
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_id', ?2)",
+                rusqlite::params![uuid, ticket],
+            );
+            if let Some(dash) = ticket.find('-') {
+                let _ = tx.execute(
+                    "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_prefix', ?2)",
+                    rusqlite::params![uuid, &ticket[..dash]],
+                );
+            }
+            count += 1;
+        }
+    }
+
+    if tx.commit().is_err() {
+        return 0;
+    }
+    count
 }
