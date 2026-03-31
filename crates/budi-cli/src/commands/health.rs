@@ -13,10 +13,10 @@ pub fn cmd_health(session_id: Option<String>) -> Result<()> {
 fn render_health(h: &SessionHealth) {
     let detail_name = |name: &str| -> String {
         match name {
-            "context_drag" => "Context Growth".to_string(),
+            "context_drag" => "Prompt Growth".to_string(),
             "cache_efficiency" => "Cache Reuse".to_string(),
             "thrashing" => "Retry Loops".to_string(),
-            "cost_acceleration" => "Cost Per Turn".to_string(),
+            "cost_acceleration" => "Cost Acceleration".to_string(),
             _ => name.to_string(),
         }
     };
@@ -40,6 +40,7 @@ fn render_health(h: &SessionHealth) {
         match s {
             "red" => red,
             "yellow" => yellow,
+            "gray" => dim,
             _ => green,
         }
     };
@@ -58,12 +59,11 @@ fn render_health(h: &SessionHealth) {
     );
     println!();
 
-    // Vitals table
     let vitals: Vec<(&str, &Option<budi_core::analytics::VitalScore>)> = vec![
-        ("Context Growth", &h.vitals.context_drag),
+        ("Prompt Growth", &h.vitals.context_drag),
         ("Cache Reuse", &h.vitals.cache_efficiency),
         ("Retry Loops", &h.vitals.thrashing),
-        ("Cost Per Turn", &h.vitals.cost_acceleration),
+        ("Cost Acceleration", &h.vitals.cost_acceleration),
     ];
 
     for (name, vital) in &vitals {

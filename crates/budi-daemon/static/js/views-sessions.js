@@ -164,10 +164,10 @@ function renderHealthPanel(health) {
   if (!health) return '';
 
   const vitalNames = {
-    context_drag: 'Context Growth',
+    context_drag: 'Prompt Growth',
     cache_efficiency: 'Cache Reuse',
     thrashing: 'Retry Loops',
-    cost_acceleration: 'Cost Per Turn',
+    cost_acceleration: 'Cost Acceleration',
   };
 
   const vitals = health.vitals || {};
@@ -177,7 +177,7 @@ function renderHealthPanel(health) {
     const v = vitals[key];
     if (!v) return `<div class="vital-card">
       <div class="vital-header"><span class="vital-name">${vitalNames[key]}</span><span class="vital-state">⚪</span></div>
-      <div class="vital-label" style="color:var(--text-muted)">Not enough data</div>
+      <div class="vital-label" style="color:var(--text-muted)">Not enough data yet</div>
     </div>`;
 
     return `<div class="vital-card">

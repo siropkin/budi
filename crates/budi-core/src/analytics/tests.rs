@@ -1347,6 +1347,22 @@ fn health_msg(
     }
 }
 
+fn insert_health_hook_event_at(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    event: &str,
+    timestamp: &str,
+    tool_name: Option<&str>,
+) {
+    conn.execute(
+        "INSERT INTO hook_events (provider, event, session_id, timestamp, tool_name, raw_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, '{}')",
+        rusqlite::params![provider, event, session_id, timestamp, tool_name],
+    )
+    .unwrap();
+}
+
 fn insert_health_hook_event(
     conn: &Connection,
     provider: &str,
@@ -1362,12 +1378,7 @@ fn insert_health_hook_event(
     .unwrap()
     .and_utc()
     .to_rfc3339();
-    conn.execute(
-        "INSERT INTO hook_events (provider, event, session_id, timestamp, tool_name, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, '{}')",
-        rusqlite::params![provider, event, session_id, ts, tool_name],
-    )
-    .unwrap();
+    insert_health_hook_event_at(conn, provider, session_id, event, &ts, tool_name);
 }
 
 #[test]
@@ -1461,9 +1472,47 @@ fn health_cost_acceleration_yellow() {
         msgs.push(health_msg(&format!("m{i}"), "s1", i, 100, 900, 15.0));
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
+    for ts in [
+        "2026-03-14T09:59:30+00:00",
+        "2026-03-14T10:01:30+00:00",
+        "2026-03-14T10:03:30+00:00",
+        "2026-03-14T10:05:30+00:00",
+    ] {
+        insert_health_hook_event_at(&conn, "claude_code", "s1", "user_prompt_submit", ts, None);
+    }
 
     let h = session_health(&conn, Some("s1")).unwrap();
     assert_eq!(h.vitals.cost_acceleration.as_ref().unwrap().state, "yellow");
+}
+
+#[test]
+fn health_cost_acceleration_suppressed_for_short_turn_sessions() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..3)
+        .map(|i| {
+            let mut msg = health_msg(&format!("m{i}"), "s1", i, 100, 900, 5.0);
+            msg.provider = "cursor".to_string();
+            msg
+        })
+        .collect();
+    for (i, cost) in [(3, 30.0), (4, 15.0), (5, 30.0)] {
+        let mut msg = health_msg(&format!("m{i}"), "s1", i, 100, 900, cost);
+        msg.provider = "cursor".to_string();
+        msgs.push(msg);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    for ts in ["2026-03-14T09:59:30+00:00", "2026-03-14T10:03:30+00:00"] {
+        insert_health_hook_event_at(&conn, "cursor", "s1", "user_prompt_submit", ts, None);
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert!(h.vitals.cost_acceleration.is_none());
+    assert_eq!(h.state, "green");
 }
 
 #[test]
@@ -1604,7 +1653,7 @@ fn health_cursor_tips_use_plain_actions() {
     let h = session_health(&conn, Some("s1")).unwrap();
     assert!(h.details.iter().any(|d| {
         d.vital == "context_drag"
-            && d.tip.contains("Context is getting noisy")
+            && d.tip.contains("Prompt size is getting large")
             && d.actions.iter().any(|a| a.contains("composer session"))
     }));
 }
@@ -1627,7 +1676,7 @@ fn health_suppressed_few_messages() {
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
     assert_eq!(h.state, "gray");
-    assert_eq!(h.tip, "Session starting");
+    assert_eq!(h.tip, "Not enough data yet");
 }
 
 #[test]
@@ -1698,4 +1747,316 @@ fn health_batch_matches_detail_thresholds() {
     let detail = session_health(&conn, Some("s1")).unwrap();
     let batch = session_health_batch(&conn, &["s1"]).unwrap();
     assert_eq!(batch["s1"], detail.state);
+}
+
+// --- Coverage: gray when only one vital is computable ---
+
+#[test]
+fn health_gray_when_only_thrashing_computable() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs: Vec<ParsedMessage> = (0..2)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 50, 1.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    for idx in 0..3 {
+        insert_health_hook_event(&conn, "claude_code", "s1", "post_tool_use", idx, Some("Shell"));
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert!(h.vitals.thrashing.is_some());
+    assert!(h.vitals.context_drag.is_none());
+    assert!(h.vitals.cache_efficiency.is_none());
+    assert!(h.vitals.cost_acceleration.is_none());
+    assert_eq!(h.state, "gray", "single green vital should stay gray");
+    assert_eq!(h.tip, "Not enough data yet");
+}
+
+// --- Coverage: cache_efficiency yellow ---
+
+#[test]
+fn health_cache_efficiency_yellow() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    // hit_rate = 500 / (500 + 500) = 0.50, which is below 0.60 (yellow) but above 0.35 (red)
+    let msgs: Vec<ParsedMessage> = (0..6)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 500, 500, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.cache_efficiency.as_ref().unwrap().state, "yellow");
+}
+
+// --- Coverage: cost_acceleration red ---
+
+#[test]
+fn health_cost_acceleration_red() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    // 4 early turns at 5¢, 4 late turns at 25¢ → ratio=5.0 ≥ 4.0, second_avg=25 ≥ 12
+    let mut msgs: Vec<ParsedMessage> = (0..4)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 900, 5.0))
+        .collect();
+    for i in 4..8 {
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 100, 900, 25.0));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    for (idx, ts) in [
+        "2026-03-14T09:59:30+00:00",
+        "2026-03-14T10:01:30+00:00",
+        "2026-03-14T10:03:30+00:00",
+        "2026-03-14T10:05:30+00:00",
+    ].iter().enumerate() {
+        insert_health_hook_event_at(&conn, "claude_code", "s1", "user_prompt_submit", ts, None);
+        let _ = idx;
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.cost_acceleration.as_ref().unwrap().state, "red");
+    assert!(h.vitals.cost_acceleration.as_ref().unwrap().label.contains("turn"));
+}
+
+// --- Coverage: cost_acceleration reply fallback ---
+
+#[test]
+fn health_cost_acceleration_reply_fallback() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    // No hook events → no prompt boundaries → falls back to per-reply scoring
+    let mut msgs: Vec<ParsedMessage> = (0..3)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 900, 5.0))
+        .collect();
+    for i in 3..9 {
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 100, 900, 15.0));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    let ca = h.vitals.cost_acceleration.as_ref().unwrap();
+    assert_ne!(ca.state, "green");
+    assert!(ca.label.contains("reply"), "label should say 'reply' not 'turn': {}", ca.label);
+}
+
+// --- Coverage: thrashing yellow ---
+
+#[test]
+fn health_thrashing_yellow() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+    let msgs: Vec<ParsedMessage> = (0..6)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 900, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    // 3 repeated failures of the same tool → score=1 → yellow
+    for idx in 0..4 {
+        insert_health_hook_event(&conn, "claude_code", "s1", "post_tool_use_failure", idx, Some("Shell"));
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.thrashing.as_ref().unwrap().state, "yellow");
+}
+
+// --- Coverage: provider-specific tips diverge correctly ---
+
+#[test]
+fn health_claude_code_context_drag_mentions_compact() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0))
+        .collect();
+    for i in 5..8 {
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 16000, 0, 5.0));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    let detail = h.details.iter().find(|d| d.vital == "context_drag").unwrap();
+    assert!(detail.actions.iter().any(|a| a.contains("/compact")),
+        "Claude Code context_drag detail should mention /compact");
+}
+
+#[test]
+fn health_cursor_context_drag_no_compact() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| {
+            let mut msg = health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0);
+            msg.provider = "cursor".to_string();
+            msg
+        })
+        .collect();
+    for i in 5..8 {
+        let mut msg = health_msg(&format!("m{i}"), "s1", i, 16000, 0, 5.0);
+        msg.provider = "cursor".to_string();
+        msgs.push(msg);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    let detail = h.details.iter().find(|d| d.vital == "context_drag").unwrap();
+    assert!(!detail.actions.iter().any(|a| a.contains("/compact")));
+    assert!(detail.actions.iter().any(|a| a.contains("composer session")));
+    assert!(!h.tip.contains("/compact"));
+}
+
+#[test]
+fn health_unknown_provider_gets_neutral_tips() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'windsurf', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| {
+            let mut msg = health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0);
+            msg.provider = "windsurf".to_string();
+            msg
+        })
+        .collect();
+    for i in 5..8 {
+        let mut msg = health_msg(&format!("m{i}"), "s1", i, 16000, 0, 5.0);
+        msg.provider = "windsurf".to_string();
+        msgs.push(msg);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    let detail = h.details.iter().find(|d| d.vital == "context_drag").unwrap();
+    assert!(!detail.actions.iter().any(|a| a.contains("/compact")));
+    assert!(!detail.actions.iter().any(|a| a.contains("composer session")));
+    assert!(detail.actions.iter().any(|a| a.contains("Trim context") || a.contains("start fresh")));
+}
+
+// --- Coverage: cost_acceleration yellow short tip uses actual metric ---
+
+#[test]
+fn health_cost_acceleration_yellow_tip_uses_metric_label() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..4)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 900, 5.0))
+        .collect();
+    for i in 4..8 {
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 100, 900, 15.0));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    for ts in [
+        "2026-03-14T09:59:30+00:00",
+        "2026-03-14T10:01:30+00:00",
+        "2026-03-14T10:03:30+00:00",
+        "2026-03-14T10:05:30+00:00",
+    ] {
+        insert_health_hook_event_at(&conn, "claude_code", "s1", "user_prompt_submit", ts, None);
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert!(h.tip.contains("Cost rising"), "tip should mention 'Cost rising': {}", h.tip);
+    assert!(h.tip.contains("growth"), "tip should contain metric label: {}", h.tip);
+}
+
+// --- Coverage: cache_efficiency red provider divergence ---
+
+#[test]
+fn health_cache_efficiency_red_cursor_vs_claude() {
+    for (provider, should_mention_clear) in [("claude_code", true), ("cursor", false)] {
+        let mut conn = test_db();
+        conn.execute(
+            &format!("INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', '{provider}', '2026-03-14')"),
+            [],
+        ).unwrap();
+
+        let msgs: Vec<ParsedMessage> = (0..6)
+            .map(|i| {
+                let mut msg = health_msg(&format!("m{i}"), "s1", i, 1000, 100, 5.0);
+                msg.provider = provider.to_string();
+                msg
+            })
+            .collect();
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+
+        let h = session_health(&conn, Some("s1")).unwrap();
+        let detail = h.details.iter().find(|d| d.vital == "cache_efficiency").unwrap();
+
+        if should_mention_clear {
+            assert!(detail.actions.iter().any(|a| a.contains("/clear")),
+                "Claude Code cache_efficiency red should mention /clear");
+        } else {
+            assert!(!detail.actions.iter().any(|a| a.contains("/clear")),
+                "Cursor cache_efficiency red should NOT mention /clear");
+            assert!(detail.actions.iter().any(|a| a.contains("composer session")),
+                "Cursor cache_efficiency red should mention composer session");
+        }
+    }
+}
+
+// --- Coverage: previously misclassified multi-reply Cursor session ---
+
+#[test]
+fn health_cursor_multi_reply_session_not_false_red() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    // Cursor session: 2 user turns, each triggers 4 assistant messages.
+    // First turn: 4 messages at 3¢ each = 12¢ per turn
+    // Second turn: 4 messages at 4¢ each = 16¢ per turn
+    // Per-turn ratio ~1.3x → green. But per-reply naively could look worse.
+    let mut msgs = Vec::new();
+    for i in 0..4 {
+        let mut msg = health_msg(&format!("m{i}"), "s1", i, 100, 900, 3.0);
+        msg.provider = "cursor".to_string();
+        msgs.push(msg);
+    }
+    for i in 4..8 {
+        let mut msg = health_msg(&format!("m{i}"), "s1", i, 100, 900, 4.0);
+        msg.provider = "cursor".to_string();
+        msgs.push(msg);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    insert_health_hook_event_at(&conn, "cursor", "s1", "user_prompt_submit", "2026-03-14T09:59:30+00:00", None);
+    insert_health_hook_event_at(&conn, "cursor", "s1", "user_prompt_submit", "2026-03-14T10:03:30+00:00", None);
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    // With only 2 turns and prompt boundaries present, cost_acceleration is suppressed
+    assert!(h.vitals.cost_acceleration.is_none(),
+        "2 prompt turns should suppress cost_acceleration");
+    assert_ne!(h.state, "red", "multi-reply Cursor session should not be false red");
 }

@@ -1,10 +1,19 @@
 //! Session health: vitals computation, tips, and batch health checks.
 //!
 //! Four vitals are computed per session:
-//! - **context_drag** — prompt size growth over the current working stretch
+//! - **context_drag** — prompt-size growth over the current working stretch
 //! - **cache_efficiency** — recent cache reuse for the active model stretch
-//! - **thrashing** — repeated failing tool loops inside a turn
-//! - **cost_acceleration** — cost-per-turn growth over the current stretch
+//! - **thrashing** — tool failure loops inside a turn
+//! - **cost_acceleration** — cost growth (per user-turn when hook data exists,
+//!   otherwise per assistant reply)
+//!
+//! Overall state rules:
+//! - `gray`  — fewer than 2 vitals could be scored (not enough data)
+//! - `green` — at least 2 vitals scored and none are yellow/red
+//! - `yellow`/`red` — worst scored vital wins
+//!
+//! Tips are provider-aware: Claude Code, Cursor, and unknown providers each
+//! get different action recommendations where the underlying workflows differ.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,8 +24,45 @@ use rusqlite::{Connection, params};
 use super::sessions::session_messages;
 
 // ---------------------------------------------------------------------------
+// Provider-aware tip policy
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderKind {
+    ClaudeCode,
+    Cursor,
+    Other,
+}
+
+impl ProviderKind {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "cursor" => Self::Cursor,
+            "claude_code" => Self::ClaudeCode,
+            _ => Self::Other,
+        }
+    }
+
+    fn new_session_action(&self) -> &'static str {
+        match self {
+            Self::Cursor => "Start a new composer session.",
+            _ => "Start a new session.",
+        }
+    }
+
+    fn new_session_short(&self) -> &'static str {
+        match self {
+            Self::Cursor => "new composer session",
+            _ => "new session",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+const MIN_VITALS_FOR_GREEN: usize = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionHealth {
@@ -85,6 +131,8 @@ const COST_ACCEL_RED_RATIO: f64 = 4.0;
 const COST_ACCEL_MIN_SESSION_CENTS: f64 = 25.0;
 const COST_ACCEL_YELLOW_MIN_TURN_CENTS: f64 = 5.0;
 const COST_ACCEL_RED_MIN_TURN_CENTS: f64 = 12.0;
+const COST_ACCEL_MIN_TURNS: usize = 4;
+const COST_ACCEL_MIN_REQUESTS: usize = 6;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -104,13 +152,14 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
             .context("No sessions found")?,
     };
 
-    let provider: String = conn
+    let provider_str: String = conn
         .query_row(
             "SELECT COALESCE(provider, 'claude_code') FROM sessions WHERE session_id = ?1",
             params![sid],
             |row| row.get(0),
         )
         .unwrap_or_else(|_| "claude_code".to_string());
+    let provider = ProviderKind::from_str(&provider_str);
 
     let messages = session_messages(conn, &sid)?;
     let msg_count = messages.len() as u64;
@@ -133,7 +182,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     let context_drag = calc_context_drag(&metrics, last_compact_ts.as_deref());
     let cache_eff = calc_cache_efficiency(&metrics, last_compact_ts.as_deref());
     let thrashing = calc_thrashing(&tool_events);
-    let cost_accel = calc_cost_acceleration(&metrics, last_compact_ts.as_deref());
+    let cost_accel = calc_cost_acceleration(&metrics, &tool_events, last_compact_ts.as_deref());
 
     let vitals = SessionVitals {
         context_drag: context_drag.clone(),
@@ -149,15 +198,9 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
         ("cost_acceleration", &cost_accel),
     ];
 
-    let any_vital_computed = all_vitals.iter().any(|(_, v)| v.is_some());
-    let overall_state = if any_vital_computed {
-        worst_state(&all_vitals)
-    } else {
-        "gray".to_string()
-    };
-    let is_cursor = provider == "cursor";
-    let details = generate_details(&all_vitals, is_cursor);
-    let tip = generate_tip(&overall_state, &details, total_cost, msg_count, is_cursor);
+    let overall_state = overall_state(&all_vitals);
+    let details = generate_details(&all_vitals, provider);
+    let tip = generate_tip(&overall_state, &details, provider);
 
     Ok(SessionHealth {
         state: overall_state,
@@ -232,7 +275,8 @@ pub fn session_health_batch(
         let context_drag = calc_context_drag(&msgs, last_compact_ts.as_deref());
         let cache_efficiency = calc_cache_efficiency(&msgs, last_compact_ts.as_deref());
         let thrashing = calc_thrashing(&events);
-        let cost_acceleration = calc_cost_acceleration(&msgs, last_compact_ts.as_deref());
+        let cost_acceleration =
+            calc_cost_acceleration(&msgs, &events, last_compact_ts.as_deref());
         let all_vitals: Vec<(&str, &Option<VitalScore>)> = vec![
             ("thrashing", &thrashing),
             ("cache_efficiency", &cache_efficiency),
@@ -240,13 +284,7 @@ pub fn session_health_batch(
             ("cost_acceleration", &cost_acceleration),
         ];
 
-        let state = if all_vitals.iter().any(|(_, v)| v.is_some()) {
-            worst_state(&all_vitals)
-        } else {
-            "gray".to_string()
-        };
-
-        result.insert((*sid).to_string(), state);
+        result.insert((*sid).to_string(), overall_state(&all_vitals));
     }
 
     Ok(result)
@@ -385,18 +423,38 @@ fn calc_thrashing(events: &[SessionToolEvent]) -> Option<VitalScore> {
 
 fn calc_cost_acceleration(
     messages: &[HealthMessage],
+    events: &[SessionToolEvent],
     last_compact_ts: Option<&str>,
 ) -> Option<VitalScore> {
     let effective = dominant_model_messages(&filter_after_last_compact(messages, last_compact_ts));
-    let total_cost: f64 = effective.iter().map(|m| m.cost_cents).sum();
-    if effective.len() < 6 || total_cost < COST_ACCEL_MIN_SESSION_CENTS {
+    let turn_costs = prompt_turn_costs(&effective, events, last_compact_ts);
+    let (costs, label_unit) = if turn_costs.len() >= COST_ACCEL_MIN_TURNS {
+        (turn_costs, "turn")
+    } else if turn_costs.is_empty() {
+        let request_costs: Vec<f64> = effective.iter().map(|m| m.cost_cents).collect();
+        if request_costs.len() < COST_ACCEL_MIN_REQUESTS {
+            return None;
+        }
+        (request_costs, "reply")
+    } else {
+        // When we have prompt boundaries but only a couple of turns, suppress the vital
+        // instead of falling back to request-level math. That avoids false reds on
+        // agentic sessions where one user turn fans out into several assistant calls.
+        return None;
+    };
+
+    let total_cost: f64 = costs.iter().sum();
+    if total_cost < COST_ACCEL_MIN_SESSION_CENTS {
         return None;
     }
 
-    let half = effective.len() / 2;
-    let first_avg = effective[..half].iter().map(|m| m.cost_cents).sum::<f64>() / half as f64;
-    let second_avg = effective[half..].iter().map(|m| m.cost_cents).sum::<f64>()
-        / (effective.len() - half) as f64;
+    let half = costs.len() / 2;
+    if half == 0 || costs.len() == half {
+        return None;
+    }
+
+    let first_avg = costs[..half].iter().sum::<f64>() / half as f64;
+    let second_avg = costs[half..].iter().sum::<f64>() / (costs.len() - half) as f64;
     if first_avg <= 0.0 {
         return None;
     }
@@ -412,36 +470,98 @@ fn calc_cost_acceleration(
 
     Some(VitalScore {
         state: state.to_string(),
-        label: format!("{ratio:.1}x growth, {:.0}¢/turn", second_avg),
+        label: format!("{ratio:.1}x growth, {:.0}¢/{label_unit}", second_avg),
     })
 }
 
+fn prompt_turn_costs(
+    messages: &[&HealthMessage],
+    events: &[SessionToolEvent],
+    last_compact_ts: Option<&str>,
+) -> Vec<f64> {
+    let compact_at = last_compact_ts.and_then(parse_timestamp);
+    let prompt_times: Vec<DateTime<Utc>> = events
+        .iter()
+        .filter(|e| e.event == "user_prompt_submit")
+        .filter_map(|e| parse_timestamp(&e.timestamp))
+        .filter(|ts| match compact_at.as_ref() {
+            Some(compact) => ts > compact,
+            None => true,
+        })
+        .collect();
+    if prompt_times.is_empty() {
+        return Vec::new();
+    }
+
+    let mut turn_costs = vec![0.0; prompt_times.len()];
+    let mut turn_message_counts = vec![0usize; prompt_times.len()];
+    let mut prompt_idx = 0usize;
+
+    for message in messages {
+        let Some(message_ts) = parse_timestamp(&message.timestamp) else {
+            continue;
+        };
+
+        while prompt_idx + 1 < prompt_times.len() && message_ts >= prompt_times[prompt_idx + 1] {
+            prompt_idx += 1;
+        }
+
+        if message_ts >= prompt_times[prompt_idx] {
+            turn_costs[prompt_idx] += message.cost_cents;
+            turn_message_counts[prompt_idx] += 1;
+        }
+    }
+
+    turn_costs
+        .into_iter()
+        .zip(turn_message_counts)
+        .filter_map(|(cost, count)| if count > 0 { Some(cost) } else { None })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// Tip generation
+// Overall state
 // ---------------------------------------------------------------------------
 
-fn worst_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
-    vitals
+/// Determines the session-level health state.
+/// - If fewer than MIN_VITALS_FOR_GREEN vitals were scored, returns `gray`.
+/// - Otherwise returns the worst scored state.
+fn overall_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
+    let scored: Vec<&str> = vitals
         .iter()
         .filter_map(|(_, v)| v.as_ref())
         .map(|v| v.state.as_str())
-        .max_by_key(|s| match *s {
+        .collect();
+
+    if scored.is_empty() {
+        return "gray".to_string();
+    }
+
+    let worst = scored
+        .iter()
+        .max_by_key(|s| match **s {
             "red" => 2,
             "yellow" => 1,
             _ => 0,
         })
-        .unwrap_or("green")
-        .to_string()
+        .unwrap_or(&"green");
+
+    if *worst == "green" && scored.len() < MIN_VITALS_FOR_GREEN {
+        return "gray".to_string();
+    }
+    worst.to_string()
 }
 
-fn generate_details(vitals: &[(&str, &Option<VitalScore>)], is_cursor: bool) -> Vec<HealthDetail> {
-    let mut details: Vec<HealthDetail> = Vec::new();
+// ---------------------------------------------------------------------------
+// Tip generation (provider-aware)
+// ---------------------------------------------------------------------------
 
-    let new_session = if is_cursor {
-        "Start a new composer session."
-    } else {
-        "Start a new session."
-    };
+fn generate_details(
+    vitals: &[(&str, &Option<VitalScore>)],
+    provider: ProviderKind,
+) -> Vec<HealthDetail> {
+    let mut details: Vec<HealthDetail> = Vec::new();
+    let new_session = provider.new_session_action();
 
     for (name, vital) in vitals {
         if let Some(v) = vital {
@@ -450,45 +570,60 @@ fn generate_details(vitals: &[(&str, &Option<VitalScore>)], is_cursor: bool) -> 
             }
             let (tip, actions): (String, Vec<String>) = match (*name, v.state.as_str()) {
                 ("context_drag", "yellow") => {
-                    let mut actions = Vec::new();
-                    if is_cursor {
-                        actions.push("If the agent is losing focus or you changed tasks, start a new composer session.".to_string());
-                    } else {
-                        actions.push("Run /compact if you want to keep working on the same task.".to_string());
-                        actions.push("If the task changed, start a new session instead.".to_string());
-                    }
-                    ("Context is getting noisy.".to_string(), actions)
+                    let actions = match provider {
+                        ProviderKind::Cursor => vec![
+                            "If the agent is losing focus or you changed tasks, start a new composer session.".to_string(),
+                        ],
+                        ProviderKind::ClaudeCode => vec![
+                            "Run /compact if you want to keep working on the same task.".to_string(),
+                            "If the task changed, start a new session instead.".to_string(),
+                        ],
+                        ProviderKind::Other => vec![
+                            "Trim context or start fresh if the agent is losing focus.".to_string(),
+                        ],
+                    };
+                    ("Prompt size is getting large.".to_string(), actions)
                 }
                 ("context_drag", "red") => {
-                    let mut actions = vec![new_session.to_string()];
-                    if !is_cursor {
-                        actions.push("If you must keep the thread, run /compact first and keep only the current plan.".to_string());
-                    }
-                    ("Context is now large enough to hurt reliability.".to_string(), actions)
+                    let actions = match provider {
+                        ProviderKind::ClaudeCode => vec![
+                            new_session.to_string(),
+                            "If you must keep the thread, run /compact first and keep only the current plan.".to_string(),
+                        ],
+                        _ => vec![new_session.to_string()],
+                    };
+                    ("Prompt size is large enough to hurt reliability.".to_string(), actions)
                 }
-                ("cache_efficiency", "yellow") => (
-                    "Cache reuse is lower than usual, so turns may get slower.".to_string(),
-                    vec![
-                        "This is normal after switching models, tools, or task shape.".to_string(),
-                        "If the session now feels sluggish, compact or start fresh.".to_string(),
-                    ],
-                ),
-                ("cache_efficiency", "red") => {
-                    let first_action = if is_cursor {
-                        "If this task still matters, start a new composer session to rebuild a clean prefix.".to_string()
-                    } else {
-                        "Run /clear or start a new session if the agent has become slow.".to_string()
+                ("cache_efficiency", "yellow") => {
+                    let second = match provider {
+                        ProviderKind::Cursor => "If the session feels sluggish, start a new composer session.".to_string(),
+                        ProviderKind::ClaudeCode => "If the session feels sluggish, run /compact or start fresh.".to_string(),
+                        ProviderKind::Other => "If the session feels sluggish, start fresh.".to_string(),
                     };
                     (
-                        "Cache reuse is very low, so you are paying for more fresh context each turn.".to_string(),
+                        "Cache reuse is lower than usual, so turns may get slower.".to_string(),
+                        vec![
+                            "This is normal after switching models, tools, or task shape.".to_string(),
+                            second,
+                        ],
+                    )
+                }
+                ("cache_efficiency", "red") => {
+                    let first_action = match provider {
+                        ProviderKind::Cursor => "Start a new composer session to rebuild a clean cache prefix.".to_string(),
+                        ProviderKind::ClaudeCode => "Run /clear or start a new session to rebuild the cache.".to_string(),
+                        ProviderKind::Other => "Start fresh to rebuild the cache.".to_string(),
+                    };
+                    (
+                        "Cache reuse is very low — you are paying for fresh context each turn.".to_string(),
                         vec![
                             first_action,
-                            "If you just changed models or tools, you can ignore this until the cache warms up again.".to_string(),
+                            "If you just changed models or tools, you can ignore this until the cache warms up.".to_string(),
                         ],
                     )
                 }
                 ("thrashing", "yellow") => (
-                    "The agent may be repeating the same failing move.".to_string(),
+                    "The agent may be stuck in a failing loop.".to_string(),
                     vec![
                         "Check the latest error or test output before letting it continue.".to_string(),
                         "Give a narrower next step if it keeps retrying.".to_string(),
@@ -501,19 +636,22 @@ fn generate_details(vitals: &[(&str, &Option<VitalScore>)], is_cursor: bool) -> 
                         "Restart with a more specific prompt after fixing the blocker.".to_string(),
                     ],
                 ),
-                ("cost_acceleration", "yellow") => (
-                    "Each turn is getting more expensive than earlier in the session.".to_string(),
-                    vec![
-                        if is_cursor {
-                            "If focus is dropping, start a new composer session.".to_string()
-                        } else {
-                            "Run /compact if you still need the current thread.".to_string()
-                        },
-                        "If the task changed, start fresh instead of carrying the old context forward.".to_string(),
-                    ],
-                ),
+                ("cost_acceleration", "yellow") => {
+                    let first = match provider {
+                        ProviderKind::Cursor => "If focus is drifting, start a new composer session.".to_string(),
+                        ProviderKind::ClaudeCode => "Run /compact if you still need the current thread.".to_string(),
+                        ProviderKind::Other => "Start fresh if the task has changed.".to_string(),
+                    };
+                    (
+                        format!("Cost is rising — {}", v.label),
+                        vec![
+                            first,
+                            "If the task changed, start fresh instead of carrying old context.".to_string(),
+                        ],
+                    )
+                }
                 ("cost_acceleration", "red") => (
-                    "Each turn now costs much more than the start of the session.".to_string(),
+                    format!("Cost has spiked — {}", v.label),
                     vec![
                         new_session.to_string(),
                         "Carry over only the plan, file paths, or failing command you still need.".to_string(),
@@ -532,7 +670,6 @@ fn generate_details(vitals: &[(&str, &Option<VitalScore>)], is_cursor: bool) -> 
         }
     }
 
-    // Sort: red first, then yellow; within same state, keep priority order.
     details.sort_by(|a, b| {
         let state_ord = |s: &str| -> u8 { if s == "red" { 0 } else { 1 } };
         let vital_ord = |v: &str| -> u8 {
@@ -554,49 +691,35 @@ fn generate_details(vitals: &[(&str, &Option<VitalScore>)], is_cursor: bool) -> 
 fn generate_tip(
     overall_state: &str,
     details: &[HealthDetail],
-    total_cost: f64,
-    msg_count: u64,
-    is_cursor: bool,
+    provider: ProviderKind,
 ) -> String {
     if overall_state == "gray" {
-        return "Session starting".to_string();
+        return "Not enough data yet".to_string();
     }
     if overall_state == "green" {
         return "Session healthy".to_string();
     }
 
-    let new_session = if is_cursor {
-        "new composer session"
-    } else {
-        "new session"
-    };
+    let new_session = provider.new_session_short();
 
-    // Use the worst (first) detail for the short tip
     let base = if let Some(d) = details.first() {
         match (d.vital.as_str(), d.state.as_str()) {
             ("context_drag", "yellow") => {
-                if is_cursor {
-                    format!("Context growing - start {new_session} if focus drops")
-                } else {
-                    "Context growing - compact soon".to_string()
+                match provider {
+                    ProviderKind::Cursor => format!("Prompt growing — start {new_session} if focus drops"),
+                    ProviderKind::ClaudeCode => "Prompt growing — /compact soon".to_string(),
+                    ProviderKind::Other => "Prompt growing — trim context soon".to_string(),
                 }
             }
-            ("context_drag", "red") => format!("Context too noisy - start {new_session}"),
-            ("cache_efficiency", "yellow") => "Cache reuse low - slower turns possible".to_string(),
-            ("cache_efficiency", "red") => format!("Cache reuse very low - start {new_session}"),
-            ("thrashing", "yellow") => "Agent may be stuck - check latest error".to_string(),
-            ("thrashing", "red") => "Agent stuck retrying - intervene now".to_string(),
+            ("context_drag", "red") => format!("Prompt too large — start {new_session}"),
+            ("cache_efficiency", "yellow") => "Cache reuse low — slower turns possible".to_string(),
+            ("cache_efficiency", "red") => format!("Cache reuse very low — start {new_session}"),
+            ("thrashing", "yellow") => "Agent may be stuck — check latest error".to_string(),
+            ("thrashing", "red") => "Agent stuck retrying — intervene now".to_string(),
             ("cost_acceleration", "yellow") => {
-                format!(
-                    "Cost per turn rising - {:.0}¢ average",
-                    if msg_count > 0 {
-                        total_cost / msg_count as f64
-                    } else {
-                        0.0
-                    }
-                )
+                format!("Cost rising — {}", d.label)
             }
-            ("cost_acceleration", "red") => format!("Cost per turn spiking - start {new_session}"),
+            ("cost_acceleration", "red") => format!("Cost spiking — start {new_session}"),
             _ => format!("Session {overall_state}"),
         }
     } else {
@@ -681,11 +804,11 @@ fn average_prompt_size(messages: &[&HealthMessage]) -> f64 {
 
 fn format_token_count(tokens: f64) -> String {
     if tokens >= 1_000_000.0 {
-        format!("{:.1}M input", tokens / 1_000_000.0)
+        format!("{:.1}M prompt", tokens / 1_000_000.0)
     } else if tokens >= 1_000.0 {
-        format!("{:.0}k input", tokens / 1_000.0)
+        format!("{:.0}k prompt", tokens / 1_000.0)
     } else {
-        format!("{tokens:.0} input")
+        format!("{tokens:.0} prompt")
     }
 }
 

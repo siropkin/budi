@@ -798,7 +798,7 @@ impl BudiMcpServer {
     }
 
     #[tool(
-        description = "Check session health: context drag, cache efficiency, agent thrashing, and cost acceleration. Returns overall state (green/yellow/red), vitals breakdown, and actionable tips. Use to decide when to compact context or start a new session."
+        description = "Check session health: prompt growth, cache reuse, retry loops, and cost acceleration. Returns overall state (green/yellow/red/gray), vitals breakdown, and provider-aware tips. Gray means not enough data yet. Use to decide when to start fresh or trim context."
     )]
     async fn session_health(
         &self,

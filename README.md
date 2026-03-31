@@ -235,19 +235,20 @@ The MCP server is a thin HTTP client to the daemon — it never touches the data
 Budi monitors four vitals for every active session and turns them into plain-language tips.
 
 The scoring is intentionally conservative:
-- It waits until there is enough data before scoring a vital.
+- It waits until there is enough data before scoring a vital — a session stays **gray** ("not enough data yet") until at least two vitals can be computed.
 - It measures the current working stretch, so a `/compact` resets context-based checks.
 - It looks at the active model stretch for cache reuse, so model switches do not poison the whole session.
+- Cost acceleration uses per-user-turn costs when hook data provides prompt boundaries, and falls back to per-reply costs otherwise.
 - It prefers concrete next steps over internal jargon.
 
-Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`, while Cursor suggestions point you toward a fresh composer session when the conversation has drifted.
+Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`, Cursor suggestions point you toward a fresh composer session, and unknown providers receive neutral advice. Different providers may intentionally get different recommendations for the same health issue.
 
 | Vital | What it detects | Yellow | Red |
 |-------|----------------|--------|-----|
-| **Context Growth** | Prompt size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute prompt size |
+| **Prompt Growth** | Prompt size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute prompt size |
 | **Cache Reuse** | Recent cache reuse is low for the active model stretch | Below 60% recent reuse | Below 35% recent reuse |
-| **Cost Per Turn** | Later turns cost much more than earlier ones | 2x+ growth and meaningful cents/turn | 4x+ growth and high cents/turn |
-| **Retry Loops** | Agent is repeating the same failing move | One suspicious retry loop | Repeated or severe retry loops |
+| **Cost Acceleration** | Later turns/replies cost much more than earlier ones | 2x+ growth and meaningful cost per unit | 4x+ growth and high cost per unit |
+| **Retry Loops** | Agent is stuck in a failing tool loop | One suspicious retry loop | Repeated or severe retry loops |
 
 Health state appears in both the status line and the session detail page in the dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh."
 
