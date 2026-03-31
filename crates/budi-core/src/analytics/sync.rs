@@ -171,6 +171,7 @@ fn sync_with_max_age(
 
 /// Scan assistant messages with a git_branch but no ticket_id tag,
 /// extract ticket IDs, and insert the missing tags.
+/// Limited to recent messages (last 90 days) and batched to cap memory usage.
 fn backfill_ticket_tags(conn: &mut Connection) -> usize {
     let rows: Vec<(String, String)> = {
         let mut stmt = match conn.prepare(
@@ -178,10 +179,12 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
              FROM messages m
              WHERE m.role = 'assistant'
                AND m.git_branch IS NOT NULL AND m.git_branch != ''
+               AND m.timestamp >= datetime('now', '-90 days')
                AND NOT EXISTS (
                  SELECT 1 FROM tags t
                  WHERE t.message_uuid = m.uuid AND t.key = 'ticket_id'
-               )",
+               )
+             LIMIT 10000",
         ) {
             Ok(s) => s,
             Err(_) => return 0,
@@ -206,15 +209,19 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
     let mut count = 0usize;
     for (uuid, branch) in &rows {
         if let Some(ticket) = crate::pipeline::extract_ticket_id(branch) {
-            let _ = tx.execute(
+            if let Err(e) = tx.execute(
                 "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_id', ?2)",
                 rusqlite::params![uuid, ticket],
-            );
+            ) {
+                tracing::warn!("backfill_ticket_tags: ticket_id insert failed for {uuid}: {e}");
+            }
             if let Some(dash) = ticket.find('-') {
-                let _ = tx.execute(
+                if let Err(e) = tx.execute(
                     "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_prefix', ?2)",
                     rusqlite::params![uuid, &ticket[..dash]],
-                );
+                ) {
+                    tracing::warn!("backfill_ticket_tags: ticket_prefix insert failed for {uuid}: {e}");
+                }
             }
             count += 1;
         }

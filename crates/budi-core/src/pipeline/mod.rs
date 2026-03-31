@@ -7,6 +7,7 @@ pub mod enrichers;
 
 use crate::analytics::Tag;
 use crate::jsonl::ParsedMessage;
+use crate::tag_keys as tk;
 
 /// Trait for pipeline enrichers. Each enricher can mutate a message and produce tags.
 pub trait Enricher: Send {
@@ -50,20 +51,7 @@ impl Pipeline {
         let mut all_tags = Vec::with_capacity(messages.len());
         // Track (session_id, key, value) to avoid duplicate session-level tags.
         let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
-        // Note: "branch" is stored as a column on messages, not emitted as a tag.
-        let session_level_keys: &[&str] = &[
-            "ticket_id",
-            "ticket_prefix",
-            "repo",
-            "user",
-            "activity",
-            "machine",
-            "composer_mode",
-            "permission_mode",
-            "user_email",
-            "duration",
-            "dominant_tool",
-        ];
+        let session_level_keys = tk::SESSION_LEVEL_KEYS;
 
         // Sort by (session_id, timestamp) to handle out-of-order batches.
         messages.sort_by(|a, b| {
@@ -97,10 +85,10 @@ impl Pipeline {
             // during JSONL parsing or from hook events). Only emit once per session.
             if let Some(ref cat) = msg.prompt_category {
                 let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
-                let key = (dedup_id, "activity".to_string(), cat.clone());
+                let key = (dedup_id, tk::ACTIVITY.to_string(), cat.clone());
                 if seen_session_tags.insert(key) {
-                    msg_tags.push(crate::analytics::Tag {
-                        key: "activity".to_string(),
+                    msg_tags.push(Tag {
+                        key: tk::ACTIVITY.to_string(),
                         value: cat.clone(),
                     });
                 }
@@ -137,28 +125,28 @@ fn propagate_session_context(messages: &mut [ParsedMessage]) {
         });
 
         if let Some(b) = &msg.git_branch {
-            if !b.is_empty() || ctx.branch.is_none() {
+            if !b.is_empty() {
                 ctx.branch = Some(b.clone());
             }
         } else if let Some(ref b) = ctx.branch {
             msg.git_branch = Some(b.clone());
         }
         if let Some(r) = &msg.repo_id {
-            if !r.is_empty() || ctx.repo.is_none() {
+            if !r.is_empty() {
                 ctx.repo = Some(r.clone());
             }
         } else if let Some(ref r) = ctx.repo {
             msg.repo_id = Some(r.clone());
         }
         if let Some(c) = &msg.cwd {
-            if !c.is_empty() || ctx.cwd.is_none() {
+            if !c.is_empty() {
                 ctx.cwd = Some(c.clone());
             }
         } else if let Some(ref c) = ctx.cwd {
             msg.cwd = Some(c.clone());
         }
         if let Some(cat) = &msg.prompt_category {
-            if ctx.category.is_none() {
+            if !cat.is_empty() && ctx.category.is_none() {
                 ctx.category = Some(cat.clone());
             }
         } else if let Some(ref cat) = ctx.category {
@@ -168,7 +156,10 @@ fn propagate_session_context(messages: &mut [ParsedMessage]) {
 }
 
 /// Simple glob matching supporting `*` (any chars) and `?` (single char).
-/// Operates on bytes for zero-allocation matching (suitable for ASCII paths/branches).
+/// Operates on bytes for zero-allocation matching.
+///
+/// **ASCII-only**: `?` matches a single byte, not a single Unicode character.
+/// This is correct for repo IDs and branch names which are ASCII in practice.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let pat = pattern.as_bytes();
     let txt = text.as_bytes();

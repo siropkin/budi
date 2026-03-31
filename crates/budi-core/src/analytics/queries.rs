@@ -67,12 +67,20 @@ fn date_provider_filter(
     let mut conditions = Vec::new();
     let mut param_values = Vec::new();
     if let Some(s) = since {
-        param_values.push(s.to_string());
-        conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        } else {
+            tracing::warn!("date_provider_filter: invalid 'since' timestamp ignored: {s}");
+        }
     }
     if let Some(u) = until {
-        param_values.push(u.to_string());
-        conditions.push(format!("timestamp < ?{}", param_values.len()));
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        } else {
+            tracing::warn!("date_provider_filter: invalid 'until' timestamp ignored: {u}");
+        }
     }
     if let Some(p) = provider {
         param_values.push(p.to_string());
@@ -750,12 +758,14 @@ pub fn tag_stats(
     let where_clause = format!("WHERE {}", where_parts.join(" AND "));
 
     // Build the untagged UNION clause for single-key queries.
+    // Note: the UNION reuses the same positional params as the main query.
+    // ?1 is always the tag key (first param pushed when tag_key is Some).
     let untagged_union = if let Some(k) = tag_key {
         let mut date_parts = Vec::new();
         {
             let mut uidx = 0usize;
             if tag_key.is_some() {
-                uidx += 1;
+                uidx += 1; // ?1 = tag key
             }
             if since.is_some() {
                 uidx += 1;

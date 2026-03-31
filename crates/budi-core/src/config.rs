@@ -160,13 +160,26 @@ pub fn tags_config_path() -> Result<PathBuf> {
 }
 
 /// Load tags config, returning None if the file doesn't exist.
+/// Logs a warning if the file exists but cannot be read or parsed.
 pub fn load_tags_config() -> Option<TagsConfig> {
     let path = tags_config_path().ok()?;
     if !path.exists() {
         return None;
     }
-    let raw = fs::read_to_string(&path).ok()?;
-    toml::from_str(&raw).ok()
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to read {}: {e}", path.display());
+            return None;
+        }
+    };
+    match toml::from_str(&raw) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

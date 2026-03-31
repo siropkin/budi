@@ -9,6 +9,7 @@ use crate::hooks::SessionMeta;
 use crate::jsonl::ParsedMessage;
 use crate::pipeline::{Enricher, extract_ticket_id, glob_match};
 use crate::repo_id::RepoIdCache;
+use crate::tag_keys as tk;
 
 // ---------------------------------------------------------------------------
 // GitEnricher — resolves repo_id from cwd, extracts ticket_id from branch
@@ -37,7 +38,7 @@ impl Enricher for GitEnricher {
         let mut tags = Vec::new();
 
         // Resolve repo_id from cwd
-        if msg.repo_id.is_none() {
+            if msg.repo_id.is_none() {
             if msg.cwd.is_none() {
                 tracing::debug!(
                     "GitEnricher: no cwd for message {}, skipping repo resolution",
@@ -48,13 +49,13 @@ impl Enricher for GitEnricher {
                 let repo_id = self.repo_cache.resolve(Path::new(cwd));
                 msg.repo_id = Some(repo_id.clone());
                 tags.push(Tag {
-                    key: "repo".to_string(),
+                    key: tk::REPO.to_string(),
                     value: repo_id,
                 });
             }
         } else if let Some(ref repo_id) = msg.repo_id {
             tags.push(Tag {
-                key: "repo".to_string(),
+                key: tk::REPO.to_string(),
                 value: repo_id.clone(),
             });
         }
@@ -64,13 +65,12 @@ impl Enricher for GitEnricher {
             && let Some(ticket) = extract_ticket_id(branch)
         {
             tags.push(Tag {
-                key: "ticket_id".to_string(),
+                key: tk::TICKET_ID.to_string(),
                 value: ticket.to_string(),
             });
-            // Extract prefix (e.g. "PAVA" from "PAVA-2057")
             if let Some(dash) = ticket.find('-') {
                 tags.push(Tag {
-                    key: "ticket_prefix".to_string(),
+                    key: tk::TICKET_PREFIX.to_string(),
                     value: ticket[..dash].to_string(),
                 });
             }
@@ -140,18 +140,17 @@ impl Enricher for IdentityEnricher {
     fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
         let mut tags = Vec::new();
 
-        // Produce user/machine tags (session-level dedup handled by Pipeline)
         let user = msg.user_name.as_deref().unwrap_or(&self.user_name);
         if !user.is_empty() {
             tags.push(Tag {
-                key: "user".to_string(),
+                key: tk::USER.to_string(),
                 value: user.to_string(),
             });
         }
         let machine = msg.machine_name.as_deref().unwrap_or(&self.machine_name);
         if !machine.is_empty() {
             tags.push(Tag {
-                key: "machine".to_string(),
+                key: tk::MACHINE.to_string(),
                 value: machine.to_string(),
             });
         }
@@ -170,20 +169,18 @@ impl Enricher for CostEnricher {
     fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
         let mut tags = Vec::new();
 
-        // Add provider tag (only for assistant messages to avoid unnecessary tag rows)
         if msg.role == "assistant" {
             tags.push(Tag {
-                key: "provider".to_string(),
+                key: tk::PROVIDER.to_string(),
                 value: msg.provider.clone(),
             });
-        }
 
-        // Add model tag
-        if let Some(ref model) = msg.model {
-            tags.push(Tag {
-                key: "model".to_string(),
-                value: model.clone(),
-            });
+            if let Some(ref model) = msg.model {
+                tags.push(Tag {
+                    key: tk::MODEL.to_string(),
+                    value: model.clone(),
+                });
+            }
         }
 
         // Calculate cost if not already set (skip if API provided exact cost)
@@ -244,20 +241,18 @@ impl Enricher for CostEnricher {
             msg.uuid
         );
 
-        // Add speed tag if not standard (fast mode = 6x pricing)
         if let Some(ref speed) = msg.speed
             && speed != "standard"
         {
             tags.push(Tag {
-                key: "speed".to_string(),
+                key: tk::SPEED.to_string(),
                 value: speed.clone(),
             });
         }
 
-        // Emit cost_confidence tag for assistant messages that have cost data
         if msg.role == "assistant" && msg.cost_cents.is_some() {
             tags.push(Tag {
-                key: "cost_confidence".to_string(),
+                key: tk::COST_CONFIDENCE.to_string(),
                 value: msg.cost_confidence.clone(),
             });
         }
@@ -350,25 +345,21 @@ impl Enricher for HookEnricher {
 
         if let Some(ref mode) = meta.composer_mode {
             tags.push(Tag {
-                key: "composer_mode".to_string(),
+                key: tk::COMPOSER_MODE.to_string(),
                 value: mode.clone(),
             });
         }
         if let Some(ref mode) = meta.permission_mode {
             tags.push(Tag {
-                key: "permission_mode".to_string(),
+                key: tk::PERMISSION_MODE.to_string(),
                 value: mode.clone(),
             });
         }
-        if let Some(ref category) = meta.prompt_category {
-            tags.push(Tag {
-                key: "activity".to_string(),
-                value: category.clone(),
-            });
-        }
+        // NOTE: activity tag is emitted solely by Pipeline::process() from
+        // msg.prompt_category to avoid conflicting values from two sources.
         if let Some(ref email) = meta.user_email {
             tags.push(Tag {
-                key: "user_email".to_string(),
+                key: tk::USER_EMAIL.to_string(),
                 value: email.clone(),
             });
         }
@@ -381,13 +372,13 @@ impl Enricher for HookEnricher {
                 "long"
             };
             tags.push(Tag {
-                key: "duration".to_string(),
+                key: tk::DURATION.to_string(),
                 value: bucket.to_string(),
             });
         }
         if let Some(ref tool) = meta.dominant_tool {
             tags.push(Tag {
-                key: "dominant_tool".to_string(),
+                key: tk::DOMINANT_TOOL.to_string(),
                 value: tool.clone(),
             });
         }

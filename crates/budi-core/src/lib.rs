@@ -9,3 +9,4 @@ pub mod pipeline;
 pub mod provider;
 pub mod providers;
 pub mod repo_id;
+pub mod tag_keys;

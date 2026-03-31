@@ -658,6 +658,22 @@ impl BudiMcpServer {
         let config: budi_core::config::TagsConfig = toml::from_str(&params.0.toml_content)
             .map_err(|e| McpError::invalid_params(format!("Invalid TOML: {e}"), None))?;
 
+        let mut warnings = Vec::new();
+        let auto_keys = &[
+            "repo", "ticket_id", "ticket_prefix", "user", "machine",
+            "session_title", "provider", "model", "speed", "cost_confidence",
+            "composer_mode", "permission_mode", "activity", "user_email",
+            "duration", "dominant_tool",
+        ];
+        for rule in &config.rules {
+            if rule.key.is_empty() || rule.value.is_empty() {
+                warnings.push(format!("Rule has empty key or value: key={:?} value={:?}", rule.key, rule.value));
+            }
+            if auto_keys.contains(&rule.key.as_str()) {
+                warnings.push(format!("Key {:?} collides with auto-generated tag; custom value may conflict", rule.key));
+            }
+        }
+
         let path = budi_core::config::tags_config_path()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         if let Some(parent) = path.parent() {
@@ -667,11 +683,14 @@ impl BudiMcpServer {
         std::fs::write(&path, &params.0.toml_content)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let text = format!(
+        let mut text = format!(
             "Tag rules saved to {}\n{} rule(s) configured.\nRun `budi sync --force` to re-tag existing messages.",
             path.display(),
             config.rules.len()
         );
+        for w in &warnings {
+            text.push_str(&format!("\nWarning: {w}"));
+        }
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 

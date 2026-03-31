@@ -1,0 +1,39 @@
+//! Canonical tag key constants.
+//!
+//! Single source of truth for all tag keys emitted by enrichers and used in
+//! queries, dedup logic, and dashboard code. Add new keys here rather than
+//! scattering string literals across the codebase.
+
+pub const REPO: &str = "repo";
+pub const TICKET_ID: &str = "ticket_id";
+pub const TICKET_PREFIX: &str = "ticket_prefix";
+pub const USER: &str = "user";
+pub const MACHINE: &str = "machine";
+pub const SESSION_TITLE: &str = "session_title";
+pub const PROVIDER: &str = "provider";
+pub const MODEL: &str = "model";
+pub const SPEED: &str = "speed";
+pub const COST_CONFIDENCE: &str = "cost_confidence";
+pub const COMPOSER_MODE: &str = "composer_mode";
+pub const PERMISSION_MODE: &str = "permission_mode";
+pub const ACTIVITY: &str = "activity";
+pub const USER_EMAIL: &str = "user_email";
+pub const DURATION: &str = "duration";
+pub const DOMINANT_TOOL: &str = "dominant_tool";
+
+/// Tag keys that are session-level: only emitted once per session (first
+/// message wins) to avoid duplicate rows in the tags table.
+pub const SESSION_LEVEL_KEYS: &[&str] = &[
+    TICKET_ID,
+    TICKET_PREFIX,
+    REPO,
+    SESSION_TITLE,
+    USER,
+    ACTIVITY,
+    MACHINE,
+    COMPOSER_MODE,
+    PERMISSION_MODE,
+    USER_EMAIL,
+    DURATION,
+    DOMINANT_TOOL,
+];
