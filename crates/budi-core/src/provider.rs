@@ -21,6 +21,7 @@ pub struct ModelPricing {
 impl ModelPricing {
     /// Calculate cost in cents from token counts and pricing.
     /// Single source of truth for cost calculation — used by CostEnricher, OTEL ingestion, etc.
+    #[allow(clippy::too_many_arguments)]
     pub fn calculate_cost_cents(
         &self,
         input_tokens: u64,

@@ -215,13 +215,13 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
             ) {
                 tracing::warn!("backfill_ticket_tags: ticket_id insert failed for {uuid}: {e}");
             }
-            if let Some(dash) = ticket.find('-') {
-                if let Err(e) = tx.execute(
+            if let Some(dash) = ticket.find('-')
+                && let Err(e) = tx.execute(
                     "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_prefix', ?2)",
                     rusqlite::params![uuid, &ticket[..dash]],
-                ) {
-                    tracing::warn!("backfill_ticket_tags: ticket_prefix insert failed for {uuid}: {e}");
-                }
+                )
+            {
+                tracing::warn!("backfill_ticket_tags: ticket_prefix insert failed for {uuid}: {e}");
             }
             count += 1;
         }
@@ -446,10 +446,10 @@ fn collect_cursor_titles(session_ids: &[&str]) -> HashMap<String, String> {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                if !name.is_empty() {
-                    result.insert(sid.to_string(), truncate_title(name, 120));
-                }
+            if let Some(name) = parsed.get("name").and_then(|v| v.as_str())
+                && !name.is_empty()
+            {
+                result.insert(sid.to_string(), truncate_title(name, 120));
             }
         }
     }

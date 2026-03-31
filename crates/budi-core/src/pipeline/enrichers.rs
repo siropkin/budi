@@ -110,10 +110,10 @@ impl IdentityEnricher {
 
 fn get_hostname() -> String {
     // Fast paths that avoid spawning a subprocess
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return h;
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
     }
     if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
         let trimmed = h.trim().to_string();

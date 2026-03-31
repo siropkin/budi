@@ -82,13 +82,12 @@ impl Default for StatuslineConfig {
 impl StatuslineConfig {
     /// Resolve the effective slots list, considering preset → slots → format priority.
     pub fn effective_slots(&self) -> Vec<String> {
-        if let Some(ref preset_name) = self.preset {
-            if let Some((_, preset_slots)) = STATUSLINE_PRESETS
+        if let Some(ref preset_name) = self.preset
+            && let Some((_, preset_slots)) = STATUSLINE_PRESETS
                 .iter()
                 .find(|(name, _)| *name == preset_name.as_str())
-            {
-                return preset_slots.iter().map(|s| s.to_string()).collect();
-            }
+        {
+            return preset_slots.iter().map(|s| s.to_string()).collect();
         }
         self.slots.clone()
     }

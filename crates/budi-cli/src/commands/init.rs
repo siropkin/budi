@@ -349,7 +349,7 @@ fn apply_cc_hooks(settings: &mut Value) -> bool {
         let Some(arr_mut) = event_arr.as_array_mut() else {
             continue;
         };
-        let had_legacy = arr_mut.iter().any(|e| is_legacy_cc_hook(e));
+        let had_legacy = arr_mut.iter().any(is_legacy_cc_hook);
         if had_legacy {
             arr_mut.retain(|e| !is_legacy_cc_hook(e));
             changed = true;
@@ -556,7 +556,7 @@ fn install_cursor_hooks() -> Result<()> {
         let Some(arr_mut) = event_arr.as_array_mut() else {
             continue;
         };
-        let had_legacy = arr_mut.iter().any(|e| is_legacy_cursor_hook(e));
+        let had_legacy = arr_mut.iter().any(is_legacy_cursor_hook);
         if had_legacy {
             arr_mut.retain(|e| !is_legacy_cursor_hook(e));
             changed = true;
@@ -870,19 +870,15 @@ pub fn find_cursor_cli() -> Option<String> {
         vec!["cursor".to_string()]
     };
 
-    for candidate in candidates {
-        if Command::new(&candidate)
+    candidates.into_iter().find(|candidate| {
+        Command::new(candidate)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-        {
-            return Some(candidate);
-        }
-    }
-    None
+    })
 }
 
 /// Check if `siropkin.budi` extension is already installed in Cursor.
