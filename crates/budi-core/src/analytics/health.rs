@@ -274,8 +274,7 @@ pub fn session_health_batch(
         let context_drag = calc_context_drag(&msgs, last_compact_ts.as_deref());
         let cache_efficiency = calc_cache_efficiency(&msgs, last_compact_ts.as_deref());
         let thrashing = calc_thrashing(&events);
-        let cost_acceleration =
-            calc_cost_acceleration(&msgs, &events, last_compact_ts.as_deref());
+        let cost_acceleration = calc_cost_acceleration(&msgs, &events, last_compact_ts.as_deref());
         let all_vitals: Vec<(&str, &Option<VitalScore>)> = vec![
             ("thrashing", &thrashing),
             ("cache_efficiency", &cache_efficiency),
@@ -591,26 +590,43 @@ fn generate_details(
                         ],
                         _ => vec![new_session.to_string()],
                     };
-                    ("Context is large enough to hurt reliability.".to_string(), actions)
+                    (
+                        "Context is large enough to hurt reliability.".to_string(),
+                        actions,
+                    )
                 }
                 ("cache_efficiency", "yellow") => {
                     let second = match provider {
-                        ProviderKind::Cursor => "If the session feels sluggish, start a new composer session.".to_string(),
-                        ProviderKind::ClaudeCode => "If the session feels sluggish, run /compact or start fresh.".to_string(),
-                        ProviderKind::Other => "If the session feels sluggish, start fresh.".to_string(),
+                        ProviderKind::Cursor => {
+                            "If the session feels sluggish, start a new composer session."
+                                .to_string()
+                        }
+                        ProviderKind::ClaudeCode => {
+                            "If the session feels sluggish, run /compact or start fresh."
+                                .to_string()
+                        }
+                        ProviderKind::Other => {
+                            "If the session feels sluggish, start fresh.".to_string()
+                        }
                     };
                     (
                         "Cache reuse is lower than usual, so turns may get slower.".to_string(),
                         vec![
-                            "This is normal after switching models, tools, or task shape.".to_string(),
+                            "This is normal after switching models, tools, or task shape."
+                                .to_string(),
                             second,
                         ],
                     )
                 }
                 ("cache_efficiency", "red") => {
                     let first_action = match provider {
-                        ProviderKind::Cursor => "Start a new composer session to rebuild a clean cache prefix.".to_string(),
-                        ProviderKind::ClaudeCode => "Run /clear or start a new session to rebuild the cache.".to_string(),
+                        ProviderKind::Cursor => {
+                            "Start a new composer session to rebuild a clean cache prefix."
+                                .to_string()
+                        }
+                        ProviderKind::ClaudeCode => {
+                            "Run /clear or start a new session to rebuild the cache.".to_string()
+                        }
                         ProviderKind::Other => "Start fresh to rebuild the cache.".to_string(),
                     };
                     (
@@ -624,7 +640,8 @@ fn generate_details(
                 ("thrashing", "yellow") => (
                     "The agent may be stuck in a failing loop.".to_string(),
                     vec![
-                        "Check the latest error or test output before letting it continue.".to_string(),
+                        "Check the latest error or test output before letting it continue."
+                            .to_string(),
                         "Give a narrower next step if it keeps retrying.".to_string(),
                     ],
                 ),
@@ -637,15 +654,20 @@ fn generate_details(
                 ),
                 ("cost_acceleration", "yellow") => {
                     let first = match provider {
-                        ProviderKind::Cursor => "If focus is drifting, start a new composer session.".to_string(),
-                        ProviderKind::ClaudeCode => "Run /compact if you still need the current thread.".to_string(),
+                        ProviderKind::Cursor => {
+                            "If focus is drifting, start a new composer session.".to_string()
+                        }
+                        ProviderKind::ClaudeCode => {
+                            "Run /compact if you still need the current thread.".to_string()
+                        }
                         ProviderKind::Other => "Start fresh if the task has changed.".to_string(),
                     };
                     (
                         format!("Cost is rising — {}", v.label),
                         vec![
                             first,
-                            "If the task changed, start fresh instead of carrying old context.".to_string(),
+                            "If the task changed, start fresh instead of carrying old context."
+                                .to_string(),
                         ],
                     )
                 }
@@ -653,7 +675,8 @@ fn generate_details(
                     format!("Cost has spiked — {}", v.label),
                     vec![
                         new_session.to_string(),
-                        "Carry over only the plan, file paths, or failing command you still need.".to_string(),
+                        "Carry over only the plan, file paths, or failing command you still need."
+                            .to_string(),
                     ],
                 ),
                 _ => continue,
@@ -704,13 +727,13 @@ fn generate_tip(
 
     let base = if let Some(d) = details.first() {
         match (d.vital.as_str(), d.state.as_str()) {
-            ("context_drag", "yellow") => {
-                match provider {
-                    ProviderKind::Cursor => format!("Context growing — start {new_session} if focus drops"),
-                    ProviderKind::ClaudeCode => "Context growing — /compact soon".to_string(),
-                    ProviderKind::Other => "Context growing — trim context soon".to_string(),
+            ("context_drag", "yellow") => match provider {
+                ProviderKind::Cursor => {
+                    format!("Context growing — start {new_session} if focus drops")
                 }
-            }
+                ProviderKind::ClaudeCode => "Context growing — /compact soon".to_string(),
+                ProviderKind::Other => "Context growing — trim context soon".to_string(),
+            },
             ("context_drag", "red") => format!("Context too large — start {new_session}"),
             ("cache_efficiency", "yellow") => "Cache reuse low — slower turns possible".to_string(),
             ("cache_efficiency", "red") => format!("Cache reuse very low — start {new_session}"),

@@ -834,7 +834,11 @@ fn install_cursor_extension() {
     }
 
     let result = Command::new(&cursor_cli)
-        .args(["--install-extension", &vsix_path.to_string_lossy(), "--force"])
+        .args([
+            "--install-extension",
+            &vsix_path.to_string_lossy(),
+            "--force",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -861,10 +865,7 @@ fn install_cursor_extension() {
 /// Check if the `cursor` CLI is on PATH (or at the well-known macOS location).
 pub fn find_cursor_cli() -> Option<String> {
     let candidates = if cfg!(target_os = "macos") {
-        vec![
-            "cursor".to_string(),
-            "/usr/local/bin/cursor".to_string(),
-        ]
+        vec!["cursor".to_string(), "/usr/local/bin/cursor".to_string()]
     } else {
         vec!["cursor".to_string()]
     };
@@ -893,7 +894,8 @@ fn is_cursor_extension_installed_via(cursor_cli: &str) -> bool {
         .filter(|o| o.status.success())
         .map(|o| {
             let out = String::from_utf8_lossy(&o.stdout);
-            out.lines().any(|l| l.trim().eq_ignore_ascii_case("siropkin.budi"))
+            out.lines()
+                .any(|l| l.trim().eq_ignore_ascii_case("siropkin.budi"))
         })
         .unwrap_or(false)
 }
@@ -906,4 +908,3 @@ pub fn is_cursor_extension_installed() -> bool {
         None => false,
     }
 }
-

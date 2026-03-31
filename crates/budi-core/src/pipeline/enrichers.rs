@@ -38,7 +38,7 @@ impl Enricher for GitEnricher {
         let mut tags = Vec::new();
 
         // Resolve repo_id from cwd
-            if msg.repo_id.is_none() {
+        if msg.repo_id.is_none() {
             if msg.cwd.is_none() {
                 tracing::debug!(
                     "GitEnricher: no cwd for message {}, skipping repo resolution",

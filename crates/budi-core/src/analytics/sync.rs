@@ -424,8 +424,7 @@ fn collect_cursor_titles(session_ids: &[&str]) -> HashMap<String, String> {
         }
         let Ok(db) = rusqlite::Connection::open_with_flags(
             db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) else {
             continue;
         };

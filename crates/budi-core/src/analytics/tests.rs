@@ -1764,7 +1764,14 @@ fn health_green_when_only_thrashing_computable() {
         .collect();
     ingest_messages(&mut conn, &msgs, None).unwrap();
     for idx in 0..3 {
-        insert_health_hook_event(&conn, "claude_code", "s1", "post_tool_use", idx, Some("Shell"));
+        insert_health_hook_event(
+            &conn,
+            "claude_code",
+            "s1",
+            "post_tool_use",
+            idx,
+            Some("Shell"),
+        );
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
@@ -1772,7 +1779,10 @@ fn health_green_when_only_thrashing_computable() {
     assert!(h.vitals.context_drag.is_none());
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
-    assert_eq!(h.state, "green", "single green vital → green (positive default)");
+    assert_eq!(
+        h.state, "green",
+        "single green vital → green (positive default)"
+    );
     assert_eq!(h.tip, "New session");
 }
 
@@ -1819,14 +1829,24 @@ fn health_cost_acceleration_red() {
         "2026-03-14T10:01:30+00:00",
         "2026-03-14T10:03:30+00:00",
         "2026-03-14T10:05:30+00:00",
-    ].iter().enumerate() {
+    ]
+    .iter()
+    .enumerate()
+    {
         insert_health_hook_event_at(&conn, "claude_code", "s1", "user_prompt_submit", ts, None);
         let _ = idx;
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
     assert_eq!(h.vitals.cost_acceleration.as_ref().unwrap().state, "red");
-    assert!(h.vitals.cost_acceleration.as_ref().unwrap().label.contains("turn"));
+    assert!(
+        h.vitals
+            .cost_acceleration
+            .as_ref()
+            .unwrap()
+            .label
+            .contains("turn")
+    );
 }
 
 // --- Coverage: cost_acceleration reply fallback ---
@@ -1851,7 +1871,11 @@ fn health_cost_acceleration_reply_fallback() {
     let h = session_health(&conn, Some("s1")).unwrap();
     let ca = h.vitals.cost_acceleration.as_ref().unwrap();
     assert_ne!(ca.state, "green");
-    assert!(ca.label.contains("reply"), "label should say 'reply' not 'turn': {}", ca.label);
+    assert!(
+        ca.label.contains("reply"),
+        "label should say 'reply' not 'turn': {}",
+        ca.label
+    );
 }
 
 // --- Coverage: thrashing yellow ---
@@ -1870,7 +1894,14 @@ fn health_thrashing_yellow() {
 
     // 3 repeated failures of the same tool → score=1 → yellow
     for idx in 0..4 {
-        insert_health_hook_event(&conn, "claude_code", "s1", "post_tool_use_failure", idx, Some("Shell"));
+        insert_health_hook_event(
+            &conn,
+            "claude_code",
+            "s1",
+            "post_tool_use_failure",
+            idx,
+            Some("Shell"),
+        );
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
@@ -1896,9 +1927,15 @@ fn health_claude_code_context_drag_mentions_compact() {
     ingest_messages(&mut conn, &msgs, None).unwrap();
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    let detail = h.details.iter().find(|d| d.vital == "context_drag").unwrap();
-    assert!(detail.actions.iter().any(|a| a.contains("/compact")),
-        "Claude Code context_drag detail should mention /compact");
+    let detail = h
+        .details
+        .iter()
+        .find(|d| d.vital == "context_drag")
+        .unwrap();
+    assert!(
+        detail.actions.iter().any(|a| a.contains("/compact")),
+        "Claude Code context_drag detail should mention /compact"
+    );
 }
 
 #[test]
@@ -1924,9 +1961,18 @@ fn health_cursor_context_drag_no_compact() {
     ingest_messages(&mut conn, &msgs, None).unwrap();
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    let detail = h.details.iter().find(|d| d.vital == "context_drag").unwrap();
+    let detail = h
+        .details
+        .iter()
+        .find(|d| d.vital == "context_drag")
+        .unwrap();
     assert!(!detail.actions.iter().any(|a| a.contains("/compact")));
-    assert!(detail.actions.iter().any(|a| a.contains("composer session")));
+    assert!(
+        detail
+            .actions
+            .iter()
+            .any(|a| a.contains("composer session"))
+    );
     assert!(!h.tip.contains("/compact"));
 }
 
@@ -1953,10 +1999,24 @@ fn health_unknown_provider_gets_neutral_tips() {
     ingest_messages(&mut conn, &msgs, None).unwrap();
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    let detail = h.details.iter().find(|d| d.vital == "context_drag").unwrap();
+    let detail = h
+        .details
+        .iter()
+        .find(|d| d.vital == "context_drag")
+        .unwrap();
     assert!(!detail.actions.iter().any(|a| a.contains("/compact")));
-    assert!(!detail.actions.iter().any(|a| a.contains("composer session")));
-    assert!(detail.actions.iter().any(|a| a.contains("Trim context") || a.contains("start fresh")));
+    assert!(
+        !detail
+            .actions
+            .iter()
+            .any(|a| a.contains("composer session"))
+    );
+    assert!(
+        detail
+            .actions
+            .iter()
+            .any(|a| a.contains("Trim context") || a.contains("start fresh"))
+    );
 }
 
 // --- Coverage: cost_acceleration yellow short tip uses actual metric ---
@@ -1986,8 +2046,16 @@ fn health_cost_acceleration_yellow_tip_uses_metric_label() {
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert!(h.tip.contains("Cost rising"), "tip should mention 'Cost rising': {}", h.tip);
-    assert!(h.tip.contains("growth"), "tip should contain metric label: {}", h.tip);
+    assert!(
+        h.tip.contains("Cost rising"),
+        "tip should mention 'Cost rising': {}",
+        h.tip
+    );
+    assert!(
+        h.tip.contains("growth"),
+        "tip should contain metric label: {}",
+        h.tip
+    );
 }
 
 // --- Coverage: cache_efficiency red provider divergence ---
@@ -2011,16 +2079,29 @@ fn health_cache_efficiency_red_cursor_vs_claude() {
         ingest_messages(&mut conn, &msgs, None).unwrap();
 
         let h = session_health(&conn, Some("s1")).unwrap();
-        let detail = h.details.iter().find(|d| d.vital == "cache_efficiency").unwrap();
+        let detail = h
+            .details
+            .iter()
+            .find(|d| d.vital == "cache_efficiency")
+            .unwrap();
 
         if should_mention_clear {
-            assert!(detail.actions.iter().any(|a| a.contains("/clear")),
-                "Claude Code cache_efficiency red should mention /clear");
+            assert!(
+                detail.actions.iter().any(|a| a.contains("/clear")),
+                "Claude Code cache_efficiency red should mention /clear"
+            );
         } else {
-            assert!(!detail.actions.iter().any(|a| a.contains("/clear")),
-                "Cursor cache_efficiency red should NOT mention /clear");
-            assert!(detail.actions.iter().any(|a| a.contains("composer session")),
-                "Cursor cache_efficiency red should mention composer session");
+            assert!(
+                !detail.actions.iter().any(|a| a.contains("/clear")),
+                "Cursor cache_efficiency red should NOT mention /clear"
+            );
+            assert!(
+                detail
+                    .actions
+                    .iter()
+                    .any(|a| a.contains("composer session")),
+                "Cursor cache_efficiency red should mention composer session"
+            );
         }
     }
 }
@@ -2051,12 +2132,31 @@ fn health_cursor_multi_reply_session_not_false_red() {
         msgs.push(msg);
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
-    insert_health_hook_event_at(&conn, "cursor", "s1", "user_prompt_submit", "2026-03-14T09:59:30+00:00", None);
-    insert_health_hook_event_at(&conn, "cursor", "s1", "user_prompt_submit", "2026-03-14T10:03:30+00:00", None);
+    insert_health_hook_event_at(
+        &conn,
+        "cursor",
+        "s1",
+        "user_prompt_submit",
+        "2026-03-14T09:59:30+00:00",
+        None,
+    );
+    insert_health_hook_event_at(
+        &conn,
+        "cursor",
+        "s1",
+        "user_prompt_submit",
+        "2026-03-14T10:03:30+00:00",
+        None,
+    );
 
     let h = session_health(&conn, Some("s1")).unwrap();
     // With only 2 turns and prompt boundaries present, cost_acceleration is suppressed
-    assert!(h.vitals.cost_acceleration.is_none(),
-        "2 prompt turns should suppress cost_acceleration");
-    assert_ne!(h.state, "red", "multi-reply Cursor session should not be false red");
+    assert!(
+        h.vitals.cost_acceleration.is_none(),
+        "2 prompt turns should suppress cost_acceleration"
+    );
+    assert_ne!(
+        h.state, "red",
+        "multi-reply Cursor session should not be false red"
+    );
 }

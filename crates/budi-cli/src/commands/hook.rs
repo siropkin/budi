@@ -98,9 +98,7 @@ fn update_cursor_session_state(json: &serde_json::Value) {
 
     match event {
         "sessionStart" => {
-            let composer_mode = json
-                .get("composer_mode")
-                .and_then(|v| v.as_str());
+            let composer_mode = json.get("composer_mode").and_then(|v| v.as_str());
             session_state_upsert(session_id, workspace, composer_mode, true);
         }
         "sessionEnd" => {
@@ -113,7 +111,9 @@ fn update_cursor_session_state(json: &serde_json::Value) {
 }
 
 fn session_state_path() -> Option<std::path::PathBuf> {
-    config::budi_home_dir().ok().map(|d| d.join("cursor-sessions.json"))
+    config::budi_home_dir()
+        .ok()
+        .map(|d| d.join("cursor-sessions.json"))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -151,7 +151,10 @@ fn write_session_state(state: &CursorSessionState) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(state).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(state).unwrap_or_default(),
+    );
 }
 
 fn session_state_upsert(
@@ -163,7 +166,11 @@ fn session_state_upsert(
     let mut state = read_session_state();
     let now = chrono::Utc::now().to_rfc3339();
 
-    if let Some(entry) = state.sessions.iter_mut().find(|s| s.session_id == session_id) {
+    if let Some(entry) = state
+        .sessions
+        .iter_mut()
+        .find(|s| s.session_id == session_id)
+    {
         entry.active = active;
         entry.started_at = now.clone();
         entry.last_active_at = Some(now);
@@ -193,7 +200,11 @@ fn session_state_touch(session_id: &str, workspace: &str) {
     let mut state = read_session_state();
     let now = chrono::Utc::now().to_rfc3339();
 
-    if let Some(entry) = state.sessions.iter_mut().find(|s| s.session_id == session_id) {
+    if let Some(entry) = state
+        .sessions
+        .iter_mut()
+        .find(|s| s.session_id == session_id)
+    {
         entry.last_active_at = Some(now);
         entry.active = true;
         if !workspace.is_empty() && entry.workspace_path.is_empty() {
@@ -216,7 +227,11 @@ fn session_state_touch(session_id: &str, workspace: &str) {
 
 fn session_state_mark_inactive(session_id: &str) {
     let mut state = read_session_state();
-    if let Some(entry) = state.sessions.iter_mut().find(|s| s.session_id == session_id) {
+    if let Some(entry) = state
+        .sessions
+        .iter_mut()
+        .find(|s| s.session_id == session_id)
+    {
         entry.active = false;
     }
     prune_old_sessions(&mut state);

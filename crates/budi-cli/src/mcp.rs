@@ -660,17 +660,35 @@ impl BudiMcpServer {
 
         let mut warnings = Vec::new();
         let auto_keys = &[
-            "repo", "ticket_id", "ticket_prefix", "user", "machine",
-            "session_title", "provider", "model", "speed", "cost_confidence",
-            "composer_mode", "permission_mode", "activity", "user_email",
-            "duration", "dominant_tool",
+            "repo",
+            "ticket_id",
+            "ticket_prefix",
+            "user",
+            "machine",
+            "session_title",
+            "provider",
+            "model",
+            "speed",
+            "cost_confidence",
+            "composer_mode",
+            "permission_mode",
+            "activity",
+            "user_email",
+            "duration",
+            "dominant_tool",
         ];
         for rule in &config.rules {
             if rule.key.is_empty() || rule.value.is_empty() {
-                warnings.push(format!("Rule has empty key or value: key={:?} value={:?}", rule.key, rule.value));
+                warnings.push(format!(
+                    "Rule has empty key or value: key={:?} value={:?}",
+                    rule.key, rule.value
+                ));
             }
             if auto_keys.contains(&rule.key.as_str()) {
-                warnings.push(format!("Key {:?} collides with auto-generated tag; custom value may conflict", rule.key));
+                warnings.push(format!(
+                    "Key {:?} collides with auto-generated tag; custom value may conflict",
+                    rule.key
+                ));
             }
         }
 

@@ -109,14 +109,8 @@ pub fn cmd_stats(
         let cost = client.cost(since.as_deref(), until.as_deref(), provider.as_deref())?;
         let mut obj = serde_json::to_value(&summary)?;
         if let Some(map) = obj.as_object_mut() {
-            map.insert(
-                "total_cost".to_string(),
-                serde_json::json!(cost.total_cost),
-            );
-            map.insert(
-                "input_cost".to_string(),
-                serde_json::json!(cost.input_cost),
-            );
+            map.insert("total_cost".to_string(), serde_json::json!(cost.total_cost));
+            map.insert("input_cost".to_string(), serde_json::json!(cost.input_cost));
             map.insert(
                 "output_cost".to_string(),
                 serde_json::json!(cost.output_cost),
