@@ -517,12 +517,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(cols.filter_map(|c| c.ok()).any(|c| c == column))
 }
 
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    column_decl: &str,
-) -> Result<bool> {
+fn ensure_column(conn: &Connection, table: &str, column: &str, column_decl: &str) -> Result<bool> {
     if !table_exists(conn, table)? {
         return Ok(false);
     }
