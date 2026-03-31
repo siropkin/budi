@@ -55,7 +55,6 @@ impl Pipeline {
             "ticket_id",
             "ticket_prefix",
             "repo",
-            "session_title",
             "user",
             "activity",
             "machine",

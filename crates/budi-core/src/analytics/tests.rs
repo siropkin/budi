@@ -1653,7 +1653,7 @@ fn health_cursor_tips_use_plain_actions() {
     let h = session_health(&conn, Some("s1")).unwrap();
     assert!(h.details.iter().any(|d| {
         d.vital == "context_drag"
-            && d.tip.contains("Prompt size is getting large")
+            && d.tip.contains("Context size is getting large")
             && d.actions.iter().any(|a| a.contains("composer session"))
     }));
 }
@@ -1675,8 +1675,8 @@ fn health_suppressed_few_messages() {
     assert!(h.vitals.context_drag.is_none());
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
-    assert_eq!(h.state, "gray");
-    assert_eq!(h.tip, "Not enough data yet");
+    assert_eq!(h.state, "green");
+    assert_eq!(h.tip, "New session");
 }
 
 #[test]
@@ -1725,7 +1725,7 @@ fn health_batch_returns_all_sessions() {
     assert_eq!(batch.len(), 3);
     assert!(batch.contains_key("s1"));
     assert!(batch.contains_key("s2"));
-    assert_eq!(batch["nonexistent"], "gray");
+    assert_eq!(batch["nonexistent"], "green");
 }
 
 #[test]
@@ -1749,10 +1749,10 @@ fn health_batch_matches_detail_thresholds() {
     assert_eq!(batch["s1"], detail.state);
 }
 
-// --- Coverage: gray when only one vital is computable ---
+// --- Coverage: green when only one vital is computable (positive default) ---
 
 #[test]
-fn health_gray_when_only_thrashing_computable() {
+fn health_green_when_only_thrashing_computable() {
     let mut conn = test_db();
     conn.execute(
         "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
@@ -1772,8 +1772,8 @@ fn health_gray_when_only_thrashing_computable() {
     assert!(h.vitals.context_drag.is_none());
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
-    assert_eq!(h.state, "gray", "single green vital should stay gray");
-    assert_eq!(h.tip, "Not enough data yet");
+    assert_eq!(h.state, "green", "single green vital → green (positive default)");
+    assert_eq!(h.tip, "New session");
 }
 
 // --- Coverage: cache_efficiency yellow ---

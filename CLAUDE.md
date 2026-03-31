@@ -7,7 +7,7 @@ Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks to
 ```bash
 cargo build              # dev build
 cargo build --release    # release build
-cargo test               # all tests (214: 198 core + 14 cli + 2 daemon)
+cargo test               # all tests (198 core + 14 cli + 2 daemon)
 cargo test -p budi-core  # core tests only
 ./scripts/install.sh     # build release + install to ~/.local/bin/
 ```
@@ -40,11 +40,11 @@ Sources (JSONL files, OTEL spans, Cursor API, Hooks)
 
 Enricher order is critical — each depends on prior enrichers. Do not reorder.
 
-### Database (SQLite, WAL mode, schema v14)
+### Database (SQLite, WAL mode, schema v15)
 
 Six tables, four data entities + two supporting:
 - **messages** — Single cost entity. One row per API call. All token/cost data lives here. Fields: uuid, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
-- **sessions** — Lifecycle context (start/end, duration, mode) without mixing cost concerns. One row per conversation from hooks
+- **sessions** — Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation from hooks
 - **hook_events** — Raw event log for tool stats and MCP tracking. One row per hook event
 - **otel_events** — Raw OpenTelemetry event storage for debugging/audit
 - **tags** — Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) with FK to messages
@@ -81,8 +81,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/jsonl.rs` — JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` — Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` — Cursor provider (Usage API, auth from state.vscdb)
-- `crates/budi-core/src/migration.rs` — Schema v14, all migration paths
+- `crates/budi-core/src/migration.rs` — Schema v15, all migration paths
 - `crates/budi-core/src/config.rs` — BudiConfig, StatuslineConfig, TagsConfig
+- `crates/budi-cli/build.rs` — Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` — HTTP server, ~38 routes
 - `crates/budi-daemon/src/routes/hooks.rs` — /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update endpoints
 - `crates/budi-daemon/src/routes/analytics.rs` — All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate)
@@ -91,6 +92,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-cli/src/mcp.rs` — MCP server handler (15 tools: analytics + config + health)
 - `crates/budi-cli/src/commands/mcp.rs` — `mcp-serve` subcommand (stdio transport)
 - `crates/budi-daemon/static/js/` — Dashboard JS (vanilla, no framework)
+- `extensions/cursor-budi/src/extension.ts` — Cursor extension entry point (status bar, commands, polling)
+- `extensions/cursor-budi/src/panel.ts` — Side panel webview (session details, vitals, session list)
+- `extensions/cursor-budi/src/budiClient.ts` — Daemon HTTP client + health aggregation logic
 
 ## Dev notes
 
@@ -100,7 +104,8 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 15 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity), config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status), and health (session_health). Thin HTTP client to daemon — stdout is JSON-RPC only, logging to stderr
 - Tags are auto-detected (provider, model, repo, ticket_id, etc.) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
-- **Session health**: Four vitals computed per session — context drag (prompt-size growth), cache efficiency (cache hit rate), cost acceleration (per-turn or per-reply cost growth), retry loops (tool failure loops from hook_events). Each vital has green/yellow/red state. Overall state requires ≥2 scored vitals for `green`; fewer yields `gray` ("not enough data yet"). Tips are provider-aware via `ProviderKind` enum (Claude Code → `/compact`/`/clear`, Cursor → "new composer session", Other → neutral). Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
+- **Session health**: Four vitals computed per session — context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-turn or per-reply cost growth), retry loops (tool failure loops from hook_events). Each vital has green/yellow/red state. New sessions start green — the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code → `/compact`/`/clear`, Cursor → "new composer session", Other → neutral). Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
+- **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Auto-installed by `budi init` when Cursor CLI is on PATH (`.vsix` embedded in binary via `include_bytes!`). Communicates with daemon via HTTP. Tracks active session via `~/.local/share/budi/cursor-sessions.json` (written by hooks, watched by extension). `budi doctor` and `/health/integrations` both check extension install status.
 - **Dashboard** is multi-page at `/dashboard` with URL-based routing (vanilla JS, no framework):
   - `/dashboard` (Overview) — Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
   - `/dashboard/insights` — Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools, MCP servers

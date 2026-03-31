@@ -283,6 +283,7 @@ pub struct MigrateResponse {
 pub struct IntegrationsResponse {
     pub claude_code_hooks: bool,
     pub cursor_hooks: bool,
+    pub cursor_extension: bool,
     pub mcp_server: bool,
     pub otel: bool,
     pub statusline: bool,

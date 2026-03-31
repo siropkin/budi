@@ -129,6 +129,19 @@ pub async fn health_integrations()
             .map(|h| !h.as_object().map(|o| o.is_empty()).unwrap_or(true))
             .unwrap_or(false);
 
+        // Cursor extension
+        let cursor_extension = std::process::Command::new("cursor")
+            .arg("--list-extensions")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                let out = String::from_utf8_lossy(&o.stdout);
+                out.lines()
+                    .any(|l| l.trim().eq_ignore_ascii_case("siropkin.budi"))
+            })
+            .unwrap_or(false);
+
         // DB stats + paths
         let db_path = budi_core::analytics::db_path().ok();
         let db_path_str = db_path
@@ -176,6 +189,7 @@ pub async fn health_integrations()
         IntegrationsResponse {
             claude_code_hooks: hooks_installed,
             cursor_hooks,
+            cursor_extension,
             mcp_server: mcp_installed,
             otel: otel_installed,
             statusline: statusline_installed,

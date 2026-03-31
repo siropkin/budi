@@ -61,7 +61,6 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
         let icon = match state {
             "red" => "🔴",
             "yellow" => "🟡",
-            "gray" => "⚪",
             _ => "🟢",
         };
         let tip = data
@@ -123,7 +122,6 @@ fn render_coach(
     let icon = match state {
         "red" => "🔴",
         "yellow" => "🟡",
-        "gray" => "⚪",
         _ => "🟢",
     };
 
@@ -132,15 +130,6 @@ fn render_coach(
     } else {
         ("", "")
     };
-
-    if state == "gray" {
-        let tip = data
-            .get("health_tip")
-            .and_then(|v| v.as_str())
-            .unwrap_or("session starting");
-        let sep = format!(" {dim}·{reset} ");
-        return Some(format!("{icon} {budi_label}{sep}{}", tip.to_lowercase()));
-    }
 
     let session_cost = data.get("session_cost").and_then(|v| v.as_f64())?;
     let cost_str = format!("{} session", fmt_cost(session_cost));

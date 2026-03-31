@@ -179,6 +179,8 @@ a:hover { text-decoration: underline; }
 .session-meta .meta-label { color: var(--text-muted); }
 .session-meta .meta-value { color: var(--text); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; display: inline-block; vertical-align: bottom; }
 
+.session-detail-title { font-size: 1.05rem; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Session health panel */
 .vitals-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .vital-card { padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); }

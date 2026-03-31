@@ -378,6 +378,24 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    // Check Cursor extension
+    {
+        let cursor_on_path = super::init::find_cursor_cli().is_some();
+        if cursor_on_path {
+            let ext_installed = super::init::is_cursor_extension_installed();
+            if ext_installed {
+                println!("  {green}\u{2713}{reset} Cursor extension: installed");
+            } else {
+                let yellow = super::ansi("\x1b[33m");
+                println!(
+                    "  {yellow}!{reset} Cursor extension: not installed. Run `budi init` to install"
+                );
+            }
+        } else {
+            println!("  {dim}-{reset} Cursor extension: cursor CLI not found");
+        }
+    }
+
     // Check transcript directories exist
     let cc_transcripts = format!("{}/.claude/transcripts", home);
     let cursor_transcripts = format!("{}/.cursor/projects", home);

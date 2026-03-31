@@ -45,9 +45,9 @@ No cloud. No uploads. Everything stays on your machine.
 - Tracks tokens, costs, and usage per message across AI coding agents
 - **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
-- **Session health** — detects prompt bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
+- **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - Web dashboard at `http://localhost:7878/dashboard`
-- Live cost + health status line in Claude Code
+- Live cost + health status line in Claude Code and Cursor
 - Background sync every 30 seconds — no workflow changes needed
 - ~6 MB Rust binary, minimal footprint
 
@@ -115,11 +115,11 @@ Budi adds a live cost display to Claude Code, installed automatically by `budi i
 
 The default `coach` preset shows your current session cost plus a health indicator. When Budi spots a problem, the short tip explains what to do next:
 
-`🟡 budi · $12.50 session · Prompt growing — /compact soon`
+`🟡 budi · $12.50 session · Context growing — /compact soon`
 
-Early in a session, before there is enough signal to score health, the status line stays neutral:
+New sessions start green — the default is always positive:
 
-`⚪ budi · $0.42 session · Not enough data yet`
+`🟢 budi · $0.42 session · new session`
 
 Customize slots in `~/.config/budi/statusline.toml`:
 
@@ -139,6 +139,23 @@ format = "[$output]($style) "
 style = "cyan"
 shell = ["sh"]
 ```
+
+## Cursor extension
+
+Budi includes a Cursor/VS Code extension that shows session health and cost in the status bar and a side panel. It is **auto-installed by `budi init`** when Cursor is detected on your machine.
+
+The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 🔴 0`). Click it to open the health panel with session details, vitals, and tips. Active session tracking works via hooks — no manual setup needed.
+
+**Manual install** (if auto-install was skipped or you want to rebuild):
+
+```bash
+cd extensions/cursor-budi
+npm install && npm run build
+npx vsce package --no-dependencies -o cursor-budi.vsix
+cursor --install-extension cursor-budi.vsix --force
+```
+
+Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**.
 
 ## Update
 
@@ -235,7 +252,7 @@ The MCP server is a thin HTTP client to the daemon — it never touches the data
 Budi monitors four vitals for every active session and turns them into plain-language tips.
 
 The scoring is intentionally conservative:
-- It waits until there is enough data before scoring a vital — a session stays **gray** ("not enough data yet") until at least two vitals can be computed.
+- New sessions start **green** — the default is always positive. Vitals only turn yellow or red when there is clear evidence of a problem.
 - It measures the current working stretch, so a `/compact` resets context-based checks.
 - It looks at the active model stretch for cache reuse, so model switches do not poison the whole session.
 - Cost acceleration uses per-user-turn costs when hook data provides prompt boundaries, and falls back to per-reply costs otherwise.
@@ -245,12 +262,12 @@ Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`,
 
 | Vital | What it detects | Yellow | Red |
 |-------|----------------|--------|-----|
-| **Prompt Growth** | Prompt size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute prompt size |
+| **Context Growth** | Context size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute context size |
 | **Cache Reuse** | Recent cache reuse is low for the active model stretch | Below 60% recent reuse | Below 35% recent reuse |
 | **Cost Acceleration** | Later turns/replies cost much more than earlier ones | 2x+ growth and meaningful cost per unit | 4x+ growth and high cost per unit |
 | **Retry Loops** | Agent is stuck in a failing tool loop | One suspicious retry loop | Repeated or severe retry loops |
 
-Health state appears in both the status line and the session detail page in the dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh."
+Health state appears in the status line, the Cursor extension panel, and the session detail page in the dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh."
 
 ## Privacy
 

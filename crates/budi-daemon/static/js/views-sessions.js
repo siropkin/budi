@@ -13,6 +13,7 @@ function renderSessionsList(sessions) {
   const multiProvider = registeredProviders.length > 1;
   const cols = [
     { key: 'started_at', label: 'Time' },
+    { key: 'title', label: 'Title' },
     { key: 'duration', label: 'Duration' },
     ...(multiProvider ? [{ key: 'provider', label: 'Agent' }] : []),
     { key: 'model', label: 'Model' },
@@ -39,8 +40,13 @@ function renderSessionsList(sessions) {
       ? ((registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider || '--')
       : '';
 
+    const TITLE_TRUNCATE = 50;
+    const title = s.title || '';
+    const shortTitle = title.length > TITLE_TRUNCATE ? title.slice(0, TITLE_TRUNCATE - 1) + '\u2026' : title;
+
     return `<tr class="session-row" data-session-id="${esc(s.session_id)}" style="cursor:pointer">
       <td>${esc(fmtDate(s.started_at))}</td>
+      <td class="dir" title="${esc(title)}">${esc(shortTitle || '--')}</td>
       <td>${esc(duration)}</td>
       ${multiProvider ? `<td>${esc(provDisplay)}</td>` : ''}
       <td title="${esc(s.model || '')}">${esc(model)}</td>
@@ -155,7 +161,6 @@ function healthIcon(state) {
   switch (state) {
     case 'red': return '🔴';
     case 'yellow': return '🟡';
-    case 'gray': return '⚪';
     default: return '🟢';
   }
 }
@@ -164,7 +169,7 @@ function renderHealthPanel(health) {
   if (!health) return '';
 
   const vitalNames = {
-    context_drag: 'Prompt Growth',
+    context_drag: 'Context Growth',
     cache_efficiency: 'Cache Reuse',
     thrashing: 'Retry Loops',
     cost_acceleration: 'Cost Acceleration',
@@ -176,8 +181,8 @@ function renderHealthPanel(health) {
   const cards = vitalKeys.map(key => {
     const v = vitals[key];
     if (!v) return `<div class="vital-card">
-      <div class="vital-header"><span class="vital-name">${vitalNames[key]}</span><span class="vital-state">⚪</span></div>
-      <div class="vital-label" style="color:var(--text-muted)">Not enough data yet</div>
+      <div class="vital-header"><span class="vital-name">${vitalNames[key]}</span><span class="vital-state">🟢</span></div>
+      <div class="vital-label" style="color:var(--text-muted)">Looking good</div>
     </div>`;
 
     return `<div class="vital-card">
@@ -282,8 +287,12 @@ async function renderSessionDetail(sessionId, content, signal) {
 
   const healthPanel = renderHealthPanel(health);
 
+  const sessionTitle = session && session.title ? `<span class="session-detail-title">${esc(session.title)}</span>` : '';
   content.innerHTML = `
-    <button class="btn btn-secondary" id="backToSessions" style="margin-bottom:12px">Back to sessions</button>
+    <div class="session-detail-header" style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <button class="btn btn-secondary" id="backToSessions">\u2190 Sessions</button>
+      ${sessionTitle}
+    </div>
     ${meta}
     ${healthPanel}
     ${bloatChart}

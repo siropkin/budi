@@ -55,6 +55,9 @@ pub fn cmd_init(
         );
     }
 
+    // Cursor extension (embedded .vsix)
+    install_cursor_extension();
+
     if had_hook_warnings {
         eprintln!("  Warning: hook installation had issues:");
         for w in &hook_warnings {
@@ -789,3 +792,118 @@ fn is_legacy_cursor_hook(entry: &Value) -> bool {
         .and_then(|c| c.as_str())
         .is_some_and(|c| c.trim() == "budi hook")
 }
+
+// ---------------------------------------------------------------------------
+// Cursor extension auto-install
+// ---------------------------------------------------------------------------
+
+static CURSOR_EXTENSION_VSIX: &[u8] =
+    include_bytes!("../../../../extensions/cursor-budi/cursor-budi.vsix");
+
+/// Install the budi Cursor extension if Cursor is available and the extension
+/// is either missing or outdated. Non-fatal — prints a warning on failure.
+fn install_cursor_extension() {
+    if CURSOR_EXTENSION_VSIX.is_empty() {
+        return;
+    }
+
+    let cursor_cli = match find_cursor_cli() {
+        Some(c) => c,
+        None => return,
+    };
+
+    if is_cursor_extension_installed_via(&cursor_cli) {
+        println!("  Extension: Cursor extension already installed");
+        return;
+    }
+
+    let tmp_dir = std::env::temp_dir().join(format!("budi-vsix-{}", std::process::id()));
+    if fs::create_dir_all(&tmp_dir).is_err() {
+        return;
+    }
+
+    let vsix_path = tmp_dir.join("cursor-budi.vsix");
+    if let Err(e) = fs::write(&vsix_path, CURSOR_EXTENSION_VSIX) {
+        eprintln!(
+            "{}  Warning:{} could not write extension to temp: {e}",
+            super::ansi("\x1b[33m"),
+            super::ansi("\x1b[0m")
+        );
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return;
+    }
+
+    let result = Command::new(&cursor_cli)
+        .args(["--install-extension", &vsix_path.to_string_lossy(), "--force"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    match result {
+        Ok(status) if status.success() => {
+            println!("  Extension: installed Cursor extension");
+        }
+        Ok(_) => {
+            let yellow = super::ansi("\x1b[33m");
+            let reset = super::ansi("\x1b[0m");
+            eprintln!("{yellow}  Warning:{reset} Cursor extension install failed");
+        }
+        Err(e) => {
+            let yellow = super::ansi("\x1b[33m");
+            let reset = super::ansi("\x1b[0m");
+            eprintln!("{yellow}  Warning:{reset} could not run cursor CLI: {e}");
+        }
+    }
+}
+
+/// Check if the `cursor` CLI is on PATH (or at the well-known macOS location).
+pub fn find_cursor_cli() -> Option<String> {
+    let candidates = if cfg!(target_os = "macos") {
+        vec![
+            "cursor".to_string(),
+            "/usr/local/bin/cursor".to_string(),
+        ]
+    } else {
+        vec!["cursor".to_string()]
+    };
+
+    for candidate in candidates {
+        if Command::new(&candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Check if `siropkin.budi` extension is already installed in Cursor.
+fn is_cursor_extension_installed_via(cursor_cli: &str) -> bool {
+    Command::new(cursor_cli)
+        .arg("--list-extensions")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout);
+            out.lines().any(|l| l.trim().eq_ignore_ascii_case("siropkin.budi"))
+        })
+        .unwrap_or(false)
+}
+
+/// Check if the budi Cursor extension is installed.
+/// Used by doctor and integrations endpoint.
+pub fn is_cursor_extension_installed() -> bool {
+    match find_cursor_cli() {
+        Some(cli) => is_cursor_extension_installed_via(&cli),
+        None => false,
+    }
+}
+

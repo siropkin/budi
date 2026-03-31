@@ -1,15 +1,14 @@
 //! Session health: vitals computation, tips, and batch health checks.
 //!
 //! Four vitals are computed per session:
-//! - **context_drag** — prompt-size growth over the current working stretch
+//! - **context_drag** — context-size growth over the current working stretch
 //! - **cache_efficiency** — recent cache reuse for the active model stretch
 //! - **thrashing** — tool failure loops inside a turn
 //! - **cost_acceleration** — cost growth (per user-turn when hook data exists,
 //!   otherwise per assistant reply)
 //!
 //! Overall state rules:
-//! - `gray`  — fewer than 2 vitals could be scored (not enough data)
-//! - `green` — at least 2 vitals scored and none are yellow/red
+//! - `green` — new session (no vitals scored yet) or all scored vitals are green
 //! - `yellow`/`red` — worst scored vital wins
 //!
 //! Tips are provider-aware: Claude Code, Cursor, and unknown providers each
@@ -200,7 +199,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
 
     let overall_state = overall_state(&all_vitals);
     let details = generate_details(&all_vitals, provider);
-    let tip = generate_tip(&overall_state, &details, provider);
+    let tip = generate_tip(&overall_state, &details, provider, msg_count);
 
     Ok(SessionHealth {
         state: overall_state,
@@ -304,8 +303,8 @@ fn calc_context_drag(
     }
 
     let window = 3.min(effective.len());
-    let first_avg = average_prompt_size(&effective[..window]);
-    let last_avg = average_prompt_size(&effective[effective.len() - window..]);
+    let first_avg = average_context_size(&effective[..window]);
+    let last_avg = average_context_size(&effective[effective.len() - window..]);
     if first_avg <= 0.0 {
         return None;
     }
@@ -427,7 +426,7 @@ fn calc_cost_acceleration(
     last_compact_ts: Option<&str>,
 ) -> Option<VitalScore> {
     let effective = dominant_model_messages(&filter_after_last_compact(messages, last_compact_ts));
-    let turn_costs = prompt_turn_costs(&effective, events, last_compact_ts);
+    let turn_costs = user_turn_costs(&effective, events, last_compact_ts);
     let (costs, label_unit) = if turn_costs.len() >= COST_ACCEL_MIN_TURNS {
         (turn_costs, "turn")
     } else if turn_costs.is_empty() {
@@ -474,7 +473,7 @@ fn calc_cost_acceleration(
     })
 }
 
-fn prompt_turn_costs(
+fn user_turn_costs(
     messages: &[&HealthMessage],
     events: &[SessionToolEvent],
     last_compact_ts: Option<&str>,
@@ -524,7 +523,7 @@ fn prompt_turn_costs(
 // ---------------------------------------------------------------------------
 
 /// Determines the session-level health state.
-/// - If fewer than MIN_VITALS_FOR_GREEN vitals were scored, returns `gray`.
+/// - New sessions and sessions with too few vitals → `green` (positive default).
 /// - Otherwise returns the worst scored state.
 fn overall_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
     let scored: Vec<&str> = vitals
@@ -534,7 +533,7 @@ fn overall_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
         .collect();
 
     if scored.is_empty() {
-        return "gray".to_string();
+        return "green".to_string();
     }
 
     let worst = scored
@@ -547,7 +546,7 @@ fn overall_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
         .unwrap_or(&"green");
 
     if *worst == "green" && scored.len() < MIN_VITALS_FOR_GREEN {
-        return "gray".to_string();
+        return "green".to_string();
     }
     worst.to_string()
 }
@@ -582,7 +581,7 @@ fn generate_details(
                             "Trim context or start fresh if the agent is losing focus.".to_string(),
                         ],
                     };
-                    ("Prompt size is getting large.".to_string(), actions)
+                    ("Context size is getting large.".to_string(), actions)
                 }
                 ("context_drag", "red") => {
                     let actions = match provider {
@@ -592,7 +591,7 @@ fn generate_details(
                         ],
                         _ => vec![new_session.to_string()],
                     };
-                    ("Prompt size is large enough to hurt reliability.".to_string(), actions)
+                    ("Context is large enough to hurt reliability.".to_string(), actions)
                 }
                 ("cache_efficiency", "yellow") => {
                     let second = match provider {
@@ -692,11 +691,12 @@ fn generate_tip(
     overall_state: &str,
     details: &[HealthDetail],
     provider: ProviderKind,
+    message_count: u64,
 ) -> String {
-    if overall_state == "gray" {
-        return "Not enough data yet".to_string();
-    }
     if overall_state == "green" {
+        if message_count < 5 {
+            return "New session".to_string();
+        }
         return "Session healthy".to_string();
     }
 
@@ -706,12 +706,12 @@ fn generate_tip(
         match (d.vital.as_str(), d.state.as_str()) {
             ("context_drag", "yellow") => {
                 match provider {
-                    ProviderKind::Cursor => format!("Prompt growing — start {new_session} if focus drops"),
-                    ProviderKind::ClaudeCode => "Prompt growing — /compact soon".to_string(),
-                    ProviderKind::Other => "Prompt growing — trim context soon".to_string(),
+                    ProviderKind::Cursor => format!("Context growing — start {new_session} if focus drops"),
+                    ProviderKind::ClaudeCode => "Context growing — /compact soon".to_string(),
+                    ProviderKind::Other => "Context growing — trim context soon".to_string(),
                 }
             }
-            ("context_drag", "red") => format!("Prompt too large — start {new_session}"),
+            ("context_drag", "red") => format!("Context too large — start {new_session}"),
             ("cache_efficiency", "yellow") => "Cache reuse low — slower turns possible".to_string(),
             ("cache_efficiency", "red") => format!("Cache reuse very low — start {new_session}"),
             ("thrashing", "yellow") => "Agent may be stuck — check latest error".to_string(),
@@ -794,7 +794,7 @@ fn recent_model_run<'a>(messages: &[&'a HealthMessage]) -> Vec<&'a HealthMessage
     out
 }
 
-fn average_prompt_size(messages: &[&HealthMessage]) -> f64 {
+fn average_context_size(messages: &[&HealthMessage]) -> f64 {
     messages
         .iter()
         .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
@@ -804,11 +804,11 @@ fn average_prompt_size(messages: &[&HealthMessage]) -> f64 {
 
 fn format_token_count(tokens: f64) -> String {
     if tokens >= 1_000_000.0 {
-        format!("{:.1}M prompt", tokens / 1_000_000.0)
+        format!("{:.1}M context", tokens / 1_000_000.0)
     } else if tokens >= 1_000.0 {
-        format!("{:.0}k prompt", tokens / 1_000.0)
+        format!("{:.0}k context", tokens / 1_000.0)
     } else {
-        format!("{tokens:.0} prompt")
+        format!("{tokens:.0} context")
     }
 }
 

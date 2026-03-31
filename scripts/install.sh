@@ -256,6 +256,14 @@ main() {
       BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
     else
       if [[ "$SKIP_BUILD" -eq 0 ]]; then
+        # Build Cursor extension (.vsix) before cargo build so it gets embedded
+        if command -v npm >/dev/null 2>&1; then
+          log "Building Cursor extension..."
+          (cd "$REPO_ROOT/extensions/cursor-budi" && npm install --silent && npm run build --silent && npx vsce package --no-dependencies -o cursor-budi.vsix) 2>&1 | tail -1
+        else
+          log "npm not found — skipping Cursor extension build (extension auto-install will be disabled)"
+        fi
+
         log "Building workspace with cargo ($PROFILE profile)"
         local lock_args=()
         if [[ -f "$REPO_ROOT/Cargo.lock" ]]; then

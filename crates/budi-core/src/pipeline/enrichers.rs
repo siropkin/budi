@@ -156,16 +156,6 @@ impl Enricher for IdentityEnricher {
             });
         }
 
-        // Produce session_title tag if present
-        if let Some(ref title) = msg.session_title
-            && !title.is_empty()
-        {
-            tags.push(Tag {
-                key: "session_title".to_string(),
-                value: title.clone(),
-            });
-        }
-
         tags
     }
 }

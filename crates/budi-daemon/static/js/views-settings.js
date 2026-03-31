@@ -84,6 +84,10 @@ function renderSettingsView(content) {
           <span class="settings-val ${ig.cursor_hooks ? 'ok' : ''}">${ig.cursor_hooks ? 'Active' : 'Not detected'}</span>
         </div>
         <div class="settings-item">
+          <span class="settings-key">Cursor Extension</span>
+          <span class="settings-val ${ig.cursor_extension ? 'ok' : ''}">${ig.cursor_extension ? 'Active' : 'Not installed'}</span>
+        </div>
+        <div class="settings-item">
           <span class="settings-key">MCP Server</span>
           <span class="settings-val ${ig.mcp_server ? 'ok' : 'warn'}">${ig.mcp_server ? 'Active' : 'Not set up'}</span>
         </div>

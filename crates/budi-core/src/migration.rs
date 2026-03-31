@@ -11,7 +11,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
@@ -79,6 +79,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     }
     if current_version(conn) == 13 {
         migrate_v13_to_v14(conn)?;
+    }
+    if current_version(conn) == 14 {
+        migrate_v14_to_v15(conn)?;
     }
 
     Ok(())
@@ -169,7 +172,8 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
             model              TEXT,
             raw_json           TEXT,
             repo_id            TEXT,
-            git_branch         TEXT
+            git_branch         TEXT,
+            title              TEXT
         );
 
         CREATE TABLE IF NOT EXISTS hook_events (
@@ -399,6 +403,14 @@ fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
         tracing::info!("Session backfill: created {from_hooks} stub rows from hook_events");
     }
 
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Incremental migration from v14 to v15: add `title` column to sessions table.
+fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v14 → v15: adding title column to sessions");
+    conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT;")?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }

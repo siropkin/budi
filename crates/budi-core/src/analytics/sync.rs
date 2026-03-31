@@ -1,5 +1,7 @@
 //! Sync pipeline: discovers transcript files across providers and ingests them.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -158,6 +160,12 @@ fn sync_with_max_age(
         tracing::info!("Backfilled ticket_id tags on {tickets_backfilled} messages");
     }
 
+    // Backfill session titles from provider-specific sources.
+    let titles_backfilled = backfill_session_titles(conn);
+    if titles_backfilled > 0 {
+        tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
+    }
+
     Ok((total_files, total_messages, warnings))
 }
 
@@ -216,4 +224,247 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
         return 0;
     }
     count
+}
+
+/// Backfill `sessions.title` for sessions that don't have one yet.
+///
+/// Sources:
+/// - Claude Code: first user prompt from the JSONL transcript file.
+/// - Cursor: composer name from state.vscdb `allComposers`.
+fn backfill_session_titles(conn: &mut Connection) -> usize {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT session_id, provider FROM sessions
+             WHERE (title IS NULL OR title = '')
+               AND started_at >= datetime('now', '-30 days')",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+
+    if rows.is_empty() {
+        return 0;
+    }
+
+    let cc_ids: Vec<&str> = rows
+        .iter()
+        .filter(|(_, p)| p == "claude_code")
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let cursor_ids: Vec<&str> = rows
+        .iter()
+        .filter(|(_, p)| p == "cursor")
+        .map(|(id, _)| id.as_str())
+        .collect();
+
+    let mut titles: HashMap<String, String> = HashMap::new();
+
+    if !cc_ids.is_empty() {
+        titles.extend(collect_claude_code_titles(&cc_ids));
+    }
+    if !cursor_ids.is_empty() {
+        titles.extend(collect_cursor_titles(&cursor_ids));
+    }
+
+    if titles.is_empty() {
+        return 0;
+    }
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(_) => return 0,
+    };
+    let mut count = 0usize;
+    for (sid, title) in &titles {
+        if tx
+            .execute(
+                "UPDATE sessions SET title = ?2 WHERE session_id = ?1 AND (title IS NULL OR title = '')",
+                rusqlite::params![sid, title],
+            )
+            .is_ok()
+        {
+            count += 1;
+        }
+    }
+    if tx.commit().is_err() {
+        return 0;
+    }
+    count
+}
+
+/// Read the first user prompt from Claude Code JSONL transcripts.
+fn collect_claude_code_titles(session_ids: &[&str]) -> HashMap<String, String> {
+    use std::collections::HashSet;
+
+    let mut needed: HashSet<&str> = session_ids.iter().copied().collect();
+    let mut result = HashMap::new();
+
+    let claude_dir = match crate::config::home_dir() {
+        Ok(h) => h.join(".claude").join("projects"),
+        Err(_) => return result,
+    };
+    if !claude_dir.exists() {
+        return result;
+    }
+
+    let project_dirs: Vec<_> = match std::fs::read_dir(&claude_dir) {
+        Ok(rd) => rd.flatten().filter(|e| e.path().is_dir()).collect(),
+        Err(_) => return result,
+    };
+
+    for project_entry in &project_dirs {
+        if needed.is_empty() {
+            break;
+        }
+        let entries = match std::fs::read_dir(project_entry.path()) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if !needed.contains(name) {
+                continue;
+            }
+            if let Some(title) = extract_first_prompt(&path) {
+                result.insert(name.to_string(), title);
+                needed.remove(name);
+            }
+        }
+    }
+    result
+}
+
+/// Extract the first user prompt text from a JSONL file (reads only until found).
+/// Skips system/synthetic messages like `<local-command-caveat>`.
+fn extract_first_prompt(path: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+
+    for line in reader.lines().take(200) {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        let text = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| {
+                if let Some(s) = c.as_str() {
+                    return Some(s.to_string());
+                }
+                if let Some(blocks) = c.as_array() {
+                    let t: String = blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !t.is_empty() {
+                        return Some(t);
+                    }
+                }
+                None
+            })?;
+        if text.starts_with('<') || text.is_empty() {
+            continue;
+        }
+        let title = truncate_title(&text, 120);
+        if !title.is_empty() {
+            return Some(title);
+        }
+    }
+    None
+}
+
+/// Read Cursor composer names from state.vscdb globalStorage.
+///
+/// Cursor stores per-composer data in `cursorDiskKV` with keys like
+/// `composerData:<composerId>`. Each value is JSON with a `name` field.
+fn collect_cursor_titles(session_ids: &[&str]) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    let home = match crate::config::home_dir() {
+        Ok(h) => h,
+        Err(_) => return result,
+    };
+
+    let global_dbs = [
+        home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+        home.join(".config/Cursor/User/globalStorage/state.vscdb"),
+    ];
+
+    for db_path in &global_dbs {
+        if !db_path.exists() {
+            continue;
+        }
+        let Ok(db) = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+
+        for sid in session_ids {
+            if result.contains_key(*sid) {
+                continue;
+            }
+            let key = format!("composerData:{sid}");
+            let json_str: String = match db.query_row(
+                "SELECT value FROM cursorDiskKV WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            ) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
+                if !name.is_empty() {
+                    result.insert(sid.to_string(), truncate_title(name, 120));
+                }
+            }
+        }
+    }
+    result
+}
+
+fn truncate_title(text: &str, max_len: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if clean.len() <= max_len {
+        clean
+    } else {
+        let mut end = max_len;
+        while end > 0 && !clean.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &clean[..end])
+    }
 }

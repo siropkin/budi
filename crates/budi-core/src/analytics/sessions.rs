@@ -106,6 +106,8 @@ pub struct SessionListEntry {
     pub output_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// Paginated session list result.
@@ -148,7 +150,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         param_values.push(format!("%{escaped}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(m.model LIKE ?{idx} ESCAPE '\\' OR m.repo_id LIKE ?{idx} ESCAPE '\\' OR m.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(m.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\')"
+            "(m.model LIKE ?{idx} ESCAPE '\\' OR m.repo_id LIKE ?{idx} ESCAPE '\\' OR m.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(m.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\' OR s.title LIKE ?{idx} ESCAPE '\\')"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -194,6 +196,13 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 format!("{col} {dir}")
             }
         }
+        "title" => {
+            if p.sort_asc {
+                format!("(sa.title IS NULL OR sa.title = '') ASC, sa.title {dir}")
+            } else {
+                format!("sa.title {dir}")
+            }
+        }
         "model" => format!("sa.models_by_cost {dir}"),
         "provider" => format!("sa.provider {dir}"),
         "repo_id" => {
@@ -234,7 +243,8 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                     COALESCE(SUM(m.output_tokens), 0) as outp,
                     COALESCE(s.duration_ms,
                         CAST((julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400000 AS INTEGER)
-                    ) as duration_ms
+                    ) as duration_ms,
+                    s.title
              FROM messages m
              LEFT JOIN sessions s ON s.session_id = m.session_id
              {where_clause}
@@ -244,7 +254,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
          SELECT COUNT(*) OVER() as total,
                 sa.session_id, sa.started_at, sa.ended_at, sa.duration_ms,
                 sa.msg_count, sa.cost, sa.models_by_cost, sa.provider, sa.repo_id, sa.git_branch,
-                sa.inp, sa.outp
+                sa.inp, sa.outp, sa.title
          FROM session_agg sa
          ORDER BY {order_expr}
          LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -267,6 +277,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 input_tokens: row.get(11)?,
                 output_tokens: row.get(12)?,
                 health_state: None,
+                title: row.get(13)?,
             })
         })?
         .filter_map(|r| r.ok())
