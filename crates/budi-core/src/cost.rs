@@ -3,13 +3,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::provider::ModelPricing;
-
-/// Look up pricing for a model using a specific provider's pricing table.
-fn pricing_for_model_by_provider(model: &str, provider: Option<&str>) -> ModelPricing {
-    crate::provider::pricing_for_model(model, provider.unwrap_or("claude_code"))
-}
-
 /// Estimated cost breakdown.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CostEstimate {
@@ -93,7 +86,7 @@ pub fn estimate_cost_filtered(
 
     for row in rows {
         let (prov, model, input, output, cache_write, cache_read) = row?;
-        let p = pricing_for_model_by_provider(&model, Some(&prov));
+        let p = crate::provider::pricing_for_model(&model, &prov);
         let ic = input as f64 * p.input / 1_000_000.0;
         let oc = output as f64 * p.output / 1_000_000.0;
         let cwc = cache_write as f64 * p.cache_write / 1_000_000.0;

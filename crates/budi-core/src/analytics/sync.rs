@@ -115,6 +115,7 @@ fn sync_with_max_age(
          )
          WHERE git_branch IS NULL
            AND session_id IS NOT NULL
+           AND timestamp >= datetime('now', '-30 days')
            AND EXISTS (
              SELECT 1 FROM sessions s
              WHERE s.session_id = messages.session_id
@@ -131,6 +132,7 @@ fn sync_with_max_age(
          )
          WHERE git_branch IS NULL
            AND session_id IS NOT NULL
+           AND timestamp >= datetime('now', '-30 days')
            AND EXISTS (
              SELECT 1 FROM messages m2
              WHERE m2.session_id = messages.session_id

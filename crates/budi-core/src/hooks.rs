@@ -393,12 +393,13 @@ pub fn load_session_meta(
 ) -> Result<std::collections::HashMap<String, SessionMeta>> {
     let mut map = std::collections::HashMap::new();
 
-    let (date_clause, date_param) = match max_age_days {
+    let (date_clause, hook_date_clause, date_param) = match max_age_days {
         Some(days) => (
             " AND started_at >= datetime('now', ?1)".to_string(),
+            " AND timestamp >= datetime('now', ?1)".to_string(),
             Some(format!("-{} days", days)),
         ),
-        None => (String::new(), None),
+        None => (String::new(), String::new(), None),
     };
     let sql = format!(
         "SELECT session_id, composer_mode, permission_mode, prompt_category,
@@ -433,18 +434,21 @@ pub fn load_session_meta(
     drop(rows);
     drop(stmt);
 
-    // Load dominant tool per session from hook_events using window function
-    let mut tool_stmt = conn.prepare(
+    // Load dominant tool per session from hook_events using window function.
+    // Scoped by the same max_age_days to avoid scanning the full hook_events table.
+    let tool_sql = format!(
         "SELECT session_id, tool_name FROM (
              SELECT session_id, tool_name, COUNT(*) as cnt,
                     ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY COUNT(*) DESC) as rn
              FROM hook_events
-             WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND session_id IS NOT NULL
+             WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND session_id IS NOT NULL{}
              GROUP BY session_id, tool_name
          ) WHERE rn = 1",
-    )?;
+        hook_date_clause
+    );
+    let mut tool_stmt = conn.prepare(&tool_sql)?;
 
-    let tool_rows = tool_stmt.query_map([], |row| {
+    let tool_rows = tool_stmt.query_map(param_refs.as_slice(), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 

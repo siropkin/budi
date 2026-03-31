@@ -81,7 +81,6 @@ pub struct OtelApiRequest {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
-    pub duration_ms: u64,
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────
@@ -180,8 +179,6 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
                 let cache_read_tokens = get_attr_u64(attrs, "cache_read_tokens").unwrap_or(0);
                 let cache_creation_tokens =
                     get_attr_u64(attrs, "cache_creation_tokens").unwrap_or(0);
-                let duration_ms = get_attr_u64(attrs, "duration_ms").unwrap_or(0);
-
                 events.push(OtelApiRequest {
                     session_id,
                     timestamp,
@@ -192,7 +189,6 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
                     output_tokens,
                     cache_read_tokens,
                     cache_creation_tokens,
-                    duration_ms,
                 });
             }
         }
@@ -445,8 +441,7 @@ mod tests {
                                 {"key": "input_tokens", "value": {"intValue": "1000"}},
                                 {"key": "output_tokens", "value": {"intValue": "500"}},
                                 {"key": "cache_read_tokens", "value": {"intValue": "50000"}},
-                                {"key": "cache_creation_tokens", "value": {"intValue": "5000"}},
-                                {"key": "duration_ms", "value": {"intValue": "1200"}}
+                                {"key": "cache_creation_tokens", "value": {"intValue": "5000"}}
                             ]
                         },
                         {
@@ -458,8 +453,7 @@ mod tests {
                                 {"key": "input_tokens", "value": {"intValue": "800"}},
                                 {"key": "output_tokens", "value": {"intValue": "200"}},
                                 {"key": "cache_read_tokens", "value": {"intValue": "10000"}},
-                                {"key": "cache_creation_tokens", "value": {"intValue": "0"}},
-                                {"key": "duration_ms", "value": {"intValue": "500"}}
+                                {"key": "cache_creation_tokens", "value": {"intValue": "0"}}
                             ]
                         }
                     ]
@@ -483,8 +477,6 @@ mod tests {
         assert_eq!(events[0].output_tokens, 500);
         assert_eq!(events[0].cache_read_tokens, 50000);
         assert_eq!(events[0].cache_creation_tokens, 5000);
-        assert_eq!(events[0].duration_ms, 1200);
-
         assert_eq!(events[1].model, "claude-sonnet-4-6");
         assert!((events[1].cost_usd - 0.02).abs() < 1e-10);
     }
@@ -651,7 +643,6 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 50000,
             cache_creation_tokens: 5000,
-            duration_ms: 1200,
         }];
 
         let count = ingest_otel_events(&mut conn, &events).unwrap();
@@ -701,7 +692,6 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 50000,
             cache_creation_tokens: 5000,
-            duration_ms: 1200,
         }];
         ingest_otel_events(&mut conn, &events).unwrap();
 
@@ -723,7 +713,6 @@ mod tests {
             output_tokens: 9999,
             cache_read_tokens: 9999,
             cache_creation_tokens: 9999,
-            duration_ms: 9999,
         }];
         ingest_otel_events(&mut conn, &events2).unwrap();
 
@@ -772,7 +761,6 @@ mod tests {
             output_tokens: 200,
             cache_read_tokens: 10000,
             cache_creation_tokens: 1000,
-            duration_ms: 800,
         }];
         ingest_otel_events(&mut conn, &events).unwrap();
 

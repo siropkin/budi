@@ -73,61 +73,7 @@ impl Pipeline {
                 .then(a.timestamp.cmp(&b.timestamp))
         });
 
-        // Propagate git_branch, repo_id, cwd from user messages to subsequent
-        // assistant messages in the same session.
-        // Uses temporal propagation: each message inherits from the most recent
-        // preceding message in the same session that has the field set.
-        struct SessionPropagation {
-            branch: Option<String>,
-            repo: Option<String>,
-            cwd: Option<String>,
-            category: Option<String>,
-        }
-        let mut session_ctx: std::collections::HashMap<String, SessionPropagation> =
-            std::collections::HashMap::new();
-        for msg in messages.iter_mut() {
-            let key = msg
-                .session_id
-                .clone()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| msg.uuid.clone());
-
-            let ctx = session_ctx.entry(key).or_insert_with(|| SessionPropagation {
-                branch: None,
-                repo: None,
-                cwd: None,
-                category: None,
-            });
-
-            if let Some(b) = &msg.git_branch {
-                if !b.is_empty() || ctx.branch.is_none() {
-                    ctx.branch = Some(b.clone());
-                }
-            } else if let Some(ref b) = ctx.branch {
-                msg.git_branch = Some(b.clone());
-            }
-            if let Some(r) = &msg.repo_id {
-                if !r.is_empty() || ctx.repo.is_none() {
-                    ctx.repo = Some(r.clone());
-                }
-            } else if let Some(ref r) = ctx.repo {
-                msg.repo_id = Some(r.clone());
-            }
-            if let Some(c) = &msg.cwd {
-                if !c.is_empty() || ctx.cwd.is_none() {
-                    ctx.cwd = Some(c.clone());
-                }
-            } else if let Some(ref c) = ctx.cwd {
-                msg.cwd = Some(c.clone());
-            }
-            if let Some(cat) = &msg.prompt_category {
-                if ctx.category.is_none() {
-                    ctx.category = Some(cat.clone());
-                }
-            } else if let Some(ref cat) = ctx.category {
-                msg.prompt_category = Some(cat.clone());
-            }
-        }
+        propagate_session_context(messages);
 
         for msg in messages.iter_mut() {
             let mut msg_tags = Vec::new();
@@ -163,6 +109,63 @@ impl Pipeline {
             all_tags.push(msg_tags);
         }
         all_tags
+    }
+}
+
+/// Propagate git_branch, repo_id, cwd, and prompt_category from earlier messages
+/// to later messages within the same session. Each message inherits from the most
+/// recent preceding message in the same session that has the field set.
+fn propagate_session_context(messages: &mut [ParsedMessage]) {
+    struct Ctx {
+        branch: Option<String>,
+        repo: Option<String>,
+        cwd: Option<String>,
+        category: Option<String>,
+    }
+    let mut session_ctx: std::collections::HashMap<String, Ctx> =
+        std::collections::HashMap::new();
+    for msg in messages.iter_mut() {
+        let key = msg
+            .session_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| msg.uuid.clone());
+
+        let ctx = session_ctx.entry(key).or_insert_with(|| Ctx {
+            branch: None,
+            repo: None,
+            cwd: None,
+            category: None,
+        });
+
+        if let Some(b) = &msg.git_branch {
+            if !b.is_empty() || ctx.branch.is_none() {
+                ctx.branch = Some(b.clone());
+            }
+        } else if let Some(ref b) = ctx.branch {
+            msg.git_branch = Some(b.clone());
+        }
+        if let Some(r) = &msg.repo_id {
+            if !r.is_empty() || ctx.repo.is_none() {
+                ctx.repo = Some(r.clone());
+            }
+        } else if let Some(ref r) = ctx.repo {
+            msg.repo_id = Some(r.clone());
+        }
+        if let Some(c) = &msg.cwd {
+            if !c.is_empty() || ctx.cwd.is_none() {
+                ctx.cwd = Some(c.clone());
+            }
+        } else if let Some(ref c) = ctx.cwd {
+            msg.cwd = Some(c.clone());
+        }
+        if let Some(cat) = &msg.prompt_category {
+            if ctx.category.is_none() {
+                ctx.category = Some(cat.clone());
+            }
+        } else if let Some(ref cat) = ctx.category {
+            msg.prompt_category = Some(cat.clone());
+        }
     }
 }
 

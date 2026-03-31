@@ -109,7 +109,19 @@ impl IdentityEnricher {
 }
 
 fn get_hostname() -> String {
-    // Try `hostname` command first (works on macOS, Linux, and Windows)
+    // Fast paths that avoid spawning a subprocess
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+        let trimmed = h.trim().to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    // Fallback: hostname command (macOS, other Unix, Windows)
     std::process::Command::new("hostname")
         .output()
         .ok()
@@ -120,12 +132,6 @@ fn get_hostname() -> String {
             } else {
                 None
             }
-        })
-        // Fallback: /etc/hostname (Linux-specific)
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
         })
         .unwrap_or_default()
 }

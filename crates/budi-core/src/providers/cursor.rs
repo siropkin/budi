@@ -736,7 +736,8 @@ fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext
     let orphans: Vec<(String, String)> = {
         let mut stmt = match conn.prepare(
             "SELECT uuid, timestamp FROM messages
-             WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'",
+             WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'
+             LIMIT 5000",
         ) {
             Ok(s) => s,
             Err(_) => return 0,
