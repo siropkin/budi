@@ -796,7 +796,8 @@ pub fn create_synthetic_cursor_sessions(conn: &mut Connection) -> usize {
         let first_ts = group[0].1;
         let synth_id = format!("cursor-synth-{first_ts}");
 
-        // Create stub session row
+        // Create stub session row (no context — Cursor API doesn't provide
+        // branch/repo and we won't guess from nearby sessions).
         let _ = tx.execute(
             "INSERT OR IGNORE INTO sessions (session_id, provider, started_at)
              VALUES (?1, 'cursor', datetime(?2 / 1000, 'unixepoch'))",
