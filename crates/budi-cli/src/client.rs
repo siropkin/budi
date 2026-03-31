@@ -97,45 +97,84 @@ impl DaemonClient {
 
     // ─── Sync & Migration ────────────────────────────────────────────
 
+    fn wait_for_sync(&self) -> Result<()> {
+        use std::io::Write;
+        print!(" sync in progress, waiting");
+        let _ = std::io::stdout().flush();
+        let start = std::time::Instant::now();
+        let max_wait = Duration::from_secs(300);
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if start.elapsed() > max_wait {
+                println!();
+                anyhow::bail!(
+                    "timed out waiting for running sync to finish — run `budi doctor` to check status"
+                );
+            }
+            let ok = self
+                .client
+                .get(format!("{}/sync/status", self.base_url))
+                .send()
+                .ok()
+                .and_then(|r| r.json::<Value>().ok())
+                .and_then(|v| v.get("syncing")?.as_bool())
+                .unwrap_or(false);
+            if !ok {
+                print!(" ");
+                let _ = std::io::stdout().flush();
+                return Ok(());
+            }
+            print!(".");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    fn sync_request(
+        &self,
+        send: impl Fn() -> std::result::Result<Response, reqwest::Error>,
+    ) -> Result<Value> {
+        let resp = send().map_err(describe_send_error)?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            self.wait_for_sync()?;
+            let resp = send().map_err(describe_send_error)?;
+            let resp = check_response(resp)?;
+            return Ok(resp.json()?);
+        }
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     pub fn sync(&self, migrate: bool) -> Result<Value> {
         let timeout = if migrate { 600 } else { 60 };
         self.sync_with_params(migrate, timeout)
     }
 
     fn sync_with_params(&self, migrate: bool, timeout_secs: u64) -> Result<Value> {
-        let resp = self
-            .client
-            .post(format!("{}/sync", self.base_url))
-            .json(&serde_json::json!({
-                "migrate": migrate,
-            }))
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .send()
-            .map_err(describe_send_error)?;
-        let resp = check_response(resp)?;
-        Ok(resp.json()?)
+        self.sync_request(|| {
+            self.client
+                .post(format!("{}/sync", self.base_url))
+                .json(&serde_json::json!({ "migrate": migrate }))
+                .timeout(Duration::from_secs(timeout_secs))
+                .send()
+        })
     }
 
     pub fn history(&self) -> Result<Value> {
-        let resp = self
-            .client
-            .post(format!("{}/sync/all", self.base_url))
-            .timeout(std::time::Duration::from_secs(600)) // History can take minutes
-            .send()
-            .map_err(describe_send_error)?;
-        let resp = check_response(resp)?;
-        Ok(resp.json()?)
+        self.sync_request(|| {
+            self.client
+                .post(format!("{}/sync/all", self.base_url))
+                .timeout(Duration::from_secs(600))
+                .send()
+        })
     }
 
     pub fn sync_reset(&self) -> Result<Value> {
-        let resp = self
-            .client
-            .post(format!("{}/sync/reset", self.base_url))
-            .timeout(std::time::Duration::from_secs(600))
-            .send()
-            .map_err(describe_send_error)?;
-        let resp = check_response(resp)?;
-        Ok(resp.json()?)
+        self.sync_request(|| {
+            self.client
+                .post(format!("{}/sync/reset", self.base_url))
+                .timeout(Duration::from_secs(600))
+                .send()
+        })
     }
 
     pub fn migrate(&self) -> Result<Value> {
