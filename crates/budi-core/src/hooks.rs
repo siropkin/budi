@@ -313,17 +313,43 @@ fn contains_word(text: &str, word: &str) -> bool {
 
 /// Classify a user prompt into a category using keyword heuristics.
 /// Returns None if no category matches (system commands, very short, or ambiguous).
+///
+/// Categories: bugfix, refactor, testing, review, ops, question, writing, feature.
 pub fn classify_prompt(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
-    // Skip system commands and tool results
-    if lower.starts_with('<') || lower.starts_with('/') || lower.len() < 5 {
+    // Skip system commands, tool results, and trivially short input
+    if lower.starts_with('/') || lower.len() < 5 {
+        return None;
+    }
+    // Skip XML/HTML tool output but not user text that merely contains angle brackets
+    if lower.starts_with('<') && !lower.contains(' ') {
         return None;
     }
 
-    // Check in priority order (most specific first)
+    // Check in priority order (most specific first).
+    // Within each group the word-boundary check avoids false positives
+    // (e.g. "testing" won't match the "test" in "contest").
     let bugfix_words = [
-        "fix", "bug", "broken", "error", "crash", "issue", "debug", "failing", "wrong",
+        "fix",
+        "bug",
+        "broken",
+        "error",
+        "crash",
+        "issue",
+        "debug",
+        "failing",
+        "fails",
+        "wrong",
+        "regression",
+        "workaround",
+        "patch",
+        "hotfix",
+        "not working",
+        "doesn't work",
+        "does not work",
+        "isn't working",
+        "stopped working",
     ];
     let refactor_words = [
         "refactor",
@@ -333,28 +359,108 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         "reorganize",
         "simplify",
         "restructure",
+        "move",
+        "split",
+        "consolidate",
+        "deduplicate",
+        "dedup",
+        "inline",
+        "remove",
+        "delete",
+        "deprecate",
+        "replace",
+        "convert",
+        "rewrite",
+        "tidy",
+    ];
+    let testing_words = [
+        "test",
+        "tests",
+        "testing",
+        "spec",
+        "specs",
+        "unit test",
+        "integration test",
+        "e2e",
+        "coverage",
+        "assert",
+        "mock",
+        "fixture",
+        "snapshot",
     ];
     let review_words = [
-        "review", "check", "audit", "validate", "verify", "inspect", "look at", "address",
+        "review",
+        "audit",
+        "validate",
+        "verify",
+        "inspect",
+        "look at",
+        "take a look",
+        "examine",
+        "analyze",
+        "analyse",
+        "assess",
+        "evaluate",
+        "feedback",
+        "critique",
     ];
     let ops_words = [
-        "deploy", "release", "migrate", "upgrade", "bump", "publish", "install", "update",
-        "commit", "push", "merge", "rebase",
+        "deploy",
+        "release",
+        "migrate",
+        "upgrade",
+        "bump",
+        "publish",
+        "install",
+        "commit",
+        "push",
+        "merge",
+        "rebase",
+        "cherry-pick",
+        "rollback",
+        "revert",
+        "configure",
+        "provision",
+        "ci",
+        "cd",
+        "docker",
+        "k8s",
+        "kubernetes",
+        "terraform",
+        "ansible",
     ];
     let question_words = [
         "why",
         "how does",
         "how do",
+        "how can",
+        "how to",
         "how much",
         "how often",
+        "how many",
         "what is",
         "what does",
+        "what are",
+        "where is",
+        "where does",
+        "where are",
+        "when does",
+        "when is",
+        "which",
         "can you tell",
+        "can you explain",
         "explain",
         "understand",
         "show me",
         "discover",
         "research",
+        "what happens",
+        "is there",
+        "are there",
+        "do we",
+        "does this",
+        "could you",
+        "tell me",
     ];
     let feature_words = [
         "add",
@@ -365,9 +471,31 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         "integrate",
         "introduce",
         "design",
+        "make",
+        "change",
+        "modify",
+        "adjust",
+        "tweak",
+        "set up",
+        "setup",
+        "enable",
+        "support",
+        "extend",
+        "enhance",
+        "improve",
+        "optimize",
+        "update",
     ];
     let writing_words = [
-        "write", "draft", "article", "post", "document", "blog", "readme",
+        "write",
+        "draft",
+        "article",
+        "post",
+        "document",
+        "blog",
+        "readme",
+        "changelog",
+        "documentation",
     ];
     let plan_words = [
         "plan",
@@ -380,6 +508,8 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         Some("bugfix".to_string())
     } else if refactor_words.iter().any(|w| contains_word(&lower, w)) {
         Some("refactor".to_string())
+    } else if testing_words.iter().any(|w| contains_word(&lower, w)) {
+        Some("testing".to_string())
     } else if plan_words.iter().any(|w| contains_word(&lower, w)) {
         Some("feature".to_string())
     } else if review_words.iter().any(|w| contains_word(&lower, w)) {
@@ -849,6 +979,14 @@ mod tests {
             classify_prompt("this is broken"),
             Some("bugfix".to_string())
         );
+        assert_eq!(
+            classify_prompt("the build doesn't work"),
+            Some("bugfix".to_string())
+        );
+        assert_eq!(
+            classify_prompt("there is a regression in the pipeline"),
+            Some("bugfix".to_string())
+        );
     }
 
     #[test]
@@ -863,6 +1001,18 @@ mod tests {
         );
         assert_eq!(
             classify_prompt("create a new endpoint"),
+            Some("feature".to_string())
+        );
+        assert_eq!(
+            classify_prompt("make the header sticky"),
+            Some("feature".to_string())
+        );
+        assert_eq!(
+            classify_prompt("change the background color"),
+            Some("feature".to_string())
+        );
+        assert_eq!(
+            classify_prompt("update the sidebar layout"),
             Some("feature".to_string())
         );
     }
@@ -885,6 +1035,38 @@ mod tests {
             classify_prompt("clean up the utils module"),
             Some("refactor".to_string())
         );
+        assert_eq!(
+            classify_prompt("remove the unused import"),
+            Some("refactor".to_string())
+        );
+        assert_eq!(
+            classify_prompt("move this to a separate file"),
+            Some("refactor".to_string())
+        );
+        assert_eq!(
+            classify_prompt("split the component into smaller parts"),
+            Some("refactor".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_testing() {
+        assert_eq!(
+            classify_prompt("add tests for the parser"),
+            Some("testing".to_string())
+        );
+        assert_eq!(
+            classify_prompt("write a unit test for this function"),
+            Some("testing".to_string())
+        );
+        assert_eq!(
+            classify_prompt("run the e2e tests"),
+            Some("testing".to_string())
+        );
+        assert_eq!(
+            classify_prompt("increase coverage for the hooks module"),
+            Some("testing".to_string())
+        );
     }
 
     #[test]
@@ -901,6 +1083,18 @@ mod tests {
             classify_prompt("is this correct?"),
             Some("question".to_string())
         );
+        assert_eq!(
+            classify_prompt("where is the config file?"),
+            Some("question".to_string())
+        );
+        assert_eq!(
+            classify_prompt("what happens when the session ends"),
+            Some("question".to_string())
+        );
+        assert_eq!(
+            classify_prompt("tell me about the architecture"),
+            Some("question".to_string())
+        );
     }
 
     #[test]
@@ -911,6 +1105,14 @@ mod tests {
         );
         assert_eq!(
             classify_prompt("upgrade the dependency"),
+            Some("ops".to_string())
+        );
+        assert_eq!(
+            classify_prompt("set up the kubernetes cluster"),
+            Some("ops".to_string())
+        );
+        assert_eq!(
+            classify_prompt("revert the last commit"),
             Some("ops".to_string())
         );
     }
@@ -926,12 +1128,20 @@ mod tests {
             classify_prompt("validate the endpoint responses"),
             Some("review".to_string())
         );
+        assert_eq!(
+            classify_prompt("analyze the performance results"),
+            Some("review".to_string())
+        );
     }
 
     #[test]
     fn classify_writing() {
         assert_eq!(
             classify_prompt("draft the article"),
+            Some("writing".to_string())
+        );
+        assert_eq!(
+            classify_prompt("write documentation for the API"),
             Some("writing".to_string())
         );
     }
@@ -950,6 +1160,8 @@ mod tests {
         assert_eq!(classify_prompt("thanks"), None);
         assert_eq!(classify_prompt("<command>/clear</command>"), None);
         assert_eq!(classify_prompt("/exit"), None);
+        assert_eq!(classify_prompt("lgtm"), None);
+        assert_eq!(classify_prompt("ok cool"), None);
     }
 
     #[test]

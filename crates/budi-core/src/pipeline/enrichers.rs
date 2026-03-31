@@ -334,13 +334,18 @@ impl Enricher for HookEnricher {
             return tags;
         };
 
-        // Propagate repo_id and git_branch from hook session metadata.
-        // This provides a fallback if GitEnricher can't resolve from cwd.
+        // Propagate repo_id, git_branch, and prompt_category from hook session
+        // metadata. This is the only bridge between sessions.prompt_category
+        // (set by hook events) and msg.prompt_category (consumed by Pipeline::process
+        // to emit the activity tag). Without this, Cursor users get no activity tags.
         if msg.repo_id.is_none() && meta.repo_id.is_some() {
             msg.repo_id = meta.repo_id.clone();
         }
         if msg.git_branch.is_none() && meta.git_branch.is_some() {
             msg.git_branch = meta.git_branch.clone();
+        }
+        if msg.prompt_category.is_none() && meta.prompt_category.is_some() {
+            msg.prompt_category = meta.prompt_category.clone();
         }
 
         if let Some(ref mode) = meta.composer_mode {
