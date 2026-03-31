@@ -16,7 +16,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -119,6 +119,8 @@ Examples:
     },
     /// Run database migration explicitly (usually automatic with init/update)
     Migrate,
+    /// Repair schema drift and run migration checks
+    Repair,
     /// Receive hook events from Claude Code / Cursor (reads JSON from stdin, fire-and-forget)
     #[command(hide = true)]
     Hook {
@@ -247,6 +249,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Repair => commands::repair::cmd_repair(),
         Commands::Hook { .. } => {
             // Hooks must NEVER block the host agent. Swallow all errors silently.
             let _ = commands::hook::cmd_hook();
@@ -302,5 +305,6 @@ mod tests {
         assert!(lower.contains("doctor"));
         assert!(lower.contains("stats"));
         assert!(lower.contains("sync"));
+        assert!(lower.contains("repair"));
     }
 }

@@ -188,6 +188,17 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    pub fn repair(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!("{}/admin/repair", self.base_url))
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     pub fn schema_version(&self) -> Result<Value> {
         let resp = self
             .client

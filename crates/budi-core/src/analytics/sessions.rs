@@ -222,7 +222,6 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         "tokens" => format!("(sa.inp + sa.outp) {dir}"),
         _ => format!("sa.cost {dir}"),
     };
-
     let sql = format!(
         "WITH session_agg AS (
              SELECT m.session_id,

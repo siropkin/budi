@@ -13,6 +13,15 @@ use rusqlite::Connection;
 /// Expected schema version for the current binary.
 pub const SCHEMA_VERSION: u32 = 15;
 
+/// Result of running schema repair.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RepairReport {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub migrated: bool,
+    pub added_columns: Vec<String>,
+}
+
 /// Check the current schema version without migrating.
 pub fn current_version(conn: &Connection) -> u32 {
     conn.pragma_query_value(None, "user_version", |r| r.get(0))
@@ -39,6 +48,29 @@ pub fn needs_migration_at(db_path: &std::path::Path) -> bool {
 
 /// Run all pending migrations up to SCHEMA_VERSION.
 pub fn migrate(conn: &Connection) -> Result<()> {
+    run_version_migrations(conn)?;
+    let _ = reconcile_schema(conn)?;
+    Ok(())
+}
+
+/// Run migrations and reconcile additive schema drift.
+///
+/// This is safe to run repeatedly. It upgrades old schema versions and repairs
+/// missing additive columns on already-current schemas.
+pub fn repair(conn: &Connection) -> Result<RepairReport> {
+    let from_version = current_version(conn);
+    run_version_migrations(conn)?;
+    let added_columns = reconcile_schema(conn)?;
+    let to_version = current_version(conn);
+    Ok(RepairReport {
+        from_version,
+        to_version,
+        migrated: from_version < to_version,
+        added_columns,
+    })
+}
+
+fn run_version_migrations(conn: &Connection) -> Result<()> {
     let version = current_version(conn);
 
     if version >= SCHEMA_VERSION {
@@ -83,7 +115,6 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if current_version(conn) == 14 {
         migrate_v14_to_v15(conn)?;
     }
-
     Ok(())
 }
 
@@ -471,6 +502,84 @@ fn create_indexes(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(cols.filter_map(|c| c.ok()).any(|c| c == column))
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_decl: &str,
+) -> Result<bool> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    if has_column(conn, table, column)? {
+        return Ok(false);
+    }
+
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column_decl};"))?;
+    tracing::info!("Schema reconcile: added missing {table}.{column}");
+    Ok(true)
+}
+
+/// Repair additive schema drift when DB claims current version but misses columns.
+///
+/// This can happen if an old migration partially applied or a table was rebuilt by
+/// external tooling while `user_version` remained current. We only add missing
+/// columns and recreate indexes; we do not drop or rewrite user data.
+fn reconcile_schema(conn: &Connection) -> Result<Vec<String>> {
+    let mut added_columns: Vec<String> = Vec::new();
+
+    if ensure_column(
+        conn,
+        "messages",
+        "cost_confidence",
+        "cost_confidence TEXT DEFAULT 'estimated'",
+    )? {
+        added_columns.push("messages.cost_confidence".to_string());
+    }
+    if ensure_column(conn, "messages", "request_id", "request_id TEXT")? {
+        added_columns.push("messages.request_id".to_string());
+    }
+
+    if ensure_column(conn, "sessions", "title", "title TEXT")? {
+        added_columns.push("sessions.title".to_string());
+    }
+
+    if ensure_column(conn, "hook_events", "mcp_server", "mcp_server TEXT")? {
+        added_columns.push("hook_events.mcp_server".to_string());
+    }
+    if ensure_column(
+        conn,
+        "otel_events",
+        "processed",
+        "processed INTEGER NOT NULL DEFAULT 0",
+    )? {
+        added_columns.push("otel_events.processed".to_string());
+    }
+
+    // Index creation is idempotent and also heals drift where indexes were dropped.
+    create_indexes(conn)?;
+
+    if !added_columns.is_empty() {
+        tracing::info!("Schema reconcile completed");
+    }
+    Ok(added_columns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +922,112 @@ mod tests {
         // request_id column should exist
         conn.execute("SELECT request_id FROM messages LIMIT 0", [])
             .expect("request_id column should exist");
+    }
+
+    #[test]
+    fn migrate_reconciles_missing_sessions_title_at_current_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // Simulate schema drift: sessions table without `title`, but user_version still current.
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions_new (
+                session_id         TEXT PRIMARY KEY,
+                provider           TEXT NOT NULL DEFAULT 'claude_code',
+                started_at         TEXT,
+                ended_at           TEXT,
+                duration_ms        INTEGER,
+                composer_mode      TEXT,
+                permission_mode    TEXT,
+                user_email         TEXT,
+                workspace_root     TEXT,
+                end_reason         TEXT,
+                prompt_category    TEXT,
+                model              TEXT,
+                raw_json           TEXT,
+                repo_id            TEXT,
+                git_branch         TEXT
+            );
+            INSERT INTO sessions_new (
+                session_id, provider, started_at, ended_at, duration_ms,
+                composer_mode, permission_mode, user_email, workspace_root, end_reason,
+                prompt_category, model, raw_json, repo_id, git_branch
+            )
+            SELECT
+                session_id, provider, started_at, ended_at, duration_ms,
+                composer_mode, permission_mode, user_email, workspace_root, end_reason,
+                prompt_category, model, raw_json, repo_id, git_branch
+            FROM sessions;
+            DROP TABLE sessions;
+            ALTER TABLE sessions_new RENAME TO sessions;
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+
+        let missing_before = conn.prepare("SELECT title FROM sessions LIMIT 1").is_err();
+        assert!(missing_before, "test setup should remove sessions.title");
+
+        migrate(&conn).unwrap();
+
+        conn.prepare("SELECT title FROM sessions LIMIT 1")
+            .expect("migrate should repair missing sessions.title");
+    }
+
+    #[test]
+    fn repair_reports_added_columns_for_drift() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions_new (
+                session_id         TEXT PRIMARY KEY,
+                provider           TEXT NOT NULL DEFAULT 'claude_code',
+                started_at         TEXT,
+                ended_at           TEXT,
+                duration_ms        INTEGER,
+                composer_mode      TEXT,
+                permission_mode    TEXT,
+                user_email         TEXT,
+                workspace_root     TEXT,
+                end_reason         TEXT,
+                prompt_category    TEXT,
+                model              TEXT,
+                raw_json           TEXT,
+                repo_id            TEXT,
+                git_branch         TEXT
+            );
+            INSERT INTO sessions_new (
+                session_id, provider, started_at, ended_at, duration_ms,
+                composer_mode, permission_mode, user_email, workspace_root, end_reason,
+                prompt_category, model, raw_json, repo_id, git_branch
+            )
+            SELECT
+                session_id, provider, started_at, ended_at, duration_ms,
+                composer_mode, permission_mode, user_email, workspace_root, end_reason,
+                prompt_category, model, raw_json, repo_id, git_branch
+            FROM sessions;
+            DROP TABLE sessions;
+            ALTER TABLE sessions_new RENAME TO sessions;
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+
+        let report = repair(&conn).unwrap();
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+        assert!(!report.migrated);
+        assert!(
+            report.added_columns.contains(&"sessions.title".to_string()),
+            "repair should report sessions.title addition"
+        );
     }
 }

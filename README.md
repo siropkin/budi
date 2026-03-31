@@ -184,6 +184,7 @@ budi stats --tag ticket_prefix # cost per team prefix
 budi sync                     # sync recent data (last 30 days)
 budi sync --all               # load full history (all time)
 budi sync --force             # re-ingest all data from scratch (use after upgrades)
+budi repair                   # repair schema drift + run migration checks
 budi update                   # check for updates (auto-detects Homebrew)
 budi update --version <name>  # update to a specific version
 budi health                   # show session health vitals for most recent session
@@ -443,6 +444,7 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | GET | `/admin/providers` | Registered providers |
 | GET | `/admin/schema` | Database schema version |
 | POST | `/admin/migrate` | Run database migration |
+| POST | `/admin/repair` | Repair schema drift + run migration |
 
 Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
@@ -454,6 +456,7 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 1. Run `budi doctor` to check health
 2. Run `budi sync` to sync recent transcripts
 3. For full history: `budi sync --all`
+4. If schema drift is detected after upgrade: `budi repair`
 
 **Daemon won't start:**
 1. Check if port 7878 is in use: `lsof -i :7878`

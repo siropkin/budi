@@ -280,6 +280,15 @@ pub struct MigrateResponse {
 }
 
 #[derive(serde::Serialize)]
+pub struct RepairResponse {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub migrated: bool,
+    pub repaired: bool,
+    pub added_columns: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
 pub struct IntegrationsResponse {
     pub claude_code_hooks: bool,
     pub cursor_hooks: bool,
@@ -653,6 +662,47 @@ pub async fn analytics_migrate(
                 target,
                 migrated: true,
                 from: Some(current),
+            })
+        })();
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        r
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_repair(
+    State(state): State<AppState>,
+) -> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if state
+        .syncing
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "another operation is in progress" })),
+        ));
+    }
+    let flag = state.syncing.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let r = (|| -> anyhow::Result<RepairResponse> {
+            let db_path = analytics::db_path()?;
+            let conn = analytics::open_db(&db_path)?;
+            let report = budi_core::migration::repair(&conn)?;
+            Ok(RepairResponse {
+                from_version: report.from_version,
+                to_version: report.to_version,
+                migrated: report.migrated,
+                repaired: !report.added_columns.is_empty(),
+                added_columns: report.added_columns,
             })
         })();
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
