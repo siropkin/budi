@@ -122,8 +122,7 @@ fn propagate_session_context(messages: &mut [ParsedMessage]) {
         cwd: Option<String>,
         category: Option<String>,
     }
-    let mut session_ctx: std::collections::HashMap<String, Ctx> =
-        std::collections::HashMap::new();
+    let mut session_ctx: std::collections::HashMap<String, Ctx> = std::collections::HashMap::new();
     for msg in messages.iter_mut() {
         let key = msg
             .session_id

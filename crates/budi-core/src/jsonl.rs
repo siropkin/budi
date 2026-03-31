@@ -199,8 +199,9 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 }
                 None => None,
             });
-            let prompt_category =
-                prompt_text.as_deref().and_then(crate::hooks::classify_prompt);
+            let prompt_category = prompt_text
+                .as_deref()
+                .and_then(crate::hooks::classify_prompt);
             Some(ParsedMessage {
                 uuid: u.uuid,
                 session_id: u.session_id,

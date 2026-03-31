@@ -703,9 +703,7 @@ impl BudiMcpServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Trigger a data sync to refresh analytics with latest transcripts."
-    )]
+    #[tool(description = "Trigger a data sync to refresh analytics with latest transcripts.")]
     async fn sync_data(&self) -> Result<CallToolResult, McpError> {
         let (status, response_body) = tokio::task::block_in_place(|| {
             let resp = self
@@ -730,7 +728,10 @@ impl BudiMcpServer {
 
         let body: Value = serde_json::from_str(&response_body)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let files = body.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
+        let files = body
+            .get("files_synced")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let messages = body
             .get("messages_ingested")
             .and_then(|v| v.as_u64())

@@ -109,8 +109,9 @@ fn sync_with_max_age(
     // 1) The session row itself (populated by hooks or earlier ingestion)
     // 2) Sibling messages in the same session (e.g., user entries in CC JSONL
     //    carry gitBranch but assistant entries may not if parsed by older code)
-    let repaired_from_session = conn.execute(
-        "UPDATE messages SET git_branch = (
+    let repaired_from_session = conn
+        .execute(
+            "UPDATE messages SET git_branch = (
             SELECT s.git_branch FROM sessions s WHERE s.session_id = messages.session_id
          )
          WHERE git_branch IS NULL
@@ -121,10 +122,12 @@ fn sync_with_max_age(
              WHERE s.session_id = messages.session_id
                AND s.git_branch IS NOT NULL AND s.git_branch != ''
            )",
-        [],
-    ).unwrap_or(0);
-    let repaired_from_siblings = conn.execute(
-        "UPDATE messages SET git_branch = (
+            [],
+        )
+        .unwrap_or(0);
+    let repaired_from_siblings = conn
+        .execute(
+            "UPDATE messages SET git_branch = (
             SELECT m2.git_branch FROM messages m2
             WHERE m2.session_id = messages.session_id
               AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
@@ -138,11 +141,14 @@ fn sync_with_max_age(
              WHERE m2.session_id = messages.session_id
                AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
            )",
-        [],
-    ).unwrap_or(0);
+            [],
+        )
+        .unwrap_or(0);
     let repaired = repaired_from_session + repaired_from_siblings;
     if repaired > 0 {
-        tracing::info!("Repaired git_branch on {repaired} messages ({repaired_from_session} from sessions, {repaired_from_siblings} from siblings)");
+        tracing::info!(
+            "Repaired git_branch on {repaired} messages ({repaired_from_session} from sessions, {repaired_from_siblings} from siblings)"
+        );
     }
 
     Ok((total_files, total_messages, warnings))

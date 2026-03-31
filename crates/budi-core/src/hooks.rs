@@ -326,25 +326,35 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         "fix", "bug", "broken", "error", "crash", "issue", "debug", "failing", "wrong",
     ];
     let refactor_words = [
-        "refactor", "rename", "clean up", "extract", "reorganize", "simplify", "restructure",
+        "refactor",
+        "rename",
+        "clean up",
+        "extract",
+        "reorganize",
+        "simplify",
+        "restructure",
     ];
     let review_words = [
-        "review",
-        "check",
-        "audit",
-        "validate",
-        "verify",
-        "inspect",
-        "look at",
-        "address",
+        "review", "check", "audit", "validate", "verify", "inspect", "look at", "address",
     ];
     let ops_words = [
         "deploy", "release", "migrate", "upgrade", "bump", "publish", "install", "update",
         "commit", "push", "merge", "rebase",
     ];
     let question_words = [
-        "why", "how does", "how do", "how much", "how often", "what is", "what does", "can you tell",
-        "explain", "understand", "show me", "discover", "research",
+        "why",
+        "how does",
+        "how do",
+        "how much",
+        "how often",
+        "what is",
+        "what does",
+        "can you tell",
+        "explain",
+        "understand",
+        "show me",
+        "discover",
+        "research",
     ];
     let feature_words = [
         "add",
@@ -360,7 +370,10 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         "write", "draft", "article", "post", "document", "blog", "readme",
     ];
     let plan_words = [
-        "plan", "the plan", "implement the plan", "read and implement",
+        "plan",
+        "the plan",
+        "implement the plan",
+        "read and implement",
     ];
 
     if bugfix_words.iter().any(|w| contains_word(&lower, w)) {
@@ -904,10 +917,7 @@ mod tests {
 
     #[test]
     fn classify_review() {
-        assert_eq!(
-            classify_prompt("review the PR"),
-            Some("review".to_string())
-        );
+        assert_eq!(classify_prompt("review the PR"), Some("review".to_string()));
         assert_eq!(
             classify_prompt("audit the codebase"),
             Some("review".to_string())

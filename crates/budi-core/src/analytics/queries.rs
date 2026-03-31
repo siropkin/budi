@@ -254,7 +254,10 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     if let Some(q) = p.search
         && !q.is_empty()
     {
-        let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = q
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         param_values.push(format!("%{escaped}%"));
         let idx = param_values.len();
         conditions.push(format!(

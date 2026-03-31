@@ -229,10 +229,7 @@ fn install_claude_code_settings(config: &config::BudiConfig) -> Vec<String> {
 
         // 2. Statusline
         match apply_statusline(&mut settings) {
-            Ok(true) => println!(
-                "  Status line: configured in {}",
-                settings_path.display()
-            ),
+            Ok(true) => println!("  Status line: configured in {}", settings_path.display()),
             Ok(false) => {} // already installed, message printed inside
             Err(e) => {
                 let yellow = super::ansi("\x1b[33m");
@@ -522,8 +519,7 @@ fn install_cursor_hooks() -> Result<()> {
     let mut config = if hooks_path.exists() {
         let raw = fs::read_to_string(&hooks_path)
             .with_context(|| format!("Failed to read {}", hooks_path.display()))?;
-        serde_json::from_str::<Value>(&raw)
-            .unwrap_or_else(|_| json!({"version": 1, "hooks": {}}))
+        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"version": 1, "hooks": {}}))
     } else {
         json!({"version": 1, "hooks": {}})
     };
@@ -594,13 +590,13 @@ fn check_daemon_binary_and_version() {
     let yellow = super::ansi("\x1b[33m");
     let reset = super::ansi("\x1b[0m");
 
-    match Command::new("budi-daemon")
-        .arg("--version")
-        .output()
-    {
+    match Command::new("budi-daemon").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let raw = String::from_utf8_lossy(&output.stdout);
-            let daemon_version = raw.trim().strip_prefix("budi-daemon ").unwrap_or(raw.trim());
+            let daemon_version = raw
+                .trim()
+                .strip_prefix("budi-daemon ")
+                .unwrap_or(raw.trim());
             if daemon_version != cli_version {
                 eprintln!(
                     "{yellow}  Warning:{reset} version mismatch: CLI v{cli_version} but daemon v{daemon_version}. \

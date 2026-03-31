@@ -343,7 +343,9 @@ pub fn ingest_messages_with_sync(
             if let Some(ref sid) = msg.session_id {
                 seen_sessions.insert((sid.clone(), msg.provider.clone()));
                 if let Some(ref cat) = msg.prompt_category {
-                    session_categories.entry(sid.clone()).or_insert_with(|| cat.clone());
+                    session_categories
+                        .entry(sid.clone())
+                        .or_insert_with(|| cat.clone());
                 }
             }
         }

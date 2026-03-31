@@ -135,7 +135,8 @@ pub async fn health_integrations()
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let db_stats = db_path.and_then(|p| {
+        let db_stats = db_path
+            .and_then(|p| {
                 let size_mb = std::fs::metadata(&p)
                     .ok()
                     .map(|m| m.len() as f64 / 1_048_576.0);
@@ -367,7 +368,9 @@ pub async fn analytics_history(
 // sufficient to prevent data corruption.
 // ---------------------------------------------------------------------------
 
-pub async fn hooks_ingest(Json(payload): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn hooks_ingest(
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
     tokio::task::spawn_blocking(move || {
         let event = budi_core::hooks::parse_hook_event(&payload)?;
 

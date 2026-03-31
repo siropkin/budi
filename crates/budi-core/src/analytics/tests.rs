@@ -470,8 +470,7 @@ fn cache_stats_computes_hit_rate() {
 fn statusline_stats_empty_db() {
     let conn = test_db();
     let params = StatuslineParams::default();
-    let stats =
-        statusline_stats(&conn, "2026-03-21", "2026-03-17", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-21", "2026-03-17", "2026-03-01", &params).unwrap();
     assert_eq!(stats.today_cost, 0.0);
     assert_eq!(stats.week_cost, 0.0);
     assert_eq!(stats.month_cost, 0.0);
@@ -485,8 +484,7 @@ fn statusline_stats_with_data() {
     let mut conn = test_db();
     ingest_messages(&mut conn, &sample_messages(), None).unwrap();
     let params = StatuslineParams::default();
-    let stats =
-        statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
     assert!(stats.month_cost > 0.0);
 }
 
@@ -498,8 +496,7 @@ fn statusline_stats_with_session_filter() {
         session_id: Some("sess-1".to_string()),
         ..Default::default()
     };
-    let stats =
-        statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
     assert!(stats.session_cost.is_some());
     assert!(stats.session_cost.unwrap() >= 0.0);
 }
@@ -512,8 +509,7 @@ fn statusline_stats_with_branch_filter() {
         branch: Some("main".to_string()),
         ..Default::default()
     };
-    let stats =
-        statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
     assert!(stats.branch_cost.is_some());
 }
 
@@ -1309,11 +1305,20 @@ fn session_tags_empty_for_unknown_session() {
 
 // --- Session Health tests ---
 
-fn health_msg(uuid: &str, session_id: &str, idx: u64, input: u64, cache_read: u64, cost: f64) -> ParsedMessage {
+fn health_msg(
+    uuid: &str,
+    session_id: &str,
+    idx: u64,
+    input: u64,
+    cache_read: u64,
+    cost: f64,
+) -> ParsedMessage {
     let ts = chrono::NaiveDateTime::parse_from_str(
         &format!("2026-03-14 10:{:02}:00", idx),
         "%Y-%m-%d %H:%M:%S",
-    ).unwrap().and_utc();
+    )
+    .unwrap()
+    .and_utc();
     ParsedMessage {
         uuid: uuid.to_string(),
         session_id: Some(session_id.to_string()),
@@ -1340,6 +1345,29 @@ fn health_msg(uuid: &str, session_id: &str, idx: u64, input: u64, cache_read: u6
         web_search_requests: 0,
         prompt_category: None,
     }
+}
+
+fn insert_health_hook_event(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    event: &str,
+    idx: u64,
+    tool_name: Option<&str>,
+) {
+    let ts = chrono::NaiveDateTime::parse_from_str(
+        &format!("2026-03-14 10:{:02}:30", idx),
+        "%Y-%m-%d %H:%M:%S",
+    )
+    .unwrap()
+    .and_utc()
+    .to_rfc3339();
+    conn.execute(
+        "INSERT INTO hook_events (provider, event, session_id, timestamp, tool_name, raw_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, '{}')",
+        rusqlite::params![provider, event, session_id, ts, tool_name],
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1370,20 +1398,15 @@ fn health_context_drag_yellow() {
     ).unwrap();
 
     let mut msgs: Vec<ParsedMessage> = (0..5)
-        .map(|i| health_msg(&format!("m{i}"), "s1", i, 1000, 0, 5.0))
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0))
         .collect();
     for i in 5..8 {
-        msgs.push(health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0));
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 16000, 0, 5.0));
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert!(
-        h.vitals.context_drag.as_ref().unwrap().state == "yellow"
-            || h.vitals.context_drag.as_ref().unwrap().state == "red",
-        "expected yellow or red for 4x growth, got {:?}",
-        h.vitals.context_drag,
-    );
+    assert_eq!(h.vitals.context_drag.as_ref().unwrap().state, "yellow");
 }
 
 #[test]
@@ -1395,10 +1418,10 @@ fn health_context_drag_red() {
     ).unwrap();
 
     let mut msgs: Vec<ParsedMessage> = (0..5)
-        .map(|i| health_msg(&format!("m{i}"), "s1", i, 1000, 0, 5.0))
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0))
         .collect();
     for i in 5..8 {
-        msgs.push(health_msg(&format!("m{i}"), "s1", i, 10000, 0, 5.0));
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 32000, 0, 5.0));
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
 
@@ -1441,6 +1464,149 @@ fn health_cost_acceleration_yellow() {
 
     let h = session_health(&conn, Some("s1")).unwrap();
     assert_eq!(h.vitals.cost_acceleration.as_ref().unwrap().state, "yellow");
+}
+
+#[test]
+fn health_cache_uses_recent_model_run() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..4)
+        .map(|i| health_msg(&format!("old{i}"), "s1", i, 1000, 0, 5.0))
+        .collect();
+    for i in 4..8 {
+        let mut msg = health_msg(&format!("new{i}"), "s1", i, 100, 900, 5.0);
+        msg.model = Some("claude-sonnet-4-6".to_string());
+        msgs.push(msg);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.cache_efficiency.as_ref().unwrap().state, "green");
+}
+
+#[test]
+fn health_thrashing_ignores_busy_successful_turn() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+    let msgs: Vec<ParsedMessage> = (0..6)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 900, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    for (idx, tool) in [
+        "ReadFile",
+        "rg",
+        "ReadFile",
+        "ApplyPatch",
+        "ReadLints",
+        "Shell",
+        "ReadFile",
+        "rg",
+        "ReadFile",
+        "ApplyPatch",
+        "ReadLints",
+        "Shell",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_health_hook_event(
+            &conn,
+            "claude_code",
+            "s1",
+            "post_tool_use",
+            idx as u64,
+            Some(tool),
+        );
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.thrashing.as_ref().unwrap().state, "green");
+}
+
+#[test]
+fn health_thrashing_detects_retry_loop() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+    let msgs: Vec<ParsedMessage> = (0..6)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 900, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    for idx in 0..5 {
+        insert_health_hook_event(
+            &conn,
+            "claude_code",
+            "s1",
+            "post_tool_use_failure",
+            idx,
+            Some("Shell"),
+        );
+    }
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.thrashing.as_ref().unwrap().state, "red");
+}
+
+#[test]
+fn health_context_drag_resets_after_compact() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| health_msg(&format!("before{i}"), "s1", i, 4000, 0, 5.0))
+        .collect();
+    for i in 5..10 {
+        msgs.push(health_msg(&format!("after{i}"), "s1", i, 5000, 900, 5.0));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    insert_health_hook_event(&conn, "claude_code", "s1", "pre_compact", 4, None);
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.context_drag.as_ref().unwrap().state, "green");
+}
+
+#[test]
+fn health_cursor_tips_use_plain_actions() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| {
+            let mut msg = health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0);
+            msg.provider = "cursor".to_string();
+            msg
+        })
+        .collect();
+    for i in 5..8 {
+        let mut msg = health_msg(&format!("m{i}"), "s1", i, 16000, 0, 5.0);
+        msg.provider = "cursor".to_string();
+        msgs.push(msg);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert!(h.details.iter().any(|d| {
+        d.vital == "context_drag"
+            && d.tip.contains("Context is getting noisy")
+            && d.actions.iter().any(|a| a.contains("composer session"))
+    }));
 }
 
 #[test]
@@ -1510,5 +1676,26 @@ fn health_batch_returns_all_sessions() {
     assert_eq!(batch.len(), 3);
     assert!(batch.contains_key("s1"));
     assert!(batch.contains_key("s2"));
-    assert_eq!(batch["nonexistent"], "green");
+    assert_eq!(batch["nonexistent"], "gray");
+}
+
+#[test]
+fn health_batch_matches_detail_thresholds() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let mut msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 4000, 0, 5.0))
+        .collect();
+    for i in 5..8 {
+        msgs.push(health_msg(&format!("m{i}"), "s1", i, 16000, 0, 5.0));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let detail = session_health(&conn, Some("s1")).unwrap();
+    let batch = session_health_batch(&conn, &["s1"]).unwrap();
+    assert_eq!(batch["s1"], detail.state);
 }

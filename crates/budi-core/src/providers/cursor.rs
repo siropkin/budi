@@ -499,8 +499,7 @@ fn find_matching_session(ts_ms: i64, sessions: &[SessionContext]) -> Option<&Ses
             sessions
                 .iter()
                 .filter(|s| {
-                    ts_ms >= (s.start_ms - CLOCK_SKEW_MS)
-                        && ts_ms <= (s.end_ms + CLOCK_SKEW_MS)
+                    ts_ms >= (s.start_ms - CLOCK_SKEW_MS) && ts_ms <= (s.end_ms + CLOCK_SKEW_MS)
                 })
                 .min_by_key(|s| {
                     let d_start = (ts_ms - s.start_ms).abs();
@@ -685,7 +684,9 @@ fn sync_from_usage_api(
     if !sessions.is_empty() {
         let orphaned = backfill_cursor_session_ids(conn, &sessions);
         if orphaned > 0 {
-            tracing::info!("Cursor session backfill: assigned session_id to {orphaned} orphaned messages");
+            tracing::info!(
+                "Cursor session backfill: assigned session_id to {orphaned} orphaned messages"
+            );
         }
     }
 
@@ -1532,7 +1533,7 @@ mod tests {
         let session_ranges = vec![SessionContext {
             start_ms: 1774455900000,
             end_ms: 1774455920000,
-                session_id: "session-abc".to_string(),
+            session_id: "session-abc".to_string(),
             workspace_root: Some("/projects/webapp".to_string()),
             repo_id: Some("github.com/acme/webapp".to_string()),
             git_branch: Some("feature/PROJ-42-fix".to_string()),

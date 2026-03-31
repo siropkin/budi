@@ -86,8 +86,8 @@ pub fn read_json_or_default(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let val = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| serde_json::json!({}));
     if val.is_object() {
         Ok(val)
@@ -104,8 +104,7 @@ pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
     }
     let out = serde_json::to_string_pretty(value)?;
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    fs::write(&tmp, &out)
-        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    fs::write(&tmp, &out).with_context(|| format!("Failed to write {}", tmp.display()))?;
     fs::rename(&tmp, path)
         .with_context(|| format!("Failed to rename {} → {}", tmp.display(), path.display()))?;
     Ok(())

@@ -232,12 +232,12 @@ Budi monitors four vitals for every active session and provides provider-aware t
 
 | Vital | What it detects | Yellow | Red |
 |-------|----------------|--------|-----|
-| **Context Drag** | Input tokens growing vs session start | 3x+ growth | 6x+ growth |
-| **Cache Efficiency** | Prompt cache hit rate dropping | Below 85% | Below 70% |
-| **Cost Acceleration** | Per-message cost rising (dominant model) | 2.5x+ ratio | 5x+ ratio |
-| **Agent Thrashing** | Rapid-fire tool calls (loops) | 2+ rapid sequences | 5+ rapid sequences |
+| **Context Growth** | Prompt size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute prompt size |
+| **Cache Reuse** | Recent cache reuse is low for the active model stretch | Below 60% recent reuse | Below 35% recent reuse |
+| **Cost Per Turn** | Later turns cost much more than earlier ones | 2x+ growth and meaningful cents/turn | 4x+ growth and high cents/turn |
+| **Retry Loops** | Agent is repeating the same failing move | One suspicious retry loop | Repeated or severe retry loops |
 
-Health state shows in the status line and on the session detail page in the dashboard. When issues are detected, tips suggest concrete actions — `/compact` for Claude Code, new composer session for Cursor.
+Health state shows in the status line and on the session detail page in the dashboard. When issues are detected, tips stay plain-language and suggest concrete next actions — `/compact` or `/clear` for Claude Code, or a fresh composer session for Cursor when focus has drifted.
 
 ## Privacy
 

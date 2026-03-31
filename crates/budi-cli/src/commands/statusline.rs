@@ -122,7 +122,10 @@ fn render_coach(
     };
 
     if state == "gray" {
-        let tip = data.get("health_tip").and_then(|v| v.as_str()).unwrap_or("session starting");
+        let tip = data
+            .get("health_tip")
+            .and_then(|v| v.as_str())
+            .unwrap_or("session starting");
         let sep = format!(" {dim}·{reset} ");
         return Some(format!("{icon} {budi_label}{sep}{}", tip.to_lowercase()));
     }
@@ -130,12 +133,12 @@ fn render_coach(
     let session_cost = data.get("session_cost").and_then(|v| v.as_f64())?;
     let cost_str = format!("{} session", fmt_cost(session_cost));
 
-    let mut parts: Vec<String> = vec![
-        format!("{icon} {budi_label}"),
-        cost_str,
-    ];
+    let mut parts: Vec<String> = vec![format!("{icon} {budi_label}"), cost_str];
 
-    let tip = data.get("health_tip").and_then(|v| v.as_str()).unwrap_or("");
+    let tip = data
+        .get("health_tip")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if !tip.is_empty() {
         parts.push(tip.to_lowercase());
     }
@@ -194,8 +197,8 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 
     // Build query params for the daemon
     let mut query_params: Vec<(&str, String)> = Vec::new();
-    let needs_session = needed.contains(&"session".to_string())
-        || needed.contains(&"health".to_string());
+    let needs_session =
+        needed.contains(&"session".to_string()) || needed.contains(&"health".to_string());
     if let Some(ref sid) = session_id
         && needs_session
     {
@@ -267,9 +270,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
             if let Some(ref template) = sl_config.format {
                 println!("{}", render_template(template, &values));
             } else if has_health {
-                if let Some(line) =
-                    render_coach(&statusline_data, &extra, false, "budi")
-                {
+                if let Some(line) = render_coach(&statusline_data, &extra, false, "budi") {
                     println!("{line}");
                 }
             } else {
@@ -278,9 +279,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         }
         StatuslineFormat::Starship => {
             if has_health {
-                if let Some(line) =
-                    render_coach(&statusline_data, &extra, false, "budi")
-                {
+                if let Some(line) = render_coach(&statusline_data, &extra, false, "budi") {
                     println!("{line}");
                 }
             } else {
@@ -297,9 +296,7 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
             let yellow = "\x1b[33m";
 
             if has_health {
-                if let Some(coach_line) =
-                    render_coach(&statusline_data, &extra, true, &budi_link)
-                {
+                if let Some(coach_line) = render_coach(&statusline_data, &extra, true, &budi_link) {
                     println!("{coach_line}");
                 }
             } else {

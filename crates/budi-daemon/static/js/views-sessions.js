@@ -166,10 +166,10 @@ function renderHealthPanel(health) {
   if (!health) return '';
 
   const vitalNames = {
-    context_drag: 'Context Drag',
-    cache_efficiency: 'Cache Efficiency',
-    thrashing: 'Agent Thrashing',
-    cost_acceleration: 'Cost Acceleration',
+    context_drag: 'Context Growth',
+    cache_efficiency: 'Cache Reuse',
+    thrashing: 'Retry Loops',
+    cost_acceleration: 'Cost Per Turn',
   };
 
   const vitals = health.vitals || {};
@@ -191,8 +191,14 @@ function renderHealthPanel(health) {
   const tips = (health.details || []).map(d => {
     const name = vitalNames[d.vital] || d.vital;
     const tipIcon = healthIcon(d.state);
+    const actions = (d.actions || []).length
+      ? `<ul class="health-tip-actions">${d.actions.map(action => `<li>${esc(action)}</li>`).join('')}</ul>`
+      : '';
     return `<div class="health-tip-card">
-      <div class="health-tip-body">${tipIcon} <strong>${esc(name)}:</strong> ${esc(d.tip)}</div>
+      <div class="health-tip-body">
+        ${tipIcon} <strong>${esc(name)}:</strong> ${esc(d.tip)}
+        ${actions}
+      </div>
     </div>`;
   }).join('');
 

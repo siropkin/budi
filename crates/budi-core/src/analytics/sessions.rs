@@ -43,8 +43,7 @@ pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
         [],
         |r| r.get(0),
     )?;
-    let sessions_total: u64 =
-        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+    let sessions_total: u64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
     let sessions_orphaned: u64 = conn.query_row(
         "SELECT COUNT(*) FROM sessions s
          WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.session_id)",
@@ -142,7 +141,10 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     if let Some(q) = p.search
         && !q.is_empty()
     {
-        let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = q
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         param_values.push(format!("%{escaped}%"));
         let idx = param_values.len();
         conditions.push(format!(

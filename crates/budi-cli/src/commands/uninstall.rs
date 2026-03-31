@@ -26,12 +26,20 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     if home.is_empty() {
-        eprintln!("{yellow}warning: could not determine home directory — skipping hook/config cleanup{reset}");
+        eprintln!(
+            "{yellow}warning: could not determine home directory — skipping hook/config cleanup{reset}"
+        );
     } else {
         // 2-6. Remove Claude Code integrations (single file pass)
         match remove_all_from_claude_code(&home) {
             Ok((hooks, otel, mcp, statusline)) => {
-                let label = |removed| if removed { format!("{green}✓{reset} removed") } else { "none found".to_string() };
+                let label = |removed| {
+                    if removed {
+                        format!("{green}✓{reset} removed")
+                    } else {
+                        "none found".to_string()
+                    }
+                };
                 println!("Removing Claude Code hooks... {}", label(hooks));
                 println!("Removing OTEL env vars... {}", label(otel));
                 println!("Removing MCP server... {}", label(mcp));
@@ -274,7 +282,6 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
     Ok(changed)
 }
 
-
 fn remove_data() -> Result<bool> {
     let data_dir = budi_core::config::budi_home_dir()?;
     if !data_dir.exists() {
@@ -317,7 +324,6 @@ fn remove_launch_agents() -> Result<bool> {
     }
     Ok(removed_any)
 }
-
 
 fn print_binary_removal_hint() {
     println!("To remove the binaries:");

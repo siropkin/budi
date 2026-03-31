@@ -11,6 +11,16 @@ pub fn cmd_health(session_id: Option<String>) -> Result<()> {
 }
 
 fn render_health(h: &SessionHealth) {
+    let detail_name = |name: &str| -> String {
+        match name {
+            "context_drag" => "Context Growth".to_string(),
+            "cache_efficiency" => "Cache Reuse".to_string(),
+            "thrashing" => "Retry Loops".to_string(),
+            "cost_acceleration" => "Cost Per Turn".to_string(),
+            _ => name.to_string(),
+        }
+    };
+
     let bold = super::ansi("\x1b[1m");
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
@@ -49,10 +59,10 @@ fn render_health(h: &SessionHealth) {
 
     // Vitals table
     let vitals: Vec<(&str, &Option<budi_core::analytics::VitalScore>)> = vec![
-        ("Context Drag", &h.vitals.context_drag),
-        ("Cache Efficiency", &h.vitals.cache_efficiency),
-        ("Agent Thrashing", &h.vitals.thrashing),
-        ("Cost Acceleration", &h.vitals.cost_acceleration),
+        ("Context Growth", &h.vitals.context_drag),
+        ("Cache Reuse", &h.vitals.cache_efficiency),
+        ("Retry Loops", &h.vitals.thrashing),
+        ("Cost Per Turn", &h.vitals.cost_acceleration),
     ];
 
     for (name, vital) in &vitals {
@@ -73,9 +83,14 @@ fn render_health(h: &SessionHealth) {
         for d in &h.details {
             let di = state_icon(&d.state);
             let dc = state_color(&d.state);
-            println!("{di} {dc}{bold}{} ({}):{reset}", d.vital.replace('_', " "), d.label);
-            for line in d.tip.lines() {
-                println!("  {line}");
+            println!(
+                "{di} {dc}{bold}{} ({}):{reset}",
+                detail_name(&d.vital),
+                d.label
+            );
+            println!("  {}", d.tip);
+            for action in &d.actions {
+                println!("  - {action}");
             }
             println!();
         }

@@ -248,9 +248,7 @@ fn daemon_process_command(pid: u32) -> Option<String> {
             .args([
                 "-NoProfile",
                 "-Command",
-                &format!(
-                    "(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
-                ),
+                &format!("(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"),
             ])
             .output()
             .ok()?
@@ -293,8 +291,7 @@ fn kill_process(pid: u32, signal: &str) -> Result<bool> {
             Ok(status) => status,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Failed to kill pid {pid} via taskkill"));
+                return Err(err).with_context(|| format!("Failed to kill pid {pid} via taskkill"));
             }
         };
         return Ok(status.success());

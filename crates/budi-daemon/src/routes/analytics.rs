@@ -663,8 +663,8 @@ pub async fn analytics_migrate(
     Ok(Json(result))
 }
 
-pub async fn analytics_session_audit(
-) -> Result<Json<analytics::SessionAudit>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn analytics_session_audit()
+-> Result<Json<analytics::SessionAudit>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;

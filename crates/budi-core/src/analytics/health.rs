@@ -1,15 +1,17 @@
 //! Session health: vitals computation, tips, and batch health checks.
 //!
 //! Four vitals are computed per session:
-//! - **context_drag** — input token growth over the session
-//! - **cache_efficiency** — cache hit rate
-//! - **thrashing** — rapid-fire tool sequences from hook_events
-//! - **cost_acceleration** — dominant-model cost ratio (2nd half vs 1st half)
+//! - **context_drag** — prompt size growth over the current working stretch
+//! - **cache_efficiency** — recent cache reuse for the active model stretch
+//! - **thrashing** — repeated failing tool loops inside a turn
+//! - **cost_acceleration** — cost-per-turn growth over the current stretch
+
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
-use super::MessageRow;
 use super::sessions::session_messages;
 
 // ---------------------------------------------------------------------------
@@ -46,7 +48,43 @@ pub struct HealthDetail {
     pub state: String,
     pub label: String,
     pub tip: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
 }
+
+#[derive(Debug, Clone)]
+struct HealthMessage {
+    timestamp: String,
+    model: Option<String>,
+    input_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    cost_cents: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SessionToolEvent {
+    event: String,
+    timestamp: String,
+    tool_name: Option<String>,
+}
+
+const CONTEXT_DRAG_YELLOW_RATIO: f64 = 3.0;
+const CONTEXT_DRAG_RED_RATIO: f64 = 6.0;
+const CONTEXT_DRAG_YELLOW_MIN_INPUT: f64 = 12_000.0;
+const CONTEXT_DRAG_RED_MIN_INPUT: f64 = 24_000.0;
+const CONTEXT_DRAG_YELLOW_MIN_DELTA: f64 = 6_000.0;
+const CONTEXT_DRAG_RED_MIN_DELTA: f64 = 12_000.0;
+
+const CACHE_REUSE_YELLOW: f64 = 0.60;
+const CACHE_REUSE_RED: f64 = 0.35;
+const CACHE_REUSE_WINDOW: usize = 6;
+
+const COST_ACCEL_YELLOW_RATIO: f64 = 2.0;
+const COST_ACCEL_RED_RATIO: f64 = 4.0;
+const COST_ACCEL_MIN_SESSION_CENTS: f64 = 25.0;
+const COST_ACCEL_YELLOW_MIN_TURN_CENTS: f64 = 5.0;
+const COST_ACCEL_RED_MIN_TURN_CENTS: f64 = 12.0;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -77,11 +115,25 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     let messages = session_messages(conn, &sid)?;
     let msg_count = messages.len() as u64;
     let total_cost: f64 = messages.iter().map(|m| m.cost_cents).sum();
+    let metrics = messages
+        .iter()
+        .map(|m| HealthMessage {
+            timestamp: m.timestamp.clone(),
+            model: m.model.clone(),
+            input_tokens: m.input_tokens,
+            cache_creation_tokens: m.cache_creation_tokens,
+            cache_read_tokens: m.cache_read_tokens,
+            cost_cents: m.cost_cents,
+        })
+        .collect::<Vec<_>>();
+    let mut tool_event_map = load_tool_events(conn, &[sid.as_str()])?;
+    let tool_events = tool_event_map.remove(&sid).unwrap_or_default();
+    let last_compact_ts = last_compact_timestamp(&tool_events);
 
-    let context_drag = calc_context_drag(conn, &sid, &messages);
-    let cache_eff = calc_cache_efficiency(&messages);
-    let thrashing = calc_thrashing(conn, &sid);
-    let cost_accel = calc_cost_acceleration(&messages, total_cost);
+    let context_drag = calc_context_drag(&metrics, last_compact_ts.as_deref());
+    let cache_eff = calc_cache_efficiency(&metrics, last_compact_ts.as_deref());
+    let thrashing = calc_thrashing(&tool_events);
+    let cost_accel = calc_cost_acceleration(&metrics, last_compact_ts.as_deref());
 
     let vitals = SessionVitals {
         context_drag: context_drag.clone(),
@@ -119,10 +171,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
 
 /// Batch compute health states for a list of sessions (for the sessions list view).
 /// Returns session_id → overall health state.
-/// Lightweight batch health check for the sessions list view.
-/// Computes only context_drag and cost_acceleration (not cache_efficiency or thrashing)
-/// to keep the list query fast. The full `session_health()` computes all four vitals,
-/// so list and detail views may show different health states.
+/// Uses the same thresholds as the full session detail view.
 pub fn session_health_batch(
     conn: &Connection,
     session_ids: &[&str],
@@ -138,7 +187,7 @@ pub fn session_health_batch(
     let sql = format!(
         "SELECT session_id, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0), model
+                COALESCE(cost_cents, 0.0), model, timestamp
          FROM messages
          WHERE session_id IN ({in_clause}) AND role = 'assistant'
          ORDER BY session_id, timestamp ASC"
@@ -150,142 +199,54 @@ pub fn session_health_batch(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    struct MiniMsg {
-        session_id: String,
-        model: Option<String>,
-        input_tokens: u64,
-        cache_read_tokens: u64,
-        cache_creation_tokens: u64,
-        cost_cents: f64,
-    }
-
-    let rows: Vec<MiniMsg> = stmt
+    let rows: Vec<(String, HealthMessage)> = stmt
         .query_map(params.as_slice(), |row| {
-            Ok(MiniMsg {
-                session_id: row.get(0)?,
-                model: row.get(6)?,
-                input_tokens: row.get(1)?,
-                cache_read_tokens: row.get(4)?,
-                cache_creation_tokens: row.get(3)?,
-                cost_cents: row.get(5)?,
-            })
+            Ok((
+                row.get(0)?,
+                HealthMessage {
+                    timestamp: row.get(7)?,
+                    model: row.get(6)?,
+                    input_tokens: row.get(1)?,
+                    cache_creation_tokens: row.get(3)?,
+                    cache_read_tokens: row.get(4)?,
+                    cost_cents: row.get(5)?,
+                },
+            ))
         })?
         .filter_map(|r| r.ok())
         .collect();
 
-    let mut grouped: std::collections::HashMap<String, Vec<&MiniMsg>> =
+    let mut grouped: std::collections::HashMap<String, Vec<HealthMessage>> =
         std::collections::HashMap::new();
-    for msg in &rows {
-        grouped
-            .entry(msg.session_id.clone())
-            .or_default()
-            .push(msg);
+    for (sid, msg) in rows {
+        grouped.entry(sid).or_default().push(msg);
     }
 
-    for (sid, msgs) in &grouped {
-        let total_cost: f64 = msgs.iter().map(|m| m.cost_cents).sum();
-        let n = msgs.len();
+    let event_map = load_tool_events(conn, session_ids)?;
 
-        // Context drag — filter to dominant model to avoid cross-model false positives
-        let cd = {
-            let mut model_count: std::collections::HashMap<&str, usize> =
-                std::collections::HashMap::new();
-            for m in msgs.iter() {
-                if let Some(ref model) = m.model {
-                    *model_count.entry(model.as_str()).or_default() += 1;
-                }
-            }
-            let dominant = model_count
-                .iter()
-                .max_by_key(|(_, c)| **c)
-                .map(|(m, _)| *m);
-            let model_msgs: Vec<&&MiniMsg> = if let Some(dom) = dominant {
-                msgs.iter().filter(|m| m.model.as_deref() == Some(dom)).collect()
-            } else {
-                msgs.iter().collect()
-            };
-            let mn = model_msgs.len();
-            if mn >= 5 {
-                let window = 3.min(mn);
-                let first_avg = model_msgs[..window]
-                    .iter()
-                    .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
-                    .sum::<f64>()
-                    / window as f64;
-                let last_avg = model_msgs[mn - window..]
-                    .iter()
-                    .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
-                    .sum::<f64>()
-                    / window as f64;
-                if first_avg > 0.0 {
-                    let ratio = last_avg / first_avg;
-                    Some(vital_state_from_ratio(ratio, 3.0, 8.0))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        // Cost acceleration — filter to dominant model (by cost) like calc_cost_acceleration does
-        let ca = if n >= 8 && total_cost >= 10.0 {
-            let mut model_cost: std::collections::HashMap<&str, f64> =
-                std::collections::HashMap::new();
-            for m in msgs.iter() {
-                if let Some(ref model) = m.model {
-                    *model_cost.entry(model.as_str()).or_default() += m.cost_cents;
-                }
-            }
-            let dominant = model_cost
-                .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(m, _)| *m);
-            let main_msgs: Vec<&&MiniMsg> = if let Some(dom) = dominant {
-                msgs.iter().filter(|m| m.model.as_deref() == Some(dom)).collect()
-            } else {
-                msgs.iter().collect()
-            };
-            let mn = main_msgs.len();
-            if mn >= 6 {
-                let half = mn / 2;
-                let first_avg =
-                    main_msgs[..half].iter().map(|m| m.cost_cents).sum::<f64>() / half as f64;
-                let second_avg = main_msgs[half..].iter().map(|m| m.cost_cents).sum::<f64>()
-                    / (mn - half) as f64;
-                if first_avg > 0.0 {
-                    let ratio = second_avg / first_avg;
-                    Some(vital_state_from_ratio(ratio, 2.0, 4.0))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let all: Vec<Option<&str>> = vec![cd.as_deref(), ca.as_deref()];
-        let state = all
-            .iter()
-            .filter_map(|s| *s)
-            .max_by_key(|s| match *s {
-                "red" => 2,
-                "yellow" => 1,
-                _ => 0,
-            })
-            .unwrap_or("green")
-            .to_string();
-
-        result.insert(sid.clone(), state);
-    }
-
-    // Sessions with no messages default to "green"
     for sid in session_ids {
-        result
-            .entry(sid.to_string())
-            .or_insert_with(|| "green".to_string());
+        let msgs = grouped.get(*sid).cloned().unwrap_or_default();
+        let events = event_map.get(*sid).cloned().unwrap_or_default();
+        let last_compact_ts = last_compact_timestamp(&events);
+
+        let context_drag = calc_context_drag(&msgs, last_compact_ts.as_deref());
+        let cache_efficiency = calc_cache_efficiency(&msgs, last_compact_ts.as_deref());
+        let thrashing = calc_thrashing(&events);
+        let cost_acceleration = calc_cost_acceleration(&msgs, last_compact_ts.as_deref());
+        let all_vitals: Vec<(&str, &Option<VitalScore>)> = vec![
+            ("thrashing", &thrashing),
+            ("cache_efficiency", &cache_efficiency),
+            ("context_drag", &context_drag),
+            ("cost_acceleration", &cost_acceleration),
+        ];
+
+        let state = if all_vitals.iter().any(|(_, v)| v.is_some()) {
+            worst_state(&all_vitals)
+        } else {
+            "gray".to_string()
+        };
+
+        result.insert((*sid).to_string(), state);
     }
 
     Ok(result)
@@ -295,182 +256,115 @@ pub fn session_health_batch(
 // Vital calculations
 // ---------------------------------------------------------------------------
 
-fn vital_state_from_ratio(ratio: f64, yellow_threshold: f64, red_threshold: f64) -> String {
-    if ratio >= red_threshold {
-        "red".to_string()
-    } else if ratio >= yellow_threshold {
-        "yellow".to_string()
-    } else {
-        "green".to_string()
-    }
-}
-
 fn calc_context_drag(
-    conn: &Connection,
-    session_id: &str,
-    messages: &[MessageRow],
+    messages: &[HealthMessage],
+    last_compact_ts: Option<&str>,
 ) -> Option<VitalScore> {
-    // If a compact happened, only consider messages after the last compact.
-    let last_compact_ts: Option<String> = conn
-        .query_row(
-            "SELECT MAX(timestamp) FROM hook_events
-             WHERE session_id = ?1 AND event = 'pre_compact'",
-            params![session_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    let effective: &[MessageRow] = if let Some(ref ts) = last_compact_ts {
-        let start = messages.iter().position(|m| m.timestamp.as_str() > ts.as_str());
-        match start {
-            Some(idx) => &messages[idx..],
-            None => messages,
-        }
-    } else {
-        messages
-    };
-
-    // Use the dominant model (most messages) to avoid false positives from
-    // cross-model comparisons. Subagent models have independent context windows
-    // and their token counts are not comparable to the main model's.
-    let mut model_count: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for m in effective {
-        if let Some(ref model) = m.model {
-            *model_count.entry(model.as_str()).or_default() += 1;
-        }
-    }
-    let dominant = model_count
-        .iter()
-        .max_by_key(|(_, count)| **count)
-        .map(|(model, _)| *model);
-
-    let model_msgs: Vec<&MessageRow> = if let Some(dom) = dominant {
-        effective
-            .iter()
-            .filter(|m| m.model.as_deref() == Some(dom))
-            .collect()
-    } else {
-        effective.iter().collect()
-    };
-
-    if model_msgs.len() < 5 {
+    let effective = dominant_model_messages(&filter_after_last_compact(messages, last_compact_ts));
+    if effective.len() < 5 {
         return None;
     }
-    let window = 3.min(model_msgs.len());
-    let total_input =
-        |m: &&MessageRow| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64;
 
-    let first_avg = model_msgs[..window]
-        .iter()
-        .map(total_input)
-        .sum::<f64>()
-        / window as f64;
-    let last_avg = model_msgs[model_msgs.len() - window..]
-        .iter()
-        .map(total_input)
-        .sum::<f64>()
-        / window as f64;
-
+    let window = 3.min(effective.len());
+    let first_avg = average_prompt_size(&effective[..window]);
+    let last_avg = average_prompt_size(&effective[effective.len() - window..]);
     if first_avg <= 0.0 {
         return None;
     }
+
     let ratio = last_avg / first_avg;
-    let state = if ratio >= 6.0 {
+    let delta = last_avg - first_avg;
+    let state = if ratio >= CONTEXT_DRAG_RED_RATIO
+        && (last_avg >= CONTEXT_DRAG_RED_MIN_INPUT || delta >= CONTEXT_DRAG_RED_MIN_DELTA)
+    {
         "red"
-    } else if ratio >= 3.0 {
+    } else if ratio >= CONTEXT_DRAG_YELLOW_RATIO
+        && (last_avg >= CONTEXT_DRAG_YELLOW_MIN_INPUT || delta >= CONTEXT_DRAG_YELLOW_MIN_DELTA)
+    {
         "yellow"
     } else {
         "green"
     };
+
     Some(VitalScore {
         state: state.to_string(),
-        label: format!("{ratio:.1}x growth"),
+        label: format!("{ratio:.1}x growth, {}", format_token_count(last_avg)),
     })
 }
 
-fn calc_cache_efficiency(messages: &[MessageRow]) -> Option<VitalScore> {
-    if messages.len() < 5 {
+fn calc_cache_efficiency(
+    messages: &[HealthMessage],
+    last_compact_ts: Option<&str>,
+) -> Option<VitalScore> {
+    let effective = filter_after_last_compact(messages, last_compact_ts);
+    let recent = recent_model_run(&effective);
+    if recent.len() < 4 {
         return None;
     }
-    let total_cache_read: u64 = messages.iter().map(|m| m.cache_read_tokens).sum();
-    let total_input: u64 = messages
+
+    let window_start = recent.len().saturating_sub(CACHE_REUSE_WINDOW);
+    let window = &recent[window_start..];
+    let total_cache_read: u64 = window.iter().map(|m| m.cache_read_tokens).sum();
+    let total_input: u64 = window
         .iter()
         .map(|m| m.input_tokens + m.cache_read_tokens)
         .sum();
     if total_input == 0 {
         return None;
     }
+
     let hit_rate = total_cache_read as f64 / total_input as f64;
     let pct = (hit_rate * 100.0).round() as u64;
-    let state = if hit_rate < 0.70 {
+    let state = if hit_rate < CACHE_REUSE_RED {
         "red"
-    } else if hit_rate < 0.85 {
+    } else if hit_rate < CACHE_REUSE_YELLOW {
         "yellow"
     } else {
         "green"
     };
+
     Some(VitalScore {
         state: state.to_string(),
-        label: format!("{pct}% cache"),
+        label: format!("{pct}% recent reuse"),
     })
 }
 
-fn calc_thrashing(conn: &Connection, session_id: &str) -> Option<VitalScore> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT event, timestamp FROM hook_events
-         WHERE session_id = ?1 AND event IN ('post_tool_use', 'user_prompt_submit')
-         ORDER BY timestamp ASC",
-        )
-        .ok()?;
-
-    let events: Vec<(String, String)> = stmt
-        .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    if events.is_empty() {
+fn calc_thrashing(events: &[SessionToolEvent]) -> Option<VitalScore> {
+    let has_tool_events = events
+        .iter()
+        .any(|e| matches!(e.event.as_str(), "post_tool_use" | "post_tool_use_failure"));
+    if !has_tool_events {
         return None;
     }
 
-    // Detect rapid-fire sequences: 12+ tool events within 60s without user prompt.
-    // Normal agent turns do 5-10 tool calls (read, edit, grep); thrashing is 12+
-    // rapid calls where the agent is retrying the same failing operation.
-    let mut rapid_sequences = 0;
-    let mut streak_timestamps: Vec<&str> = Vec::new();
-
-    let check_streak = |ts: &[&str], count: &mut usize| {
-        if ts.len() < 12 {
-            return;
-        }
-        let first = ts
-            .first()
-            .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok());
-        let last = ts
-            .last()
-            .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok());
-        if let (Some(f), Some(l)) = (first, last) {
-            if (l - f).num_seconds() <= 60 {
-                *count += 1;
+    let mut turns: Vec<Vec<&SessionToolEvent>> = Vec::new();
+    let mut current: Vec<&SessionToolEvent> = Vec::new();
+    for event in events {
+        if event.event == "user_prompt_submit" {
+            if !current.is_empty() {
+                turns.push(std::mem::take(&mut current));
             }
-        }
-    };
-
-    for (event, ts) in &events {
-        if event == "user_prompt_submit" {
-            check_streak(&streak_timestamps, &mut rapid_sequences);
-            streak_timestamps.clear();
             continue;
         }
-        streak_timestamps.push(ts.as_str());
+        if matches!(
+            event.event.as_str(),
+            "post_tool_use" | "post_tool_use_failure"
+        ) {
+            current.push(event);
+        }
     }
-    check_streak(&streak_timestamps, &mut rapid_sequences);
+    if !current.is_empty() {
+        turns.push(current);
+    }
 
-    let state = if rapid_sequences >= 5 {
+    let score: u32 = turns.iter().map(|turn| score_turn_loop(turn)).sum();
+    let loop_count = turns
+        .iter()
+        .filter(|turn| score_turn_loop(turn) > 0)
+        .count();
+    let state = if score >= 2 {
         "red"
-    } else if rapid_sequences >= 2 {
+    } else if score >= 1 {
         "yellow"
     } else {
         "green"
@@ -478,68 +372,47 @@ fn calc_thrashing(conn: &Connection, session_id: &str) -> Option<VitalScore> {
 
     Some(VitalScore {
         state: state.to_string(),
-        label: if rapid_sequences == 0 {
-            "no rapid-fire".to_string()
+        label: if loop_count == 0 {
+            "no retry loops".to_string()
         } else {
-            format!("{rapid_sequences} rapid sequence(s)")
+            format!(
+                "{loop_count} retry loop{}",
+                if loop_count == 1 { "" } else { "s" }
+            )
         },
     })
 }
 
-fn calc_cost_acceleration(messages: &[MessageRow], total_cost: f64) -> Option<VitalScore> {
-    if messages.len() < 8 || total_cost < 10.0 {
+fn calc_cost_acceleration(
+    messages: &[HealthMessage],
+    last_compact_ts: Option<&str>,
+) -> Option<VitalScore> {
+    let effective = dominant_model_messages(&filter_after_last_compact(messages, last_compact_ts));
+    let total_cost: f64 = effective.iter().map(|m| m.cost_cents).sum();
+    if effective.len() < 6 || total_cost < COST_ACCEL_MIN_SESSION_CENTS {
         return None;
     }
 
-    // Find the dominant model (most cost) to filter out subagent noise.
-    let mut model_cost: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
-    for m in messages {
-        if let Some(ref model) = m.model {
-            *model_cost.entry(model.as_str()).or_default() += m.cost_cents;
-        }
-    }
-    let dominant = model_cost
-        .iter()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(k, _)| *k);
-
-    // Use only dominant-model messages for the acceleration check
-    let main_msgs: Vec<&MessageRow> = if let Some(dom) = dominant {
-        messages
-            .iter()
-            .filter(|m| m.model.as_deref() == Some(dom))
-            .collect()
-    } else {
-        messages.iter().collect()
-    };
-
-    if main_msgs.len() < 6 {
-        return None;
-    }
-
-    let half = main_msgs.len() / 2;
-    let first_avg = main_msgs[..half].iter().map(|m| m.cost_cents).sum::<f64>() / half as f64;
-    let second_avg = main_msgs[half..]
-        .iter()
-        .map(|m| m.cost_cents)
-        .sum::<f64>()
-        / (main_msgs.len() - half) as f64;
-
+    let half = effective.len() / 2;
+    let first_avg = effective[..half].iter().map(|m| m.cost_cents).sum::<f64>() / half as f64;
+    let second_avg = effective[half..].iter().map(|m| m.cost_cents).sum::<f64>()
+        / (effective.len() - half) as f64;
     if first_avg <= 0.0 {
         return None;
     }
+
     let ratio = second_avg / first_avg;
-    let state = if ratio >= 5.0 {
+    let state = if ratio >= COST_ACCEL_RED_RATIO && second_avg >= COST_ACCEL_RED_MIN_TURN_CENTS {
         "red"
-    } else if ratio >= 2.5 {
+    } else if ratio >= COST_ACCEL_YELLOW_RATIO && second_avg >= COST_ACCEL_YELLOW_MIN_TURN_CENTS {
         "yellow"
     } else {
         "green"
     };
-    let avg_cost = total_cost / messages.len() as f64;
+
     Some(VitalScore {
         state: state.to_string(),
-        label: format!("{ratio:.1}x cost, {avg_cost:.0}¢/msg"),
+        label: format!("{ratio:.1}x growth, {:.0}¢/turn", second_avg),
     })
 }
 
@@ -561,16 +434,13 @@ fn worst_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
         .to_string()
 }
 
-fn generate_details(
-    vitals: &[(&str, &Option<VitalScore>)],
-    is_cursor: bool,
-) -> Vec<HealthDetail> {
+fn generate_details(vitals: &[(&str, &Option<VitalScore>)], is_cursor: bool) -> Vec<HealthDetail> {
     let mut details: Vec<HealthDetail> = Vec::new();
 
     let new_session = if is_cursor {
-        "start a new composer session"
+        "Start a new composer session."
     } else {
-        "start a new session"
+        "Start a new session."
     };
 
     for (name, vital) in vitals {
@@ -578,43 +448,77 @@ fn generate_details(
             if v.state == "green" {
                 continue;
             }
-            let tip: String = match (*name, v.state.as_str()) {
+            let (tip, actions): (String, Vec<String>) = match (*name, v.state.as_str()) {
                 ("context_drag", "yellow") => {
+                    let mut actions = Vec::new();
                     if is_cursor {
-                        format!("Your context has grown significantly.\n→ Consider starting a new composer session if switching tasks.")
+                        actions.push("If the agent is losing focus or you changed tasks, start a new composer session.".to_string());
                     } else {
-                        format!("Your context has grown significantly.\n→ Run /compact to summarize and drop unused context.\n→ Or {new_session} if switching tasks.")
+                        actions.push("Run /compact if you want to keep working on the same task.".to_string());
+                        actions.push("If the task changed, start a new session instead.".to_string());
                     }
+                    ("Context is getting noisy.".to_string(), actions)
                 }
                 ("context_drag", "red") => {
-                    format!("Context is bloated — input tokens are 6x+ the session start.\n→ Start fresh. The context is too large for effective work.")
+                    let mut actions = vec![new_session.to_string()];
+                    if !is_cursor {
+                        actions.push("If you must keep the thread, run /compact first and keep only the current plan.".to_string());
+                    }
+                    ("Context is now large enough to hurt reliability.".to_string(), actions)
                 }
-                ("cache_efficiency", "yellow") => {
-                    format!("Cache hit rate is dropping below 85%.\n→ Check if tool definitions, MCP config, or system prompt changed.\n→ A model switch mid-session also resets the cache prefix.")
-                }
+                ("cache_efficiency", "yellow") => (
+                    "Cache reuse is lower than usual, so turns may get slower.".to_string(),
+                    vec![
+                        "This is normal after switching models, tools, or task shape.".to_string(),
+                        "If the session now feels sluggish, compact or start fresh.".to_string(),
+                    ],
+                ),
                 ("cache_efficiency", "red") => {
-                    if is_cursor {
-                        format!("Cache is mostly dead — less than 70% hit rate.\n→ Start a new composer session to rebuild the cache prefix.")
+                    let first_action = if is_cursor {
+                        "If this task still matters, start a new composer session to rebuild a clean prefix.".to_string()
                     } else {
-                        format!("Cache is mostly dead — less than 70% hit rate.\n→ Run /clear to reset context but preserve the cache-friendly prefix.\n→ Or {new_session}.")
-                    }
+                        "Run /clear or start a new session if the agent has become slow.".to_string()
+                    };
+                    (
+                        "Cache reuse is very low, so you are paying for more fresh context each turn.".to_string(),
+                        vec![
+                            first_action,
+                            "If you just changed models or tools, you can ignore this until the cache warms up again.".to_string(),
+                        ],
+                    )
                 }
-                ("thrashing", "yellow") => {
-                    format!("Agent is making rapid-fire tool calls — possible retry loop.\n→ Check test output or error messages the agent is reacting to.\n→ Intervene if the agent is stuck.")
-                }
-                ("thrashing", "red") => {
-                    format!("Agent is stuck in a loop — multiple rapid-fire tool sequences detected.\n→ Intervene now. The agent is likely retrying the same failing operation.")
-                }
-                ("cost_acceleration", "yellow") => {
-                    if is_cursor {
-                        format!("Cost per message is rising — the second half costs 2.5x+ the first.\n→ Context growth may be driving up token counts.\n→ Consider a new composer session.")
-                    } else {
-                        format!("Cost per message is rising — the second half costs 2.5x+ the first.\n→ Context growth may be driving up token counts.\n→ Consider /compact or a new session.")
-                    }
-                }
-                ("cost_acceleration", "red") => {
-                    format!("Cost per message has exploded — 5x+ increase.\n→ {new_session}. You're burning money on bloated context.")
-                }
+                ("thrashing", "yellow") => (
+                    "The agent may be repeating the same failing move.".to_string(),
+                    vec![
+                        "Check the latest error or test output before letting it continue.".to_string(),
+                        "Give a narrower next step if it keeps retrying.".to_string(),
+                    ],
+                ),
+                ("thrashing", "red") => (
+                    "The agent is stuck in a retry loop.".to_string(),
+                    vec![
+                        "Stop and inspect the most recent failure.".to_string(),
+                        "Restart with a more specific prompt after fixing the blocker.".to_string(),
+                    ],
+                ),
+                ("cost_acceleration", "yellow") => (
+                    "Each turn is getting more expensive than earlier in the session.".to_string(),
+                    vec![
+                        if is_cursor {
+                            "If focus is dropping, start a new composer session.".to_string()
+                        } else {
+                            "Run /compact if you still need the current thread.".to_string()
+                        },
+                        "If the task changed, start fresh instead of carrying the old context forward.".to_string(),
+                    ],
+                ),
+                ("cost_acceleration", "red") => (
+                    "Each turn now costs much more than the start of the session.".to_string(),
+                    vec![
+                        new_session.to_string(),
+                        "Carry over only the plan, file paths, or failing command you still need.".to_string(),
+                    ],
+                ),
                 _ => continue,
             };
 
@@ -623,15 +527,25 @@ fn generate_details(
                 state: v.state.clone(),
                 label: v.label.clone(),
                 tip,
+                actions,
             });
         }
     }
 
-    // Sort: red first, then yellow; within same state, keep priority order (thrashing > cache > context > cost)
+    // Sort: red first, then yellow; within same state, keep priority order.
     details.sort_by(|a, b| {
-        let state_ord =
-            |s: &str| -> u8 { if s == "red" { 0 } else { 1 } };
-        state_ord(&a.state).cmp(&state_ord(&b.state))
+        let state_ord = |s: &str| -> u8 { if s == "red" { 0 } else { 1 } };
+        let vital_ord = |v: &str| -> u8 {
+            match v {
+                "thrashing" => 0,
+                "cache_efficiency" => 1,
+                "context_drag" => 2,
+                _ => 3,
+            }
+        };
+        state_ord(&a.state)
+            .cmp(&state_ord(&b.state))
+            .then_with(|| vital_ord(&a.vital).cmp(&vital_ord(&b.vital)))
     });
 
     details
@@ -662,34 +576,27 @@ fn generate_tip(
         match (d.vital.as_str(), d.state.as_str()) {
             ("context_drag", "yellow") => {
                 if is_cursor {
-                    format!("Context growing — consider {new_session}")
+                    format!("Context growing - start {new_session} if focus drops")
                 } else {
-                    "Context growing — consider /compact".to_string()
+                    "Context growing - compact soon".to_string()
                 }
             }
-            ("context_drag", "red") => format!("Context bloated — start {new_session}"),
-            ("cache_efficiency", "yellow") => {
-                "Cache dropping — check tool/MCP config".to_string()
-            }
-            ("cache_efficiency", "red") => format!("Cache dead — start {new_session}"),
-            ("thrashing", "yellow") => "Agent retrying — check test output".to_string(),
-            ("thrashing", "red") => "Agent stuck in loop — intervene now".to_string(),
+            ("context_drag", "red") => format!("Context too noisy - start {new_session}"),
+            ("cache_efficiency", "yellow") => "Cache reuse low - slower turns possible".to_string(),
+            ("cache_efficiency", "red") => format!("Cache reuse very low - start {new_session}"),
+            ("thrashing", "yellow") => "Agent may be stuck - check latest error".to_string(),
+            ("thrashing", "red") => "Agent stuck retrying - intervene now".to_string(),
             ("cost_acceleration", "yellow") => {
-                let avg = if msg_count > 0 {
-                    total_cost / msg_count as f64
-                } else {
-                    0.0
-                };
-                format!("Cost rising — {avg:.0}¢/msg now")
+                format!(
+                    "Cost per turn rising - {:.0}¢ average",
+                    if msg_count > 0 {
+                        total_cost / msg_count as f64
+                    } else {
+                        0.0
+                    }
+                )
             }
-            ("cost_acceleration", "red") => {
-                let avg = if msg_count > 0 {
-                    total_cost / msg_count as f64 / 100.0
-                } else {
-                    0.0
-                };
-                format!("Burning ${avg:.2}/msg — {new_session} recommended")
-            }
+            ("cost_acceleration", "red") => format!("Cost per turn spiking - start {new_session}"),
             _ => format!("Session {overall_state}"),
         }
     } else {
@@ -698,8 +605,195 @@ fn generate_tip(
 
     let extra = details.len().saturating_sub(1);
     if extra > 0 {
-        format!("{base} (+{extra} issue{})", if extra == 1 { "" } else { "s" })
+        format!(
+            "{base} (+{extra} issue{})",
+            if extra == 1 { "" } else { "s" }
+        )
     } else {
         base
     }
+}
+
+fn filter_after_last_compact<'a>(
+    messages: &'a [HealthMessage],
+    last_compact_ts: Option<&str>,
+) -> Vec<&'a HealthMessage> {
+    match last_compact_ts {
+        Some(ts) => {
+            let start = messages.iter().position(|m| m.timestamp.as_str() > ts);
+            match start {
+                Some(idx) => messages[idx..].iter().collect(),
+                None => messages.iter().collect(),
+            }
+        }
+        None => messages.iter().collect(),
+    }
+}
+
+fn dominant_model_messages<'a>(messages: &[&'a HealthMessage]) -> Vec<&'a HealthMessage> {
+    let mut model_count: HashMap<&str, usize> = HashMap::new();
+    for m in messages {
+        if let Some(ref model) = m.model {
+            *model_count.entry(model.as_str()).or_default() += 1;
+        }
+    }
+    let dominant = model_count
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map(|(model, _)| *model);
+
+    if let Some(dom) = dominant {
+        messages
+            .iter()
+            .copied()
+            .filter(|m| m.model.as_deref() == Some(dom))
+            .collect()
+    } else {
+        messages.to_vec()
+    }
+}
+
+fn recent_model_run<'a>(messages: &[&'a HealthMessage]) -> Vec<&'a HealthMessage> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let last_model = messages.last().and_then(|m| m.model.as_deref());
+    let mut out: Vec<&HealthMessage> = Vec::new();
+    for message in messages.iter().rev() {
+        if out.is_empty() || message.model.as_deref() == last_model {
+            out.push(*message);
+        } else {
+            break;
+        }
+    }
+    out.reverse();
+    out
+}
+
+fn average_prompt_size(messages: &[&HealthMessage]) -> f64 {
+    messages
+        .iter()
+        .map(|m| (m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens) as f64)
+        .sum::<f64>()
+        / messages.len() as f64
+}
+
+fn format_token_count(tokens: f64) -> String {
+    if tokens >= 1_000_000.0 {
+        format!("{:.1}M input", tokens / 1_000_000.0)
+    } else if tokens >= 1_000.0 {
+        format!("{:.0}k input", tokens / 1_000.0)
+    } else {
+        format!("{tokens:.0} input")
+    }
+}
+
+fn last_compact_timestamp(events: &[SessionToolEvent]) -> Option<String> {
+    events
+        .iter()
+        .filter(|e| e.event == "pre_compact")
+        .map(|e| e.timestamp.clone())
+        .max()
+}
+
+fn score_turn_loop(turn: &[&SessionToolEvent]) -> u32 {
+    if turn.len() < 4 {
+        return 0;
+    }
+
+    let start = turn.first().and_then(|e| parse_timestamp(&e.timestamp));
+    let end = turn.last().and_then(|e| parse_timestamp(&e.timestamp));
+    let span_secs = match (start, end) {
+        (Some(start), Some(end)) => (end - start).num_seconds(),
+        _ => 0,
+    };
+
+    let mut unique_tools: HashSet<&str> = HashSet::new();
+    let mut failure_count = 0usize;
+    let mut failures_by_tool: HashMap<&str, usize> = HashMap::new();
+    let mut longest_same_tool_run = 0usize;
+    let mut current_tool = "";
+    let mut current_run = 0usize;
+
+    for event in turn {
+        let tool = event.tool_name.as_deref().unwrap_or("unknown");
+        unique_tools.insert(tool);
+
+        if tool == current_tool {
+            current_run += 1;
+        } else {
+            current_tool = tool;
+            current_run = 1;
+        }
+        longest_same_tool_run = longest_same_tool_run.max(current_run);
+
+        if event.event == "post_tool_use_failure" {
+            failure_count += 1;
+            *failures_by_tool.entry(tool).or_default() += 1;
+        }
+    }
+
+    let repeated_failure = failures_by_tool.values().copied().max().unwrap_or(0);
+    let failure_storm = failure_count >= 4 && failure_count * 2 >= turn.len() && span_secs <= 120;
+    let same_tool_burst = longest_same_tool_run >= 4 && span_secs <= 90;
+    let ping_pong = turn.len() >= 8 && unique_tools.len() <= 2 && span_secs <= 90;
+
+    if repeated_failure >= 5 || (same_tool_burst && failure_count >= 4) {
+        2
+    } else if repeated_failure >= 3
+        || failure_storm
+        || (same_tool_burst && failure_count >= 2)
+        || (ping_pong && failure_count >= 2)
+    {
+        1
+    } else {
+        0
+    }
+}
+
+fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+    ts.parse::<DateTime<Utc>>().ok()
+}
+
+fn load_tool_events(
+    conn: &Connection,
+    session_ids: &[&str],
+) -> Result<HashMap<String, Vec<SessionToolEvent>>> {
+    let mut grouped = HashMap::new();
+    if session_ids.is_empty() {
+        return Ok(grouped);
+    }
+
+    let placeholders: Vec<String> = (1..=session_ids.len()).map(|i| format!("?{i}")).collect();
+    let in_clause = placeholders.join(",");
+    let sql = format!(
+        "SELECT session_id, event, timestamp, tool_name
+         FROM hook_events
+         WHERE session_id IN ({in_clause})
+           AND event IN ('pre_compact', 'post_tool_use', 'post_tool_use_failure', 'user_prompt_submit')
+         ORDER BY session_id, timestamp ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::types::ToSql> = session_ids
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            SessionToolEvent {
+                event: row.get(1)?,
+                timestamp: row.get(2)?,
+                tool_name: row.get(3)?,
+            },
+        ))
+    })?;
+
+    for row in rows.filter_map(|r| r.ok()) {
+        grouped.entry(row.0).or_insert_with(Vec::new).push(row.1);
+    }
+
+    Ok(grouped)
 }
