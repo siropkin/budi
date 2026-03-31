@@ -109,12 +109,23 @@ impl IdentityEnricher {
 }
 
 fn get_hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .or_else(|_| {
-            std::process::Command::new("hostname")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    // Try `hostname` command first (works on macOS, Linux, and Windows)
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            } else {
+                None
+            }
+        })
+        // Fallback: /etc/hostname (Linux-specific)
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
         })
         .unwrap_or_default()
 }
@@ -200,39 +211,17 @@ impl Enricher for CostEnricher {
                     msg.provider
                 );
             }
-            let pricing = match msg.provider.as_str() {
-                "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
-                _ => crate::providers::claude_code::claude_pricing_for_model(model),
-            };
+            let pricing = crate::provider::pricing_for_model(model, &msg.provider);
 
-            // Split cache_creation_tokens into 5-min and 1-hour tiers.
-            // 1-hour cache: 2x input rate. 5-min cache: 1.25x input rate (pricing.cache_write).
-            // If no breakdown available, assume all tokens are 5-min tier.
-            let cache_5m_tokens = msg
-                .cache_creation_tokens
-                .saturating_sub(msg.cache_creation_1h_tokens);
-            let cache_1h_rate = pricing.input * 2.0; // 1-hour tier = 2x base input
-
-            let mut cost = msg.input_tokens as f64 * pricing.input / 1_000_000.0
-                + msg.output_tokens as f64 * pricing.output / 1_000_000.0
-                + cache_5m_tokens as f64 * pricing.cache_write / 1_000_000.0
-                + msg.cache_creation_1h_tokens as f64 * cache_1h_rate / 1_000_000.0
-                + msg.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
-
-            // Fast mode: 6x all token costs
-            let is_fast = msg.speed.as_deref() == Some("fast");
-            if is_fast {
-                cost *= 6.0;
-            }
-
-            // Web search: $10 per 1000 searches ($0.01 per search)
-            if msg.web_search_requests > 0 {
-                cost += msg.web_search_requests as f64 * 0.01;
-            }
-
-            // Always set cost_cents for assistant messages (Some(0.0) for zero-cost)
-            // so they are distinguishable from NULL (unknown cost) in queries.
-            msg.cost_cents = Some(cost * 100.0);
+            msg.cost_cents = Some(pricing.calculate_cost_cents(
+                msg.input_tokens,
+                msg.output_tokens,
+                msg.cache_creation_tokens,
+                msg.cache_read_tokens,
+                msg.cache_creation_1h_tokens,
+                msg.speed.as_deref(),
+                msg.web_search_requests,
+            ));
             // Distinguish between known and unknown model estimates
             if model == "unknown" {
                 msg.cost_confidence = "estimated_unknown_model".to_string();

@@ -487,6 +487,29 @@ fn fetch_usage_events(
     Ok(all_events)
 }
 
+/// Find the session whose time range contains `ts_ms`, using strict containment
+/// first, then falling back to a ±5s clock-skew window.
+fn find_matching_session(ts_ms: i64, sessions: &[SessionContext]) -> Option<&SessionContext> {
+    const CLOCK_SKEW_MS: i64 = 5000;
+    sessions
+        .iter()
+        .filter(|s| ts_ms >= s.start_ms && ts_ms <= s.end_ms)
+        .min_by_key(|s| (ts_ms - s.start_ms).abs())
+        .or_else(|| {
+            sessions
+                .iter()
+                .filter(|s| {
+                    ts_ms >= (s.start_ms - CLOCK_SKEW_MS)
+                        && ts_ms <= (s.end_ms + CLOCK_SKEW_MS)
+                })
+                .min_by_key(|s| {
+                    let d_start = (ts_ms - s.start_ms).abs();
+                    let d_end = (ts_ms - s.end_ms).abs();
+                    d_start.min(d_end)
+                })
+        })
+}
+
 /// Session context for correlating API events to hook sessions.
 struct SessionContext {
     start_ms: i64,
@@ -547,34 +570,7 @@ fn usage_events_to_messages(
     events
         .iter()
         .map(|ev| {
-            // Find matching session by timestamp — prefer strict containment,
-            // fall back to clock-skew window with closest-timestamp tiebreak.
-            const CLOCK_SKEW_MS: i64 = 5000;
-            let strict_match = sessions
-                .iter()
-                .filter(|s| ev.timestamp_ms >= s.start_ms && ev.timestamp_ms <= s.end_ms)
-                .min_by_key(|s| (ev.timestamp_ms - s.start_ms).abs());
-            let matched = strict_match.or_else(|| {
-                let fallback = sessions
-                    .iter()
-                    .filter(|s| {
-                        ev.timestamp_ms >= (s.start_ms - CLOCK_SKEW_MS)
-                            && ev.timestamp_ms <= (s.end_ms + CLOCK_SKEW_MS)
-                    })
-                    .min_by_key(|s| {
-                        let d_start = (ev.timestamp_ms - s.start_ms).abs();
-                        let d_end = (ev.timestamp_ms - s.end_ms).abs();
-                        d_start.min(d_end)
-                    });
-                if let Some(s) = &fallback {
-                    tracing::warn!(
-                        "Cursor session correlation: clock-skew fallback used for event at ts={}, matched session '{}'",
-                        ev.timestamp_ms,
-                        s.session_id
-                    );
-                }
-                fallback
-            });
+            let matched = find_matching_session(ev.timestamp_ms, sessions);
 
             let session_id = matched.map(|s| s.session_id.clone());
 
@@ -736,65 +732,63 @@ fn sync_from_usage_api(
 
 /// Retroactively assign session_id to Cursor messages that have NULL session_id.
 /// Uses the same timestamp-overlap logic as `usage_events_to_messages`.
-fn backfill_cursor_session_ids(conn: &Connection, sessions: &[SessionContext]) -> usize {
-    let mut stmt = match conn.prepare(
-        "SELECT uuid, timestamp FROM messages
-         WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'",
-    ) {
-        Ok(s) => s,
+fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext]) -> usize {
+    let orphans: Vec<(String, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT uuid, timestamp FROM messages
+             WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    if orphans.is_empty() {
+        return 0;
+    }
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
         Err(_) => return 0,
     };
 
-    let orphans: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
-
     let mut updated = 0;
-    for (uuid, ts_str) in &orphans {
-        let Ok(ts) = ts_str.parse::<DateTime<Utc>>() else {
-            continue;
+    {
+        let mut update_stmt = match tx.prepare_cached(
+            "UPDATE messages SET session_id = ?1,
+             cwd = COALESCE(NULLIF(cwd, ''), ?2),
+             repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?3),
+             git_branch = COALESCE(NULLIF(git_branch, ''), ?4)
+             WHERE uuid = ?5",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
         };
-        let ts_ms = ts.timestamp_millis();
 
-        const CLOCK_SKEW_MS: i64 = 5000;
-        let matched = sessions
-            .iter()
-            .filter(|s| ts_ms >= s.start_ms && ts_ms <= s.end_ms)
-            .min_by_key(|s| (ts_ms - s.start_ms).abs())
-            .or_else(|| {
-                sessions
-                    .iter()
-                    .filter(|s| {
-                        ts_ms >= (s.start_ms - CLOCK_SKEW_MS)
-                            && ts_ms <= (s.end_ms + CLOCK_SKEW_MS)
-                    })
-                    .min_by_key(|s| {
-                        let d_start = (ts_ms - s.start_ms).abs();
-                        let d_end = (ts_ms - s.end_ms).abs();
-                        d_start.min(d_end)
-                    })
-            });
+        for (uuid, ts_str) in &orphans {
+            let Ok(ts) = ts_str.parse::<DateTime<Utc>>() else {
+                continue;
+            };
+            let matched = find_matching_session(ts.timestamp_millis(), sessions);
 
-        if let Some(session) = matched {
-            let _ = conn.execute(
-                "UPDATE messages SET session_id = ?1,
-                 cwd = COALESCE(NULLIF(cwd, ''), ?2),
-                 repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?3),
-                 git_branch = COALESCE(NULLIF(git_branch, ''), ?4)
-                 WHERE uuid = ?5",
-                params![
+            if let Some(session) = matched {
+                let _ = update_stmt.execute(params![
                     session.session_id,
                     session.workspace_root,
                     session.repo_id,
                     session.git_branch,
                     uuid,
-                ],
-            );
-            updated += 1;
+                ]);
+                updated += 1;
+            }
         }
     }
+
+    let _ = tx.commit();
     updated
 }
 
@@ -1042,12 +1036,19 @@ pub(crate) fn parse_cursor_transcript(
         line_index = content[..start_offset].lines().count();
     }
 
-    for line in content[start_offset..].lines() {
-        let line_end = offset + line.len() + 1;
+    let remaining = &content[start_offset..];
+    let mut pos = 0;
+    for line in remaining.lines() {
+        let line_end = pos + line.len();
+        let has_newline = line_end < remaining.len() && remaining.as_bytes()[line_end] == b'\n';
+        if !has_newline && line_end == remaining.len() {
+            break;
+        }
+        pos = line_end + if has_newline { 1 } else { 0 };
         if let Some(msg) = parse_cursor_line(line, line_index, session_id, cwd, fallback_ts) {
             messages.push(msg);
         }
-        offset = line_end;
+        offset = start_offset + pos;
         line_index += 1;
     }
 

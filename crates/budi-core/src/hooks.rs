@@ -293,6 +293,24 @@ pub fn update_session_category(conn: &Connection, event: &HookEvent, category: &
     Ok(())
 }
 
+/// Check if `text` contains `word` at a word boundary.
+/// Handles both single words ("fix") and phrases ("clean up").
+fn contains_word(text: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(word) {
+        let abs_pos = start + pos;
+        let before_ok = abs_pos == 0 || !text.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
+        let after_pos = abs_pos + word.len();
+        let after_ok =
+            after_pos >= text.len() || !text.as_bytes()[after_pos].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
+}
+
 /// Classify a user prompt into a category using keyword heuristics.
 /// Returns None if no category matches (system commands, very short, or ambiguous).
 pub fn classify_prompt(text: &str) -> Option<String> {
@@ -345,21 +363,21 @@ pub fn classify_prompt(text: &str) -> Option<String> {
         "plan", "the plan", "implement the plan", "read and implement",
     ];
 
-    if bugfix_words.iter().any(|w| lower.contains(w)) {
+    if bugfix_words.iter().any(|w| contains_word(&lower, w)) {
         Some("bugfix".to_string())
-    } else if refactor_words.iter().any(|w| lower.contains(w)) {
+    } else if refactor_words.iter().any(|w| contains_word(&lower, w)) {
         Some("refactor".to_string())
-    } else if plan_words.iter().any(|w| lower.contains(w)) {
+    } else if plan_words.iter().any(|w| contains_word(&lower, w)) {
         Some("feature".to_string())
-    } else if review_words.iter().any(|w| lower.contains(w)) {
+    } else if review_words.iter().any(|w| contains_word(&lower, w)) {
         Some("review".to_string())
-    } else if ops_words.iter().any(|w| lower.contains(w)) {
+    } else if ops_words.iter().any(|w| contains_word(&lower, w)) {
         Some("ops".to_string())
-    } else if question_words.iter().any(|w| lower.contains(w)) || lower.ends_with('?') {
+    } else if question_words.iter().any(|w| contains_word(&lower, w)) || lower.ends_with('?') {
         Some("question".to_string())
-    } else if writing_words.iter().any(|w| lower.contains(w)) {
+    } else if writing_words.iter().any(|w| contains_word(&lower, w)) {
         Some("writing".to_string())
-    } else if feature_words.iter().any(|w| lower.contains(w)) {
+    } else if feature_words.iter().any(|w| contains_word(&lower, w)) {
         Some("feature".to_string())
     } else {
         None

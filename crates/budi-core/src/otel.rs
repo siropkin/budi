@@ -217,7 +217,12 @@ fn otel_uuid(session_id: &str, timestamp_nano: &str) -> String {
 /// Hex-encode bytes (no extra dependency).
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 }
 
@@ -245,12 +250,16 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         let ts_hi = (event.timestamp + chrono::Duration::seconds(1)).to_rfc3339();
         // Calculate cost from tokens × pricing instead of trusting OTEL's self-reported
         // cost_usd, which systematically underreports by ~10% vs official Anthropic billing.
-        let pricing = crate::providers::claude_code::claude_pricing_for_model(&event.model);
-        let cost_cents = (event.input_tokens as f64 * pricing.input / 1_000_000.0
-            + event.output_tokens as f64 * pricing.output / 1_000_000.0
-            + event.cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0
-            + event.cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0)
-            * 100.0;
+        let pricing = crate::provider::pricing_for_model(&event.model, "claude_code");
+        let cost_cents = pricing.calculate_cost_cents(
+            event.input_tokens,
+            event.output_tokens,
+            event.cache_creation_tokens,
+            event.cache_read_tokens,
+            0,    // OTEL doesn't yet provide 1h cache tier breakdown
+            None, // OTEL doesn't yet provide speed
+            0,    // OTEL doesn't yet provide web search count
+        );
 
         // Look up session context (repo_id, git_branch, cwd)
         let session_ctx: Option<(Option<String>, Option<String>, Option<String>)> = tx

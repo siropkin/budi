@@ -77,55 +77,54 @@ impl Pipeline {
         // assistant messages in the same session.
         // Uses temporal propagation: each message inherits from the most recent
         // preceding message in the same session that has the field set.
-        let mut session_branch: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut session_repo: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut session_cwd: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut session_category: std::collections::HashMap<String, String> =
+        struct SessionPropagation {
+            branch: Option<String>,
+            repo: Option<String>,
+            cwd: Option<String>,
+            category: Option<String>,
+        }
+        let mut session_ctx: std::collections::HashMap<String, SessionPropagation> =
             std::collections::HashMap::new();
         for msg in messages.iter_mut() {
-            // Use session_id for grouping. Unsessionized messages use their own uuid
-            // as the key so they don't share context with other unsessionized messages.
             let key = msg
                 .session_id
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| msg.uuid.clone());
 
-            // If this message has a non-empty value, update the running context.
-            // If it has None, inherit from the most recent preceding message.
-            // An explicit empty string (Some("")) does not overwrite an existing
-            // non-empty value but is kept as-is on the message (no inheritance).
+            let ctx = session_ctx.entry(key).or_insert_with(|| SessionPropagation {
+                branch: None,
+                repo: None,
+                cwd: None,
+                category: None,
+            });
+
             if let Some(b) = &msg.git_branch {
-                if !b.is_empty() || !session_branch.contains_key(&key) {
-                    session_branch.insert(key.clone(), b.clone());
+                if !b.is_empty() || ctx.branch.is_none() {
+                    ctx.branch = Some(b.clone());
                 }
-            } else if let Some(b) = session_branch.get(&key) {
+            } else if let Some(ref b) = ctx.branch {
                 msg.git_branch = Some(b.clone());
             }
             if let Some(r) = &msg.repo_id {
-                if !r.is_empty() || !session_repo.contains_key(&key) {
-                    session_repo.insert(key.clone(), r.clone());
+                if !r.is_empty() || ctx.repo.is_none() {
+                    ctx.repo = Some(r.clone());
                 }
-            } else if let Some(r) = session_repo.get(&key) {
+            } else if let Some(ref r) = ctx.repo {
                 msg.repo_id = Some(r.clone());
             }
             if let Some(c) = &msg.cwd {
-                if !c.is_empty() || !session_cwd.contains_key(&key) {
-                    session_cwd.insert(key.clone(), c.clone());
+                if !c.is_empty() || ctx.cwd.is_none() {
+                    ctx.cwd = Some(c.clone());
                 }
-            } else if let Some(c) = session_cwd.get(&key) {
+            } else if let Some(ref c) = ctx.cwd {
                 msg.cwd = Some(c.clone());
             }
-            // prompt_category: first classified user prompt wins for the session,
-            // then propagates to all subsequent messages (including assistants).
             if let Some(cat) = &msg.prompt_category {
-                if !session_category.contains_key(&key) {
-                    session_category.insert(key.clone(), cat.clone());
+                if ctx.category.is_none() {
+                    ctx.category = Some(cat.clone());
                 }
-            } else if let Some(cat) = session_category.get(&key) {
+            } else if let Some(ref cat) = ctx.category {
                 msg.prompt_category = Some(cat.clone());
             }
         }

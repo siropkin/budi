@@ -87,65 +87,53 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32) {
     }
 }
 
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
 /// Claude model pricing lookup (per million tokens, USD).
 /// Source: https://docs.anthropic.com/en/docs/about-claude/pricing
 pub fn claude_pricing_for_model(model: &str) -> ModelPricing {
-    if contains_ci(model, "opus-4-6") || contains_ci(model, "opus-4-5") {
+    let m = model.to_ascii_lowercase();
+    if m.contains("opus-4-6") || m.contains("opus-4-5") {
         ModelPricing {
             input: 5.0,
             output: 25.0,
             cache_write: 6.25,
             cache_read: 0.50,
         }
-    // Opus 4.0/4.1/3: $15/$75
-    } else if contains_ci(model, "opus") {
+    } else if m.contains("opus") {
         ModelPricing {
             input: 15.0,
             output: 75.0,
             cache_write: 18.75,
             cache_read: 1.50,
         }
-    // All Sonnet variants (3.5/3.7/4/4.5/4.6): $3/$15
-    } else if contains_ci(model, "sonnet") {
+    } else if m.contains("sonnet") {
         ModelPricing {
             input: 3.0,
             output: 15.0,
             cache_write: 3.75,
             cache_read: 0.30,
         }
-    // Haiku 4.5: $1/$5
-    } else if contains_ci(model, "haiku-4-5") || contains_ci(model, "haiku-4") {
+    } else if m.contains("haiku-4-5") || m.contains("haiku-4") {
         ModelPricing {
             input: 1.0,
             output: 5.0,
             cache_write: 1.25,
             cache_read: 0.10,
         }
-    // Haiku 3.5: $0.80/$4
-    } else if contains_ci(model, "haiku-3-5") || contains_ci(model, "3-5-haiku") {
+    } else if m.contains("haiku-3-5") || m.contains("3-5-haiku") {
         ModelPricing {
             input: 0.80,
             output: 4.0,
             cache_write: 1.0,
             cache_read: 0.08,
         }
-    // Haiku 3: $0.25/$1.25
-    } else if contains_ci(model, "haiku-3") || contains_ci(model, "3-haiku") {
+    } else if m.contains("haiku-3") || m.contains("3-haiku") {
         ModelPricing {
             input: 0.25,
             output: 1.25,
             cache_write: 0.30,
             cache_read: 0.03,
         }
-    // Haiku (unversioned fallback): use Haiku 4.5 pricing
-    } else if contains_ci(model, "haiku") {
+    } else if m.contains("haiku") {
         ModelPricing {
             input: 1.0,
             output: 5.0,
@@ -153,7 +141,6 @@ pub fn claude_pricing_for_model(model: &str) -> ModelPricing {
             cache_read: 0.10,
         }
     } else {
-        // Unknown model — use sonnet pricing as a reasonable default
         tracing::warn!(
             "Unknown Claude model '{}', using Sonnet default pricing",
             model

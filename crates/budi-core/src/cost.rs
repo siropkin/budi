@@ -7,10 +7,7 @@ use crate::provider::ModelPricing;
 
 /// Look up pricing for a model using a specific provider's pricing table.
 fn pricing_for_model_by_provider(model: &str, provider: Option<&str>) -> ModelPricing {
-    match provider {
-        Some("cursor") => crate::providers::cursor::cursor_pricing_for_model(model),
-        _ => crate::providers::claude_code::claude_pricing_for_model(model),
-    }
+    crate::provider::pricing_for_model(model, provider.unwrap_or("claude_code"))
 }
 
 /// Estimated cost breakdown.

@@ -40,7 +40,7 @@ pub(crate) struct UserMessage {
 #[serde(untagged)]
 pub(crate) enum UserContent {
     Text(String),
-    Blocks(()),
+    Blocks(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +141,37 @@ pub struct ParsedMessage {
     pub prompt_category: Option<String>,
 }
 
+impl Default for ParsedMessage {
+    fn default() -> Self {
+        Self {
+            uuid: String::new(),
+            session_id: None,
+            timestamp: DateTime::from_timestamp(0, 0).expect("epoch is valid"),
+            cwd: None,
+            role: String::new(),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: None,
+            repo_id: None,
+            provider: String::new(),
+            cost_cents: None,
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: String::new(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+        }
+    }
+}
+
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
 fn parse_line(line: &str) -> Option<ParsedMessage> {
     let line = line.trim();
@@ -156,12 +187,20 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
     };
     match entry {
         TranscriptEntry::User(u) => {
-            let prompt_text = u.message.as_ref().and_then(|m| match &m.content {
-                Some(UserContent::Text(s)) => Some(s.as_str()),
-                _ => None,
+            let prompt_text: Option<String> = u.message.as_ref().and_then(|m| match &m.content {
+                Some(UserContent::Text(s)) => Some(s.clone()),
+                Some(UserContent::Blocks(blocks)) => {
+                    let text: String = blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if text.is_empty() { None } else { Some(text) }
+                }
+                None => None,
             });
             let prompt_category =
-                prompt_text.and_then(crate::hooks::classify_prompt);
+                prompt_text.as_deref().and_then(crate::hooks::classify_prompt);
             Some(ParsedMessage {
                 uuid: u.uuid,
                 session_id: u.session_id,
