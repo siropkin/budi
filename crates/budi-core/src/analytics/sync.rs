@@ -166,6 +166,13 @@ fn sync_with_max_age(
         tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
     }
 
+    // Group orphaned Cursor messages into synthetic sessions so they appear
+    // in the Sessions tab even when hooks weren't installed at the time.
+    let synth = crate::providers::cursor::create_synthetic_cursor_sessions(conn);
+    if synth > 0 {
+        tracing::info!("Assigned {synth} orphaned Cursor messages to synthetic sessions");
+    }
+
     Ok((total_files, total_messages, warnings))
 }
 

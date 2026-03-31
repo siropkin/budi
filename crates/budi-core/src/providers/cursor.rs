@@ -207,78 +207,41 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Result of auth extraction: credentials (if valid) plus any warnings.
-struct CursorAuthResult {
-    auth: Option<CursorAuth>,
-    warnings: Vec<String>,
-}
-
 /// Extract auth credentials from Cursor's state.vscdb ItemTable.
-fn extract_cursor_auth() -> CursorAuthResult {
-    let mut warnings = Vec::new();
-
+/// Returns `None` when auth is unavailable (not installed, empty, expired, etc.).
+/// Expired tokens are logged via `tracing::warn`.
+fn extract_cursor_auth() -> Option<CursorAuth> {
     let paths = all_state_vscdb_paths();
-    // Only global state.vscdb has ItemTable with auth
-    let Some(global_path) = paths
+    let global_path = paths
         .into_iter()
-        .find(|p| p.to_string_lossy().contains("globalStorage"))
-    else {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
-    };
+        .find(|p| p.to_string_lossy().contains("globalStorage"))?;
 
-    let Ok(vscdb) = Connection::open_with_flags(
+    let vscdb = Connection::open_with_flags(
         &global_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
-    };
+    )
+    .ok()?;
 
-    let Ok(jwt) = vscdb.query_row(
-        "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
-        [],
-        |row| row.get::<_, String>(0),
-    ) else {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
-    };
+    let jwt: String = vscdb
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
 
     if jwt.is_empty() {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
+        return None;
     }
 
     // Decode JWT payload to extract user_id from `sub` field.
-    // JWT is header.payload.signature — we need the payload (base64url).
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() < 2 {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
+        return None;
     }
 
-    let Some(decoded) = base64url_decode(parts[1]) else {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
-    };
-    let Ok(payload) = serde_json::from_slice::<Value>(&decoded) else {
-        return CursorAuthResult {
-            auth: None,
-            warnings,
-        };
-    };
+    let decoded = base64url_decode(parts[1])?;
+    let payload: Value = serde_json::from_slice(&decoded).ok()?;
 
     // Check JWT expiry — `exp` is assumed to be in seconds (standard JWT).
     // If it looks like milliseconds (> 1_700_000_000_000), convert first.
@@ -293,31 +256,17 @@ fn extract_cursor_auth() -> CursorAuthResult {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if now > exp {
-            let msg = "Cursor auth token expired. Re-authenticate in Cursor to restore exact cost tracking.";
-            tracing::warn!("{}", msg);
-            warnings.push(msg.to_string());
-            return CursorAuthResult {
-                auth: None,
-                warnings,
-            };
+            tracing::warn!(
+                "Cursor auth token expired — restart Cursor to refresh it. Using estimated costs from local files."
+            );
+            return None;
         }
     }
 
-    let sub = match payload.get("sub").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => {
-            return CursorAuthResult {
-                auth: None,
-                warnings,
-            };
-        }
-    };
+    let sub = payload.get("sub").and_then(|v| v.as_str())?;
     let user_id = sub.split('|').next_back().unwrap_or(sub).to_string();
 
-    CursorAuthResult {
-        auth: Some(CursorAuth { user_id, jwt }),
-        warnings,
-    }
+    Some(CursorAuth { user_id, jwt })
 }
 
 /// Parse a single usage event JSON value into a CursorUsageEvent.
@@ -631,19 +580,17 @@ fn sync_from_usage_api(
     pipeline: &mut crate::pipeline::Pipeline,
     max_age_days: Option<u64>,
 ) -> Option<Result<(usize, usize, Vec<String>)>> {
-    let auth_result = extract_cursor_auth();
-    let warnings = auth_result.warnings;
+    // Run session repair and backfill unconditionally — they only need DB access,
+    // not API auth, and must run even when auth is expired or no new events arrive.
+    run_cursor_repairs(conn);
 
-    let auth = match auth_result.auth {
+    let auth = match extract_cursor_auth() {
         Some(a) => a,
         None => {
-            // No valid auth — return warnings (e.g. JWT expired) but no error.
-            // Fall back to file-based sync by returning None when there are no warnings,
-            // or return success with 0 counts + warnings if we have something to report.
-            if warnings.is_empty() {
-                return None;
-            }
-            return Some(Ok((0, 0, warnings)));
+            // No valid auth — fall back to file-based sync (returns None).
+            // Repairs already ran above, and file-based sync produces messages
+            // with session_ids from file paths.
+            return None;
         }
     };
 
@@ -664,6 +611,33 @@ fn sync_from_usage_api(
         Err(e) => return Some(Err(e)),
     };
 
+    if events.is_empty() {
+        return Some(Ok((0, 0, Vec::new())));
+    }
+
+    let sessions = load_session_contexts(conn);
+    let mut messages = usage_events_to_messages(&events, &sessions);
+    let tags = pipeline.process(&mut messages);
+    let count = match analytics::ingest_messages(conn, &messages, Some(&tags)) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+
+    // Update watermark to latest event timestamp.
+    if let Some(newest_ts) = events.iter().map(|e| e.timestamp_ms).max() {
+        let _ = analytics::set_sync_offset(conn, watermark_key, newest_ts as usize);
+    }
+
+    let api_calls = if paginate_all {
+        events.len().div_ceil(100).max(1)
+    } else {
+        1
+    };
+    Some(Ok((api_calls, count, Vec::new())))
+}
+
+/// Session repair and backfill that runs on every sync regardless of auth status.
+fn run_cursor_repairs(conn: &mut Connection) {
     // Repair sessions whose started_at was set by a late-arriving hook instead
     // of the earliest hook. Use MIN(hook_events.timestamp) as the true start.
     let _ = conn.execute(
@@ -678,8 +652,7 @@ fn sync_from_usage_api(
         [],
     );
 
-    // Always run backfill for orphaned messages (ingested before their session
-    // row existed). Must run even when there are no new API events.
+    // Backfill orphaned messages (ingested before their session row existed).
     let sessions = load_session_contexts(conn);
     if !sessions.is_empty() {
         let orphaned = backfill_cursor_session_ids(conn, &sessions);
@@ -706,29 +679,6 @@ fn sync_from_usage_api(
            )",
         [],
     );
-
-    if events.is_empty() {
-        return Some(Ok((0, 0, warnings)));
-    }
-
-    let mut messages = usage_events_to_messages(&events, &sessions);
-    let tags = pipeline.process(&mut messages);
-    let count = match analytics::ingest_messages(conn, &messages, Some(&tags)) {
-        Ok(c) => c,
-        Err(e) => return Some(Err(e)),
-    };
-
-    // Update watermark to latest event timestamp.
-    if let Some(newest_ts) = events.iter().map(|e| e.timestamp_ms).max() {
-        let _ = analytics::set_sync_offset(conn, watermark_key, newest_ts as usize);
-    }
-
-    let api_calls = if paginate_all {
-        events.len().div_ceil(100).max(1)
-    } else {
-        1
-    };
-    Some(Ok((api_calls, count, warnings)))
 }
 
 /// Retroactively assign session_id to Cursor messages that have NULL session_id.
@@ -792,6 +742,98 @@ fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext
 
     let _ = tx.commit();
     updated
+}
+
+/// Group orphaned Cursor messages (session_id IS NULL) into synthetic sessions
+/// based on time proximity. Messages within 30 minutes of each other are grouped
+/// into the same session. Creates stub session rows for each synthetic group.
+pub fn create_synthetic_cursor_sessions(conn: &mut Connection) -> usize {
+    const GAP_MS: i64 = 30 * 60 * 1000; // 30 minutes
+
+    let orphans: Vec<(String, i64)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT uuid, CAST(strftime('%s', timestamp) AS INTEGER) * 1000
+             FROM messages
+             WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'
+             ORDER BY timestamp ASC
+             LIMIT 10000",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    if orphans.is_empty() {
+        return 0;
+    }
+
+    // Group by 30-minute time gaps
+    let mut groups: Vec<Vec<(String, i64)>> = Vec::new();
+    let mut current_group: Vec<(String, i64)> = vec![orphans[0].clone()];
+
+    for pair in orphans.iter().skip(1) {
+        let prev_ts = current_group.last().unwrap().1;
+        if pair.1 - prev_ts > GAP_MS {
+            groups.push(std::mem::take(&mut current_group));
+        }
+        current_group.push(pair.clone());
+    }
+    if !current_group.is_empty() {
+        groups.push(current_group);
+    }
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(_) => return 0,
+    };
+
+    let mut total = 0;
+    for group in &groups {
+        let first_ts = group[0].1;
+        let synth_id = format!("cursor-synth-{first_ts}");
+
+        // Create stub session row
+        let _ = tx.execute(
+            "INSERT OR IGNORE INTO sessions (session_id, provider, started_at)
+             VALUES (?1, 'cursor', datetime(?2 / 1000, 'unixepoch'))",
+            rusqlite::params![synth_id, first_ts],
+        );
+
+        // Update ended_at from the last message in the group
+        if let Some(last) = group.last() {
+            let _ = tx.execute(
+                "UPDATE sessions SET ended_at = datetime(?2 / 1000, 'unixepoch')
+                 WHERE session_id = ?1 AND (ended_at IS NULL OR ended_at < datetime(?2 / 1000, 'unixepoch'))",
+                rusqlite::params![synth_id, last.1],
+            );
+        }
+
+        // Assign all messages in this group to the synthetic session
+        for (uuid, _) in group {
+            if tx
+                .execute(
+                    "UPDATE messages SET session_id = ?1 WHERE uuid = ?2",
+                    rusqlite::params![synth_id, uuid],
+                )
+                .is_ok()
+            {
+                total += 1;
+            }
+        }
+    }
+
+    let _ = tx.commit();
+    if total > 0 {
+        tracing::info!(
+            "Created {} synthetic Cursor sessions from {total} orphaned messages",
+            groups.len()
+        );
+    }
+    total
 }
 
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.
@@ -1621,5 +1663,120 @@ mod tests {
         // cost_cents is None so CostEnricher will estimate
         assert_eq!(msgs[0].cost_cents, None);
         assert_eq!(msgs[0].cost_confidence, "estimated");
+    }
+
+    // --- Synthetic session tests ---
+
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .unwrap();
+        crate::migration::migrate(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn synthetic_sessions_groups_by_time_gap() {
+        let mut conn = test_db();
+        // Insert 4 orphaned Cursor messages: 2 close together, gap, then 2 more
+        for (i, ts) in [
+            "2026-03-14 10:00:00",
+            "2026-03-14 10:05:00",
+            "2026-03-14 12:00:00", // >30 min gap
+            "2026-03-14 12:10:00",
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO messages (uuid, provider, role, timestamp, input_tokens, output_tokens)
+                 VALUES (?1, 'cursor', 'assistant', ?2, 100, 50)",
+                rusqlite::params![format!("orphan-{i}"), ts],
+            )
+            .unwrap();
+        }
+
+        let assigned = create_synthetic_cursor_sessions(&mut conn);
+        assert_eq!(assigned, 4);
+
+        // Should have created 2 synthetic sessions
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT session_id) FROM sessions WHERE session_id LIKE 'cursor-synth-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 2);
+
+        // All messages should now have session_ids
+        let null_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_count, 0);
+
+        // First two share a session, last two share a different one
+        let s1: String = conn
+            .query_row(
+                "SELECT session_id FROM messages WHERE uuid = 'orphan-0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let s2: String = conn
+            .query_row(
+                "SELECT session_id FROM messages WHERE uuid = 'orphan-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let s3: String = conn
+            .query_row(
+                "SELECT session_id FROM messages WHERE uuid = 'orphan-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(s1, s2, "first two messages should share a session");
+        assert_ne!(
+            s1, s3,
+            "messages across the gap should be in different sessions"
+        );
+    }
+
+    #[test]
+    fn synthetic_sessions_idempotent() {
+        let mut conn = test_db();
+        conn.execute(
+            "INSERT INTO messages (uuid, provider, role, timestamp, input_tokens, output_tokens)
+             VALUES ('orphan-1', 'cursor', 'assistant', '2026-03-14 10:00:00', 100, 50)",
+            [],
+        )
+        .unwrap();
+
+        let first = create_synthetic_cursor_sessions(&mut conn);
+        assert_eq!(first, 1);
+
+        // Running again should find no orphans
+        let second = create_synthetic_cursor_sessions(&mut conn);
+        assert_eq!(second, 0);
+    }
+
+    #[test]
+    fn synthetic_sessions_skips_non_cursor() {
+        let mut conn = test_db();
+        conn.execute(
+            "INSERT INTO messages (uuid, provider, role, timestamp, session_id, input_tokens, output_tokens)
+             VALUES ('cc-1', 'claude_code', 'assistant', '2026-03-14 10:00:00', NULL, 100, 50)",
+            [],
+        )
+        .unwrap();
+
+        let assigned = create_synthetic_cursor_sessions(&mut conn);
+        assert_eq!(assigned, 0);
     }
 }

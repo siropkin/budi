@@ -185,9 +185,9 @@ budi sync                     # sync recent data (last 30 days)
 budi sync --all               # load full history (all time)
 budi sync --force             # re-ingest all data from scratch (use after upgrades)
 budi update                   # check for updates (auto-detects Homebrew)
-budi update --version 7.1.0  # update to a specific version
-budi health                  # show session health vitals for most recent session
-budi health --session <id>   # health vitals for a specific session
+budi update --version <name>  # update to a specific version
+budi health                   # show session health vitals for most recent session
+budi health --session <id>    # health vitals for a specific session
 budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
 budi mcp-serve                # run MCP server (used by Claude Code, not called directly)
