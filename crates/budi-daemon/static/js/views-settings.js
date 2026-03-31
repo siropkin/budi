@@ -2,13 +2,13 @@
 
 let settingsData = null;
 
-async function loadSettingsData() {
-  const ok = r => { if (!r.ok) throw new Error(r.statusText); return r.json(); };
+async function loadSettingsData(signal) {
+  const opts = signal ? { signal } : {};
   const [health, schema, syncStatus, integrations] = await Promise.all([
-    fetch('/health').then(ok).catch(() => ({ ok: false })),
-    fetch('/admin/schema').then(ok).catch(() => ({ current: '?', target: '?' })),
-    fetch('/sync/status').then(ok).catch(() => ({ syncing: false })),
-    fetch('/health/integrations').then(ok).catch(() => ({})),
+    fetch('/health', opts).then(fetchOk).catch(() => ({ ok: false })),
+    fetch('/admin/schema', opts).then(fetchOk).catch(() => ({ current: '?', target: '?' })),
+    fetch('/sync/status', opts).then(fetchOk).catch(() => ({ syncing: false })),
+    fetch('/health/integrations', opts).then(fetchOk).catch(() => ({})),
   ]);
   settingsData = { health, schema, syncStatus, integrations };
 }
@@ -184,7 +184,7 @@ function setLastSyncDisplay(text, warn) {
 }
 
 async function refreshSettingsStatus() {
-  const syncStatus = await fetch('/sync/status').then(r => r.json()).catch(() => null);
+  const syncStatus = await fetch('/sync/status').then(fetchOk).catch(() => null);
   if (syncStatus && settingsData) {
     settingsData.syncStatus = syncStatus;
     const syncEl = [...$$('.settings-key')].find(e => e.textContent === 'Last Sync');
@@ -286,7 +286,7 @@ function bindSettingsHandlers() {
     checkUpdateBtn.disabled = true;
     settingsLog('Checking for updates...');
     try {
-      const r = await fetch('/health/check-update').then(r => r.json());
+      const r = await fetch('/health/check-update').then(fetchOk);
       if (r.error) {
         settingsLog(r.error);
       } else if (r.up_to_date) {

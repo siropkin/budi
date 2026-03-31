@@ -132,8 +132,6 @@ a:hover { text-decoration: underline; }
 .btn-secondary { background: var(--surface); color: var(--text-muted); }
 .btn-secondary:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
 
-
-
 .show-more-btn {
   display: block; width: 100%; padding: 8px; margin-top: 8px; background: var(--bg);
   border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted);

@@ -1,6 +1,6 @@
 const $ = (s, el) => (el || document).querySelector(s);
 const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
-function esc(s) { if (s == null) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+function esc(s) { if (s == null) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
 let currentPeriod = localStorage.getItem('budi_period') || 'today';
 const VALID_PAGES = ['overview', 'insights', 'sessions', 'settings'];
@@ -16,6 +16,7 @@ let currentPage = (function() {
   return 'overview';
 })();
 const DEFAULT_CHART_ROWS = 15;
+const SESSIONS_PAGE_LIMIT = 50;
 
 // Provider data
 let providersData = [];
@@ -37,6 +38,6 @@ let sessionsPageTotalCount = 0;
 // Parse session ID from URL: /dashboard/sessions/:id
 let selectedSessionId = (function() {
   const m = location.pathname.match(/^\/dashboard\/sessions\/(.+)$/);
-  return m ? decodeURIComponent(m[1]) : null;
+  try { return m ? decodeURIComponent(m[1]) : null; } catch (_) { return null; }
 })();
 

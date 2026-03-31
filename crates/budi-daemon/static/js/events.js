@@ -86,9 +86,10 @@ async function switchAndReload() {
   insightsData = null;
   sessionsPageData = null;
   settingsData = null;
+  lastStatsHash = '';
   // Preserve selectedSessionId from URL when on session detail page
   const sessionUrlMatch = location.pathname.match(/^\/dashboard\/sessions\/(.+)$/);
-  selectedSessionId = sessionUrlMatch ? decodeURIComponent(sessionUrlMatch[1]) : null;
+  try { selectedSessionId = sessionUrlMatch ? decodeURIComponent(sessionUrlMatch[1]) : null; } catch (_) { selectedSessionId = null; }
   // Hide period tabs on settings page
   const periodBar = $('.period-tabs');
   if (periodBar) periodBar.style.display = currentPage === 'settings' ? 'none' : '';
@@ -99,7 +100,8 @@ async function switchAndReload() {
       renderInsightsView(content);
     } else if (currentPage === 'sessions') {
       if (selectedSessionId) {
-        await renderSessionDetail(selectedSessionId, content);
+        await renderSessionDetail(selectedSessionId, content, abort.signal);
+        if (abort.signal.aborted) return;
       } else {
         await loadSessionsPageData(abort.signal);
         if (abort.signal.aborted) return;
@@ -107,14 +109,13 @@ async function switchAndReload() {
         bindSessionsHandlers(content);
       }
     } else if (currentPage === 'settings') {
-      await loadSettingsData();
+      await loadSettingsData(abort.signal);
       if (abort.signal.aborted) return;
       renderSettingsView(content);
     } else {
       await loadStatsData(abort.signal);
       if (abort.signal.aborted) return;
       renderStatsView(content);
-      // Overview has no interactive handlers
     }
   } catch (err) {
     if (abort.signal.aborted) return;
@@ -124,13 +125,14 @@ async function switchAndReload() {
 }
 
 // Period tab switching — restore saved selection
-$$('.period-tabs button').forEach(btn => {
+const periodButtons = $$('.period-tabs button');
+periodButtons.forEach(btn => {
   if (btn.dataset.period === currentPeriod) {
-    $$('.period-tabs button').forEach(b => b.classList.remove('active'));
+    periodButtons.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
   }
   btn.addEventListener('click', () => {
-    $$('.period-tabs button').forEach(b => b.classList.remove('active'));
+    periodButtons.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPeriod = btn.dataset.period;
     localStorage.setItem('budi_period', currentPeriod);
@@ -139,13 +141,14 @@ $$('.period-tabs button').forEach(btn => {
 });
 
 // Page tab switching — use real URL paths
-$$('.page-tabs button').forEach(btn => {
+const pageButtons = $$('.page-tabs button');
+pageButtons.forEach(btn => {
   if (btn.dataset.page === currentPage) {
-    $$('.page-tabs button').forEach(b => b.classList.remove('active'));
+    pageButtons.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
   }
   btn.addEventListener('click', () => {
-    $$('.page-tabs button').forEach(b => b.classList.remove('active'));
+    pageButtons.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPage = btn.dataset.page;
     const url = currentPage === 'overview' ? '/dashboard' : '/dashboard/' + currentPage;
@@ -162,13 +165,13 @@ window.addEventListener('popstate', () => {
   const sessionMatch = path.match(/^sessions\/(.+)$/);
   if (sessionMatch) {
     currentPage = 'sessions';
-    selectedSessionId = decodeURIComponent(sessionMatch[1]);
+    try { selectedSessionId = decodeURIComponent(sessionMatch[1]); } catch (_) { selectedSessionId = null; }
   } else {
     const newPage = VALID_PAGES.includes(path) ? path : 'overview';
     currentPage = newPage;
     selectedSessionId = null;
   }
-  $$('.page-tabs button').forEach(b => {
+  pageButtons.forEach(b => {
     b.classList.toggle('active', b.dataset.page === currentPage);
   });
   switchAndReload();
@@ -178,13 +181,18 @@ render();
 
 // Auto-refresh: poll every 30s for overview, every 5s for settings sync status
 let overviewRefreshing = false;
+let lastStatsHash = '';
 setInterval(async () => {
   if (document.hidden || !dataLoaded || overviewRefreshing) return;
   if (currentPage === 'overview') {
     overviewRefreshing = true;
     try {
       await loadStatsData();
-      if (currentPage === 'overview') renderStatsView($('#content'));
+      const hash = JSON.stringify(statsData);
+      if (currentPage === 'overview' && hash !== lastStatsHash) {
+        lastStatsHash = hash;
+        renderStatsView($('#content'));
+      }
     } catch (_) { /* poll failure is non-fatal */ }
     overviewRefreshing = false;
   }

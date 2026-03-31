@@ -1,5 +1,9 @@
 /* ===== Sessions Page ===== */
 
+const CHART_MAX_BUCKETS = 40;
+const BRANCH_TRUNCATE_LEN = 30;
+const SEARCH_DEBOUNCE_MS = 300;
+
 // Sessions page sort state
 let sessionsPageSortCol = 'started_at';
 let sessionsPageSortAsc = false;
@@ -26,17 +30,11 @@ function renderSessionsList(sessions) {
   const rowFn = s => {
     const cost = (s.cost_cents || 0) / 100;
     const branch = s.git_branch ? s.git_branch.replace(/^refs\/heads\//, '') : '';
-    const shortBranch = branch.length > 30 ? branch.slice(0, 27) + '...' : branch;
+    const shortBranch = branch.length > BRANCH_TRUNCATE_LEN ? branch.slice(0, BRANCH_TRUNCATE_LEN - 3) + '...' : branch;
     const models = (s.model || '').split(',').map(m => m.trim()).filter(Boolean);
     const model = models.length ? formatModelName(models[0]) + (models.length > 1 ? ' +' + (models.length - 1) : '') : '--';
     const totalTok = (s.input_tokens || 0) + (s.output_tokens || 0);
-    let duration = '--';
-    if (s.duration_ms) {
-      duration = fmtDurationMs(s.duration_ms);
-    } else if (s.started_at && s.ended_at) {
-      const ms = new Date(s.ended_at) - new Date(s.started_at);
-      if (ms > 0) duration = fmtDurationMs(ms);
-    }
+    const duration = fmtSessionDuration(s);
     const provDisplay = multiProvider
       ? ((registeredProviders.find(rp => rp.name === s.provider) || {}).display_name || s.provider || '--')
       : '';
@@ -209,15 +207,16 @@ function renderHealthPanel(health) {
   </div>`;
 }
 
-async function renderSessionDetail(sessionId, content) {
+async function renderSessionDetail(sessionId, content, signal) {
   content.innerHTML = '<div class="loading">Loading session</div>';
 
-  const sessionsListPromise = sessionsPageData ? Promise.resolve() : loadSessionsPageData();
+  const sessionsListPromise = sessionsPageData ? Promise.resolve() : loadSessionsPageData(signal);
   const [msgs, tags, health] = await Promise.all([
-    loadSessionMessages(sessionId),
-    loadSessionTags(sessionId),
-    loadSessionHealth(sessionId),
+    loadSessionMessages(sessionId, signal),
+    loadSessionTags(sessionId, signal),
+    loadSessionHealth(sessionId, signal),
   ]);
+  if (signal && signal.aborted) return;
   await sessionsListPromise;
   sessionDetailMessages = msgs;
   sessionDetailSortCol = 'timestamp';
@@ -227,16 +226,7 @@ async function renderSessionDetail(sessionId, content) {
 
   const totalCost = sessionDetailMessages.reduce((s, m) => s + (m.cost_cents || 0), 0) / 100;
   const totalTokens = sessionDetailMessages.reduce((s, m) => s + (m.input_tokens || 0) + (m.output_tokens || 0), 0);
-
-  let duration = '--';
-  if (session) {
-    if (session.duration_ms) {
-      duration = fmtDurationMs(session.duration_ms);
-    } else if (session.started_at && session.ended_at) {
-      const ms = new Date(session.ended_at) - new Date(session.started_at);
-      if (ms > 0) duration = fmtDurationMs(ms);
-    }
-  }
+  const duration = session ? fmtSessionDuration(session) : '--';
 
   // Filter tags to show only interesting ones (skip redundant keys)
   const skipTagKeys = new Set(['provider', 'model', 'repo', 'machine', 'cost_confidence']);
@@ -271,10 +261,10 @@ async function renderSessionDetail(sessionId, content) {
       <div style="display:flex;flex-wrap:wrap;gap:6px">${tagsHtml}</div>
     </div>` : ''}` : '';
 
-  // Input token growth chart — group into max 40 buckets
+  // Input token growth chart — group into max buckets
   let bloatChart = '';
   if (sessionDetailMessages.length >= 2) {
-    const chartData = groupMessagesForChart(sessionDetailMessages, 40);
+    const chartData = groupMessagesForChart(sessionDetailMessages, CHART_MAX_BUCKETS);
     const maxInput = Math.max(...chartData.map(m => m.input_tokens), 1);
     bloatChart = `
     <div class="panel section-mb">
@@ -342,7 +332,7 @@ function bindSessionDetailHandlers(content) {
       clearTimeout(searchTimeout);
       searchTimeout = setTimeout(() => {
         if (container) container.innerHTML = renderSessionDetailMessages(sessionDetailMessages);
-      }, 200);
+      }, SEARCH_DEBOUNCE_MS);
     });
   }
 }
@@ -383,10 +373,9 @@ function bindSessionsHandlers(content) {
     if (moreBtn) {
       moreBtn.textContent = 'Loading...';
       moreBtn.disabled = true;
-      const extra = { limit: 50, offset: sessionsPageData.length, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
+      const extra = { limit: SESSIONS_PAGE_LIMIT, offset: sessionsPageData.length, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
       if (sessionsPageSearchTerm) extra.search = sessionsPageSearchTerm;
-      const ok = r => r.json();
-      const result = await fetch(buildUrl('/analytics/sessions', extra)).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
+      const result = await fetch(buildUrl('/analytics/sessions', extra)).then(fetchOk).catch(() => ({ sessions: [], total_count: 0 }));
       sessionsPageData = sessionsPageData.concat(result.sessions || []);
       sessionsPageTotalCount = result.total_count || sessionsPageTotalCount;
       container.innerHTML = renderSessionsList(sessionsPageData);
@@ -403,16 +392,15 @@ function bindSessionsHandlers(content) {
       clearTimeout(searchTimeout);
       searchTimeout = setTimeout(async () => {
         await reloadSessionsPage(content);
-      }, 300);
+      }, SEARCH_DEBOUNCE_MS);
     });
   }
 }
 
 async function reloadSessionsPage(content) {
-  const extra = { limit: 50, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
+  const extra = { limit: SESSIONS_PAGE_LIMIT, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
   if (sessionsPageSearchTerm) extra.search = sessionsPageSearchTerm;
-  const ok = r => r.json();
-  const result = await fetch(buildUrl('/analytics/sessions', extra)).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
+  const result = await fetch(buildUrl('/analytics/sessions', extra)).then(fetchOk).catch(() => ({ sessions: [], total_count: 0 }));
   sessionsPageData = result.sessions || [];
   sessionsPageTotalCount = result.total_count || 0;
   $('#sessionsPageContainer').innerHTML = renderSessionsList(sessionsPageData);

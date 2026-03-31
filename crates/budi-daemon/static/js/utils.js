@@ -38,6 +38,8 @@ function buildUrl(path, extra) {
   return path + qs({ ...dateRange(currentPeriod), ...extra });
 }
 
+function fetchOk(r) { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); }
+
 function fmtNum(n) {
   if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + 'B';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -45,9 +47,9 @@ function fmtNum(n) {
   return String(n);
 }
 function fmtCost(n) {
+  if (n < 0) return '-' + fmtCost(-n);
   if (n >= 1000) return '$' + (n / 1000).toFixed(1) + 'K';
   if (n >= 100) return '$' + n.toFixed(0);
-  if (n >= 1) return '$' + n.toFixed(2);
   if (n > 0) return '$' + n.toFixed(2);
   return '$0.00';
 }
@@ -133,13 +135,20 @@ function formatModelName(raw) {
   return raw;
 }
 
-
-
 function fmtDurationMs(ms) {
   if (ms == null) return '';
   if (ms >= 120000) return Math.floor(ms / 60000) + 'm ' + Math.floor((ms % 60000) / 1000) + 's';
   if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
   return ms + 'ms';
+}
+function fmtSessionDuration(s) {
+  if (!s) return '--';
+  if (s.duration_ms) return fmtDurationMs(s.duration_ms);
+  if (s.started_at && s.ended_at) {
+    const ms = new Date(s.ended_at) - new Date(s.started_at);
+    if (ms > 0) return fmtDurationMs(ms);
+  }
+  return '--';
 }
 function fmtToolCalls(_, item) {
   return fmtNum(item.call_count || 0) + ' calls';

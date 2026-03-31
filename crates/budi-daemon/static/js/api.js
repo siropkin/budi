@@ -1,7 +1,6 @@
 async function loadAllData() {
-  // Fetch registered providers once (lightweight, doesn't change per period).
   if (registeredProviders.length === 0) {
-    registeredProviders = await fetch('/admin/providers').then(r => r.json()).catch(() => []);
+    registeredProviders = await fetch('/admin/providers').then(fetchOk).catch(() => []);
   }
   if (currentPage === 'overview') await loadStatsData();
   dataLoaded = true;
@@ -12,17 +11,16 @@ async function loadStatsData(signal) {
   const tzOffset = -new Date().getTimezoneOffset();
   const opts = signal ? { signal } : {};
 
-  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
   const [summary, cwds, cost, models, activityChart, providers, branches, tickets, activityTags] = await Promise.all([
-    fetch(buildUrl('/analytics/summary'), opts).then(ok),
-    fetch(buildUrl('/analytics/projects', { limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/cost'), opts).then(ok),
-    fetch(buildUrl('/analytics/models', { limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/activity', { granularity: gran, tz_offset: tzOffset }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/providers'), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/branches', { limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/tags', { key: 'ticket_id', limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/tags', { key: 'activity', limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
+    fetch(buildUrl('/analytics/summary'), opts).then(fetchOk),
+    fetch(buildUrl('/analytics/projects', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/cost'), opts).then(fetchOk),
+    fetch(buildUrl('/analytics/models', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/activity', { granularity: gran, tz_offset: tzOffset }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/providers'), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/branches', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/tags', { key: 'ticket_id', limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/tags', { key: 'activity', limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
   ]);
 
   statsData = { summary, cwds, cost, models, activityChart, branches, tickets, activityTags };
@@ -57,16 +55,15 @@ async function loadStatsData(signal) {
 
 async function loadInsightsData(signal) {
   const opts = signal ? { signal } : {};
-  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
 
   const [cacheEff, sessionCurve, costConf, subagent, speedTags, tools, mcp] = await Promise.all([
-    fetch(buildUrl('/analytics/cache-efficiency'), opts).then(ok).catch(() => null),
-    fetch(buildUrl('/analytics/session-cost-curve'), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/cost-confidence'), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/subagent-cost'), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/tags', { key: 'speed', limit: 10 }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/tools', { limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
-    fetch(buildUrl('/analytics/mcp', { limit: DEFAULT_CHART_ROWS }), opts).then(ok).catch(() => []),
+    fetch(buildUrl('/analytics/cache-efficiency'), opts).then(fetchOk).catch(() => null),
+    fetch(buildUrl('/analytics/session-cost-curve'), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/cost-confidence'), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/subagent-cost'), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/tags', { key: 'speed', limit: 10 }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/tools', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
+    fetch(buildUrl('/analytics/mcp', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
   ]);
 
   insightsData = { cacheEff, sessionCurve, costConf, subagent, speedTags, tools, mcp };
@@ -74,26 +71,25 @@ async function loadInsightsData(signal) {
 
 async function loadSessionsPageData(signal) {
   const opts = signal ? { signal } : {};
-  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
 
-  const extra = { limit: 50, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
+  const extra = { limit: SESSIONS_PAGE_LIMIT, sort_by: sessionsPageSortCol, sort_asc: sessionsPageSortAsc };
   if (sessionsPageSearchTerm) extra.search = sessionsPageSearchTerm;
-  const result = await fetch(buildUrl('/analytics/sessions', extra), opts).then(ok).catch(() => ({ sessions: [], total_count: 0 }));
+  const result = await fetch(buildUrl('/analytics/sessions', extra), opts).then(fetchOk).catch(() => ({ sessions: [], total_count: 0 }));
   sessionsPageData = result.sessions || [];
   sessionsPageTotalCount = result.total_count || 0;
 }
 
-async function loadSessionMessages(sessionId) {
-  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
-  return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/messages').then(ok).catch(() => []);
+async function loadSessionMessages(sessionId, signal) {
+  const opts = signal ? { signal } : {};
+  return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/messages', opts).then(fetchOk).catch(() => []);
 }
 
-async function loadSessionTags(sessionId) {
-  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
-  return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/tags').then(ok).catch(() => []);
+async function loadSessionTags(sessionId, signal) {
+  const opts = signal ? { signal } : {};
+  return fetch('/analytics/sessions/' + encodeURIComponent(sessionId) + '/tags', opts).then(fetchOk).catch(() => []);
 }
 
-async function loadSessionHealth(sessionId) {
-  const ok = r => { if (!r.ok) throw new Error(`${r.url}: ${r.status}`); return r.json(); };
-  return fetch('/analytics/session-health?session_id=' + encodeURIComponent(sessionId)).then(ok).catch(() => null);
+async function loadSessionHealth(sessionId, signal) {
+  const opts = signal ? { signal } : {};
+  return fetch('/analytics/session-health?session_id=' + encodeURIComponent(sessionId), opts).then(fetchOk).catch(() => null);
 }
