@@ -113,9 +113,13 @@ Budi adds a live cost display to Claude Code, installed automatically by `budi i
 
 `🟢 budi · $4.92 session · session healthy`
 
-The default "coach" mode shows your current session cost plus a health indicator. When issues are detected, you get actionable tips:
+The default `coach` preset shows your current session cost plus a health indicator. When Budi spots a problem, the short tip explains what to do next:
 
-`🟡 budi · $12.50 session · context growing — consider /compact`
+`🟡 budi · $12.50 session · context growing - compact soon`
+
+Early in a session, before there is enough signal to score health, the status line stays neutral:
+
+`⚪ budi · session starting`
 
 Customize slots in `~/.config/budi/statusline.toml`:
 
@@ -228,7 +232,15 @@ The MCP server is a thin HTTP client to the daemon — it never touches the data
 
 ## Session health
 
-Budi monitors four vitals for every active session and provides provider-aware tips (different advice for Claude Code vs Cursor):
+Budi monitors four vitals for every active session and turns them into plain-language tips.
+
+The scoring is intentionally conservative:
+- It waits until there is enough data before scoring a vital.
+- It measures the current working stretch, so a `/compact` resets context-based checks.
+- It looks at the active model stretch for cache reuse, so model switches do not poison the whole session.
+- It prefers concrete next steps over internal jargon.
+
+Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`, while Cursor suggestions point you toward a fresh composer session when the conversation has drifted.
 
 | Vital | What it detects | Yellow | Red |
 |-------|----------------|--------|-----|
@@ -237,7 +249,7 @@ Budi monitors four vitals for every active session and provides provider-aware t
 | **Cost Per Turn** | Later turns cost much more than earlier ones | 2x+ growth and meaningful cents/turn | 4x+ growth and high cents/turn |
 | **Retry Loops** | Agent is repeating the same failing move | One suspicious retry loop | Repeated or severe retry loops |
 
-Health state shows in the status line and on the session detail page in the dashboard. When issues are detected, tips stay plain-language and suggest concrete next actions — `/compact` or `/clear` for Claude Code, or a fresh composer session for Cursor when focus has drifted.
+Health state appears in both the status line and the session detail page in the dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh."
 
 ## Privacy
 
