@@ -106,7 +106,35 @@ pub fn cmd_stats(
     if json_output {
         let (since, until) = period_date_range(period);
         let summary = client.summary(since.as_deref(), until.as_deref(), provider.as_deref())?;
-        println!("{}", serde_json::to_string_pretty(&summary)?);
+        let cost = client.cost(since.as_deref(), until.as_deref(), provider.as_deref())?;
+        let mut obj = serde_json::to_value(&summary)?;
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "total_cost".to_string(),
+                serde_json::json!(cost.total_cost),
+            );
+            map.insert(
+                "input_cost".to_string(),
+                serde_json::json!(cost.input_cost),
+            );
+            map.insert(
+                "output_cost".to_string(),
+                serde_json::json!(cost.output_cost),
+            );
+            map.insert(
+                "cache_write_cost".to_string(),
+                serde_json::json!(cost.cache_write_cost),
+            );
+            map.insert(
+                "cache_read_cost".to_string(),
+                serde_json::json!(cost.cache_read_cost),
+            );
+            map.insert(
+                "cache_savings".to_string(),
+                serde_json::json!(cost.cache_savings),
+            );
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
     }
 

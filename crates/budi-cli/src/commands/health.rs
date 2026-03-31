@@ -50,10 +50,11 @@ fn render_health(h: &SessionHealth) {
         "{icon} {bold}Session Health: {color}{}{reset}",
         h.state.to_uppercase()
     );
+    let cost_dollars = h.total_cost_cents / 100.0;
+    let cost_display = if cost_dollars == 0.0 { 0.0 } else { cost_dollars };
     println!(
         "  {dim}{} messages · ${:.2} total{reset}",
-        h.message_count,
-        h.total_cost_cents / 100.0
+        h.message_count, cost_display
     );
     println!();
 

@@ -87,13 +87,25 @@ pub fn render_template(template: &str, values: &HashMap<String, String>) -> Stri
     result
 }
 
+const FALLBACK_SLOTS: &[&str] = &["today", "week", "month"];
+
 /// Render slots as a separator-joined string.
+/// Falls back to basic cost slots if the requested slots produce nothing.
 fn render_slots(slots: &[String], values: &HashMap<String, String>, sep: &str) -> String {
-    slots
+    let result: String = slots
         .iter()
         .filter_map(|slot| values.get(slot).map(|v| format!("{v} {slot}")))
         .collect::<Vec<_>>()
-        .join(sep)
+        .join(sep);
+    if result.is_empty() {
+        FALLBACK_SLOTS
+            .iter()
+            .filter_map(|slot| values.get(*slot).map(|v| format!("{v} {slot}")))
+            .collect::<Vec<_>>()
+            .join(sep)
+    } else {
+        result
+    }
 }
 
 /// Health-aware rendering for coach/full presets.
@@ -157,9 +169,16 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
     let stdin_json = if io::stdin().is_terminal() {
         None
     } else {
-        let mut input = String::new();
-        let _ = io::stdin().read_to_string(&mut input);
-        serde_json::from_str::<Value>(&input).ok()
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = String::new();
+            let _ = io::stdin().read_to_string(&mut input);
+            let _ = tx.send(input);
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(input) if !input.trim().is_empty() => serde_json::from_str::<Value>(&input).ok(),
+            _ => None,
+        }
     };
 
     let cwd = stdin_json
@@ -270,21 +289,21 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
             if let Some(ref template) = sl_config.format {
                 println!("{}", render_template(template, &values));
             } else if has_health {
-                if let Some(line) = render_coach(&statusline_data, &extra, false, "budi") {
-                    println!("{line}");
-                }
+                let line = render_coach(&statusline_data, &extra, false, "budi")
+                    .unwrap_or_else(|| render_slots(&effective, &values, " · "));
+                println!("{line}");
             } else {
                 println!("{}", render_slots(&effective, &values, " · "));
             }
         }
         StatuslineFormat::Starship => {
-            if has_health {
-                if let Some(line) = render_coach(&statusline_data, &extra, false, "budi") {
-                    println!("{line}");
-                }
+            let line = if has_health {
+                render_coach(&statusline_data, &extra, false, "budi")
+                    .unwrap_or_else(|| render_slots(&effective, &values, " · "))
             } else {
-                println!("{}", render_slots(&effective, &values, " · "));
-            }
+                render_slots(&effective, &values, " · ")
+            };
+            println!("{line}");
         }
         StatuslineFormat::Claude => {
             let budi_link = format!(
@@ -295,12 +314,8 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
             let reset = "\x1b[0m";
             let yellow = "\x1b[33m";
 
-            if has_health {
-                if let Some(coach_line) = render_coach(&statusline_data, &extra, true, &budi_link) {
-                    println!("{coach_line}");
-                }
-            } else {
-                let parts: Vec<String> = effective
+            let render_cost_line = |slots: &[String]| -> String {
+                let mut parts: Vec<String> = slots
                     .iter()
                     .filter_map(|slot| {
                         values
@@ -308,9 +323,26 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
                             .map(|v| format!("{yellow}{v}{reset} {slot}"))
                     })
                     .collect();
-
+                if parts.is_empty() {
+                    parts = FALLBACK_SLOTS
+                        .iter()
+                        .filter_map(|slot| {
+                            values
+                                .get(*slot)
+                                .map(|v| format!("{yellow}{v}{reset} {slot}"))
+                        })
+                        .collect();
+                }
                 let joined = parts.join(&format!(" {dim}·{reset} "));
-                println!("{budi_link} {dim}·{reset} {joined}");
+                format!("{budi_link} {dim}·{reset} {joined}")
+            };
+
+            if has_health {
+                let line = render_coach(&statusline_data, &extra, true, &budi_link)
+                    .unwrap_or_else(|| render_cost_line(&effective));
+                println!("{line}");
+            } else {
+                println!("{}", render_cost_line(&effective));
             }
         }
     }

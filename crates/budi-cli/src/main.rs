@@ -84,7 +84,7 @@ Examples:
         #[arg(long)]
         tag: Option<String>,
         /// Output format: text (default) or json
-        #[arg(long, value_enum, default_value_t = StatsFormat::Text)]
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
     },
     /// Sync recent transcripts (last 30 days). Use --all for full history, --force to re-ingest from scratch.
