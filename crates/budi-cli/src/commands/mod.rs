@@ -103,7 +103,7 @@ pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
     let out = serde_json::to_string_pretty(value)?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     fs::write(&tmp, &out)
         .with_context(|| format!("Failed to write {}", tmp.display()))?;
     fs::rename(&tmp, path)

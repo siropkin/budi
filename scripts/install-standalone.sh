@@ -30,7 +30,7 @@ detect_target() {
   case "$os" in
     Linux)
       # Detect musl-based systems (Alpine, Void, etc.) — prebuilt binaries require glibc.
-      if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+      if [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl); then
         fail "musl libc detected. Prebuilt binaries require glibc. Install from source instead: https://github.com/siropkin/budi#install"
       fi
       echo "${arch}-unknown-linux-gnu"
@@ -114,6 +114,8 @@ main() {
     if [ -x "$pkg_dir/$bin" ]; then
       install -m 0755 "$pkg_dir/$bin" "$BIN_DIR/$bin"
       log "Installed $bin -> $BIN_DIR/$bin"
+    else
+      fail "Missing binary in release archive: $bin"
     fi
   done
 
@@ -158,7 +160,7 @@ main() {
         log "Added $BIN_DIR to PATH in $shell_profile"
         log "Restart your terminal or run: source $shell_profile"
       fi
-    elif case "$current_shell" in */fish) true;; *) false;; esac; then
+    elif [ "${current_shell##*/}" = "fish" ]; then
       : # Fish PATH was configured in the case block above — nothing to do here.
     else
       log ""

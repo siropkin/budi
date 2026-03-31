@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -126,13 +127,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
         if !status.success() {
             eprintln!("brew upgrade failed. Attempting to restart daemon with current binaries...");
-            let repo_root = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| config::find_repo_root(&cwd).ok());
-            let cfg = match &repo_root {
-                Some(root) => config::load_or_default(root).unwrap_or_default(),
-                None => config::BudiConfig::default(),
-            };
+            let (repo_root, cfg) = resolve_current_config();
             let _ = ensure_daemon_running(repo_root.as_deref(), &cfg);
             anyhow::bail!("brew upgrade exited with {}", status);
         }
@@ -174,13 +169,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
         if !status.success() {
             eprintln!("Installer failed. Attempting to restart daemon with current binaries...");
-            let repo_root = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| config::find_repo_root(&cwd).ok());
-            let cfg = match &repo_root {
-                Some(root) => config::load_or_default(root).unwrap_or_default(),
-                None => config::BudiConfig::default(),
-            };
+            let (repo_root, cfg) = resolve_current_config();
             let _ = ensure_daemon_running(repo_root.as_deref(), &cfg);
             anyhow::bail!("Installer exited with {}", status);
         }
@@ -208,13 +197,7 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
     // Ensure OTEL env vars are configured (for users upgrading from pre-OTEL versions)
     {
-        let repo_root = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| config::find_repo_root(&cwd).ok());
-        let config = match &repo_root {
-            Some(root) => config::load_or_default(root).unwrap_or_default(),
-            None => config::BudiConfig::default(),
-        };
+        let (repo_root, config) = resolve_current_config();
         crate::commands::init::install_otel_env_vars(&config);
         crate::commands::init::install_mcp_server();
 
@@ -253,6 +236,17 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     println!("{dim}Restart Claude Code and Cursor to pick up any changes.{reset}");
 
     Ok(())
+}
+
+fn resolve_current_config() -> (Option<PathBuf>, config::BudiConfig) {
+    let repo_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| config::find_repo_root(&cwd).ok());
+    let cfg = match &repo_root {
+        Some(root) => config::load_or_default(root).unwrap_or_default(),
+        None => config::BudiConfig::default(),
+    };
+    (repo_root, cfg)
 }
 
 /// Try to find a GitHub token from env vars or `gh auth token`.

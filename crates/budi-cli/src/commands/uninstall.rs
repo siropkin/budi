@@ -28,22 +28,18 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     if home.is_empty() {
         eprintln!("{yellow}warning: could not determine home directory — skipping hook/config cleanup{reset}");
     } else {
-        print!("Removing Claude Code hooks... ");
-        match remove_claude_code_hooks(&home) {
-            Ok(true) => {
-                // Verify removal by re-reading the file
-                let settings_path = PathBuf::from(&home).join(CLAUDE_USER_SETTINGS);
-                if verify_no_budi_hooks_cc(&settings_path) {
-                    println!("{green}✓{reset} removed (verified)");
-                } else {
-                    println!(
-                        "{yellow}✓{reset} removed but some budi hooks may remain — check {}",
-                        settings_path.display()
-                    );
-                }
+        // 2-6. Remove Claude Code integrations (single file pass)
+        match remove_all_from_claude_code(&home) {
+            Ok((hooks, otel, mcp, statusline)) => {
+                let label = |removed| if removed { format!("{green}✓{reset} removed") } else { "none found".to_string() };
+                println!("Removing Claude Code hooks... {}", label(hooks));
+                println!("Removing OTEL env vars... {}", label(otel));
+                println!("Removing MCP server... {}", label(mcp));
+                println!("Removing status line... {}", label(statusline));
             }
-            Ok(false) => println!("none found"),
-            Err(e) => println!("{yellow}warning: {e}{reset}"),
+            Err(e) => {
+                println!("Removing Claude Code integrations... {yellow}warning: {e}{reset}");
+            }
         }
 
         // 3. Remove hooks from Cursor
@@ -60,30 +56,6 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
                     );
                 }
             }
-            Ok(false) => println!("none found"),
-            Err(e) => println!("{yellow}warning: {e}{reset}"),
-        }
-
-        // 4. Remove OTEL env vars from Claude Code
-        print!("Removing OTEL env vars... ");
-        match remove_otel_env_vars(&home) {
-            Ok(true) => println!("{green}✓{reset} removed"),
-            Ok(false) => println!("none found"),
-            Err(e) => println!("{yellow}warning: {e}{reset}"),
-        }
-
-        // 5. Remove MCP server from Claude Code
-        print!("Removing MCP server... ");
-        match remove_mcp_server(&home) {
-            Ok(true) => println!("{green}✓{reset} removed"),
-            Ok(false) => println!("none found"),
-            Err(e) => println!("{yellow}warning: {e}{reset}"),
-        }
-
-        // 6. Remove status line from Claude Code
-        print!("Removing status line... ");
-        match remove_statusline(&home) {
-            Ok(true) => println!("{green}✓{reset} removed"),
             Ok(false) => println!("none found"),
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
@@ -161,47 +133,108 @@ fn stop_daemon() -> Result<bool> {
     }
 }
 
-fn remove_claude_code_hooks(home: &str) -> Result<bool> {
+/// Remove all budi integrations from ~/.claude/settings.json in a single read-modify-write pass.
+/// Returns (hooks_removed, otel_removed, mcp_removed, statusline_removed).
+fn remove_all_from_claude_code(home: &str) -> Result<(bool, bool, bool, bool)> {
     let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
     if !settings_path.exists() {
-        return Ok(false);
+        return Ok((false, false, false, false));
     }
 
     let mut settings = super::read_json_or_default(&settings_path)?;
 
-    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return Ok(false);
+    // 1. Remove hooks
+    let hooks_removed = {
+        let mut changed = false;
+        if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            let events: Vec<String> = hooks.keys().cloned().collect();
+            for event in events {
+                if let Some(arr) = hooks.get_mut(&event).and_then(|v| v.as_array_mut()) {
+                    let before = arr.len();
+                    arr.retain(|entry| !super::is_budi_cc_hook_entry(entry));
+                    if arr.len() < before {
+                        changed = true;
+                    }
+                    if arr.is_empty() {
+                        hooks.remove(&event);
+                    }
+                }
+            }
+            if hooks.is_empty()
+                && let Some(obj) = settings.as_object_mut()
+            {
+                obj.remove("hooks");
+            }
+        }
+        changed
     };
 
-    let mut changed = false;
-    let events: Vec<String> = hooks.keys().cloned().collect();
-    for event in events {
-        let Some(arr) = hooks.get_mut(&event).and_then(|v| v.as_array_mut()) else {
-            continue;
-        };
-
-        let before = arr.len();
-        arr.retain(|entry| !super::is_budi_cc_hook_entry(entry));
-        if arr.len() < before {
-            changed = true;
+    // 2. Remove OTEL env vars
+    let otel_removed = {
+        let mut changed = false;
+        let is_budi_endpoint = settings
+            .get("env")
+            .and_then(|e| e.as_object())
+            .and_then(|env| env.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|url| {
+                let lower = url.to_lowercase();
+                let is_local = lower.contains("127.0.0.1") || lower.contains("localhost");
+                let is_budi_port =
+                    lower.contains(&format!(":{}", budi_core::config::DEFAULT_DAEMON_PORT));
+                is_local && is_budi_port
+            });
+        if is_budi_endpoint
+            && let Some(env) = settings.get_mut("env").and_then(|e| e.as_object_mut())
+        {
+            for key in &[
+                "CLAUDE_CODE_ENABLE_TELEMETRY",
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "OTEL_EXPORTER_OTLP_PROTOCOL",
+                "OTEL_METRICS_EXPORTER",
+                "OTEL_LOGS_EXPORTER",
+            ] {
+                if env.remove(*key).is_some() {
+                    changed = true;
+                }
+            }
+            if env.is_empty()
+                && let Some(obj) = settings.as_object_mut()
+            {
+                obj.remove("env");
+            }
         }
+        changed
+    };
 
-        if arr.is_empty() {
-            hooks.remove(&event);
+    // 3. Remove MCP server
+    let mcp_removed = {
+        let removed = settings
+            .get_mut("mcpServers")
+            .and_then(|m| m.as_object_mut())
+            .and_then(|mcp| mcp.remove("budi"))
+            .is_some();
+        if removed
+            && let Some(mcp) = settings.get("mcpServers").and_then(|m| m.as_object())
+            && mcp.is_empty()
+            && let Some(obj) = settings.as_object_mut()
+        {
+            obj.remove("mcpServers");
         }
-    }
+        removed
+    };
 
-    if hooks.is_empty()
-        && let Some(obj) = settings.as_object_mut()
-    {
-        obj.remove("hooks");
-    }
+    // 4. Remove statusline
+    let statusline_removed = settings
+        .as_object_mut()
+        .and_then(|obj| obj.remove("statusLine"))
+        .is_some();
 
-    if changed {
+    if hooks_removed || otel_removed || mcp_removed || statusline_removed {
         super::atomic_write_json(&settings_path, &settings)?;
     }
 
-    Ok(changed)
+    Ok((hooks_removed, otel_removed, mcp_removed, statusline_removed))
 }
 
 fn remove_cursor_hooks(home: &str) -> Result<bool> {
@@ -241,53 +274,6 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
     Ok(changed)
 }
 
-fn remove_mcp_server(home: &str) -> Result<bool> {
-    let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-
-    let mut settings = super::read_json_or_default(&settings_path)?;
-
-    let Some(mcp_servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|m| m.as_object_mut())
-    else {
-        return Ok(false);
-    };
-
-    if mcp_servers.remove("budi").is_none() {
-        return Ok(false);
-    }
-
-    if mcp_servers.is_empty()
-        && let Some(obj) = settings.as_object_mut()
-    {
-        obj.remove("mcpServers");
-    }
-
-    super::atomic_write_json(&settings_path, &settings)?;
-    Ok(true)
-}
-
-fn remove_statusline(home: &str) -> Result<bool> {
-    let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-
-    let mut settings = super::read_json_or_default(&settings_path)?;
-
-    let obj = settings
-        .as_object_mut()
-        .context("settings is not an object")?;
-    if obj.remove("statusLine").is_none() {
-        return Ok(false);
-    }
-
-    super::atomic_write_json(&settings_path, &settings)?;
-    Ok(true)
-}
 
 fn remove_data() -> Result<bool> {
     let data_dir = budi_core::config::budi_home_dir()?;
@@ -332,61 +318,6 @@ fn remove_launch_agents() -> Result<bool> {
     Ok(removed_any)
 }
 
-/// Remove budi OTEL env vars from ~/.claude/settings.json.
-fn remove_otel_env_vars(home: &str) -> Result<bool> {
-    let settings_path = PathBuf::from(home).join(CLAUDE_USER_SETTINGS);
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-
-    let mut settings = super::read_json_or_default(&settings_path)?;
-
-    let Some(env) = settings.get_mut("env").and_then(|e| e.as_object_mut()) else {
-        return Ok(false);
-    };
-
-    let is_budi_endpoint = env
-        .get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .and_then(|v| v.as_str())
-        .is_some_and(|url| {
-            let lower = url.to_lowercase();
-            let is_local_address = lower.contains("127.0.0.1") || lower.contains("localhost");
-            let is_budi_port =
-                lower.contains(&format!(":{}", budi_core::config::DEFAULT_DAEMON_PORT));
-            is_local_address && is_budi_port
-        });
-
-    if !is_budi_endpoint {
-        return Ok(false);
-    }
-
-    let otel_keys = [
-        "CLAUDE_CODE_ENABLE_TELEMETRY",
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_PROTOCOL",
-        "OTEL_METRICS_EXPORTER",
-        "OTEL_LOGS_EXPORTER",
-    ];
-
-    let mut changed = false;
-    for key in &otel_keys {
-        if env.remove(*key).is_some() {
-            changed = true;
-        }
-    }
-
-    if env.is_empty()
-        && let Some(obj) = settings.as_object_mut()
-    {
-        obj.remove("env");
-    }
-
-    if changed {
-        super::atomic_write_json(&settings_path, &settings)?;
-    }
-
-    Ok(changed)
-}
 
 fn print_binary_removal_hint() {
     println!("To remove the binaries:");
@@ -402,24 +333,6 @@ fn print_binary_removal_hint() {
         println!("  # If installed via shell script:");
         println!("  rm ~/.local/bin/budi ~/.local/bin/budi-daemon");
     }
-}
-
-/// Re-read Claude Code settings and confirm no budi hooks remain.
-fn verify_no_budi_hooks_cc(path: &PathBuf) -> bool {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return true; // file gone = hooks gone
-    };
-    let Ok(settings) = serde_json::from_str::<Value>(&raw) else {
-        return false; // malformed JSON — cannot verify
-    };
-    let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) else {
-        return true;
-    };
-    !hooks.values().any(|arr| {
-        arr.as_array()
-            .map(|a| a.iter().any(super::is_budi_cc_hook_entry))
-            .unwrap_or(false)
-    })
 }
 
 /// Re-read Cursor hooks and confirm no budi hooks remain.

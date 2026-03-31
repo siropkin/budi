@@ -21,10 +21,9 @@ if ($Version) {
 
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 if ($arch -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
-    $target = "aarch64-pc-windows-msvc"
-} else {
-    $target = "x86_64-pc-windows-msvc"
+    Log "ARM64 detected — using x86_64 build (runs via Windows x86 emulation)"
 }
+$target = "x86_64-pc-windows-msvc"
 $assetName = "budi-$tag-$target.zip"
 $baseUrl = "https://github.com/$Repo/releases/download/$tag"
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "budi-install-$(Get-Random)"

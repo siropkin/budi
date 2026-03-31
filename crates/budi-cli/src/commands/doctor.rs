@@ -45,14 +45,14 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         println!("  {green}\u{2713}{reset} config: using defaults");
     }
 
-    // Check that budi-daemon binary exists on PATH (cross-platform).
-    let daemon_bin_found = std::process::Command::new("budi-daemon")
+    // Check that budi-daemon binary exists on PATH and version matches CLI.
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let daemon_output = std::process::Command::new("budi-daemon")
         .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .output()
+        .ok()
+        .filter(|o| o.status.success());
+    let daemon_bin_found = daemon_output.is_some();
     doctor_check("budi-daemon binary", daemon_bin_found, None);
     if !daemon_bin_found {
         issues.push(
@@ -60,20 +60,14 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         );
     }
 
-    // Version consistency: CLI and daemon should be the same version
-    let cli_version = env!("CARGO_PKG_VERSION");
-    let daemon_version = std::process::Command::new("budi-daemon")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .strip_prefix("budi-daemon ")
-                .unwrap_or(String::from_utf8_lossy(&o.stdout).trim())
-                .to_string()
-        });
+    let daemon_version = daemon_output.map(|o| {
+        let raw = String::from_utf8_lossy(&o.stdout);
+        let trimmed = raw.trim();
+        trimmed
+            .strip_prefix("budi-daemon ")
+            .unwrap_or(trimmed)
+            .to_string()
+    });
     match daemon_version {
         Some(ref dv) if dv == cli_version => {
             println!("  {green}\u{2713}{reset} version: v{cli_version} (CLI and daemon match)");

@@ -23,7 +23,7 @@ try {
 }
 
 # 3. Remove binaries.
-foreach ($bin in @("budi.exe", "budi-daemon.exe", "budi-bench.exe")) {
+foreach ($bin in @("budi.exe", "budi-daemon.exe")) {
     $target = Join-Path $BinDir $bin
     if (Test-Path $target) {
         Remove-Item $target -Force

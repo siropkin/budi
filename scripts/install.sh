@@ -305,7 +305,7 @@ main() {
         log "Added $BIN_DIR to PATH in $shell_profile"
         log "Restart your terminal or run: source $shell_profile"
       fi
-    elif case "$current_shell" in */fish) true;; *) false;; esac; then
+    elif [[ "$current_shell" == */fish ]]; then
       : # Already handled above.
     else
       log ""

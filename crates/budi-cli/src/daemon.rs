@@ -243,13 +243,26 @@ fn daemon_listener_pids(port: u16) -> Result<Vec<u32>> {
 }
 
 fn daemon_process_command(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .arg("-o")
-        .arg("command=")
-        .output()
-        .ok()?;
+    let output = if cfg!(target_os = "windows") {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
+                ),
+            ])
+            .output()
+            .ok()?
+    } else {
+        Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("command=")
+            .output()
+            .ok()?
+    };
     if !output.status.success() {
         return None;
     }

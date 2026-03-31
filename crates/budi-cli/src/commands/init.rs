@@ -217,7 +217,7 @@ fn install_claude_code_settings(config: &config::BudiConfig) -> Vec<String> {
         let home = budi_core::config::home_dir()?;
         let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
         let mut settings = super::read_json_or_default(&settings_path)?;
-        let mut warnings = Vec::new();
+        let warnings = Vec::new();
 
         // 1. Remove legacy hooks (old-style with subcommand args)
         if super::statusline::remove_legacy_budi_hooks_from_value(&mut settings) {
@@ -242,7 +242,7 @@ fn install_claude_code_settings(config: &config::BudiConfig) -> Vec<String> {
         }
 
         // 3. Claude Code hooks
-        let (hooks_changed, hook_warnings) = apply_cc_hooks(&mut settings);
+        let hooks_changed = apply_cc_hooks(&mut settings);
         if hooks_changed {
             println!(
                 "  Hooks: installed Claude Code hooks in {}",
@@ -251,7 +251,6 @@ fn install_claude_code_settings(config: &config::BudiConfig) -> Vec<String> {
         } else {
             println!("  Hooks: Claude Code hooks already installed");
         }
-        warnings.extend(hook_warnings);
 
         // 4. MCP server
         if apply_mcp_server(&mut settings) {
@@ -316,12 +315,11 @@ fn apply_statusline(settings: &mut Value) -> Result<bool> {
 /// Wrapped with `|| true` so the hook never blocks the host agent.
 const BUDI_HOOK_CMD: &str = "budi hook 2>/dev/null || true";
 
-/// Apply Claude Code hooks. Returns (changed, warnings).
-fn apply_cc_hooks(settings: &mut Value) -> (bool, Vec<String>) {
-    let warnings = Vec::new();
+/// Apply Claude Code hooks. Returns true if any changes were made.
+fn apply_cc_hooks(settings: &mut Value) -> bool {
     let obj = match settings.as_object_mut() {
         Some(o) => o,
-        None => return (false, warnings),
+        None => return false,
     };
     let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
     if !hooks.is_object() {
@@ -366,7 +364,7 @@ fn apply_cc_hooks(settings: &mut Value) -> (bool, Vec<String>) {
         }
     }
 
-    (changed, warnings)
+    changed
 }
 
 /// Apply MCP server configuration. Returns true if changed.

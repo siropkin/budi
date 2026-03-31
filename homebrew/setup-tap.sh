@@ -30,6 +30,7 @@ curl -fsSL "https://github.com/siropkin/budi/releases/download/${TAG}/SHA256SUMS
 AARCH64_DARWIN=$(awk '/aarch64-apple-darwin\.tar\.gz$/ {print $1}' "$TEMP_DIR/sums")
 X86_64_DARWIN=$(awk '/x86_64-apple-darwin\.tar\.gz$/ {print $1}' "$TEMP_DIR/sums")
 X86_64_LINUX=$(awk '/x86_64-unknown-linux-gnu\.tar\.gz$/ {print $1}' "$TEMP_DIR/sums")
+AARCH64_LINUX=$(awk '/aarch64-unknown-linux-gnu\.tar\.gz$/ {print $1}' "$TEMP_DIR/sums")
 
 # Render formula
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +39,7 @@ sed \
   -e "s/{{SHA256_AARCH64_DARWIN}}/${AARCH64_DARWIN}/g" \
   -e "s/{{SHA256_X86_64_DARWIN}}/${X86_64_DARWIN}/g" \
   -e "s/{{SHA256_X86_64_LINUX}}/${X86_64_LINUX}/g" \
+  -e "s/{{SHA256_AARCH64_LINUX}}/${AARCH64_LINUX}/g" \
   "${SCRIPT_DIR}/budi.rb" > "$TEMP_DIR/budi.rb"
 
 log "Rendered formula:"
