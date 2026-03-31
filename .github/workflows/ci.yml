@@ -41,6 +41,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit
+
       - name: Build release binaries
         run: cargo build --workspace --release --locked
 
@@ -50,24 +55,36 @@ jobs:
           ./target/release/budi-daemon --version
 
       - name: Integration smoke test (daemon endpoints)
+        env:
+          SMOKE_PORT: 19876
         run: |
-          ./target/release/budi-daemon serve --port 19876 &
+          ./target/release/budi-daemon serve --port "$SMOKE_PORT" &
           DAEMON_PID=$!
           trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
-          # Wait for daemon to be ready
           for i in $(seq 1 20); do
-            if curl -sf http://127.0.0.1:19876/health >/dev/null 2>&1; then
+            if curl -sf "http://127.0.0.1:${SMOKE_PORT}/health" >/dev/null 2>&1; then
               break
             fi
             sleep 0.25
           done
-          # Test endpoints (daemon has no data in CI, just verify they respond)
-          curl -sf http://127.0.0.1:19876/health | jq -e '.ok == true'
-          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19876/analytics/summary)
-          echo "analytics/summary returned HTTP $HTTP_CODE"
-          # Accept 200 (normal) or 500 (empty DB in CI — no data dir)
-          test "$HTTP_CODE" = "200" -o "$HTTP_CODE" = "500"
-          curl -sf http://127.0.0.1:19876/dashboard | head -c 100 | grep -q '<!DOCTYPE html\|<html'
+          curl -sf "http://127.0.0.1:${SMOKE_PORT}/health" >/dev/null 2>&1 || {
+            echo "::error::Daemon did not become healthy within 5s"
+            exit 1
+          }
+          curl -sf "http://127.0.0.1:${SMOKE_PORT}/health" | jq -e '.ok == true'
+          RESPONSE=$(curl -s -w '\n%{http_code}' "http://127.0.0.1:${SMOKE_PORT}/analytics/summary")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "analytics/summary returned 200"
+          elif [ "$HTTP_CODE" = "500" ]; then
+            echo "$BODY" | jq . >/dev/null 2>&1 || { echo "::error::500 response is not valid JSON: $BODY"; exit 1; }
+            echo "analytics/summary returned 500 (empty DB — valid JSON error)"
+          else
+            echo "::error::analytics/summary returned unexpected HTTP $HTTP_CODE"
+            exit 1
+          fi
+          curl -sf "http://127.0.0.1:${SMOKE_PORT}/dashboard" | head -c 100 | grep -q '<!DOCTYPE html\|<html'
           echo "All daemon endpoints responded correctly"
 
       - name: Test install script (from source build)
@@ -91,9 +108,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build
         run: cargo build --workspace --locked
@@ -143,3 +165,28 @@ jobs:
         run: |
           .\target\debug\budi.exe --version
           .\target\debug\budi-daemon.exe --version
+
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          foreach ($script in @("scripts/install-standalone.ps1", "scripts/uninstall-standalone.ps1")) {
+            $errors = $null
+            [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw $script), [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw "Syntax errors in ${script}: $($errors | Out-String)" }
+          }
+          Write-Host "PowerShell scripts have valid syntax"
+
+  ci-success:
+    if: always()
+    needs: [rust-checks, macos-build, windows-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs passed
+        run: |
+          if [[ "${{ needs.rust-checks.result }}" != "success" ]] || \
+             [[ "${{ needs.macos-build.result }}" != "success" ]] || \
+             [[ "${{ needs.windows-build.result }}" != "success" ]]; then
+            echo "::error::One or more CI jobs failed"
+            exit 1
+          fi
+          echo "All CI checks passed"

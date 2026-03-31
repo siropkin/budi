@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
@@ -12,23 +12,27 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
+  checks: read
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 jobs:
   ci-check:
     name: Verify CI passed
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Wait for CI workflow
         uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028fb74dc5a068cccc # v1.3.4
         with:
           ref: ${{ github.sha }}
-          check-name: rust-checks
+          check-name: ci-success
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
+          allowed-conclusions: success
 
   verify_tag_version:
     name: Verify tag matches Cargo version
@@ -40,8 +44,6 @@ jobs:
 
       - name: Validate tag and workspace version
         shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           expected_version="${RELEASE_TAG#v}"
@@ -108,8 +110,6 @@ jobs:
 
       - name: Package tarball
         shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
@@ -133,27 +133,21 @@ jobs:
             tar -C "${RUNNER_TEMP}" -czf "${archive}" "${package}"
           fi
 
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${archive}" > "${archive}.sha256"
-          else
-            shasum -a 256 "${archive}" > "${archive}.sha256"
-          fi
-
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.asset }}
           path: |
             *.tar.gz
-            *.tar.gz.sha256
             *.zip
-            *.zip.sha256
           if-no-files-found: error
 
   publish-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     needs: build-assets
+    permissions:
+      contents: write
     steps:
       - name: Download all packaged artifacts
         uses: actions/download-artifact@v4
@@ -175,7 +169,7 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           files: |
             dist/*.tar.gz
@@ -199,8 +193,6 @@ jobs:
 
       - name: Update formula
         shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           VER="${RELEASE_TAG#v}"
@@ -232,8 +224,6 @@ jobs:
 
       - name: Push to tap
         working-directory: homebrew-tap
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
