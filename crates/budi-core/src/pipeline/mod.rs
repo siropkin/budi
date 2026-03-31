@@ -45,13 +45,20 @@ impl Pipeline {
     /// Process a batch of messages through all enrichers.
     /// Returns a parallel Vec of tags for each message.
     /// Session-level tags (ticket_id, ticket_prefix, repo, etc.) are
-    /// deduplicated: only emitted for the first message in each session.
+    /// deduplicated and attached to the first **assistant** message in each
+    /// session. This is critical because analytics queries filter on
+    /// `role = 'assistant'` (where cost lives) — tags on user messages are
+    /// invisible to those queries.
     pub fn process(&mut self, messages: &mut [ParsedMessage]) -> Vec<Vec<Tag>> {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
         let mut all_tags = Vec::with_capacity(messages.len());
-        // Track (session_id, key, value) to avoid duplicate session-level tags.
         let mut seen_session_tags: HashSet<(String, String, String)> = HashSet::new();
         let session_level_keys = tk::SESSION_LEVEL_KEYS;
+
+        // Buffer session-level tags and activity from non-assistant messages.
+        // Flushed onto the next assistant message in the same session.
+        let mut pending_session_tags: HashMap<String, Vec<Tag>> = HashMap::new();
+        let mut pending_activity: HashMap<String, String> = HashMap::new();
 
         // Sort by (session_id, timestamp) to handle out-of-order batches.
         messages.sort_by(|a, b| {
@@ -64,35 +71,51 @@ impl Pipeline {
 
         for msg in messages.iter_mut() {
             let mut msg_tags = Vec::new();
+            let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
+
             for enricher in &mut self.enrichers {
                 for tag in enricher.enrich(msg) {
                     if session_level_keys.contains(&tag.key.as_str()) {
-                        let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
-                        let key = (dedup_id, tag.key.clone(), tag.value.clone());
+                        let key = (dedup_id.clone(), tag.key.clone(), tag.value.clone());
                         if !seen_session_tags.insert(key) {
-                            tracing::trace!(
-                                "pipeline: skipping duplicate session tag {}={}",
-                                tag.key,
-                                tag.value
-                            );
+                            continue;
+                        }
+                        if msg.role != "assistant" {
+                            pending_session_tags
+                                .entry(dedup_id.clone())
+                                .or_default()
+                                .push(tag);
                             continue;
                         }
                     }
                     msg_tags.push(tag);
                 }
             }
-            // Add "activity" tag from prompt_category (classified from user prompt text
-            // during JSONL parsing or from hook events). Only emit once per session.
+
+            // Buffer activity from user messages for the next assistant message.
             if let Some(ref cat) = msg.prompt_category {
-                let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
-                let key = (dedup_id, tk::ACTIVITY.to_string(), cat.clone());
-                if seen_session_tags.insert(key) {
-                    msg_tags.push(Tag {
-                        key: tk::ACTIVITY.to_string(),
-                        value: cat.clone(),
-                    });
+                pending_activity
+                    .entry(dedup_id.clone())
+                    .or_insert_with(|| cat.clone());
+            }
+
+            if msg.role == "assistant" {
+                // Flush any buffered session-level tags from prior user messages.
+                if let Some(buffered) = pending_session_tags.remove(&dedup_id) {
+                    msg_tags.extend(buffered);
+                }
+                // Emit activity tag.
+                if let Some(cat) = pending_activity.remove(&dedup_id) {
+                    let key = (dedup_id, tk::ACTIVITY.to_string(), cat.clone());
+                    if seen_session_tags.insert(key) {
+                        msg_tags.push(Tag {
+                            key: tk::ACTIVITY.to_string(),
+                            value: cat,
+                        });
+                    }
                 }
             }
+
             all_tags.push(msg_tags);
         }
         all_tags
@@ -340,5 +363,66 @@ mod tests {
             web_search_requests: 0,
             prompt_category: None,
         }
+    }
+
+    #[test]
+    fn session_level_tags_land_on_assistant_messages() {
+        use crate::config::TagsConfig;
+        let mut pipeline = Pipeline::default_pipeline(
+            Some(TagsConfig::default()),
+            std::collections::HashMap::new(),
+        );
+
+        let mut user_msg = test_msg();
+        user_msg.uuid = "u1".into();
+        user_msg.session_id = Some("sess-1".into());
+        user_msg.role = "user".into();
+        user_msg.cwd = Some("/tmp/test".into());
+        user_msg.repo_id = Some("github.com/test/repo".into());
+        user_msg.git_branch = Some("PROJ-123-feature".into());
+        user_msg.prompt_category = Some("bugfix".into());
+        user_msg.timestamp = "2026-03-14T18:13:42Z".parse().unwrap();
+
+        let mut asst_msg = test_msg();
+        asst_msg.uuid = "a1".into();
+        asst_msg.session_id = Some("sess-1".into());
+        asst_msg.role = "assistant".into();
+        asst_msg.model = Some("claude-opus".into());
+        asst_msg.output_tokens = 100;
+        asst_msg.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut msgs = vec![user_msg, asst_msg];
+        let all_tags = pipeline.process(&mut msgs);
+
+        let user_tags = &all_tags[0];
+        let asst_tags = &all_tags[1];
+
+        let session_keys: Vec<&str> = crate::tag_keys::SESSION_LEVEL_KEYS.to_vec();
+
+        for tag in user_tags {
+            assert!(
+                !session_keys.contains(&tag.key.as_str()),
+                "session-level tag '{}' should NOT be on user message, got value '{}'",
+                tag.key,
+                tag.value,
+            );
+        }
+
+        let asst_keys: Vec<&str> = asst_tags.iter().map(|t| t.key.as_str()).collect();
+        assert!(
+            asst_keys.contains(&"repo"),
+            "assistant message should have 'repo' tag, got: {:?}",
+            asst_keys
+        );
+        assert!(
+            asst_keys.contains(&"ticket_id"),
+            "assistant message should have 'ticket_id' tag, got: {:?}",
+            asst_keys
+        );
+        assert!(
+            asst_keys.contains(&"activity"),
+            "assistant message should have 'activity' tag, got: {:?}",
+            asst_keys
+        );
     }
 }
