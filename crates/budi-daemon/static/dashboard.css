@@ -49,8 +49,6 @@ a:hover { text-decoration: underline; }
 .card .sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
-.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
-@media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
 @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
 
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
@@ -176,16 +174,6 @@ a:hover { text-decoration: underline; }
 .page-tabs button:hover:not(.active) { color: var(--text); }
 
 /* Sessions page */
-.session-detail-panel {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 16px; margin-bottom: 16px;
-}
-.session-detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.session-detail-header .back-btn {
-  background: none; border: 1px solid var(--border); color: var(--text-muted);
-  padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 0.82rem;
-}
-.session-detail-header .back-btn:hover { color: var(--text); border-color: var(--accent); }
 .session-meta { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
 .session-meta .meta-item { font-size: 0.82rem; }
 .session-meta .meta-label { color: var(--text-muted); }

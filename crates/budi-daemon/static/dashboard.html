@@ -13,19 +13,19 @@
   <div class="header-left">
     <span class="logo">&#x1f4ca;</span>
     <h1>budi</h1>
-    <div class="page-tabs">
-      <button data-page="overview" class="active">Overview</button>
-      <button data-page="insights">Insights</button>
-      <button data-page="sessions">Sessions</button>
-      <button data-page="settings">Settings</button>
+    <div class="page-tabs" role="tablist" aria-label="Dashboard pages">
+      <button data-page="overview" class="active" role="tab" aria-selected="true">Overview</button>
+      <button data-page="insights" role="tab" aria-selected="false">Insights</button>
+      <button data-page="sessions" role="tab" aria-selected="false">Sessions</button>
+      <button data-page="settings" role="tab" aria-selected="false">Settings</button>
     </div>
   </div>
   <div class="header-right">
-    <div class="period-tabs">
-      <button data-period="today" class="active">Today</button>
-      <button data-period="week">Week</button>
-      <button data-period="month">Month</button>
-      <button data-period="all">All</button>
+    <div class="period-tabs" role="tablist" aria-label="Time period">
+      <button data-period="today" class="active" role="tab" aria-selected="true">Today</button>
+      <button data-period="week" role="tab" aria-selected="false">Week</button>
+      <button data-period="month" role="tab" aria-selected="false">Month</button>
+      <button data-period="all" role="tab" aria-selected="false">All</button>
     </div>
   </div>
 </div>

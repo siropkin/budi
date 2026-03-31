@@ -97,9 +97,7 @@ function fillActivityBuckets(chartData) {
     // Compute start in local time (same logic as dateRange)
     let start, end;
     if (currentPeriod === 'week') {
-      const dow = now.getDay();
-      const mondayOffset = dow === 0 ? 6 : dow - 1;
-      start = new Date(y, mo, day - mondayOffset);
+      start = weekStart(now);
       end = new Date(start);
       end.setDate(end.getDate() + 6); // Monday to Sunday
     } else if (currentPeriod === 'month') {

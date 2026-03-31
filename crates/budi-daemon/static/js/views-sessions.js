@@ -356,7 +356,10 @@ function bindSessionsHandlers(content) {
     if (row) {
       selectedSessionId = row.dataset.sessionId;
       history.pushState(null, '', '/dashboard/sessions/' + encodeURIComponent(selectedSessionId));
-      renderSessionDetail(selectedSessionId, content);
+      renderSessionDetail(selectedSessionId, content).catch(err => {
+        content.innerHTML = renderError(err);
+        bindErrorHandlers();
+      });
       return;
     }
 
@@ -403,6 +406,8 @@ async function reloadSessionsPage(content) {
   const result = await fetch(buildUrl('/analytics/sessions', extra)).then(fetchOk).catch(() => ({ sessions: [], total_count: 0 }));
   sessionsPageData = result.sessions || [];
   sessionsPageTotalCount = result.total_count || 0;
-  $('#sessionsPageContainer').innerHTML = renderSessionsList(sessionsPageData);
+  const container = $('#sessionsPageContainer');
+  if (!container) return;
+  container.innerHTML = renderSessionsList(sessionsPageData);
   bindSessionsHandlers(content);
 }

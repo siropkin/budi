@@ -1,9 +1,8 @@
-async function loadAllData() {
+async function ensureProvidersLoaded(signal) {
   if (registeredProviders.length === 0) {
-    registeredProviders = await fetch('/admin/providers').then(fetchOk).catch(() => []);
+    const opts = signal ? { signal } : {};
+    registeredProviders = await fetch('/admin/providers', opts).then(fetchOk).catch(() => []);
   }
-  if (currentPage === 'overview') await loadStatsData();
-  dataLoaded = true;
 }
 
 async function loadStatsData(signal) {
@@ -11,10 +10,12 @@ async function loadStatsData(signal) {
   const tzOffset = -new Date().getTimezoneOffset();
   const opts = signal ? { signal } : {};
 
+  const emptySummary = { total_messages: 0, total_user_messages: 0, total_assistant_messages: 0, total_input_tokens: 0, total_output_tokens: 0, total_cache_creation_tokens: 0, total_cache_read_tokens: 0 };
+  const emptyCost = { total_cost: 0, input_cost: 0, output_cost: 0, cache_write_cost: 0, cache_read_cost: 0 };
   const [summary, cwds, cost, models, activityChart, providers, branches, tickets, activityTags] = await Promise.all([
-    fetch(buildUrl('/analytics/summary'), opts).then(fetchOk),
+    fetch(buildUrl('/analytics/summary'), opts).then(fetchOk).catch(() => emptySummary),
     fetch(buildUrl('/analytics/projects', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
-    fetch(buildUrl('/analytics/cost'), opts).then(fetchOk),
+    fetch(buildUrl('/analytics/cost'), opts).then(fetchOk).catch(() => emptyCost),
     fetch(buildUrl('/analytics/models', { limit: DEFAULT_CHART_ROWS }), opts).then(fetchOk).catch(() => []),
     fetch(buildUrl('/analytics/activity', { granularity: gran, tz_offset: tzOffset }), opts).then(fetchOk).catch(() => []),
     fetch(buildUrl('/analytics/providers'), opts).then(fetchOk).catch(() => []),

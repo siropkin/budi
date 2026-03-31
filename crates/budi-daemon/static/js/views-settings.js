@@ -28,7 +28,6 @@ function fmtSyncTime(iso) {
 
 function fmtPath(p) {
   if (!p) return '--';
-  // Shorten home dir
   const home = p.match(/^(\/Users\/[^/]+|\/home\/[^/]+)/);
   if (home) return '~' + p.slice(home[0].length);
   return p;
@@ -67,7 +66,7 @@ function renderSettingsView(content) {
         </div>
         <div class="settings-item">
           <span class="settings-key">Last Sync</span>
-          <span class="settings-val ${syncing ? 'warn' : ''}">${syncing ? 'Syncing now...' : fmtSyncTime(lastSynced)}</span>
+          <span id="lastSyncValue" class="settings-val ${syncing ? 'warn' : ''}">${syncing ? 'Syncing now...' : fmtSyncTime(lastSynced)}</span>
         </div>
         <div class="settings-item">
           <span class="settings-key">Providers</span>
@@ -173,13 +172,10 @@ function settingsLog(msg) {
 }
 
 function setLastSyncDisplay(text, warn) {
-  const syncEl = [...$$('.settings-key')].find(e => e.textContent === 'Last Sync');
-  if (syncEl) {
-    const valEl = syncEl.nextElementSibling;
-    if (valEl) {
-      valEl.textContent = text;
-      valEl.className = 'settings-val' + (warn ? ' warn' : '');
-    }
+  const el = $('#lastSyncValue');
+  if (el) {
+    el.textContent = text;
+    el.className = 'settings-val' + (warn ? ' warn' : '');
   }
 }
 
@@ -187,14 +183,10 @@ async function refreshSettingsStatus() {
   const syncStatus = await fetch('/sync/status').then(fetchOk).catch(() => null);
   if (syncStatus && settingsData) {
     settingsData.syncStatus = syncStatus;
-    const syncEl = [...$$('.settings-key')].find(e => e.textContent === 'Last Sync');
-    if (syncEl) {
-      const valEl = syncEl.nextElementSibling;
-      if (valEl) {
-        valEl.textContent = syncStatus.syncing ? 'Syncing now...' : fmtSyncTime(syncStatus.last_synced);
-        valEl.className = 'settings-val' + (syncStatus.syncing ? ' warn' : '');
-      }
-    }
+    setLastSyncDisplay(
+      syncStatus.syncing ? 'Syncing now...' : fmtSyncTime(syncStatus.last_synced),
+      syncStatus.syncing
+    );
   }
 }
 

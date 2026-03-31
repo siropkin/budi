@@ -1,36 +1,44 @@
 async function render() {
+  if (currentAbort) currentAbort.abort();
+  const abort = new AbortController();
+  currentAbort = abort;
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
-  // Hide period tabs on settings page
   const periodBar = $('.period-tabs');
   if (periodBar) periodBar.style.display = currentPage === 'settings' ? 'none' : '';
-
   try {
-    await loadAllData();
-    await renderCurrentPage(content);
+    await ensureProvidersLoaded(abort.signal);
+    if (abort.signal.aborted) return;
+    await renderCurrentPage(content, abort.signal);
+    dataLoaded = true;
   } catch (err) {
+    if (abort.signal.aborted) return;
     content.innerHTML = renderError(err);
     bindErrorHandlers();
   }
 }
 
-async function renderCurrentPage(content) {
+async function renderCurrentPage(content, signal) {
   if (currentPage === 'insights') {
-    if (!insightsData) await loadInsightsData();
+    if (!insightsData) await loadInsightsData(signal);
+    if (signal && signal.aborted) return;
     renderInsightsView(content);
   } else if (currentPage === 'sessions') {
     if (selectedSessionId) {
-      await renderSessionDetail(selectedSessionId, content);
+      await renderSessionDetail(selectedSessionId, content, signal);
     } else {
-      if (!sessionsPageData) await loadSessionsPageData();
+      if (!sessionsPageData) await loadSessionsPageData(signal);
+      if (signal && signal.aborted) return;
       renderSessionsView(content);
       bindSessionsHandlers(content);
     }
   } else if (currentPage === 'settings') {
-    if (!settingsData) await loadSettingsData();
+    if (!settingsData) await loadSettingsData(signal);
+    if (signal && signal.aborted) return;
     renderSettingsView(content);
   } else {
-    if (!statsData) await loadStatsData();
+    if (!statsData) await loadStatsData(signal);
+    if (signal && signal.aborted) return;
     renderStatsView(content);
   }
 }
@@ -71,52 +79,25 @@ function bindErrorHandlers() {
   });
 }
 
-
-// Request sequencing — cancel in-flight fetches when period changes
 let currentAbort = null;
 
-// Shared reload helper — aborts previous in-flight requests
 async function switchAndReload() {
   if (currentAbort) currentAbort.abort();
   const abort = new AbortController();
   currentAbort = abort;
   const content = $('#content');
   content.innerHTML = '<div class="loading">Loading analytics</div>';
-  // Clear cached data for pages that need refresh
   insightsData = null;
   sessionsPageData = null;
   settingsData = null;
+  statsData = null;
   lastStatsHash = '';
-  // Preserve selectedSessionId from URL when on session detail page
   const sessionUrlMatch = location.pathname.match(/^\/dashboard\/sessions\/(.+)$/);
   try { selectedSessionId = sessionUrlMatch ? decodeURIComponent(sessionUrlMatch[1]) : null; } catch (_) { selectedSessionId = null; }
-  // Hide period tabs on settings page
   const periodBar = $('.period-tabs');
   if (periodBar) periodBar.style.display = currentPage === 'settings' ? 'none' : '';
   try {
-    if (currentPage === 'insights') {
-      await loadInsightsData(abort.signal);
-      if (abort.signal.aborted) return;
-      renderInsightsView(content);
-    } else if (currentPage === 'sessions') {
-      if (selectedSessionId) {
-        await renderSessionDetail(selectedSessionId, content, abort.signal);
-        if (abort.signal.aborted) return;
-      } else {
-        await loadSessionsPageData(abort.signal);
-        if (abort.signal.aborted) return;
-        renderSessionsView(content);
-        bindSessionsHandlers(content);
-      }
-    } else if (currentPage === 'settings') {
-      await loadSettingsData(abort.signal);
-      if (abort.signal.aborted) return;
-      renderSettingsView(content);
-    } else {
-      await loadStatsData(abort.signal);
-      if (abort.signal.aborted) return;
-      renderStatsView(content);
-    }
+    await renderCurrentPage(content, abort.signal);
   } catch (err) {
     if (abort.signal.aborted) return;
     content.innerHTML = renderError(err);
@@ -124,16 +105,18 @@ async function switchAndReload() {
   }
 }
 
-// Period tab switching — restore saved selection
+// Restore saved period selection
 const periodButtons = $$('.period-tabs button');
 periodButtons.forEach(btn => {
   if (btn.dataset.period === currentPeriod) {
-    periodButtons.forEach(b => b.classList.remove('active'));
+    periodButtons.forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
     btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
   }
   btn.addEventListener('click', () => {
-    periodButtons.forEach(b => b.classList.remove('active'));
+    periodButtons.forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
     btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
     currentPeriod = btn.dataset.period;
     localStorage.setItem('budi_period', currentPeriod);
     switchAndReload();
@@ -144,12 +127,14 @@ periodButtons.forEach(btn => {
 const pageButtons = $$('.page-tabs button');
 pageButtons.forEach(btn => {
   if (btn.dataset.page === currentPage) {
-    pageButtons.forEach(b => b.classList.remove('active'));
+    pageButtons.forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
     btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
   }
   btn.addEventListener('click', () => {
-    pageButtons.forEach(b => b.classList.remove('active'));
+    pageButtons.forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
     btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
     currentPage = btn.dataset.page;
     const url = currentPage === 'overview' ? '/dashboard' : '/dashboard/' + currentPage;
     history.pushState(null, '', url);
@@ -158,10 +143,8 @@ pageButtons.forEach(btn => {
   });
 });
 
-// Handle browser back/forward
 window.addEventListener('popstate', () => {
   const path = location.pathname.replace(/^\/dashboard\/?/, '');
-  // Check for session detail URL: sessions/:id
   const sessionMatch = path.match(/^sessions\/(.+)$/);
   if (sessionMatch) {
     currentPage = 'sessions';
@@ -172,14 +155,15 @@ window.addEventListener('popstate', () => {
     selectedSessionId = null;
   }
   pageButtons.forEach(b => {
-    b.classList.toggle('active', b.dataset.page === currentPage);
+    const isActive = b.dataset.page === currentPage;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-selected', String(isActive));
   });
   switchAndReload();
 });
 
 render();
 
-// Auto-refresh: poll every 30s for overview, every 5s for settings sync status
 let overviewRefreshing = false;
 let lastStatsHash = '';
 setInterval(async () => {
@@ -188,7 +172,8 @@ setInterval(async () => {
     overviewRefreshing = true;
     try {
       await loadStatsData();
-      const hash = JSON.stringify(statsData);
+      const s = statsData.summary, c = statsData.cost;
+      const hash = `${s.total_messages}|${s.total_input_tokens}|${c.total_cost}`;
       if (currentPage === 'overview' && hash !== lastStatsHash) {
         lastStatsHash = hash;
         renderStatsView($('#content'));

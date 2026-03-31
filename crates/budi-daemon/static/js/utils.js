@@ -1,3 +1,9 @@
+function weekStart(date) {
+  const dow = date.getDay();
+  const offset = dow === 0 ? 6 : dow - 1;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - offset);
+}
+
 function dateRange(period) {
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
@@ -5,9 +11,7 @@ function dateRange(period) {
   switch (period) {
     case 'today': return { since: toISO(new Date(y, m, d)), until: toISO(new Date(y, m, d + 1)) };
     case 'week': {
-      const dow = now.getDay();
-      const mondayOffset = dow === 0 ? 6 : dow - 1;
-      const monday = new Date(y, m, d - mondayOffset);
+      const monday = weekStart(now);
       return { since: toISO(monday), until: toISO(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7)) };
     }
     case 'month': return { since: toISO(new Date(y, m, 1)), until: toISO(new Date(y, m + 1, 1)) };
