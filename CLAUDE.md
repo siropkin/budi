@@ -7,7 +7,7 @@ Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks to
 ```bash
 cargo build              # dev build
 cargo build --release    # release build
-cargo test               # all tests (196: 180 core + 14 cli + 2 daemon)
+cargo test               # all tests (214: 198 core + 14 cli + 2 daemon)
 cargo test -p budi-core  # core tests only
 ./scripts/install.sh     # build release + install to ~/.local/bin/
 ```
@@ -70,7 +70,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 
 ## Key files
 
-- `crates/budi-core/src/analytics.rs` — SQLite storage, sync pipeline, all query functions, session health (vitals + tips)
+- `crates/budi-core/src/analytics/mod.rs` — SQLite storage, sync pipeline, all query functions
+- `crates/budi-core/src/analytics/health.rs` — Session health vitals, ProviderKind-aware tips, overall-state logic
+- `crates/budi-core/src/analytics/tests.rs` — Analytics + session health unit tests (26 health tests)
 - `crates/budi-core/src/pipeline/mod.rs` — Pipeline struct, Enricher trait, default_pipeline()
 - `crates/budi-core/src/pipeline/enrichers.rs` — All 5 enricher implementations
 - `crates/budi-core/src/cost.rs` — Cost estimation, ModelPricing, per-provider pricing tables

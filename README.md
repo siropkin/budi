@@ -45,7 +45,7 @@ No cloud. No uploads. Everything stays on your machine.
 - Tracks tokens, costs, and usage per message across AI coding agents
 - **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
-- **Session health** — detects context bloat, cache degradation, cost acceleration, and agent thrashing with actionable tips
+- **Session health** — detects prompt bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - Web dashboard at `http://localhost:7878/dashboard`
 - Live cost + health status line in Claude Code
 - Background sync every 30 seconds — no workflow changes needed
@@ -115,11 +115,11 @@ Budi adds a live cost display to Claude Code, installed automatically by `budi i
 
 The default `coach` preset shows your current session cost plus a health indicator. When Budi spots a problem, the short tip explains what to do next:
 
-`🟡 budi · $12.50 session · context growing - compact soon`
+`🟡 budi · $12.50 session · Prompt growing — /compact soon`
 
 Early in a session, before there is enough signal to score health, the status line stays neutral:
 
-`⚪ budi · session starting`
+`⚪ budi · $0.42 session · Not enough data yet`
 
 Customize slots in `~/.config/budi/statusline.toml`:
 
