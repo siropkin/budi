@@ -10,3 +10,4 @@ pub mod provider;
 pub mod providers;
 pub mod repo_id;
 pub mod tag_keys;
+pub mod update;

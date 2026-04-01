@@ -165,7 +165,11 @@ install_from_release() {
     [[ "$expected" == "$actual" ]] || fail "Checksum mismatch for $asset_name"
     log "Checksum verified for $asset_name"
   else
-    log "SHA256SUMS not found for release; skipping checksum verification"
+    if [[ "${BUDI_ALLOW_INSECURE_NO_CHECKSUM:-}" == "1" ]]; then
+      log "WARNING: SHA256SUMS not found; continuing due to BUDI_ALLOW_INSECURE_NO_CHECKSUM=1"
+    else
+      fail "SHA256SUMS not found for release; refusing insecure install. Set BUDI_ALLOW_INSECURE_NO_CHECKSUM=1 to override."
+    fi
   fi
 
   tar -xzf "$temp_dir/$asset_name" -C "$temp_dir"

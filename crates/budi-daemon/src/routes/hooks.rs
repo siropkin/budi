@@ -3,6 +3,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::internal_error;
 use crate::AppState;
@@ -139,46 +140,82 @@ pub async fn health_check_update()
 -> Result<Json<super::analytics::CheckUpdateResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::analytics::CheckUpdateResponse;
 
-    let result = tokio::task::spawn_blocking(|| -> anyhow::Result<CheckUpdateResponse> {
+    let result = tokio::task::spawn_blocking(|| -> CheckUpdateResponse {
         let current = env!("CARGO_PKG_VERSION").to_string();
-        let output = std::process::Command::new("curl")
-            .args([
-                "-sf",
-                "--max-time",
-                "10",
-                "-H",
-                &format!("User-Agent: budi/{current}"),
-                "https://api.github.com/repos/siropkin/budi/releases/latest",
-            ])
-            .output()?;
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(client) => client,
+            Err(e) => {
+                return CheckUpdateResponse {
+                    current,
+                    latest: None,
+                    up_to_date: None,
+                    error: Some(format!("Could not create HTTP client: {e}")),
+                };
+            }
+        };
 
-        if !output.status.success() {
-            return Ok(CheckUpdateResponse {
+        let resp = match client
+            .get("https://api.github.com/repos/siropkin/budi/releases/latest")
+            .header("User-Agent", format!("budi/{current}"))
+            .send()
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                return CheckUpdateResponse {
+                    current,
+                    latest: None,
+                    up_to_date: None,
+                    error: Some(format!("Could not reach GitHub API: {e}")),
+                };
+            }
+        };
+
+        if !resp.status().is_success() {
+            return CheckUpdateResponse {
                 current,
                 latest: None,
                 up_to_date: None,
-                error: Some("Could not reach GitHub API".to_string()),
-            });
+                error: Some(format!("GitHub API returned {}", resp.status())),
+            };
         }
 
-        let release: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        let latest = release
-            .get("tag_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim_start_matches('v')
-            .to_string();
+        let release: serde_json::Value = match resp.json() {
+            Ok(release) => release,
+            Err(e) => {
+                return CheckUpdateResponse {
+                    current,
+                    latest: None,
+                    up_to_date: None,
+                    error: Some(format!("Could not parse GitHub response: {e}")),
+                };
+            }
+        };
+
+        let latest_tag = match budi_core::update::parse_and_normalize_release_tag(&release) {
+            Ok(tag) => tag,
+            Err(e) => {
+                return CheckUpdateResponse {
+                    current,
+                    latest: None,
+                    up_to_date: None,
+                    error: Some(e.to_string()),
+                };
+            }
+        };
+        let latest = budi_core::update::version_from_tag(&latest_tag);
         let up_to_date = latest == current;
-        Ok(CheckUpdateResponse {
+        CheckUpdateResponse {
             current,
             latest: Some(latest),
             up_to_date: Some(up_to_date),
             error: None,
-        })
+        }
     })
     .await
-    .map_err(|e| super::internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(super::internal_error)?;
+    .map_err(|e| super::internal_error(anyhow::anyhow!("{e}")))?;
     Ok(Json(result))
 }
 
@@ -202,7 +239,9 @@ pub async fn admin_install_integrations(
     {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "another integration update is already in progress" })),
+            Json(
+                json!({ "ok": false, "error": "another integration update is already in progress" }),
+            ),
         ));
     }
     let _busy = BusyFlagGuard::new(state.integrations_installing.clone());

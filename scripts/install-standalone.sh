@@ -43,6 +43,19 @@ detect_target() {
 TEMP_DIR=""
 cleanup() { [ -n "$TEMP_DIR" ] && rm -rf "$TEMP_DIR"; }
 
+restore_binaries() {
+  local backup_dir="$1"
+  local bin_dir="$2"
+  shift 2
+  for bin in "$@"; do
+    rm -f "$bin_dir/$bin"
+    if [ -f "$backup_dir/$bin.bak" ]; then
+      cp "$backup_dir/$bin.bak" "$bin_dir/$bin"
+      chmod 0755 "$bin_dir/$bin" || true
+    fi
+  done
+}
+
 main() {
   command -v curl >/dev/null 2>&1 || fail "curl is required"
   command -v tar >/dev/null 2>&1 || fail "tar is required"
@@ -89,20 +102,21 @@ main() {
   curl -fSL "$base_url/$asset_name" -o "$TEMP_DIR/$asset_name" \
     || fail "Download failed — check that a release asset exists for $target"
 
-  # Verify checksum if available.
-  if curl -fsSL "$base_url/SHA256SUMS" -o "$TEMP_DIR/SHA256SUMS" 2>/dev/null; then
-    :
-  else
-    log "Checksum file unavailable — skipping verification."
+  # Verify checksum (required by default).
+  if ! curl -fsSL "$base_url/SHA256SUMS" -o "$TEMP_DIR/SHA256SUMS" 2>/dev/null; then
+    if [ "${BUDI_ALLOW_INSECURE_NO_CHECKSUM:-}" = "1" ]; then
+      log "WARNING: checksum file unavailable — continuing due to BUDI_ALLOW_INSECURE_NO_CHECKSUM=1."
+    else
+      fail "Checksum file unavailable. Refusing insecure install. Set BUDI_ALLOW_INSECURE_NO_CHECKSUM=1 to override."
+    fi
   fi
   if [ -f "$TEMP_DIR/SHA256SUMS" ]; then
     local expected actual
-    expected="$(awk -v f="$asset_name" '$2 == f {print $1}' "$TEMP_DIR/SHA256SUMS")"
-    if [ -n "$expected" ]; then
-      actual="$(sha256_of_file "$TEMP_DIR/$asset_name")"
-      [ "$expected" = "$actual" ] || fail "Checksum mismatch for $asset_name"
-      log "Checksum verified."
-    fi
+    expected="$(awk -v f="$asset_name" '$2 == f || $2 == "*" f {print $1}' "$TEMP_DIR/SHA256SUMS")"
+    [ -n "$expected" ] || fail "Checksum for $asset_name not found in SHA256SUMS"
+    actual="$(sha256_of_file "$TEMP_DIR/$asset_name")"
+    [ "$expected" = "$actual" ] || fail "Checksum mismatch for $asset_name"
+    log "Checksum verified."
   fi
 
   tar -xzf "$TEMP_DIR/$asset_name" -C "$TEMP_DIR"
@@ -110,17 +124,49 @@ main() {
   [ -d "$pkg_dir" ] || fail "Unexpected archive layout"
 
   mkdir -p "$BIN_DIR"
+  local backup_dir="$TEMP_DIR/backup"
+  mkdir -p "$backup_dir"
+
   for bin in budi budi-daemon; do
-    if [ -x "$pkg_dir/$bin" ]; then
-      install -m 0755 "$pkg_dir/$bin" "$BIN_DIR/$bin"
-      log "Installed $bin -> $BIN_DIR/$bin"
-    else
-      fail "Missing binary in release archive: $bin"
+    [ -x "$pkg_dir/$bin" ] || fail "Missing binary in release archive: $bin"
+    if [ -e "$BIN_DIR/$bin" ]; then
+      cp "$BIN_DIR/$bin" "$backup_dir/$bin.bak" || fail "Failed to backup existing $bin"
     fi
   done
 
+  for bin in budi budi-daemon; do
+    local staged="$BIN_DIR/.${bin}.new.$$"
+    cp "$pkg_dir/$bin" "$staged" || {
+      restore_binaries "$backup_dir" "$BIN_DIR" budi budi-daemon
+      fail "Failed to stage $bin for install"
+    }
+    chmod 0755 "$staged" || {
+      rm -f "$staged"
+      restore_binaries "$backup_dir" "$BIN_DIR" budi budi-daemon
+      fail "Failed to set execute permission on staged $bin"
+    }
+    rm -f "$BIN_DIR/$bin" || {
+      rm -f "$staged"
+      restore_binaries "$backup_dir" "$BIN_DIR" budi budi-daemon
+      fail "Failed to replace existing $bin"
+    }
+    mv "$staged" "$BIN_DIR/$bin" || {
+      rm -f "$staged"
+      restore_binaries "$backup_dir" "$BIN_DIR" budi budi-daemon
+      fail "Failed to install $bin"
+    }
+    log "Installed $bin -> $BIN_DIR/$bin"
+  done
+
   # Verify.
-  "$BIN_DIR/budi" --version || fail "Installed binary failed to run"
+  "$BIN_DIR/budi" --version || {
+    restore_binaries "$backup_dir" "$BIN_DIR" budi budi-daemon
+    fail "Installed budi failed to run"
+  }
+  "$BIN_DIR/budi-daemon" --version || {
+    restore_binaries "$backup_dir" "$BIN_DIR" budi budi-daemon
+    fail "Installed budi-daemon failed to run"
+  }
 
   # Auto-add BIN_DIR to PATH in shell profile if missing.
   if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then

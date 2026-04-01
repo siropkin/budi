@@ -50,6 +50,14 @@ fn startup_timeout_retries() -> usize {
 }
 
 pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
+    ensure_daemon_running_with_binary(repo_root, config, None)
+}
+
+pub fn ensure_daemon_running_with_binary(
+    repo_root: Option<&Path>,
+    config: &BudiConfig,
+    daemon_bin_override: Option<&Path>,
+) -> Result<()> {
     if daemon_health(config) {
         // Daemon is running — but check if it's the same version as this CLI.
         // A version mismatch (e.g. after `brew upgrade`) means the old daemon
@@ -76,7 +84,7 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
         ) {
             return Ok(());
         }
-        if restart_unhealthy_daemon_listener(repo_root, config)? {
+        if restart_unhealthy_daemon_listener(repo_root, config, daemon_bin_override)? {
             return Ok(());
         }
         let log_excerpt = daemon_log_tail(repo_root);
@@ -87,7 +95,7 @@ pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> R
         );
     }
 
-    spawn_daemon_process(repo_root, config)?;
+    spawn_daemon_process(repo_root, config, daemon_bin_override)?;
     let retries = startup_timeout_retries();
     if wait_for_daemon_health(
         config,
@@ -144,6 +152,7 @@ fn wait_for_daemon_health(
 fn restart_unhealthy_daemon_listener(
     repo_root: Option<&Path>,
     config: &BudiConfig,
+    daemon_bin_override: Option<&Path>,
 ) -> Result<bool> {
     let listener_pids = daemon_listener_pids(config.daemon_port)?;
     if listener_pids.is_empty() {
@@ -177,7 +186,7 @@ fn restart_unhealthy_daemon_listener(
     if daemon_port_is_listening(config) {
         return Ok(false);
     }
-    spawn_daemon_process(repo_root, config)?;
+    spawn_daemon_process(repo_root, config, daemon_bin_override)?;
     Ok(wait_for_daemon_health(
         config,
         startup_timeout_retries(),
@@ -390,8 +399,15 @@ fn daemon_log_tail(repo_root: Option<&Path>) -> String {
     )
 }
 
-fn spawn_daemon_process(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
-    let daemon_bin = resolve_daemon_binary()?;
+fn spawn_daemon_process(
+    repo_root: Option<&Path>,
+    config: &BudiConfig,
+    daemon_bin_override: Option<&Path>,
+) -> Result<()> {
+    let daemon_bin = match daemon_bin_override {
+        Some(path) => path.to_path_buf(),
+        None => resolve_daemon_binary()?,
+    };
     let log_path = daemon_log_path(repo_root).context("Could not determine daemon log path")?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;

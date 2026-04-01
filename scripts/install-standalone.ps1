@@ -34,18 +34,25 @@ try {
     $zipPath = Join-Path $tempDir $assetName
     Invoke-WebRequest -Uri "$baseUrl/$assetName" -OutFile $zipPath -UseBasicParsing
 
-    # Verify checksum if available.
+    # Verify checksum (required by default).
     try {
         $sumsPath = Join-Path $tempDir "SHA256SUMS"
         Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
-        $expected = (Get-Content $sumsPath | Where-Object { $_ -match $assetName } | ForEach-Object { ($_ -split '\s+')[0].ToLower() })
-        if ($expected) {
-            $actual = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
-            if ($expected -ne $actual) { Fail "Checksum mismatch for $assetName" }
-            Log "Checksum verified."
-        }
+        $expectedLine = Get-Content $sumsPath | Where-Object {
+            ($_ -split '\s+')[-1].TrimStart('*') -eq $assetName
+        } | Select-Object -First 1
+        if (-not $expectedLine) { Fail "Checksum for $assetName not found in SHA256SUMS" }
+
+        $expected = (($expectedLine -split '\s+')[0]).ToLower()
+        $actual = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
+        if ($expected -ne $actual) { Fail "Checksum mismatch for $assetName" }
+        Log "Checksum verified."
     } catch {
-        Log "Checksum file unavailable - skipping verification."
+        if ($env:BUDI_ALLOW_INSECURE_NO_CHECKSUM -eq "1") {
+            Log "WARNING: checksum file unavailable - continuing due to BUDI_ALLOW_INSECURE_NO_CHECKSUM=1."
+        } else {
+            Fail "Checksum file unavailable. Refusing insecure install. Set BUDI_ALLOW_INSECURE_NO_CHECKSUM=1 to override."
+        }
     }
 
     Log "Extracting..."
@@ -55,14 +62,38 @@ try {
     if (-not (Test-Path $pkgDir)) { Fail "Unexpected archive layout" }
 
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-    foreach ($bin in @("budi.exe", "budi-daemon.exe")) {
+    $bins = @("budi.exe", "budi-daemon.exe")
+    $backupDir = Join-Path $tempDir "backup"
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+
+    foreach ($bin in $bins) {
         $src = Join-Path $pkgDir $bin
-        if (Test-Path $src) {
-            Copy-Item $src (Join-Path $BinDir $bin) -Force
-            Log "Installed $bin -> $BinDir\$bin"
-        } else {
-            Fail "Missing binary in release archive: $bin"
+        if (-not (Test-Path $src)) { Fail "Missing binary in release archive: $bin" }
+
+        $dst = Join-Path $BinDir $bin
+        if (Test-Path $dst) {
+            Copy-Item $dst (Join-Path $backupDir "$bin.bak") -Force
         }
+    }
+
+    try {
+        foreach ($bin in $bins) {
+            $src = Join-Path $pkgDir $bin
+            $dst = Join-Path $BinDir $bin
+            $staged = Join-Path $BinDir ".$bin.new.$PID"
+            Copy-Item $src $staged -Force
+            if (Test-Path $dst) { Remove-Item $dst -Force }
+            Move-Item $staged $dst -Force
+            Log "Installed $bin -> $BinDir\$bin"
+        }
+    } catch {
+        foreach ($bin in $bins) {
+            $dst = Join-Path $BinDir $bin
+            $bak = Join-Path $backupDir "$bin.bak"
+            if (Test-Path $dst) { Remove-Item $dst -Force -ErrorAction SilentlyContinue }
+            if (Test-Path $bak) { Copy-Item $bak $dst -Force }
+        }
+        throw
     }
 
     # Verify.
