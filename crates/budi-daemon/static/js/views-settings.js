@@ -84,22 +84,13 @@ const SETTINGS_INTEGRATIONS = Object.freeze([
     component: 'starship',
     missingLabel: 'Not installed (optional)',
     missingClass: '',
-    bulkEligible: false,
   },
 ]);
-
-function integrationCommand(def, installed) {
-  if (!installed && def.defaultPreset) {
-    return `budi integrations install --with ${def.component} --statusline-preset ${def.defaultPreset}`;
-  }
-  return `budi integrations install --with ${def.component}`;
-}
 
 function renderIntegrationRow(def, installed) {
   const statusClass = installed ? 'ok' : def.missingClass;
   const statusText = installed ? 'Active' : def.missingLabel;
-  const actionText = installed ? 'Reinstall' : 'Install';
-  const cmd = integrationCommand(def, installed);
+  const actionText = 'Reinstall';
   const presetAttr = !installed && def.defaultPreset
     ? ` data-statusline-preset="${esc(def.defaultPreset)}"`
     : '';
@@ -112,10 +103,7 @@ function renderIntegrationRow(def, installed) {
       </div>
       <div class="integration-actions">
         <span class="settings-val ${statusClass}">${statusText}</span>
-        <div class="integration-command-line">
-          <code class="integration-command" title="${esc(cmd)}">${esc(cmd)}</code>
-          <button type="button" class="btn btn-secondary integration-run-btn" data-components="${esc(def.component)}"${presetAttr}>${actionText}</button>
-        </div>
+        <button type="button" class="btn btn-secondary integration-run-btn" data-components="${esc(def.component)}"${presetAttr}>${actionText}</button>
       </div>
     </div>
   `;
@@ -133,19 +121,6 @@ function renderSettingsView(content) {
   const ig = d.integrations || {};
   const db = ig.database || {};
   const paths = ig.paths || {};
-  const missingIntegrations = SETTINGS_INTEGRATIONS.filter(def => !ig[def.key]);
-  const bulkCandidates = SETTINGS_INTEGRATIONS.filter(def => def.bulkEligible !== false);
-  const missingBulkIntegrations = bulkCandidates.filter(def => !ig[def.key]);
-  const actionIntegrations = missingBulkIntegrations.length > 0 ? missingBulkIntegrations : bulkCandidates;
-  const actionComponents = actionIntegrations.map(def => def.component);
-  const includesMissingStatusline = missingBulkIntegrations.some(def => def.key === 'statusline');
-  const missingCount = missingBulkIntegrations.length;
-  const bulkCmd = `budi integrations install ${actionComponents.map(component => `--with ${component}`).join(' ')}${includesMissingStatusline ? ' --statusline-preset coach' : ''}`;
-  const bulkAction = missingCount > 0 ? 'Install Missing' : 'Reinstall All';
-  const bulkSummary = missingCount > 0
-    ? `${missingCount} core integration${missingCount === 1 ? '' : 's'} need setup`
-    : 'All core integrations are active';
-  const bulkPresetAttr = includesMissingStatusline ? ' data-statusline-preset="coach"' : '';
   const integrationsRowsHtml = SETTINGS_INTEGRATIONS
     .map(def => renderIntegrationRow(def, !!ig[def.key]))
     .join('');
@@ -155,7 +130,6 @@ function renderSettingsView(content) {
       <h2>Help</h2>
       <div style="display:flex;flex-direction:column;gap:4px">
         <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi integrations list</code> to inspect optional components</div>
-        <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi integrations install --with &lt;name&gt;</code> to install or reinstall one component</div>
         <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi init</code> for first-time full setup</div>
         <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi doctor</code> to diagnose issues</div>
         <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi update</code> to update to the latest version</div>
@@ -181,13 +155,6 @@ function renderSettingsView(content) {
       </div>
       <div class="panel">
         <h2>Integrations</h2>
-        <div class="integration-summary">
-          <span class="integration-summary-text">${esc(bulkSummary)}</span>
-          <div class="integration-command-line">
-            <code class="integration-command" title="${esc(bulkCmd)}">${esc(bulkCmd)}</code>
-            <button type="button" class="btn btn-secondary integration-run-btn" data-components="${esc(actionComponents.join(','))}"${bulkPresetAttr}>${bulkAction}</button>
-          </div>
-        </div>
         ${integrationsRowsHtml}
       </div>
     </div>
