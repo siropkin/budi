@@ -46,11 +46,30 @@ pub fn cmd_hook() -> anyhow::Result<()> {
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log_path)
+            .open(&log_path)
             .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        rotate_hook_log(&log_path);
     }
 
     Ok(())
+}
+
+/// Keep only the last 100 lines when the log exceeds 50 KB.
+fn rotate_hook_log(path: &std::path::Path) {
+    const MAX_BYTES: u64 = 50_000;
+    const KEEP_LINES: usize = 100;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= MAX_BYTES {
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let kept = &lines[lines.len().saturating_sub(KEEP_LINES)..];
+    let _ = std::fs::write(path, kept.join("\n") + "\n");
 }
 
 /// Load daemon URL from config, falling back to defaults.

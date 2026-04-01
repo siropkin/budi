@@ -161,19 +161,29 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 db_path.display()
             );
         }
-        // Check for hook delivery errors
+        // Check for hook delivery errors — only flag recent ones (last 24h)
         if let Ok(home) = budi_core::config::budi_home_dir() {
             let log_path = home.join("hook-debug.log");
             if log_path.exists()
                 && let Ok(meta) = std::fs::metadata(&log_path)
                 && meta.len() > 0
             {
-                let yellow = super::ansi("\x1b[33m");
-                println!(
-                    "  {yellow}!{reset} hook errors: found in {}",
-                    log_path.display()
-                );
-                issues.push("Hook delivery errors logged. Check hook-debug.log".to_string());
+                let recent_count = count_recent_hook_errors(&log_path);
+                if recent_count > 0 {
+                    let yellow = super::ansi("\x1b[33m");
+                    println!(
+                        "  {yellow}!{reset} hook errors: {recent_count} in the last 24h ({})",
+                        log_path.display()
+                    );
+                    issues.push(format!(
+                        "Hook delivery errors logged recently ({recent_count} in last 24h). Check hook-debug.log"
+                    ));
+                } else {
+                    println!(
+                        "  {green}\u{2713}{reset} hook errors: none recent (stale log at {})",
+                        log_path.display()
+                    );
+                }
             }
         }
     }
@@ -555,6 +565,24 @@ fn check_mcp_config(settings_path: &str) -> bool {
         .and_then(|b| b.get("command"))
         .and_then(|c| c.as_str())
         .is_some_and(|c| c.contains("budi"))
+}
+
+/// Count hook errors from the last 24 hours in the debug log.
+/// Lines have format: `[2026-03-30T03:19:14.945796+00:00] hook POST ...`
+fn count_recent_hook_errors(log_path: &Path) -> usize {
+    let Ok(content) = std::fs::read_to_string(log_path) else {
+        return 0;
+    };
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+    content
+        .lines()
+        .filter(|line| {
+            line.strip_prefix('[')
+                .and_then(|s| s.split(']').next())
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .is_some_and(|dt| dt > cutoff)
+        })
+        .count()
 }
 
 /// Check available disk space in MB. Uses `df -k` on Unix, skips on Windows.
