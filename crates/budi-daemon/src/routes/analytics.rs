@@ -296,6 +296,7 @@ pub struct IntegrationsResponse {
     pub mcp_server: bool,
     pub otel: bool,
     pub statusline: bool,
+    pub starship: bool,
     pub database: DatabaseStats,
     pub paths: IntegrationPaths,
 }

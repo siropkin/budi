@@ -72,6 +72,10 @@ fn build_router(app_state: AppState) -> Router {
         .route("/admin/schema", get(a::analytics_schema_version))
         .route("/admin/migrate", post(a::analytics_migrate))
         .route("/admin/repair", post(a::analytics_repair))
+        .route(
+            "/admin/integrations/install",
+            post(h::admin_install_integrations),
+        )
         .route("/analytics/tools", get(a::analytics_tools))
         .route("/analytics/mcp", get(a::analytics_mcp))
         .route(

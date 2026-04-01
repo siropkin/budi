@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -134,39 +136,54 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         }
     } else {
         // Pin the installer to the exact version we resolved to avoid race conditions
-        // (a new release published between version check and download).
-        // Also pin the installer script itself to the target tag so the script format
-        // matches the version being installed.
+        // (a new release published between version check and download). Download to
+        // a local temp script first, then execute it (avoid curl|bash style piping).
         let installer_tag = &latest_tag;
-        let status = if cfg!(target_os = "windows") {
-            let script_url = format!(
-                "irm https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.ps1 | iex",
+        let script_url = if cfg!(target_os = "windows") {
+            format!(
+                "https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.ps1",
                 installer_tag
-            );
+            )
+        } else {
+            format!(
+                "https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.sh",
+                installer_tag
+            )
+        };
+        let script_suffix = if cfg!(target_os = "windows") {
+            ".ps1"
+        } else {
+            ".sh"
+        };
+        let script_path = download_installer_script(&script_url, script_suffix)?;
+
+        let status = if cfg!(target_os = "windows") {
             Command::new("powershell")
                 .env("VERSION", &latest_tag)
                 .env("BUDI_SKIP_INIT", "1")
-                .args(["-ExecutionPolicy", "Bypass", "-Command", &script_url])
+                .args([
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    &script_path.to_string_lossy(),
+                ])
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
                 .context("Failed to run PowerShell installer")?
         } else {
-            let script_url = format!(
-                "curl -fsSL https://raw.githubusercontent.com/siropkin/budi/{}/scripts/install-standalone.sh | bash",
-                installer_tag
-            );
             Command::new("bash")
                 .env("VERSION", &latest_tag)
                 .env("BUDI_SKIP_INIT", "1")
-                .args(["-c", &script_url])
+                .arg(&script_path)
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
                 .context("Failed to run installer")?
         };
+        let _ = fs::remove_file(&script_path);
 
         if !status.success() {
             eprintln!("Installer failed. Attempting to restart daemon with current binaries...");
@@ -196,11 +213,16 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         }
     }
 
-    // Ensure OTEL env vars are configured (for users upgrading from pre-OTEL versions)
+    // Refresh opted-in integrations (or currently detected integrations for older installs).
     {
         let (repo_root, config) = resolve_current_config();
-        crate::commands::init::install_otel_env_vars(&config);
-        crate::commands::init::install_mcp_server();
+        let report = crate::commands::integrations::refresh_enabled_integrations(&config);
+        if !report.warnings.is_empty() {
+            eprintln!("Integration refresh warnings:");
+            for warning in report.warnings {
+                eprintln!("  - {warning}");
+            }
+        }
 
         // Restart daemon with new version
         println!("Restarting daemon...");
@@ -273,6 +295,49 @@ fn resolve_current_config() -> (Option<PathBuf>, config::BudiConfig) {
         None => config::BudiConfig::default(),
     };
     (repo_root, cfg)
+}
+
+fn download_installer_script(url: &str, suffix: &str) -> Result<PathBuf> {
+    let client = Client::builder().timeout(Duration::from_secs(20)).build()?;
+    let body = client
+        .get(url)
+        .header("User-Agent", "budi-cli")
+        .send()
+        .with_context(|| format!("Failed to download installer script from {url}"))?
+        .error_for_status()
+        .with_context(|| format!("Installer script download failed from {url}"))?
+        .bytes()?;
+
+    let mut path = std::env::temp_dir();
+    let mut written = false;
+    for _ in 0..16 {
+        let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        path = std::env::temp_dir().join(format!("budi-update-{stamp}-{suffix}"));
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(&body)?;
+                written = true;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("Failed to write {}", path.display())),
+        }
+    }
+    if !written {
+        anyhow::bail!("Failed to allocate a temporary installer script path");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path)?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(&path, perms)?;
+    }
+    Ok(path)
 }
 
 /// Try to find a GitHub token from env vars or `gh auth token`.

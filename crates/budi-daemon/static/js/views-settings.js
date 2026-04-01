@@ -33,6 +33,94 @@ function fmtPath(p) {
   return p;
 }
 
+const SETTINGS_INTEGRATIONS = Object.freeze([
+  {
+    key: 'claude_code_hooks',
+    label: 'Claude Code Hooks',
+    component: 'claude-code-hooks',
+    missingLabel: 'Not set up',
+    missingClass: 'warn',
+  },
+  {
+    key: 'cursor_hooks',
+    label: 'Cursor Hooks',
+    component: 'cursor-hooks',
+    missingLabel: 'Not detected',
+    missingClass: '',
+  },
+  {
+    key: 'cursor_extension',
+    label: 'Cursor Extension',
+    component: 'cursor-extension',
+    missingLabel: 'Not installed',
+    missingClass: '',
+  },
+  {
+    key: 'mcp_server',
+    label: 'MCP Server',
+    component: 'claude-code-mcp',
+    missingLabel: 'Not set up',
+    missingClass: 'warn',
+  },
+  {
+    key: 'otel',
+    label: 'OTEL (Exact Cost)',
+    component: 'claude-code-otel',
+    missingLabel: 'Not set up',
+    missingClass: 'warn',
+  },
+  {
+    key: 'statusline',
+    label: 'Statusline',
+    component: 'claude-code-statusline',
+    missingLabel: 'Not set up',
+    missingClass: '',
+    defaultPreset: 'coach',
+    missingHint: 'Tip: use `--statusline-preset cost` for period mode.',
+  },
+  {
+    key: 'starship',
+    label: 'Starship Prompt',
+    component: 'starship',
+    missingLabel: 'Not installed (optional)',
+    missingClass: '',
+    bulkEligible: false,
+  },
+]);
+
+function integrationCommand(def, installed) {
+  if (!installed && def.defaultPreset) {
+    return `budi integrations install --with ${def.component} --statusline-preset ${def.defaultPreset}`;
+  }
+  return `budi integrations install --with ${def.component}`;
+}
+
+function renderIntegrationRow(def, installed) {
+  const statusClass = installed ? 'ok' : def.missingClass;
+  const statusText = installed ? 'Active' : def.missingLabel;
+  const actionText = installed ? 'Reinstall' : 'Install';
+  const cmd = integrationCommand(def, installed);
+  const presetAttr = !installed && def.defaultPreset
+    ? ` data-statusline-preset="${esc(def.defaultPreset)}"`
+    : '';
+  const hint = !installed && def.missingHint ? `<div class="integration-hint">${esc(def.missingHint)}</div>` : '';
+  return `
+    <div class="settings-item integration-item">
+      <div class="integration-main">
+        <span class="settings-key">${esc(def.label)}</span>
+        ${hint}
+      </div>
+      <div class="integration-actions">
+        <span class="settings-val ${statusClass}">${statusText}</span>
+        <div class="integration-command-line">
+          <code class="integration-command" title="${esc(cmd)}">${esc(cmd)}</code>
+          <button type="button" class="btn btn-secondary integration-run-btn" data-components="${esc(def.component)}"${presetAttr}>${actionText}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderSettingsView(content) {
   const d = settingsData;
   if (!d) { content.innerHTML = '<div class="empty">Loading settings...</div>'; return; }
@@ -45,12 +133,30 @@ function renderSettingsView(content) {
   const ig = d.integrations || {};
   const db = ig.database || {};
   const paths = ig.paths || {};
+  const missingIntegrations = SETTINGS_INTEGRATIONS.filter(def => !ig[def.key]);
+  const bulkCandidates = SETTINGS_INTEGRATIONS.filter(def => def.bulkEligible !== false);
+  const missingBulkIntegrations = bulkCandidates.filter(def => !ig[def.key]);
+  const actionIntegrations = missingBulkIntegrations.length > 0 ? missingBulkIntegrations : bulkCandidates;
+  const actionComponents = actionIntegrations.map(def => def.component);
+  const includesMissingStatusline = missingBulkIntegrations.some(def => def.key === 'statusline');
+  const missingCount = missingBulkIntegrations.length;
+  const bulkCmd = `budi integrations install ${actionComponents.map(component => `--with ${component}`).join(' ')}${includesMissingStatusline ? ' --statusline-preset coach' : ''}`;
+  const bulkAction = missingCount > 0 ? 'Install Missing' : 'Reinstall All';
+  const bulkSummary = missingCount > 0
+    ? `${missingCount} core integration${missingCount === 1 ? '' : 's'} need setup`
+    : 'All core integrations are active';
+  const bulkPresetAttr = includesMissingStatusline ? ' data-statusline-preset="coach"' : '';
+  const integrationsRowsHtml = SETTINGS_INTEGRATIONS
+    .map(def => renderIntegrationRow(def, !!ig[def.key]))
+    .join('');
 
   content.innerHTML = `
     <div class="panel section-mb" style="font-size:0.82rem;color:var(--text-muted)">
       <h2>Help</h2>
       <div style="display:flex;flex-direction:column;gap:4px">
-        <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi init</code> to set up hooks, OTEL, MCP, and statusline</div>
+        <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi integrations list</code> to inspect optional components</div>
+        <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi integrations install --with &lt;name&gt;</code> to install or reinstall one component</div>
+        <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi init</code> for first-time full setup</div>
         <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi doctor</code> to diagnose issues</div>
         <div>Run <code style="background:var(--bg);padding:2px 6px;border-radius:4px">budi update</code> to update to the latest version</div>
         <div style="margin-top:4px"><a href="https://github.com/siropkin/budi" target="_blank">Documentation</a> &middot; <a href="https://github.com/siropkin/budi/issues" target="_blank">Report an Issue</a></div>
@@ -75,30 +181,14 @@ function renderSettingsView(content) {
       </div>
       <div class="panel">
         <h2>Integrations</h2>
-        <div class="settings-item">
-          <span class="settings-key">Claude Code Hooks</span>
-          <span class="settings-val ${ig.claude_code_hooks ? 'ok' : 'warn'}">${ig.claude_code_hooks ? 'Active' : 'Not set up'}</span>
+        <div class="integration-summary">
+          <span class="integration-summary-text">${esc(bulkSummary)}</span>
+          <div class="integration-command-line">
+            <code class="integration-command" title="${esc(bulkCmd)}">${esc(bulkCmd)}</code>
+            <button type="button" class="btn btn-secondary integration-run-btn" data-components="${esc(actionComponents.join(','))}"${bulkPresetAttr}>${bulkAction}</button>
+          </div>
         </div>
-        <div class="settings-item">
-          <span class="settings-key">Cursor Hooks</span>
-          <span class="settings-val ${ig.cursor_hooks ? 'ok' : ''}">${ig.cursor_hooks ? 'Active' : 'Not detected'}</span>
-        </div>
-        <div class="settings-item">
-          <span class="settings-key">Cursor Extension</span>
-          <span class="settings-val ${ig.cursor_extension ? 'ok' : ''}">${ig.cursor_extension ? 'Active' : 'Not installed'}</span>
-        </div>
-        <div class="settings-item">
-          <span class="settings-key">MCP Server</span>
-          <span class="settings-val ${ig.mcp_server ? 'ok' : 'warn'}">${ig.mcp_server ? 'Active' : 'Not set up'}</span>
-        </div>
-        <div class="settings-item">
-          <span class="settings-key">OTEL (Exact Cost)</span>
-          <span class="settings-val ${ig.otel ? 'ok' : 'warn'}">${ig.otel ? 'Active' : 'Not set up'}</span>
-        </div>
-        <div class="settings-item">
-          <span class="settings-key">Statusline</span>
-          <span class="settings-val ${ig.statusline ? 'ok' : ''}">${ig.statusline ? 'Active' : 'Not set up'}</span>
-        </div>
+        ${integrationsRowsHtml}
       </div>
     </div>
 
@@ -195,6 +285,51 @@ async function refreshSettingsStatus() {
 }
 
 function bindSettingsHandlers() {
+  for (const btn of $$('.integration-run-btn')) {
+    btn.addEventListener('click', async () => {
+      const components = (btn.dataset.components || '')
+        .split(',')
+        .map(v => v.trim())
+        .filter(Boolean);
+      if (components.length === 0) return;
+      const statuslinePreset = (btn.dataset.statuslinePreset || '').trim();
+      const originalText = btn.textContent;
+      clearSettingsLog();
+      btn.disabled = true;
+      btn.textContent = 'Running...';
+      settingsLog('Applying integration changes...');
+      try {
+        const body = { components };
+        if (statuslinePreset) {
+          body.statusline_preset = statuslinePreset;
+        }
+        const resp = await fetch('/admin/integrations/install', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const r = await resp.json().catch(() => ({}));
+        if (resp.status === 409) {
+          settingsLog('Another operation is in progress. Try again in a moment.');
+        } else if (!resp.ok) {
+          settingsLog('Failed: ' + (r.error || 'Unknown error'));
+          if (r.command) settingsLog('Command: ' + r.command);
+          if (r.stderr) settingsLog(r.stderr);
+        } else {
+          settingsLog('Integrations updated.');
+          if (r.command) settingsLog('Command: ' + r.command);
+          settingsData = null;
+          await switchAndReload();
+          return;
+        }
+      } catch (_) {
+        settingsLog('Failed: request error');
+      }
+      btn.textContent = originalText;
+      btn.disabled = false;
+    });
+  }
+
   const syncRecentBtn = $('#syncRecentBtn');
   if (syncRecentBtn) syncRecentBtn.addEventListener('click', async () => {
     clearSettingsLog();

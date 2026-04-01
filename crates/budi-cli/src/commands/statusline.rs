@@ -343,10 +343,19 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
 pub(crate) const BUDI_STATUSLINE_CMD: &str = "budi statusline";
 
 /// Suffix appended to an existing command to merge budi output after it.
-pub(crate) const BUDI_STATUSLINE_SUFFIX: &str = r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#;
+pub(crate) fn budi_statusline_suffix() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        ""
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        r#"; budi_out=$(budi statusline 2>/dev/null || true); [ -n "$budi_out" ] && printf " %s" "$budi_out""#
+    }
+}
 
 /// Check if a statusLine command already includes budi.
-fn statusline_has_budi(cmd: &str) -> bool {
+pub(crate) fn statusline_has_budi(cmd: &str) -> bool {
     cmd.contains("budi statusline") || cmd.contains("budi_out=$(budi")
 }
 
@@ -357,60 +366,31 @@ pub fn cmd_statusline_install() -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed creating {}", parent.display()))?;
     }
-    let mut settings = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)
-            .with_context(|| format!("Failed reading {}", settings_path.display()))?;
-        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}))
-    } else {
-        json!({})
-    };
-    if !settings.is_object() {
-        settings = json!({});
-    }
+    let mut settings = super::read_json_object_strict(&settings_path)?;
 
-    if let Some(existing) = settings.get("statusLine") {
-        if !existing.is_object() {
-            anyhow::bail!(
-                "statusLine in {} is not an object — fix it manually before installing",
-                settings_path.display()
-            );
-        }
-        // Already has a statusLine — check if budi is already there
-        let existing_cmd = existing
-            .get("command")
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
-        if statusline_has_budi(existing_cmd) {
+    match super::integrations::apply_statusline(&mut settings)? {
+        super::integrations::StatuslineApply::AlreadyConfigured => {
             println!(
                 "Status line already includes budi in {}",
                 settings_path.display()
             );
-            return Ok(());
+            Ok(())
         }
-        // Merge: append budi to the existing command
-        let merged = format!("{existing_cmd}{BUDI_STATUSLINE_SUFFIX}");
-        settings["statusLine"]["command"] = Value::String(merged);
-        let raw = serde_json::to_string_pretty(&settings)?;
-        fs::write(&settings_path, &raw)
-            .with_context(|| format!("Failed writing {}", settings_path.display()))?;
-        println!(
-            "Merged budi into existing status line in {}",
-            settings_path.display()
-        );
-        return Ok(());
+        super::integrations::StatuslineApply::Changed => {
+            let raw = serde_json::to_string_pretty(&settings)?;
+            fs::write(&settings_path, raw)
+                .with_context(|| format!("Failed writing {}", settings_path.display()))?;
+            println!("Installed budi status line in {}", settings_path.display());
+            Ok(())
+        }
+        super::integrations::StatuslineApply::ManualMergeRequired => {
+            anyhow::bail!(
+                "statusLine already exists in {} and merge is shell-dependent on Windows. \
+                 Please set `statusLine.command` manually to include `budi statusline`.",
+                settings_path.display()
+            )
+        }
     }
-
-    // No statusLine at all — install budi as the sole command
-    settings["statusLine"] = json!({
-        "type": "command",
-        "command": BUDI_STATUSLINE_CMD,
-        "padding": 0
-    });
-    let raw = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_path, raw)
-        .with_context(|| format!("Failed writing {}", settings_path.display()))?;
-    println!("Installed budi status line in {}", settings_path.display());
-    Ok(())
 }
 
 /// Remove legacy budi hooks from ~/.claude/settings.json.

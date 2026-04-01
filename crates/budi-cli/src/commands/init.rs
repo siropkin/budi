@@ -1,12 +1,14 @@
+use std::collections::BTreeSet;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use budi_core::config;
-use serde_json::{Value, json};
 
 use crate::daemon::ensure_daemon_running;
+use crate::{InitIntegrationsMode, StatuslinePreset};
 
 /// Run `budi init`. Prints warnings to stderr if hook installation had issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +19,11 @@ pub enum InitOutcome {
 
 pub fn cmd_init(
     local: bool,
+    yes: bool,
+    with: Vec<super::integrations::IntegrationComponent>,
+    without: Vec<super::integrations::IntegrationComponent>,
+    integrations_mode: InitIntegrationsMode,
+    statusline_preset: Option<StatuslinePreset>,
     repo_root: Option<PathBuf>,
     no_daemon: bool,
     no_open: bool,
@@ -48,21 +55,49 @@ pub fn cmd_init(
     clean_duplicate_binaries();
     check_daemon_binary_and_version();
 
-    // Install all Claude Code integrations (settings.json) in a single read-modify-write pass.
-    let mut hook_warnings = install_claude_code_settings(&config);
+    let selected_integrations = resolve_init_integrations(
+        local,
+        yes,
+        with,
+        without,
+        integrations_mode,
+        io::stdin().is_terminal(),
+    )?;
+    let statusline_preset = resolve_statusline_preset(
+        &selected_integrations,
+        statusline_preset,
+        !yes && io::stdin().is_terminal(),
+    )?;
 
-    // Cursor hooks are in a separate file.
-    if let Err(e) = install_cursor_hooks() {
-        eprintln!(
-            "{}  Warning:{} Cursor hooks: {e}",
-            super::ansi("\x1b[33m"),
-            super::ansi("\x1b[0m")
-        );
-        hook_warnings.push(format!("Cursor hooks: {e}"));
+    if selected_integrations.is_empty() {
+        println!("  Integrations: skipped");
+    } else {
+        let names = selected_integrations
+            .iter()
+            .map(|c| c.display_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  Integrations: {names}");
     }
 
-    // Cursor extension (embedded .vsix)
-    install_cursor_extension();
+    let install_report =
+        super::integrations::install_selected(&config, &selected_integrations, statusline_preset);
+    let hook_warnings = install_report.warnings;
+
+    if repo_root.is_none() {
+        let mut prefs = super::integrations::load_preferences();
+        prefs.enabled = selected_integrations.clone();
+        if statusline_preset.is_some() {
+            prefs.statusline_preset = statusline_preset;
+        }
+        if let Err(e) = super::integrations::save_preferences(&prefs) {
+            eprintln!(
+                "{}  Warning:{} could not persist integration preferences: {e}",
+                super::ansi("\x1b[33m"),
+                super::ansi("\x1b[0m")
+            );
+        }
+    }
 
     let had_hook_warnings = !hook_warnings.is_empty();
 
@@ -172,7 +207,13 @@ pub fn cmd_init(
         );
     }
     println!();
-    println!("  {dim}Restart Claude Code and Cursor to activate hooks and the status line.{reset}");
+    if selected_integrations.is_empty() {
+        println!(
+            "  {dim}No integrations were installed. Use `budi integrations install ...` anytime.{reset}"
+        );
+    } else {
+        println!("  {dim}Restart Claude Code and Cursor to activate updated integrations.{reset}");
+    }
     println!();
 
     if !no_open && !is_reinit {
@@ -220,379 +261,142 @@ pub fn open_url_in_browser(url: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Consolidated Claude Code settings.json installation
-// ---------------------------------------------------------------------------
-
-/// Install all Claude Code integrations in a single read-modify-write pass.
-/// Handles: legacy hook cleanup, statusline, CC hooks, MCP server, OTEL env vars.
-/// Returns a list of warning messages for any hooks that failed.
-fn install_claude_code_settings(config: &config::BudiConfig) -> Vec<String> {
-    let result = (|| -> Result<Vec<String>> {
-        let home = budi_core::config::home_dir()?;
-        let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
-        let mut settings = super::read_json_or_default(&settings_path)?;
-        let warnings = Vec::new();
-
-        // 1. Remove legacy hooks (old-style with subcommand args)
-        if super::statusline::remove_legacy_budi_hooks_from_value(&mut settings) {
-            eprintln!(
-                "  Cleaned up legacy budi hooks from {}",
-                settings_path.display()
-            );
-        }
-
-        // 2. Statusline
-        match apply_statusline(&mut settings) {
-            Ok(true) => println!("  Status line: configured in {}", settings_path.display()),
-            Ok(false) => {} // already installed, message printed inside
-            Err(e) => {
-                let yellow = super::ansi("\x1b[33m");
-                let reset = super::ansi("\x1b[0m");
-                eprintln!("{yellow}  Warning:{reset} status line install failed: {e}");
+fn resolve_init_integrations(
+    local: bool,
+    yes: bool,
+    with: Vec<super::integrations::IntegrationComponent>,
+    without: Vec<super::integrations::IntegrationComponent>,
+    mode: InitIntegrationsMode,
+    is_tty: bool,
+) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
+    let mut selected = match mode {
+        InitIntegrationsMode::None => BTreeSet::new(),
+        InitIntegrationsMode::All => super::integrations::all_components(),
+        InitIntegrationsMode::Auto => {
+            if !is_tty || yes {
+                if local {
+                    BTreeSet::new()
+                } else {
+                    super::integrations::default_recommended_components()
+                }
+            } else {
+                prompt_for_integrations(local)?
             }
         }
-
-        // 3. Claude Code hooks
-        let hooks_changed = apply_cc_hooks(&mut settings);
-        if hooks_changed {
-            println!(
-                "  Hooks: installed Claude Code hooks in {}",
-                settings_path.display()
-            );
-        } else {
-            println!("  Hooks: Claude Code hooks already installed");
-        }
-
-        // 4. MCP server
-        if apply_mcp_server(&mut settings) {
-            println!(
-                "  MCP: installed budi server in {}",
-                settings_path.display()
-            );
-        } else {
-            println!("  MCP: budi server already configured");
-        }
-
-        // 5. OTEL env vars
-        apply_otel_env_vars(&mut settings, config, &settings_path);
-
-        // Single atomic write
-        super::atomic_write_json(&settings_path, &settings)?;
-
-        Ok(warnings)
-    })();
-
-    match result {
-        Ok(warnings) => warnings,
-        Err(e) => {
-            let yellow = super::ansi("\x1b[33m");
-            let reset = super::ansi("\x1b[0m");
-            eprintln!("{yellow}  Warning:{reset} Claude Code setup failed: {e}");
-            vec![format!("Claude Code settings: {e}")]
-        }
-    }
-}
-
-/// Apply statusline configuration. Returns Ok(true) if changed, Ok(false) if already set.
-fn apply_statusline(settings: &mut Value) -> Result<bool> {
-    if let Some(existing) = settings.get("statusLine") {
-        if !existing.is_object() {
-            anyhow::bail!("statusLine is not an object — fix it manually before installing");
-        }
-        let existing_cmd = existing
-            .get("command")
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
-        if existing_cmd.contains("budi statusline") || existing_cmd.contains("budi_out=$(budi") {
-            return Ok(false);
-        }
-        let merged = format!(
-            "{existing_cmd}{}",
-            super::statusline::BUDI_STATUSLINE_SUFFIX
-        );
-        settings["statusLine"]["command"] = Value::String(merged);
-        return Ok(true);
-    }
-
-    settings["statusLine"] = json!({
-        "type": "command",
-        "command": super::statusline::BUDI_STATUSLINE_CMD,
-        "padding": 0
-    });
-    Ok(true)
-}
-
-/// The budi hook command string — same for all hook events.
-/// Wrapped with `|| true` so the hook never blocks the host agent.
-const BUDI_HOOK_CMD: &str = "budi hook 2>/dev/null || true";
-
-/// Apply Claude Code hooks. Returns true if any changes were made.
-fn apply_cc_hooks(settings: &mut Value) -> bool {
-    let obj = match settings.as_object_mut() {
-        Some(o) => o,
-        None => return false,
     };
-    let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
-    if !hooks.is_object() {
-        *hooks = json!({});
+
+    for component in with {
+        selected.insert(component);
+    }
+    for component in without {
+        selected.remove(&component);
     }
 
-    let budi_hook_entry = json!({
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": BUDI_HOOK_CMD,
-            "async": true
-        }]
-    });
-
-    let mut changed = false;
-    for event in super::CC_HOOK_EVENTS {
-        let Some(hooks_map) = hooks.as_object_mut() else {
-            break;
-        };
-        let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
-        if !event_arr.is_array() {
-            *event_arr = json!([]);
-        }
-
-        // Remove legacy budi hooks (without || true wrapper) to re-add with the safe version
-        let Some(arr_mut) = event_arr.as_array_mut() else {
-            continue;
-        };
-        let had_legacy = arr_mut.iter().any(is_legacy_cc_hook);
-        if had_legacy {
-            arr_mut.retain(|e| !is_legacy_cc_hook(e));
-            changed = true;
-        }
-
-        let already_installed = arr_mut.iter().any(super::is_budi_cc_hook_entry);
-        if !already_installed {
-            if let Some(arr) = event_arr.as_array_mut() {
-                arr.push(budi_hook_entry.clone());
-            }
-            changed = true;
-        }
-    }
-
-    changed
+    Ok(selected)
 }
 
-/// Apply MCP server configuration. Returns true if changed.
-fn apply_mcp_server(settings: &mut Value) -> bool {
-    let obj = match settings.as_object_mut() {
-        Some(o) => o,
-        None => return false,
+fn resolve_statusline_preset(
+    selected: &BTreeSet<super::integrations::IntegrationComponent>,
+    preset: Option<StatuslinePreset>,
+    prompt: bool,
+) -> Result<Option<StatuslinePreset>> {
+    if !selected.contains(&super::integrations::IntegrationComponent::ClaudeCodeStatusline) {
+        return Ok(None);
+    }
+    if preset.is_some() || !prompt {
+        return Ok(preset);
+    }
+
+    println!();
+    println!("  Choose Claude Code status line preset:");
+    println!("    1) coach  (session cost + health)");
+    println!("    2) cost   (today/week/month)");
+    println!("    3) full   (session + health + today)");
+    eprint!("  Preset [1]: ");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read stdin")?;
+    let chosen = match input.trim() {
+        "2" | "cost" => StatuslinePreset::Cost,
+        "3" | "full" => StatuslinePreset::Full,
+        _ => StatuslinePreset::Coach,
     };
-    let mcp_servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    if !mcp_servers.is_object() {
-        *mcp_servers = json!({});
-    }
-
-    let budi_path = which_budi();
-    let desired = json!({
-        "command": budi_path,
-        "args": ["mcp-serve"],
-        "type": "stdio"
-    });
-
-    let mcp_obj = mcp_servers.as_object_mut().unwrap();
-    if mcp_obj.get("budi") == Some(&desired) {
-        return false;
-    }
-
-    mcp_obj.insert("budi".to_string(), desired);
-    true
+    Ok(Some(chosen))
 }
 
-/// Apply OTEL env vars. Prints status messages directly.
-fn apply_otel_env_vars(
-    settings: &mut Value,
-    config: &config::BudiConfig,
-    settings_path: &std::path::Path,
-) {
-    let obj = match settings.as_object_mut() {
-        Some(o) => o,
-        None => return,
-    };
-    let env = obj.entry("env").or_insert_with(|| json!({}));
-    if !env.is_object() {
-        *env = json!({});
-    }
-    let env_obj = env.as_object_mut().unwrap();
-
-    let budi_endpoint = format!("http://127.0.0.1:{}", config.daemon_port);
-
-    // Check if user has a custom OTEL endpoint pointing elsewhere
-    if let Some(existing) = env_obj
-        .get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .and_then(|v| v.as_str())
-    {
-        let existing_lower = existing.to_lowercase();
-        let is_localhost =
-            existing_lower.contains("127.0.0.1") || existing_lower.contains("localhost");
-        if !is_localhost {
-            println!(
-                "  OTEL: already configured (pointing to {existing}). \
-                 To also send to budi, use an OTEL Collector with multiple exporters."
-            );
-            return;
+fn prompt_for_integrations(
+    local: bool,
+) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
+    if local {
+        let enable_global = prompt_yes_no(
+            "  Install global integrations too (Claude/Cursor hooks, status line, MCP, OTEL)?",
+            false,
+        )?;
+        if !enable_global {
+            return Ok(BTreeSet::new());
         }
     }
 
-    let otel_vars = [
-        ("CLAUDE_CODE_ENABLE_TELEMETRY", "1"),
-        ("OTEL_EXPORTER_OTLP_ENDPOINT", &budi_endpoint),
-        ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
-        ("OTEL_METRICS_EXPORTER", "otlp"),
-        ("OTEL_LOGS_EXPORTER", "otlp"),
+    println!();
+    println!("  Select integrations to install:");
+    let mut selected = BTreeSet::new();
+    let defaults = [
+        (
+            super::integrations::IntegrationComponent::ClaudeCodeHooks,
+            true,
+        ),
+        (
+            super::integrations::IntegrationComponent::ClaudeCodeMcp,
+            true,
+        ),
+        (
+            super::integrations::IntegrationComponent::ClaudeCodeOtel,
+            true,
+        ),
+        (
+            super::integrations::IntegrationComponent::ClaudeCodeStatusline,
+            true,
+        ),
+        (super::integrations::IntegrationComponent::CursorHooks, true),
+        (
+            super::integrations::IntegrationComponent::CursorExtension,
+            true,
+        ),
+        (super::integrations::IntegrationComponent::Starship, false),
     ];
-
-    let mut changed = false;
-    for (key, value) in &otel_vars {
-        let current = env_obj.get(*key).and_then(|v| v.as_str());
-        if current != Some(value) {
-            env_obj.insert(key.to_string(), json!(value));
-            changed = true;
+    for (component, default_enabled) in defaults {
+        let question = format!("  - {}?", component.display_name());
+        if prompt_yes_no(&question, default_enabled)? {
+            selected.insert(component);
         }
     }
-
-    if changed {
-        println!(
-            "  OTEL: configured telemetry in {}",
-            settings_path.display()
-        );
-    } else {
-        println!("  OTEL: telemetry already configured");
-    }
+    println!();
+    Ok(selected)
 }
 
-// ---------------------------------------------------------------------------
-// Public wrappers for update.rs (read-modify-write individually)
-// ---------------------------------------------------------------------------
-
-/// Install OTEL telemetry env vars into ~/.claude/settings.json.
-/// Standalone wrapper for use by `budi update`.
-pub fn install_otel_env_vars(config: &config::BudiConfig) {
-    let result = (|| -> Result<()> {
-        let home = budi_core::config::home_dir()?;
-        let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
-        let mut settings = super::read_json_or_default(&settings_path)?;
-        apply_otel_env_vars(&mut settings, config, &settings_path);
-        super::atomic_write_json(&settings_path, &settings)?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        let yellow = super::ansi("\x1b[33m");
-        let reset = super::ansi("\x1b[0m");
-        eprintln!("{yellow}  Warning:{reset} OTEL setup failed: {e}");
-    }
-}
-
-/// Install the budi MCP server in ~/.claude/settings.json.
-/// Standalone wrapper for use by `budi update`.
-pub fn install_mcp_server() {
-    let result = (|| -> Result<()> {
-        let home = budi_core::config::home_dir()?;
-        let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
-        let mut settings = super::read_json_or_default(&settings_path)?;
-        if apply_mcp_server(&mut settings) {
-            println!(
-                "  MCP: installed budi server in {}",
-                settings_path.display()
-            );
-        } else {
-            println!("  MCP: budi server already configured");
+fn prompt_yes_no(question: &str, default_yes: bool) -> Result<bool> {
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    loop {
+        eprint!("{question} {hint} ");
+        io::stdout().flush().ok();
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read stdin")?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(default_yes);
         }
-        super::atomic_write_json(&settings_path, &settings)?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        let yellow = super::ansi("\x1b[33m");
-        let reset = super::ansi("\x1b[0m");
-        eprintln!("{yellow}  Warning:{reset} MCP server setup failed: {e}");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Hook installation (Cursor — separate file)
-// ---------------------------------------------------------------------------
-
-/// Install hooks into ~/.cursor/hooks.json.
-fn install_cursor_hooks() -> Result<()> {
-    let home = budi_core::config::home_dir()?;
-    let hooks_path = home.join(".cursor/hooks.json");
-
-    if let Some(parent) = hooks_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-
-    let mut config = if hooks_path.exists() {
-        let raw = fs::read_to_string(&hooks_path)
-            .with_context(|| format!("Failed to read {}", hooks_path.display()))?;
-        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"version": 1, "hooks": {}}))
-    } else {
-        json!({"version": 1, "hooks": {}})
-    };
-
-    if config.get("version").is_none() {
-        config["version"] = json!(1);
-    }
-    if config.get("hooks").is_none() || !config["hooks"].is_object() {
-        config["hooks"] = json!({});
-    }
-
-    let budi_hook_entry = json!({
-        "command": BUDI_HOOK_CMD,
-        "type": "command"
-    });
-
-    let mut changed = false;
-    let Some(hooks) = config.get_mut("hooks") else {
-        anyhow::bail!("Cursor hooks config missing hooks key");
-    };
-
-    for event in super::CURSOR_HOOK_EVENTS {
-        let Some(hooks_map) = hooks.as_object_mut() else {
-            anyhow::bail!("Cursor hooks is not a JSON object");
-        };
-        let event_arr = hooks_map.entry(*event).or_insert_with(|| json!([]));
-        if !event_arr.is_array() {
-            *event_arr = json!([]);
-        }
-
-        let Some(arr_mut) = event_arr.as_array_mut() else {
-            continue;
-        };
-        let had_legacy = arr_mut.iter().any(is_legacy_cursor_hook);
-        if had_legacy {
-            arr_mut.retain(|e| !is_legacy_cursor_hook(e));
-            changed = true;
-        }
-
-        let already_installed = arr_mut.iter().any(super::is_budi_cursor_hook_entry);
-        if !already_installed {
-            if let Some(arr) = event_arr.as_array_mut() {
-                arr.push(budi_hook_entry.clone());
+        match trimmed {
+            "y" | "Y" | "yes" | "YES" | "Yes" => return Ok(true),
+            "n" | "N" | "no" | "NO" | "No" => return Ok(false),
+            _ => {
+                println!("  Please enter y or n.");
             }
-            changed = true;
         }
     }
-
-    if changed {
-        super::atomic_write_json(&hooks_path, &config)?;
-        println!(
-            "  Hooks: installed Cursor hooks in {}",
-            hooks_path.display()
-        );
-    } else {
-        println!("  Hooks: Cursor hooks already installed");
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -732,156 +536,4 @@ fn brew_has_budi() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Find the budi binary path, preferring the same directory as the running binary.
-fn which_budi() -> String {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("budi");
-        if candidate.exists() {
-            return candidate.display().to_string();
-        }
-    }
-    "budi".to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Legacy hook detection (for upgrading from old format without `|| true`)
-// ---------------------------------------------------------------------------
-
-/// Check if a Claude Code hook entry uses the old format (without `|| true` wrapper).
-fn is_legacy_cc_hook(entry: &Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| c.trim() == "budi hook")
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Check if a Cursor hook entry uses the old format (without `|| true` wrapper).
-fn is_legacy_cursor_hook(entry: &Value) -> bool {
-    entry
-        .get("command")
-        .and_then(|c| c.as_str())
-        .is_some_and(|c| c.trim() == "budi hook")
-}
-
-// ---------------------------------------------------------------------------
-// Cursor extension auto-install
-// ---------------------------------------------------------------------------
-
-static CURSOR_EXTENSION_VSIX: &[u8] =
-    include_bytes!("../../../../extensions/cursor-budi/cursor-budi.vsix");
-
-/// Install the budi Cursor extension if Cursor is available and the extension
-/// is either missing or outdated. Non-fatal — prints a warning on failure.
-fn install_cursor_extension() {
-    if CURSOR_EXTENSION_VSIX.is_empty() {
-        return;
-    }
-
-    let cursor_cli = match find_cursor_cli() {
-        Some(c) => c,
-        None => return,
-    };
-
-    if is_cursor_extension_installed_via(&cursor_cli) {
-        println!("  Extension: Cursor extension already installed");
-        return;
-    }
-
-    let tmp_dir = std::env::temp_dir().join(format!("budi-vsix-{}", std::process::id()));
-    if fs::create_dir_all(&tmp_dir).is_err() {
-        return;
-    }
-
-    let vsix_path = tmp_dir.join("cursor-budi.vsix");
-    if let Err(e) = fs::write(&vsix_path, CURSOR_EXTENSION_VSIX) {
-        eprintln!(
-            "{}  Warning:{} could not write extension to temp: {e}",
-            super::ansi("\x1b[33m"),
-            super::ansi("\x1b[0m")
-        );
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return;
-    }
-
-    let result = Command::new(&cursor_cli)
-        .args([
-            "--install-extension",
-            &vsix_path.to_string_lossy(),
-            "--force",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    let _ = fs::remove_dir_all(&tmp_dir);
-
-    match result {
-        Ok(status) if status.success() => {
-            println!("  Extension: installed Cursor extension");
-        }
-        Ok(_) => {
-            let yellow = super::ansi("\x1b[33m");
-            let reset = super::ansi("\x1b[0m");
-            eprintln!("{yellow}  Warning:{reset} Cursor extension install failed");
-        }
-        Err(e) => {
-            let yellow = super::ansi("\x1b[33m");
-            let reset = super::ansi("\x1b[0m");
-            eprintln!("{yellow}  Warning:{reset} could not run cursor CLI: {e}");
-        }
-    }
-}
-
-/// Check if the `cursor` CLI is on PATH (or at the well-known macOS location).
-pub fn find_cursor_cli() -> Option<String> {
-    let candidates = if cfg!(target_os = "macos") {
-        vec!["cursor".to_string(), "/usr/local/bin/cursor".to_string()]
-    } else {
-        vec!["cursor".to_string()]
-    };
-
-    candidates.into_iter().find(|candidate| {
-        Command::new(candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
-}
-
-/// Check if `siropkin.budi` extension is already installed in Cursor.
-fn is_cursor_extension_installed_via(cursor_cli: &str) -> bool {
-    Command::new(cursor_cli)
-        .arg("--list-extensions")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout);
-            out.lines()
-                .any(|l| l.trim().eq_ignore_ascii_case("siropkin.budi"))
-        })
-        .unwrap_or(false)
-}
-
-/// Check if the budi Cursor extension is installed.
-/// Used by doctor and integrations endpoint.
-pub fn is_cursor_extension_installed() -> bool {
-    match find_cursor_cli() {
-        Some(cli) => is_cursor_extension_installed_via(&cli),
-        None => false,
-    }
 }

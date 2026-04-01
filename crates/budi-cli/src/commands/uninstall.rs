@@ -183,14 +183,23 @@ fn remove_all_from_claude_code(home: &str) -> Result<(bool, bool, bool, bool)> {
         let is_budi_endpoint = settings
             .get("env")
             .and_then(|e| e.as_object())
-            .and_then(|env| env.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
-            .and_then(|v| v.as_str())
-            .is_some_and(|url| {
-                let lower = url.to_lowercase();
-                let is_local = lower.contains("127.0.0.1") || lower.contains("localhost");
-                let is_budi_port =
-                    lower.contains(&format!(":{}", budi_core::config::DEFAULT_DAEMON_PORT));
-                is_local && is_budi_port
+            .is_some_and(|env| {
+                let endpoint_local = env
+                    .get("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|url| {
+                        let lower = url.to_lowercase();
+                        lower.contains("127.0.0.1") || lower.contains("localhost")
+                    });
+                endpoint_local
+                    && env
+                        .get("CLAUDE_CODE_ENABLE_TELEMETRY")
+                        .and_then(|v| v.as_str())
+                        == Some("1")
+                    && env
+                        .get("OTEL_EXPORTER_OTLP_PROTOCOL")
+                        .and_then(|v| v.as_str())
+                        == Some("http/json")
             });
         if is_budi_endpoint
             && let Some(env) = settings.get_mut("env").and_then(|e| e.as_object_mut())

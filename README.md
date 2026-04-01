@@ -114,7 +114,7 @@ All installers automatically run `budi init` after installation. Homebrew users 
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon, installs hooks for Claude Code and Cursor, configures OpenTelemetry for exact cost tracking, sets up the status line, and syncs existing data. **Restart Claude Code and Cursor** after install to activate hooks, telemetry, and the status line. The daemon uses port 7878 by default — make sure it's available (customize in `~/.config/budi/config.toml` with `daemon_port`).
+`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks/MCP/OTEL/statusline, Cursor hooks/extension, Starship prompt module). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize in `~/.config/budi/config.toml` with `daemon_port`.
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -122,11 +122,11 @@ Run `budi doctor` to verify everything is set up correctly.
 
 ## Status line
 
-Budi adds a live cost display to Claude Code, installed automatically by `budi init`:
+Budi adds a live cost display to Claude Code (optional in `budi init`):
 
 `🟢 budi · $4.92 session · session healthy`
 
-The default `coach` preset shows your current session cost plus a health indicator. When Budi spots a problem, the short tip explains what to do next:
+The `coach` preset shows your current session cost plus a health indicator. When Budi spots a problem, the short tip explains what to do next:
 
 `🟡 budi · $12.50 session · Context growing — /compact soon`
 
@@ -155,7 +155,7 @@ shell = ["sh"]
 
 ## Cursor extension
 
-Budi includes a Cursor/VS Code extension that shows session health and cost in the status bar and a side panel. It is **auto-installed by `budi init`** when Cursor is detected on your machine.
+Budi includes a Cursor/VS Code extension that shows session health and cost in the status bar and a side panel. It can be installed during `budi init` and later via `budi integrations install --with cursor-extension`.
 
 The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 🔴 0`). Click it to open the health panel with session details, vitals, and tips. Active session tracking works via hooks — no manual setup needed.
 
@@ -177,7 +177,18 @@ budi update                      # downloads latest release, migrates DB, restar
 budi update --version 7.1.0     # update to a specific version
 ```
 
-Works for all installation methods — automatically detects Homebrew and runs `brew upgrade` when appropriate.
+Works for all installation methods — automatically detects Homebrew and runs `brew upgrade` when appropriate. Update refreshes integrations you previously enabled (stored in `~/.config/budi/integrations.toml`).
+
+## Integrations
+
+Manage integrations anytime (especially if you skipped some during first init):
+
+```bash
+budi integrations list
+budi integrations install --with claude-code-hooks --with claude-code-otel
+budi integrations install --with cursor-extension
+budi integrations install --with starship
+```
 
 **Restart Claude Code and Cursor** after updating to pick up any changes.
 
@@ -185,6 +196,10 @@ Works for all installation methods — automatically detects Homebrew and runs `
 
 ```bash
 budi init                     # start daemon, install hooks, sync data
+budi init --integrations none # initialize data/daemon without editor integrations
+budi init --with starship     # install an extra integration during init
+budi integrations list        # show what is installed vs available
+budi integrations install ... # install integrations later
 budi open                     # open web dashboard
 budi doctor                   # check health: daemon, database, config
 budi stats                    # usage summary with cost breakdown

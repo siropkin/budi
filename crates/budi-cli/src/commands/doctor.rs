@@ -322,7 +322,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 claude_missing.join(", ")
             );
             issues.push(format!(
-                "Claude Code hooks missing events: {}. Run `budi init` to fix.",
+                "Claude Code hooks missing events: {}. Run `budi integrations install --with claude-code-hooks` to fix.",
                 claude_missing.join(", ")
             ));
         }
@@ -337,7 +337,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                 cursor_missing.join(", ")
             );
             issues.push(format!(
-                "Cursor hooks missing events: {}. Run `budi init` to fix.",
+                "Cursor hooks missing events: {}. Run `budi integrations install --with cursor-hooks` to fix.",
                 cursor_missing.join(", ")
             ));
         } else if cursor_dir_exists && !cursor_ok {
@@ -347,9 +347,14 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
     } else {
         let hook_log_hint = hook_debug_log_hint();
         println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
-        println!("    Run `budi init` to install hooks");
+        println!(
+            "    Run `budi integrations install --with claude-code-hooks --with cursor-hooks`"
+        );
         println!("    Tip: set BUDI_HOOK_DEBUG=1 to log hook failures to {hook_log_hint}");
-        issues.push("No hooks installed. Run `budi init` to set up hooks.".into());
+        issues.push(
+            "No hooks installed. Run `budi integrations install --with claude-code-hooks --with cursor-hooks`."
+                .into(),
+        );
     }
 
     // Print hook debug hint if any hook-related issues were found
@@ -369,7 +374,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         } else {
             let yellow = super::ansi("\x1b[33m");
             println!(
-                "  {yellow}!{reset} MCP: budi server not configured. Run `budi init` to enable AI agent integration"
+                "  {yellow}!{reset} MCP: budi server not configured. Run `budi integrations install --with claude-code-mcp`"
             );
         }
     }
@@ -382,7 +387,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
         } else {
             let yellow = super::ansi("\x1b[33m");
             println!(
-                "  {yellow}!{reset} OTEL: not configured. Run `budi init` to enable exact cost tracking"
+                "  {yellow}!{reset} OTEL: not configured. Run `budi integrations install --with claude-code-otel`"
             );
             // Not a hard issue — JSONL still works, just estimated cost
         }
@@ -390,15 +395,15 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
 
     // Check Cursor extension
     {
-        let cursor_on_path = super::init::find_cursor_cli().is_some();
+        let cursor_on_path = super::integrations::find_cursor_cli().is_some();
         if cursor_on_path {
-            let ext_installed = super::init::is_cursor_extension_installed();
+            let ext_installed = super::integrations::is_cursor_extension_installed();
             if ext_installed {
                 println!("  {green}\u{2713}{reset} Cursor extension: installed");
             } else {
                 let yellow = super::ansi("\x1b[33m");
                 println!(
-                    "  {yellow}!{reset} Cursor extension: not installed. Run `budi init` to install"
+                    "  {yellow}!{reset} Cursor extension: not installed. Run `budi integrations install --with cursor-extension`"
                 );
             }
         } else {

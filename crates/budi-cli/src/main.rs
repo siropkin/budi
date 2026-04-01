@@ -9,6 +9,8 @@ mod commands;
 mod daemon;
 mod mcp;
 
+use crate::commands::integrations::{IntegrationComponent, StatuslinePreset};
+
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 
 #[derive(Debug, Parser)]
@@ -16,7 +18,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -25,11 +27,26 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Set up budi (starts daemon, installs status line, syncs existing data).
+    /// Set up budi (starts daemon, lets you choose integrations, syncs existing data).
     Init {
         /// Initialize for the current git repo only (default: global)
         #[arg(long)]
         local: bool,
+        /// Skip prompts and use default integration selection
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        /// Explicitly install these integrations (repeatable, kebab-case names)
+        #[arg(long = "with", value_enum)]
+        with: Vec<IntegrationComponent>,
+        /// Explicitly skip these integrations (repeatable, kebab-case names)
+        #[arg(long = "without", value_enum)]
+        without: Vec<IntegrationComponent>,
+        /// Integration selection mode: auto (default), all, or none
+        #[arg(long, value_enum, default_value_t = InitIntegrationsMode::Auto)]
+        integrations: InitIntegrationsMode,
+        /// Claude Code status line preset (coach=session health, cost=period)
+        #[arg(long, value_enum)]
+        statusline_preset: Option<StatuslinePreset>,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
@@ -145,6 +162,39 @@ Examples:
         #[arg(long, value_enum, default_value_t = StatuslineFormat::Claude)]
         format: StatuslineFormat,
     },
+    /// Manage optional integrations (install later, list current status)
+    Integrations {
+        #[command(subcommand)]
+        action: IntegrationAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrationAction {
+    /// List all available integrations and whether they are installed
+    List,
+    /// Install selected integrations
+    Install {
+        /// Integrations to install (repeatable). If omitted, installs recommended set.
+        #[arg(long = "with", value_enum)]
+        with: Vec<IntegrationComponent>,
+        /// Install every available integration
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Statusline preset for Claude Code status line (coach=session health, cost=period)
+        #[arg(long, value_enum)]
+        statusline_preset: Option<StatuslinePreset>,
+        /// Skip prompts and use defaults
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum InitIntegrationsMode {
+    Auto,
+    All,
+    None,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -185,12 +235,28 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init {
             local,
+            yes,
+            with,
+            without,
+            integrations,
+            statusline_preset,
             repo_root,
             no_daemon,
             no_open,
             no_sync,
         } => {
-            let outcome = commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
+            let outcome = commands::init::cmd_init(
+                local,
+                yes,
+                with,
+                without,
+                integrations,
+                statusline_preset,
+                repo_root,
+                no_daemon,
+                no_open,
+                no_sync,
+            )?;
             if matches!(outcome, commands::init::InitOutcome::PartialSuccess) {
                 std::process::exit(2);
             }
@@ -273,6 +339,7 @@ fn main() -> Result<()> {
                 commands::statusline::cmd_statusline(format)
             }
         }
+        Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
     }
 }
 

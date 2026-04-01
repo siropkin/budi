@@ -17,7 +17,13 @@ Live AI coding cost analytics in your Cursor status bar and side panel.
 
 ## Install
 
-The extension is **auto-installed by `budi init`** when Cursor is detected on your machine. Run `budi doctor` to verify.
+The extension can be installed during `budi init` and later with:
+
+```bash
+budi integrations install --with cursor-extension
+```
+
+Run `budi doctor` to verify.
 
 **Manual install** (if auto-install was skipped or you want to rebuild):
 
