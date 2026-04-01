@@ -9,13 +9,19 @@ use serde_json::{Value, json};
 use crate::daemon::ensure_daemon_running;
 
 /// Run `budi init`. Prints warnings to stderr if hook installation had issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitOutcome {
+    Success,
+    PartialSuccess,
+}
+
 pub fn cmd_init(
     local: bool,
     repo_root: Option<PathBuf>,
     no_daemon: bool,
     no_open: bool,
     no_sync: bool,
-) -> Result<()> {
+) -> Result<InitOutcome> {
     let repo_root = if local || repo_root.is_some() {
         let root = super::try_resolve_repo_root(repo_root);
         if root.is_none() {
@@ -43,8 +49,7 @@ pub fn cmd_init(
     check_daemon_binary_and_version();
 
     // Install all Claude Code integrations (settings.json) in a single read-modify-write pass.
-    let hook_warnings = install_claude_code_settings(&config);
-    let had_hook_warnings = !hook_warnings.is_empty();
+    let mut hook_warnings = install_claude_code_settings(&config);
 
     // Cursor hooks are in a separate file.
     if let Err(e) = install_cursor_hooks() {
@@ -53,10 +58,13 @@ pub fn cmd_init(
             super::ansi("\x1b[33m"),
             super::ansi("\x1b[0m")
         );
+        hook_warnings.push(format!("Cursor hooks: {e}"));
     }
 
     // Cursor extension (embedded .vsix)
     install_cursor_extension();
+
+    let had_hook_warnings = !hook_warnings.is_empty();
 
     if had_hook_warnings {
         eprintln!("  Warning: hook installation had issues:");
@@ -137,14 +145,14 @@ pub fn cmd_init(
             "  Data:      {}",
             config::repo_paths(root)
                 .map(|p| p.data_dir.display().to_string())
-                .unwrap_or_else(|_| "~/.local/share/budi".to_string())
+                .unwrap_or_else(|_| "<unable to resolve repo data path>".to_string())
         );
     } else {
         println!(
             "  Data:      {}",
             config::budi_home_dir()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "~/.local/share/budi".to_string())
+                .unwrap_or_else(|_| "<unable to resolve budi home>".to_string())
         );
     }
     println!("  Dashboard: {dashboard_url}");
@@ -180,7 +188,11 @@ pub fn cmd_init(
         );
     }
 
-    Ok(())
+    if had_hook_warnings {
+        Ok(InitOutcome::PartialSuccess)
+    } else {
+        Ok(InitOutcome::Success)
+    }
 }
 
 pub fn open_url_in_browser(url: &str) {
@@ -621,13 +633,10 @@ fn check_daemon_binary_and_version() {
 // Duplicate binary cleanup
 // ---------------------------------------------------------------------------
 
-/// Detect and auto-remove duplicate budi binaries from the non-active install source.
+/// Detect duplicate `budi`/`budi-daemon` binaries in PATH and warn.
 ///
-/// Handles two cases:
-/// - Active source is Homebrew → removes `~/.local/bin` copies and `.bak` files
-/// - Active source is `~/.local/bin` → runs `brew uninstall budi` if installed
-///
-/// Skips cleanup for dev builds (binary not in a known install location).
+/// We do not delete or uninstall anything automatically — users should opt in
+/// to binary removal to avoid destructive surprises.
 pub(crate) fn clean_duplicate_binaries() {
     let Ok(path_var) = std::env::var("PATH") else {
         return;
@@ -636,20 +645,28 @@ pub(crate) fn clean_duplicate_binaries() {
         return;
     };
 
-    let has_duplicates = ["budi", "budi-daemon"].iter().any(|bin_name| {
-        let mut found: Vec<PathBuf> = Vec::new();
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(bin_name);
-            if candidate.exists()
-                && let Ok(resolved) = candidate.canonicalize()
-                && !found.iter().any(|p| p == &resolved)
-            {
-                found.push(resolved);
+    let duplicate_bins: Vec<(&str, Vec<PathBuf>)> = ["budi", "budi-daemon"]
+        .iter()
+        .filter_map(|bin_name| {
+            let mut found: Vec<PathBuf> = Vec::new();
+            for dir in std::env::split_paths(&path_var) {
+                let candidate = dir.join(bin_name);
+                if candidate.exists()
+                    && let Ok(resolved) = candidate.canonicalize()
+                    && !found.iter().any(|p| p == &resolved)
+                {
+                    found.push(resolved);
+                }
             }
-        }
-        found.len() > 1
-    });
-    if !has_duplicates {
+            if found.len() > 1 {
+                Some((*bin_name, found))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if duplicate_bins.is_empty() {
         clean_backup_files();
         return;
     }
@@ -659,66 +676,30 @@ pub(crate) fn clean_duplicate_binaries() {
     let is_brew = exe_lower.contains("/cellar/") || exe_lower.contains("/homebrew/");
     let is_standalone = exe_str.contains("/.local/bin/");
 
-    let green = super::ansi("\x1b[32m");
     let yellow = super::ansi("\x1b[33m");
     let reset = super::ansi("\x1b[0m");
 
+    eprintln!(
+        "{yellow}  Warning:{reset} multiple budi binaries found in PATH. \
+         Keep only one install source to avoid CLI/daemon version mismatches."
+    );
+    for (name, paths) in &duplicate_bins {
+        let rendered = paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("    - {name}: {rendered}");
+    }
+
     if is_brew {
-        if let Ok(home) = config::home_dir() {
-            let bin_dir = home.join(".local").join("bin");
-            if bin_dir.is_dir() {
-                for name in &["budi", "budi-daemon"] {
-                    let target = bin_dir.join(name);
-                    if target.exists() {
-                        let is_different = target
-                            .canonicalize()
-                            .map(|r| r != current_exe)
-                            .unwrap_or(true);
-                        if is_different {
-                            match fs::remove_file(&target) {
-                                Ok(()) => {
-                                    eprintln!(
-                                        "  {green}✓{reset} Removed stale standalone binary: {}",
-                                        target.display()
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "  {yellow}!{reset} Could not remove {}: {e}",
-                                        target.display()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else if is_standalone {
-        if brew_has_budi() {
-            eprintln!("  Removing Homebrew copy of budi...");
-            let status = Command::new("brew")
-                .args(["uninstall", "budi", "--force"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    eprintln!("  {green}✓{reset} Uninstalled Homebrew copy of budi");
-                }
-                Ok(_) | Err(_) => {
-                    eprintln!(
-                        "  {yellow}!{reset} Could not uninstall Homebrew copy. \
-                         Run `brew uninstall budi` manually."
-                    );
-                }
-            }
-        }
+        eprintln!("  Active install source: Homebrew");
+        eprintln!("  Suggested cleanup: remove standalone copies from ~/.local/bin (if unused).");
+    } else if is_standalone && brew_has_budi() {
+        eprintln!("  Active install source: standalone (~/.local/bin)");
+        eprintln!("  Suggested cleanup: run `brew uninstall budi`.");
     } else {
-        eprintln!(
-            "{yellow}  Warning:{reset} multiple budi binaries found in PATH. \
-             Remove stale copies to avoid version mismatch."
-        );
+        eprintln!("  Suggested cleanup: remove stale copies and keep one location first on PATH.");
     }
 
     clean_backup_files();

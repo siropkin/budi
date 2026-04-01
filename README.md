@@ -53,7 +53,7 @@ No cloud. No uploads. Everything stays on your machine.
 
 ## Platforms
 
-budi targets **macOS**, **Linux** (glibc), and **Windows 10+** (x86_64 and ARM64 where Rust tier-1 builds exist). Paths follow OS conventions (`HOME` / `USERPROFILE`, XDG-style data under `~/.local/share/budi` on Unix, `%LOCALAPPDATA%\budi` on Windows). Daemon port takeover after upgrade uses `lsof`/`ps`/`kill` on Unix and **PowerShell `Get-NetTCPConnection`** plus `tasklist`/`taskkill` on Windows (requires PowerShell, which is default on supported Windows versions).
+budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release binaries are published for macOS (Intel + Apple Silicon), Linux (x86_64 + aarch64 glibc), and Windows x86_64. On Windows ARM64, the installer currently uses the x86_64 binary via emulation. Paths follow OS conventions (`HOME` / `USERPROFILE`, data under `~/.local/share/budi` on Unix and `%LOCALAPPDATA%\budi` on Windows). Daemon port takeover after upgrade uses `lsof`/`ps`/`kill` on Unix and **PowerShell `Get-NetTCPConnection`** plus `taskkill` on Windows (requires PowerShell, which is default on supported Windows versions).
 
 ## Supported agents
 
@@ -87,10 +87,23 @@ irm https://raw.githubusercontent.com/siropkin/budi/main/scripts/install-standal
 
 Windows notes: binaries install to `%LOCALAPPDATA%\budi\bin`. Stopping or upgrading the daemon uses `taskkill` (or PowerShell) instead of Unix `pkill`. On startup, budi-daemon asks PowerShell for listeners on its port and terminates another `budi-daemon` if present. PATH is updated in the user environment — restart your terminal after install.
 
-**From source:** requires [Rust toolchain](https://rustup.rs/) — clones the repo and builds release binaries
+**From source:** requires [Rust toolchain](https://rustup.rs/)
 
 ```bash
 git clone https://github.com/siropkin/budi.git && cd budi && ./scripts/install.sh
+```
+
+Windows source build (PowerShell):
+
+```powershell
+git clone https://github.com/siropkin/budi.git
+cd budi
+cargo build --release --locked
+$BinDir = Join-Path $env:LOCALAPPDATA "budi\bin"
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+Copy-Item .\target\release\budi.exe $BinDir -Force
+Copy-Item .\target\release\budi-daemon.exe $BinDir -Force
+& (Join-Path $BinDir "budi.exe") init
 ```
 
 **Or paste this into your AI coding agent:**
@@ -272,7 +285,7 @@ Health state appears in the status line, the Cursor extension panel, and the ses
 
 ## Privacy
 
-Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on your machine in `~/.local/share/budi/`. Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
+Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on your machine (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
 
 ## How it works
 
@@ -311,7 +324,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 └──────────┘             │  - analytics │    Extract → Normalize
                          │  - hooks     │      → Enrich → Load
 ┌──────────┐    HTTP     └──────────────┘
-│ MCP      │ ──────────▶ (stdio JSON-RPC, 14 tools)
+│ MCP      │ ──────────▶ (stdio JSON-RPC, 15 tools)
 │ Server   │  thin client
 └──────────┘
                           ▲   ▲   ▲   ▲
@@ -461,6 +474,11 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 **Daemon won't start:**
 1. Check if port 7878 is in use: `lsof -i :7878`
 2. Kill stale processes: `pkill -f "budi-daemon serve"`
+3. Restart: `budi init`
+
+Windows equivalent:
+1. Check listeners: `Get-NetTCPConnection -LocalPort 7878 -State Listen`
+2. Kill stale daemon: `taskkill /IM budi-daemon.exe /F`
 3. Restart: `budi init`
 
 **Hooks not working:**

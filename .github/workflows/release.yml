@@ -87,6 +87,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Cursor extension package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd extensions/cursor-budi
+          npm ci
+          npm run build
+          npx vsce package --no-dependencies -o cursor-budi.vsix
+          test -s cursor-budi.vsix
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -99,6 +114,8 @@ jobs:
 
       - name: Build release binaries
         shell: bash
+        env:
+          BUDI_REQUIRE_CURSOR_VSIX: "1"
         run: |
           cargo build \
             --manifest-path Cargo.toml \

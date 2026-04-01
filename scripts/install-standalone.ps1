@@ -38,7 +38,7 @@ try {
     try {
         $sumsPath = Join-Path $tempDir "SHA256SUMS"
         Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
-        $expected = (Get-Content $sumsPath | Where-Object { $_ -match $assetName } | ForEach-Object { ($_ -split '\s+')[0] })
+        $expected = (Get-Content $sumsPath | Where-Object { $_ -match $assetName } | ForEach-Object { ($_ -split '\s+')[0].ToLower() })
         if ($expected) {
             $actual = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
             if ($expected -ne $actual) { Fail "Checksum mismatch for $assetName" }
@@ -60,13 +60,18 @@ try {
         if (Test-Path $src) {
             Copy-Item $src (Join-Path $BinDir $bin) -Force
             Log "Installed $bin -> $BinDir\$bin"
+        } else {
+            Fail "Missing binary in release archive: $bin"
         }
     }
 
     # Verify.
     $budiExe = Join-Path $BinDir "budi.exe"
+    $daemonExe = Join-Path $BinDir "budi-daemon.exe"
     & $budiExe --version
-    if ($LASTEXITCODE -ne 0) { Fail "Installed binary failed to run" }
+    if ($LASTEXITCODE -ne 0) { Fail "Installed budi.exe failed to run" }
+    & $daemonExe --version
+    if ($LASTEXITCODE -ne 0) { Fail "Installed budi-daemon.exe failed to run" }
 
     # Check PATH.
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -99,16 +104,16 @@ try {
     Log "Running budi init..."
     Log ""
     & $budiExe init
-    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2) {
+    $initExit = $LASTEXITCODE
+    if ($initExit -eq 0 -or $initExit -eq 2) {
         Log ""
-        if ($LASTEXITCODE -eq 2) {
+        if ($initExit -eq 2) {
             Log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
         } else {
             Log "Setup complete! Restart Claude Code and Cursor to activate hooks."
         }
     } else {
-        Log ""
-        Log "budi init failed. Run 'budi doctor' to check what needs fixing."
+        Fail "budi init failed (exit code $initExit). Run 'budi doctor' to diagnose."
     }
 } finally {
     if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }

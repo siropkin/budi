@@ -190,7 +190,10 @@ fn main() -> Result<()> {
             no_open,
             no_sync,
         } => {
-            commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
+            let outcome = commands::init::cmd_init(local, repo_root, no_daemon, no_open, no_sync)?;
+            if matches!(outcome, commands::init::InitOutcome::PartialSuccess) {
+                std::process::exit(2);
+            }
             Ok(())
         }
         Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),

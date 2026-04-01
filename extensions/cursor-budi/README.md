@@ -48,7 +48,7 @@ Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**
 
 ## How it works
 
-1. **Hooks** — Cursor hooks (`budi hook`) fire on chat interactions and update `~/.local/share/budi/cursor-sessions.json` with session activity timestamps
+1. **Hooks** — Cursor hooks (`budi hook`) fire on chat interactions and update `cursor-sessions.json` in budi's data directory (`~/.local/share/budi` on Unix, `%LOCALAPPDATA%\budi` on Windows)
 2. **File watcher** — the extension watches the session file and detects when the active session changes
 3. **Daemon** — `budi statusline --format json` (or direct HTTP to daemon) returns session cost, health state, and vitals
 4. **Health panel** — fetches session health details and lists recent sessions from `/analytics/sessions`

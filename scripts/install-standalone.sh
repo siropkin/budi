@@ -58,7 +58,7 @@ main() {
     log ""
   fi
 
-  local target tag asset_url
+  local target tag
   target="$(detect_target)"
 
   # Resolve version tag.
@@ -184,12 +184,16 @@ main() {
     # Auto-run budi init for a seamless setup experience.
     log "Running budi init..."
     log ""
-    if "$BIN_DIR/budi" init; then
+    local init_rc=0
+    "$BIN_DIR/budi" init || init_rc=$?
+    if [ "$init_rc" -eq 0 ]; then
       log ""
       log "Setup complete! Restart Claude Code and Cursor to activate hooks."
-    else
+    elif [ "$init_rc" -eq 2 ]; then
       log ""
-      log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+      log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
+    else
+      fail "budi init failed (exit code $init_rc). Run 'budi doctor' to diagnose."
     fi
   fi
 }

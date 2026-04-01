@@ -1,6 +1,6 @@
 //! `budi hook` — read hook JSON from stdin and POST it to the daemon.
 //! Exits 0 quickly so the editor is not blocked; delivery failures are appended to
-//! `~/.local/share/budi/hook-debug.log` (used by `budi doctor`).
+//! `<budi-home>/hook-debug.log` (used by `budi doctor`).
 
 use std::io::Read;
 
@@ -35,7 +35,7 @@ pub fn cmd_hook() -> anyhow::Result<()> {
         Err(e) => Err(e.to_string()),
     };
 
-    // Always log hook delivery failures to ~/.local/share/budi/hook-debug.log.
+    // Always log hook delivery failures to <budi-home>/hook-debug.log.
     // This file is checked by `budi doctor` and helps diagnose hook issues.
     if let Err(ref err) = result
         && let Ok(log_dir) = config::budi_home_dir()
@@ -88,7 +88,7 @@ fn load_daemon_url() -> String {
 
 /// Persist lightweight session state so the Cursor extension can resolve
 /// the active session_id for the current workspace without querying the daemon.
-/// File: `~/.local/share/budi/cursor-sessions.json`
+/// File: `<budi-home>/cursor-sessions.json`
 fn update_cursor_session_state(json: &serde_json::Value) {
     if json.get("cursor_version").is_none() {
         return;

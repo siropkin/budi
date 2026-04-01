@@ -30,12 +30,8 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
 
     // Resolve target version — either from --version flag or GitHub API.
     let (latest_tag, latest) = if let Some(ref v) = version {
-        let tag = if v.starts_with('v') {
-            v.clone()
-        } else {
-            format!("v{v}")
-        };
-        let ver = tag.strip_prefix('v').unwrap_or(&tag).to_string();
+        let tag = normalize_release_tag(v)?;
+        let ver = tag.trim_start_matches('v').to_string();
         println!("Target version: v{}", ver);
         (tag, ver)
     } else {
@@ -61,12 +57,17 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         }
 
         let release: Value = resp.json()?;
-        let tag = release
+        let raw_tag = release
             .get("tag_name")
             .and_then(|v| v.as_str())
-            .context("Could not parse release tag")?
-            .to_string();
-        let ver = tag.strip_prefix('v').unwrap_or(&tag).to_string();
+            .context("Could not parse release tag")?;
+        let tag = normalize_release_tag(raw_tag).with_context(|| {
+            format!(
+                "Latest release tag has unsupported format: {raw_tag}. \
+                 Please update manually or run `budi update --version <tag>`."
+            )
+        })?;
+        let ver = tag.trim_start_matches('v').to_string();
         (tag, ver)
     };
 
@@ -238,6 +239,31 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Normalize and validate a release tag used in shell commands and URLs.
+///
+/// Accepts either `7.1.0` or `v7.1.0` style input (and other safe tag variants
+/// like `v7.1.0-rc1`), then returns the normalized `v...` form.
+fn normalize_release_tag(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    let candidate = if trimmed.starts_with('v') {
+        trimmed.to_string()
+    } else {
+        format!("v{trimmed}")
+    };
+
+    // Safety gate: shell command and URL interpolation must use a restricted charset.
+    let is_safe = candidate
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if !is_safe || candidate == "v" {
+        anyhow::bail!(
+            "Invalid version/tag `{raw}`. Allowed characters: letters, digits, `.`, `-`, `_`"
+        );
+    }
+
+    Ok(candidate)
+}
+
 fn resolve_current_config() -> (Option<PathBuf>, config::BudiConfig) {
     let repo_root = std::env::current_dir()
         .ok()
@@ -291,5 +317,33 @@ fn stop_all_daemons() {
         let _ = Command::new("pkill")
             .args(["-f", "budi-daemon serve"])
             .status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_release_tag;
+
+    #[test]
+    fn normalize_release_tag_accepts_plain_semver() {
+        assert_eq!(
+            normalize_release_tag("7.1.0").expect("valid semver"),
+            "v7.1.0"
+        );
+    }
+
+    #[test]
+    fn normalize_release_tag_accepts_existing_v_prefix() {
+        assert_eq!(
+            normalize_release_tag("v7.1.0-rc1").expect("valid prefixed tag"),
+            "v7.1.0-rc1"
+        );
+    }
+
+    #[test]
+    fn normalize_release_tag_rejects_unsafe_characters() {
+        assert!(normalize_release_tag("v7.1.0;rm -rf /").is_err());
+        assert!(normalize_release_tag("v7.1.0\" && whoami").is_err());
+        assert!(normalize_release_tag("").is_err());
     }
 }

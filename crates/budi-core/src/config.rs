@@ -262,6 +262,12 @@ pub fn budi_home_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = env::var(BUDI_HOME_ENV) {
         return Ok(PathBuf::from(override_dir));
     }
+    #[cfg(windows)]
+    {
+        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+            return Ok(PathBuf::from(local_app_data).join("budi"));
+        }
+    }
     Ok(home_dir()?.join(BUDI_HOME_DEFAULT_REL))
 }
 

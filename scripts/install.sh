@@ -259,7 +259,16 @@ main() {
         # Build Cursor extension (.vsix) before cargo build so it gets embedded
         if command -v npm >/dev/null 2>&1; then
           log "Building Cursor extension..."
-          (cd "$REPO_ROOT/extensions/cursor-budi" && npm install --silent && npm run build --silent && npx vsce package --no-dependencies -o cursor-budi.vsix) 2>&1 | tail -1
+          (
+            cd "$REPO_ROOT/extensions/cursor-budi"
+            if [[ -f package-lock.json ]]; then
+              npm ci --silent
+            else
+              npm install --silent
+            fi
+            npm run build --silent
+            npx vsce package --no-dependencies -o cursor-budi.vsix
+          ) 2>&1 | tail -1
         else
           log "npm not found — skipping Cursor extension build (extension auto-install will be disabled)"
         fi
@@ -343,12 +352,16 @@ main() {
   # Auto-run budi init for a seamless setup experience.
   log "Running budi init..."
   log ""
-  if "$BIN_DIR/budi" init; then
+  local init_rc=0
+  "$BIN_DIR/budi" init || init_rc=$?
+  if [[ "$init_rc" -eq 0 ]]; then
     log ""
     log "Setup complete! Restart Claude Code and Cursor to activate hooks."
-  else
+  elif [[ "$init_rc" -eq 2 ]]; then
     log ""
-    log "budi init had warnings. Run 'budi doctor' to check what needs fixing."
+    log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
+  else
+    fail "budi init failed (exit code $init_rc). Run 'budi doctor' to diagnose."
   fi
 }
 
