@@ -76,7 +76,6 @@ const SETTINGS_INTEGRATIONS = Object.freeze([
     missingLabel: 'Not set up',
     missingClass: '',
     defaultPreset: 'coach',
-    missingHint: 'Tip: use `--statusline-preset cost` for period mode.',
   },
   {
     key: 'starship',
@@ -94,15 +93,13 @@ function renderIntegrationRow(def, installed) {
   const presetAttr = !installed && def.defaultPreset
     ? ` data-statusline-preset="${esc(def.defaultPreset)}"`
     : '';
-  const hint = !installed && def.missingHint ? `<div class="integration-hint">${esc(def.missingHint)}</div>` : '';
   return `
-    <div class="settings-item integration-item">
+    <div class="settings-item integration-item" data-component="${esc(def.component)}">
       <div class="integration-main">
         <span class="settings-key">${esc(def.label)}</span>
-        ${hint}
       </div>
       <div class="integration-actions">
-        <span class="settings-val ${statusClass}">${statusText}</span>
+        <span class="settings-val integration-status ${statusClass}">${statusText}</span>
         <button type="button" class="btn btn-secondary integration-run-btn" data-components="${esc(def.component)}"${presetAttr}>${actionText}</button>
       </div>
     </div>
@@ -232,6 +229,18 @@ function settingsLog(msg) {
   }
 }
 
+function markIntegrationRowsActive(components) {
+  for (const component of components) {
+    const row = $(`.integration-item[data-component="${component}"]`);
+    if (!row) continue;
+    const status = row.querySelector('.integration-status');
+    if (!status) continue;
+    status.textContent = 'Active';
+    status.classList.remove('warn');
+    status.classList.add('ok');
+  }
+}
+
 function setLastSyncDisplay(text, warn) {
   const el = $('#lastSyncValue');
   if (el) {
@@ -280,14 +289,12 @@ function bindSettingsHandlers() {
           settingsLog(r.error || 'Another operation is in progress. Try again in a moment.');
         } else if (!resp.ok) {
           settingsLog('Failed: ' + (r.error || 'Unknown error'));
-          if (r.command) settingsLog('Command: ' + r.command);
           if (r.stderr) settingsLog(r.stderr);
         } else {
           settingsLog('Integrations updated.');
-          if (r.command) settingsLog('Command: ' + r.command);
-          settingsData = null;
-          await switchAndReload();
-          return;
+          markIntegrationRowsActive(components);
+          if (r.stdout) settingsLog(r.stdout);
+          if (r.stderr) settingsLog(r.stderr);
         }
       } catch (_) {
         settingsLog('Failed: request error');
