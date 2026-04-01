@@ -374,7 +374,7 @@ pub async fn health_integrations()
                     hooks
                         .get(*event)
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().any(|entry| is_budi_cc_hook_entry(entry)))
+                        .map(|arr| arr.iter().any(is_budi_cc_hook_entry))
                         .unwrap_or(false)
                 })
             });
@@ -436,7 +436,7 @@ pub async fn health_integrations()
                     hooks
                         .get(*event)
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().any(|entry| is_budi_cursor_hook_entry(entry)))
+                        .map(|arr| arr.iter().any(is_budi_cursor_hook_entry))
                         .unwrap_or(false)
                 })
             });

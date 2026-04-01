@@ -714,11 +714,10 @@ fn install_cursor_extension(warnings: &mut Vec<String>) {
 
     if let (Some(installed), Some(bundled)) =
         (installed_version.as_deref(), bundled_version.as_deref())
+        && compare_versions(installed, bundled) != Ordering::Less
     {
-        if compare_versions(installed, bundled) != Ordering::Less {
-            println!("  Extension: Cursor extension already installed (v{installed})");
-            return;
-        }
+        println!("  Extension: Cursor extension already installed (v{installed})");
+        return;
     }
 
     let temp_dir = match create_secure_temp_dir("budi-vsix") {

@@ -17,6 +17,7 @@ pub enum InitOutcome {
     PartialSuccess,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_init(
     local: bool,
     yes: bool,
