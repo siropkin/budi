@@ -33,6 +33,7 @@ enum Commands {
 #[derive(Clone)]
 pub struct AppState {
     pub syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub integrations_installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -137,6 +138,7 @@ async fn main() -> Result<()> {
 
     let app_state = AppState {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let sync_flag = app_state.syncing.clone();
@@ -306,6 +308,7 @@ mod tests {
     fn test_app() -> Router {
         build_router(AppState {
             syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 

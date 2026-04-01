@@ -256,18 +256,58 @@ main() {
       BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
     else
       if [[ "$SKIP_BUILD" -eq 0 ]]; then
-        # Build Cursor extension (.vsix) before cargo build so it gets embedded
+        # Build Cursor extension (.vsix) before cargo build so it gets embedded.
+        # This is best-effort: install should still succeed even if packaging cannot run.
         if command -v npm >/dev/null 2>&1; then
           log "Building Cursor extension..."
           (
-            cd "$REPO_ROOT/extensions/cursor-budi"
+            set +e
+            cd "$REPO_ROOT/extensions/cursor-budi" || exit 0
+
             if [[ -f package-lock.json ]]; then
               npm ci --silent
             else
               npm install --silent
             fi
+            local npm_install_rc=$?
+            if [[ "$npm_install_rc" -ne 0 ]]; then
+              if [[ -s cursor-budi.vsix ]]; then
+                log "WARN: npm install failed; using existing cursor-budi.vsix"
+                exit 0
+              fi
+              : > cursor-budi.vsix
+              log "WARN: npm install failed; created empty cursor-budi.vsix (auto-install disabled)"
+              exit 0
+            fi
+
             npm run build --silent
-            npx vsce package --no-dependencies -o cursor-budi.vsix
+            local npm_build_rc=$?
+            if [[ "$npm_build_rc" -ne 0 ]]; then
+              if [[ -s cursor-budi.vsix ]]; then
+                log "WARN: extension build failed; using existing cursor-budi.vsix"
+                exit 0
+              fi
+              : > cursor-budi.vsix
+              log "WARN: extension build failed; created empty cursor-budi.vsix (auto-install disabled)"
+              exit 0
+            fi
+
+            if command -v vsce >/dev/null 2>&1; then
+              vsce package --no-dependencies -o cursor-budi.vsix
+            elif [[ -x node_modules/.bin/vsce ]]; then
+              node_modules/.bin/vsce package --no-dependencies -o cursor-budi.vsix
+            else
+              npx --no-install vsce package --no-dependencies -o cursor-budi.vsix
+            fi
+            local package_rc=$?
+            if [[ "$package_rc" -ne 0 ]]; then
+              if [[ -s cursor-budi.vsix ]]; then
+                log "WARN: vsce package failed; using existing cursor-budi.vsix"
+                exit 0
+              fi
+              : > cursor-budi.vsix
+              log "WARN: vsce package failed; created empty cursor-budi.vsix (auto-install disabled)"
+            fi
           ) 2>&1 | tail -1
         else
           log "npm not found — skipping Cursor extension build (extension auto-install will be disabled)"

@@ -310,7 +310,7 @@ function bindSettingsHandlers() {
         });
         const r = await resp.json().catch(() => ({}));
         if (resp.status === 409) {
-          settingsLog('Another operation is in progress. Try again in a moment.');
+          settingsLog(r.error || 'Another operation is in progress. Try again in a moment.');
         } else if (!resp.ok) {
           settingsLog('Failed: ' + (r.error || 'Unknown error'));
           if (r.command) settingsLog('Command: ' + r.command);

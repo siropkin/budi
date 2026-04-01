@@ -191,7 +191,7 @@ pub async fn admin_install_integrations(
     }
 
     if state
-        .syncing
+        .integrations_installing
         .compare_exchange(
             false,
             true,
@@ -202,10 +202,10 @@ pub async fn admin_install_integrations(
     {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "another operation is in progress" })),
+            Json(json!({ "ok": false, "error": "another integration update is already in progress" })),
         ));
     }
-    let _busy = BusyFlagGuard::new(state.syncing.clone());
+    let _busy = BusyFlagGuard::new(state.integrations_installing.clone());
 
     let budi_bin = resolve_budi_binary();
     let mut args: Vec<String> = vec![
