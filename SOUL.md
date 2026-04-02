@@ -9,6 +9,7 @@ cargo build              # dev build
 cargo build --release    # release build
 cargo test               # all workspace tests
 cargo test -p budi-core  # core tests only
+./scripts/build-dashboard-v2.sh  # build React dashboard-v2 bundle into daemon static assets
 ./scripts/install.sh     # build release + install to ~/.local/bin/
 ```
 
@@ -92,6 +93,8 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-cli/src/mcp.rs` - MCP server handler (15 tools: analytics + config + health)
 - `crates/budi-cli/src/commands/mcp.rs` - `mcp-serve` subcommand (stdio transport)
 - `crates/budi-daemon/static/js/` - Dashboard JS (vanilla, no framework)
+- `frontend/dashboard-v2/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard-v2`
+- `crates/budi-daemon/static/dashboard-v2-dist/` - Built dashboard-v2 bundle served under `/static/dashboard-v2/*`
 - `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
 - `extensions/cursor-budi/src/panel.ts` - Side panel webview (session details, vitals, session list)
 - `extensions/cursor-budi/src/budiClient.ts` - Daemon HTTP client + health aggregation logic
@@ -112,6 +115,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
   - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` - Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
 - Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
+- **Dashboard v2** lives at `/dashboard-v2` and is served from the React build in `crates/budi-daemon/static/dashboard-v2-dist` (assets at `/static/dashboard-v2/*`)
 - Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion - not used by dashboard/MCP)
 - Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration)
 - Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)

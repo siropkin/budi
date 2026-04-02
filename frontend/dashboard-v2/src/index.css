@@ -1,0 +1,50 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 205 31% 9%;
+  --foreground: 197 35% 93%;
+  --card: 203 32% 13%;
+  --card-foreground: 197 35% 93%;
+  --popover: 203 32% 13%;
+  --popover-foreground: 197 35% 93%;
+  --primary: 164 63% 44%;
+  --primary-foreground: 200 28% 9%;
+  --secondary: 204 26% 18%;
+  --secondary-foreground: 197 35% 93%;
+  --muted: 204 21% 17%;
+  --muted-foreground: 206 20% 69%;
+  --accent: 35 90% 58%;
+  --accent-foreground: 210 23% 10%;
+  --destructive: 0 70% 50%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 205 22% 27%;
+  --input: 205 22% 27%;
+  --ring: 164 63% 44%;
+  --radius: 0.75rem;
+}
+
+* {
+  @apply border-border;
+}
+
+body {
+  @apply min-h-screen bg-background text-foreground antialiased;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(66, 188, 157, 0.22), transparent 38%),
+    radial-gradient(circle at 84% 4%, rgba(242, 165, 65, 0.2), transparent 32%),
+    radial-gradient(circle at 50% 120%, rgba(66, 188, 157, 0.2), transparent 45%);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+}

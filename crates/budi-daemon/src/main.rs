@@ -126,6 +126,10 @@ fn build_router(app_state: AppState) -> Router {
         // SPA: all /dashboard/* paths serve the same HTML; JS handles client-side routing
         .route("/dashboard", get(d::dashboard))
         .route("/dashboard/{*rest}", get(d::dashboard))
+        // React dashboard-v2 shell + hashed static assets
+        .route("/dashboard-v2", get(d::dashboard_v2))
+        .route("/dashboard-v2/{*rest}", get(d::dashboard_v2))
+        .route("/static/dashboard-v2/{*path}", get(d::dashboard_v2_asset))
         .route("/static/dashboard.css", get(d::dashboard_css))
         .route("/static/dashboard.js", get(d::dashboard_js))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
@@ -356,5 +360,57 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("text/html"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_v2_returns_html() {
+        let app = test_app();
+        let resp = app
+            .oneshot(Request::get("/dashboard-v2").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/html"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_v2_deep_link_returns_html() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::get("/dashboard-v2/sessions/some-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/html"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_v2_missing_asset_returns_404() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::get("/static/dashboard-v2/assets/not-found.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
