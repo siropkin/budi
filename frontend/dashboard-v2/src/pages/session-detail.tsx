@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
@@ -62,20 +61,12 @@ export function SessionDetailPage() {
   const tags = tagsQuery.data.filter((tag) => !["provider", "model", "repo", "machine", "cost_confidence"].includes(tag.key));
   const health = healthQuery.data;
 
-  const totals = useMemo(() => {
-    let tokenTotal = 0;
-    let costTotalCents = 0;
-
-    for (const message of messages) {
-      tokenTotal += (message.input_tokens ?? 0) + (message.output_tokens ?? 0);
-      costTotalCents += message.cost_cents ?? 0;
-    }
-
-    return {
-      tokenTotal,
-      costTotalCents,
-    };
-  }, [messages]);
+  let tokenTotal = 0;
+  let costTotalCents = 0;
+  for (const message of messages) {
+    tokenTotal += (message.input_tokens ?? 0) + (message.output_tokens ?? 0);
+    costTotalCents += message.cost_cents ?? 0;
+  }
 
   const tokenGrowth = messages.map((message, index) => ({
     label: `#${index + 1}`,
@@ -101,10 +92,10 @@ export function SessionDetailPage() {
               Messages: <span className="font-semibold text-foreground">{fmtNum(messages.length)}</span>
             </p>
             <p>
-              Tokens: <span className="font-semibold text-foreground">{fmtNum(totals.tokenTotal)}</span>
+              Tokens: <span className="font-semibold text-foreground">{fmtNum(tokenTotal)}</span>
             </p>
             <p>
-              Cost: <span className="font-semibold text-primary">{fmtCost(totals.costTotalCents / 100)}</span>
+              Cost: <span className="font-semibold text-primary">{fmtCost(costTotalCents / 100)}</span>
             </p>
             {health?.tip ? (
               <p className="text-muted-foreground">
@@ -156,7 +147,7 @@ export function SessionDetailPage() {
             config={{
               input: {
                 label: "Input tokens",
-                color: "#1f8a70",
+                color: "hsl(var(--chart-1))",
               },
             }}
           >

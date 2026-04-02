@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -69,28 +68,24 @@ export function OverviewPage() {
     .filter((entry) => entry.cost_cents > 0)
     .slice(0, 15);
 
-  const modelCostRows = useMemo(() => {
-    const modelMap = new Map<string, { label: string; cost_cents: number }>();
-
-    for (const model of data.models) {
-      const normalizedModel = formatModelName(model.model);
-      const providerDisplay = providers.find((entry) => entry.name === model.provider)?.display_name ?? model.provider;
-      const key = `${model.provider}:${normalizedModel}`;
-      const existing = modelMap.get(key);
-      if (existing) {
-        existing.cost_cents += model.cost_cents;
-      } else {
-        modelMap.set(key, {
-          label: `${providerDisplay} / ${normalizedModel}`,
-          cost_cents: model.cost_cents,
-        });
-      }
+  const modelMap = new Map<string, { label: string; cost_cents: number }>();
+  for (const model of data.models) {
+    const normalizedModel = formatModelName(model.model);
+    const providerDisplay = providers.find((entry) => entry.name === model.provider)?.display_name ?? model.provider;
+    const key = `${model.provider}:${normalizedModel}`;
+    const existing = modelMap.get(key);
+    if (existing) {
+      existing.cost_cents += model.cost_cents;
+    } else {
+      modelMap.set(key, {
+        label: `${providerDisplay} / ${normalizedModel}`,
+        cost_cents: model.cost_cents,
+      });
     }
-
-    return Array.from(modelMap.values())
-      .sort((a, b) => b.cost_cents - a.cost_cents)
-      .slice(0, 15);
-  }, [data.models, providers]);
+  }
+  const modelCostRows = Array.from(modelMap.values())
+    .sort((a, b) => b.cost_cents - a.cost_cents)
+    .slice(0, 15);
 
   const projectCostRows = data.projects
     .map((row) => ({
@@ -167,8 +162,8 @@ export function OverviewPage() {
         <CardContent>
           <ChartContainer
             config={{
-              input: { label: "Input", color: "#1f8a70" },
-              output: { label: "Output", color: "#f2a541" },
+              input: { label: "Input", color: "hsl(var(--chart-1))" },
+              output: { label: "Output", color: "hsl(var(--chart-2))" },
             }}
           >
             <BarChart data={activityRows} margin={{ left: 12, right: 8 }}>

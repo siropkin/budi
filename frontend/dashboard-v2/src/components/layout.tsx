@@ -41,14 +41,14 @@ function ShellBody() {
   const periodHidden = location.pathname.startsWith("/settings");
 
   return (
-    <div className="mx-auto min-h-screen w-full max-w-[1320px] px-4 pb-10 pt-6 md:px-6">
-      <header className="mb-6 rounded-2xl border border-border bg-gradient-to-r from-card to-card/70 px-4 py-4 shadow-sm md:px-6">
+    <div className="mx-auto min-h-screen w-full max-w-7xl px-4 pb-10 pt-6 md:px-6">
+      <header className="mb-6 rounded-lg border bg-card px-4 py-4 md:px-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-4">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/20 text-2xl">📊</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-muted text-lg">📊</div>
             <div className="space-y-1">
-              <h1 className="text-2xl font-bold tracking-tight text-foreground">budi</h1>
-              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Dashboard v2</p>
+              <h1 className="text-xl font-semibold tracking-tight text-foreground">budi</h1>
+              <p className="text-xs text-muted-foreground">Dashboard v2</p>
             </div>
           </div>
           <PeriodSelector hidden={periodHidden} />

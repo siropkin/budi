@@ -114,7 +114,8 @@ export function SessionsPage() {
             </TableHeader>
             <TableBody>
               {sessions.map((session) => {
-                const modelList = session.model
+                const rawModel = session.model ?? "";
+                const modelList = rawModel
                   .split(",")
                   .map((model) => model.trim())
                   .filter(Boolean);
@@ -138,7 +139,7 @@ export function SessionsPage() {
                     <TableCell className="max-w-[260px] truncate" title={session.title ?? ""}>{session.title || "--"}</TableCell>
                     <TableCell className="text-muted-foreground">{duration}</TableCell>
                     {multiProvider ? <TableCell className="text-muted-foreground">{providerDisplay}</TableCell> : null}
-                    <TableCell title={session.model}>{modelSummary}</TableCell>
+                    <TableCell title={rawModel}>{modelSummary}</TableCell>
                     <TableCell className="max-w-[180px] truncate text-muted-foreground" title={session.repo_id ?? ""}>{repoName(session.repo_id)}</TableCell>
                     <TableCell className="max-w-[180px] truncate text-muted-foreground" title={branch}>{branch}</TableCell>
                     <TableCell className="text-right font-mono text-muted-foreground">{fmtNum(tokenCount)}</TableCell>

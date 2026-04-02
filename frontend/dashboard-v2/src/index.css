@@ -1,30 +1,33 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap");
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --background: 205 31% 9%;
-  --foreground: 197 35% 93%;
-  --card: 203 32% 13%;
-  --card-foreground: 197 35% 93%;
-  --popover: 203 32% 13%;
-  --popover-foreground: 197 35% 93%;
-  --primary: 164 63% 44%;
-  --primary-foreground: 200 28% 9%;
-  --secondary: 204 26% 18%;
-  --secondary-foreground: 197 35% 93%;
-  --muted: 204 21% 17%;
-  --muted-foreground: 206 20% 69%;
-  --accent: 35 90% 58%;
-  --accent-foreground: 210 23% 10%;
-  --destructive: 0 70% 50%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 205 22% 27%;
-  --input: 205 22% 27%;
-  --ring: 164 63% 44%;
+  --background: 224 36% 7%;
+  --foreground: 220 20% 96%;
+  --card: 224 30% 10%;
+  --card-foreground: 220 20% 96%;
+  --popover: 224 30% 10%;
+  --popover-foreground: 220 20% 96%;
+  --primary: 221 83% 53%;
+  --primary-foreground: 220 20% 98%;
+  --secondary: 223 22% 16%;
+  --secondary-foreground: 220 20% 96%;
+  --muted: 223 22% 16%;
+  --muted-foreground: 218 12% 70%;
+  --accent: 199 89% 48%;
+  --accent-foreground: 220 20% 98%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 223 20% 20%;
+  --input: 223 20% 20%;
+  --ring: 221 83% 53%;
   --radius: 0.75rem;
+  --chart-1: 220 70% 50%;
+  --chart-2: 160 60% 45%;
+  --chart-3: 30 80% 55%;
+  --chart-4: 280 65% 60%;
+  --chart-5: 340 75% 55%;
 }
 
 * {
@@ -33,18 +36,4 @@
 
 body {
   @apply min-h-screen bg-background text-foreground antialiased;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  background-image:
-    radial-gradient(circle at 12% 18%, rgba(66, 188, 157, 0.22), transparent 38%),
-    radial-gradient(circle at 84% 4%, rgba(242, 165, 65, 0.2), transparent 32%),
-    radial-gradient(circle at 50% 120%, rgba(66, 188, 157, 0.2), transparent 45%);
-}
-
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
 }

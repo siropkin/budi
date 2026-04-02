@@ -56,6 +56,7 @@ fn build_router(app_state: AppState) -> Router {
     use routes::{analytics as a, dashboard as d, hooks as h, otel as o};
 
     Router::new()
+        .route("/favicon.ico", get(d::favicon))
         .route("/health", get(h::health))
         .route("/health/integrations", get(h::health_integrations))
         .route("/health/check-update", get(h::health_check_update))
@@ -343,6 +344,16 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["ok"], true);
         assert!(json["version"].is_string(), "health should include version");
+    }
+
+    #[tokio::test]
+    async fn favicon_returns_ok() {
+        let app = test_app();
+        let resp = app
+            .oneshot(Request::get("/favicon.ico").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

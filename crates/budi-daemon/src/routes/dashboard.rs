@@ -17,6 +17,17 @@ pub async fn dashboard() -> impl IntoResponse {
     )
 }
 
+pub async fn favicon() -> impl IntoResponse {
+    let svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1f4ca;</text></svg>";
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        svg,
+    )
+}
+
 pub async fn dashboard_css() -> impl IntoResponse {
     let css = include_str!("../../static/dashboard.css");
     (

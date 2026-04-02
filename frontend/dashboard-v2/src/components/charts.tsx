@@ -12,7 +12,13 @@ import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import { EmptyState } from "@/components/state";
 import { fmtCost, fmtNum } from "@/lib/format";
 
-const PALETTE = ["#1f8a70", "#f2a541", "#57cc99", "#ef8354", "#4c956c", "#2a9d8f", "#f6bd60"];
+const PALETTE = [
+  "hsl(var(--chart-1))",
+  "hsl(var(--chart-2))",
+  "hsl(var(--chart-3))",
+  "hsl(var(--chart-4))",
+  "hsl(var(--chart-5))",
+];
 
 export interface CostBarDatum {
   label: string;
@@ -39,7 +45,7 @@ export function CostBarChart({
         config={{
           cost: {
             label: "Cost",
-            color: "#1f8a70",
+            color: "hsl(var(--chart-1))",
           },
         }}
       >
@@ -104,7 +110,7 @@ export function CountBarChart({
         config={{
           value: {
             label: valueLabel ?? "Value",
-            color: "#f2a541",
+            color: "hsl(var(--chart-2))",
           },
         }}
       >
@@ -127,7 +133,7 @@ export function CountBarChart({
               );
             }}
           />
-          <Bar dataKey="value" fill="#f2a541" radius={[5, 5, 5, 5]}>
+          <Bar dataKey="value" fill="hsl(var(--chart-2))" radius={[5, 5, 5, 5]}>
             <LabelList dataKey="value" position="right" className="fill-muted-foreground text-xs" formatter={(value: number) => fmtNum(value)} />
           </Bar>
         </BarChart>

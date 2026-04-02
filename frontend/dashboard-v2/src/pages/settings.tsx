@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -129,7 +128,7 @@ export function SettingsPage() {
   const database = integrationState.database ?? {};
   const paths = integrationState.paths ?? {};
 
-  const hasMigration = useMemo(() => Boolean(settings.schema.needs_migration), [settings.schema]);
+  const hasMigration = Boolean(settings.schema.needs_migration);
 
   const askConfirmation = (message: string): boolean => window.confirm(message);
 
