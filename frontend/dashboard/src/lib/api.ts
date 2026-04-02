@@ -5,12 +5,12 @@ import type {
   CacheEfficiency,
   ConfidenceCostRow,
   CostSummary,
+  DateRangeSelection,
   DaemonHealth,
   InstallIntegrationsRequest,
   IntegrationsHealth,
   MessageRow,
   ModelRow,
-  Period,
   ProjectRow,
   ProviderStats,
   RegisteredProvider,
@@ -36,7 +36,11 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return payload;
 }
 
-function withPeriod(path: string, period: Period, extra: Record<string, string | number | boolean | undefined> = {}): string {
+function withPeriod(
+  path: string,
+  period: DateRangeSelection,
+  extra: Record<string, string | number | boolean | undefined> = {},
+): string {
   const params = new URLSearchParams();
   const range = periodRange(period);
 
@@ -56,7 +60,7 @@ export async function fetchRegisteredProviders(signal?: AbortSignal): Promise<Re
   return fetchJson<RegisteredProvider[]>("/admin/providers", signal ? { signal } : undefined);
 }
 
-export async function fetchOverview(period: Period, signal?: AbortSignal) {
+export async function fetchOverview(period: DateRangeSelection, signal?: AbortSignal) {
   const tzOffset = -new Date().getTimezoneOffset();
 
   const [summary, cost, projects, models, activity, providers, branches, tickets, activities] = await Promise.all([
@@ -102,7 +106,7 @@ export async function fetchOverview(period: Period, signal?: AbortSignal) {
   };
 }
 
-export async function fetchInsights(period: Period, signal?: AbortSignal) {
+export async function fetchInsights(period: DateRangeSelection, signal?: AbortSignal) {
   const [cacheEff, sessionCurve, confidence, subagent, speedTags, tools, mcp] = await Promise.all([
     fetchJson<CacheEfficiency>(withPeriod("/analytics/cache-efficiency", period), signal ? { signal } : undefined),
     fetchJson<SessionCurveRow[]>(withPeriod("/analytics/session-cost-curve", period), signal ? { signal } : undefined),
@@ -130,7 +134,11 @@ export interface SessionsQuery {
   sort_asc?: boolean;
 }
 
-export async function fetchSessions(period: Period, query: SessionsQuery, signal?: AbortSignal): Promise<SessionsResponse> {
+export async function fetchSessions(
+  period: DateRangeSelection,
+  query: SessionsQuery,
+  signal?: AbortSignal,
+): Promise<SessionsResponse> {
   return fetchJson<SessionsResponse>(
     withPeriod("/analytics/sessions", period, query as Record<string, string | number | boolean | undefined>),
     signal ? { signal } : undefined,

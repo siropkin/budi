@@ -1,50 +1,112 @@
-import type { Period } from "@/lib/types";
+import type { DateRangeSelection } from "@/lib/types";
 
-function weekStart(date: Date): Date {
-  const day = date.getDay();
-  const offset = day === 0 ? 6 : day - 1;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - offset);
+const DAY_MS = 86_400_000;
+const DATE_INPUT_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-export function periodRange(period: Period): { since?: string; until?: string } {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = now.getMonth();
-  const d = now.getDate();
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
 
+function parseDateInput(value: string): Date | null {
+  if (!DATE_INPUT_PATTERN.test(value)) return null;
+  const [yearStr, monthStr, dayStr] = value.split("-");
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  const parsed = new Date(year, month - 1, day);
+  if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
+  return parsed;
+}
+
+function formatShortDate(date: Date): string {
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatCustomRange(from: string, to: string): string {
+  const fromDate = parseDateInput(from);
+  const toDate = parseDateInput(to);
+  if (!fromDate || !toDate) return "Custom";
+  return `${formatShortDate(fromDate)} to ${formatShortDate(toDate)}`;
+}
+
+export function periodLabel(period: DateRangeSelection): string {
+  switch (period.preset) {
+    case "today":
+      return "Today";
+    case "month_to_date":
+      return "Month to date";
+    case "last_7_days":
+      return "Last 7 days";
+    case "last_30_days":
+      return "Last 30 days";
+    case "last_month":
+      return "Last Month";
+    case "custom":
+      return period.from && period.to ? formatCustomRange(period.from, period.to) : "Custom";
+    default:
+      return "Today";
+  }
+}
+
+export function periodRange(period: DateRangeSelection): { since?: string; until?: string } {
+  const now = new Date();
+  const today = startOfDay(now);
+  const y = today.getFullYear();
+  const m = today.getMonth();
   const toIso = (value: Date) => value.toISOString();
 
-  switch (period) {
+  switch (period.preset) {
     case "today":
-      return { since: toIso(new Date(y, m, d)), until: toIso(new Date(y, m, d + 1)) };
-    case "week": {
-      const monday = weekStart(now);
+      return { since: toIso(today), until: toIso(addDays(today, 1)) };
+    case "month_to_date":
+      return { since: toIso(new Date(y, m, 1)), until: toIso(addDays(today, 1)) };
+    case "last_7_days":
+      return { since: toIso(addDays(today, -6)), until: toIso(addDays(today, 1)) };
+    case "last_30_days":
+      return { since: toIso(addDays(today, -29)), until: toIso(addDays(today, 1)) };
+    case "last_month":
+      return { since: toIso(new Date(y, m - 1, 1)), until: toIso(new Date(y, m, 1)) };
+    case "custom": {
+      if (!period.from || !period.to || period.from > period.to) {
+        return { since: toIso(today), until: toIso(addDays(today, 1)) };
+      }
+      const fromDate = parseDateInput(period.from);
+      const toDate = parseDateInput(period.to);
+      if (!fromDate || !toDate) {
+        return { since: toIso(today), until: toIso(addDays(today, 1)) };
+      }
       return {
-        since: toIso(monday),
-        until: toIso(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7)),
+        since: toIso(startOfDay(fromDate)),
+        until: toIso(addDays(startOfDay(toDate), 1)),
       };
     }
-    case "month":
-      return { since: toIso(new Date(y, m, 1)), until: toIso(new Date(y, m + 1, 1)) };
-    case "all":
-      return {};
     default:
-      return { since: toIso(new Date(y, m, d)), until: toIso(new Date(y, m, d + 1)) };
+      return { since: toIso(today), until: toIso(addDays(today, 1)) };
   }
 }
 
-export function granularityForPeriod(period: Period): "hour" | "day" | "month" {
-  switch (period) {
-    case "today":
-      return "hour";
-    case "week":
-    case "month":
-      return "day";
-    case "all":
-      return "month";
-    default:
-      return "day";
+export function granularityForPeriod(period: DateRangeSelection): "hour" | "day" | "month" {
+  if (period.preset === "today") {
+    return "hour";
   }
+
+  const range = periodRange(period);
+  if (!range.since || !range.until) {
+    return "day";
+  }
+
+  const sinceTime = new Date(range.since).getTime();
+  const untilTime = new Date(range.until).getTime();
+  const days = Math.max(1, Math.round((untilTime - sinceTime) / DAY_MS));
+
+  if (days <= 2) return "hour";
+  if (days > 120) return "month";
+  return "day";
 }
 
 export function fmtNum(value: number): string {

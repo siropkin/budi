@@ -30,7 +30,7 @@ export function SessionsPage() {
   });
 
   const sessionsQuery = useQuery({
-    queryKey: ["sessions", period, sortBy, sortAsc, search, offset],
+    queryKey: ["sessions", period.preset, period.from ?? "", period.to ?? "", sortBy, sortAsc, search, offset],
     queryFn: ({ signal }) =>
       fetchSessions(
         period,

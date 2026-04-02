@@ -1,14 +1,19 @@
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { PeriodProvider, usePeriod } from "@/lib/period";
-import type { Period } from "@/lib/types";
+import type { DateRangePreset } from "@/lib/types";
+import { periodLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
-const PERIODS: Array<{ value: Period; label: string }> = [
+const QUICK_PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "today", label: "Today" },
-  { value: "week", label: "Week" },
-  { value: "month", label: "Month" },
-  { value: "all", label: "All" },
+  { value: "month_to_date", label: "Month to date" },
+  { value: "last_7_days", label: "Last 7 days" },
+  { value: "last_30_days", label: "Last 30 days" },
+  { value: "last_month", label: "Last Month" },
+  { value: "custom", label: "Custom range" },
 ];
 
 const NAV_ITEMS = [
@@ -19,20 +24,61 @@ const NAV_ITEMS = [
 ];
 
 function PeriodSelector({ hidden }: { hidden: boolean }) {
-  const { period, setPeriod } = usePeriod();
+  const { period, setPreset, setCustomRange } = usePeriod();
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+
+  useEffect(() => {
+    if (period.preset !== "custom") return;
+    setFrom(period.from ?? "");
+    setTo(period.to ?? "");
+  }, [period.from, period.preset, period.to]);
 
   if (hidden) return null;
 
+  const showCustomRange = period.preset === "custom";
+  const customRangeInvalid = showCustomRange && (!from || !to || from > to);
+
   return (
-    <Tabs value={period} onValueChange={(value) => setPeriod(value as Period)}>
-      <TabsList>
-        {PERIODS.map((item) => (
-          <TabsTrigger key={item.value} value={item.value}>
-            {item.label}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-    </Tabs>
+    <div className="flex flex-col gap-2 md:items-end">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          aria-label="Date range preset"
+          value={period.preset}
+          onChange={(event) => setPreset(event.target.value as DateRangePreset)}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        >
+          {QUICK_PRESETS.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+        {showCustomRange ? (
+          <>
+            <Input
+              type="date"
+              aria-label="Start date"
+              value={from}
+              onChange={(event) => setFrom(event.target.value)}
+              className="h-9 w-40"
+            />
+            <span className="text-xs text-muted-foreground">to</span>
+            <Input
+              type="date"
+              aria-label="End date"
+              value={to}
+              onChange={(event) => setTo(event.target.value)}
+              className="h-9 w-40"
+            />
+            <Button type="button" size="sm" variant="secondary" disabled={customRangeInvalid} onClick={() => setCustomRange(from, to)}>
+              Apply
+            </Button>
+          </>
+        ) : null}
+      </div>
+      <p className="text-xs text-muted-foreground">{periodLabel(period)}</p>
+    </div>
   );
 }
 

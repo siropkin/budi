@@ -8,9 +8,9 @@ import { fetchOverview, fetchRegisteredProviders } from "@/lib/api";
 import { fmtCost, fmtNum, formatModelName, granularityForPeriod, repoName } from "@/lib/format";
 import { usePeriod } from "@/lib/period";
 
-function getActivityTitle(period: "today" | "week" | "month" | "all") {
-  if (period === "today") return "Activity (Hourly)";
-  if (period === "all") return "Activity (Monthly)";
+function getActivityTitle(granularity: "hour" | "day" | "month") {
+  if (granularity === "hour") return "Activity (Hourly)";
+  if (granularity === "month") return "Activity (Monthly)";
   return "Activity (Daily)";
 }
 
@@ -24,9 +24,9 @@ export function OverviewPage() {
   });
 
   const overviewQuery = useQuery({
-    queryKey: ["overview", period],
+    queryKey: ["overview", period.preset, period.from ?? "", period.to ?? ""],
     queryFn: ({ signal }) => fetchOverview(period, signal),
-    refetchInterval: period === "today" ? 30_000 : false,
+    refetchInterval: period.preset === "today" ? 30_000 : false,
   });
 
   if (providersQuery.isPending || overviewQuery.isPending) {
@@ -157,7 +157,7 @@ export function OverviewPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>{getActivityTitle(period)}</CardTitle>
+          <CardTitle>{getActivityTitle(granularity)}</CardTitle>
         </CardHeader>
         <CardContent>
           <ChartContainer

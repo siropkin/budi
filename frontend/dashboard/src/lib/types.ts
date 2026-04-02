@@ -1,4 +1,10 @@
-export type Period = "today" | "week" | "month" | "all";
+export type DateRangePreset = "today" | "month_to_date" | "last_7_days" | "last_30_days" | "last_month" | "custom";
+
+export interface DateRangeSelection {
+  preset: DateRangePreset;
+  from?: string;
+  to?: string;
+}
 
 export interface RegisteredProvider {
   name: string;

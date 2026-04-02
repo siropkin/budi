@@ -25,7 +25,7 @@ function mcpName(raw: string): string {
 export function InsightsPage() {
   const { period } = usePeriod();
   const insightsQuery = useQuery({
-    queryKey: ["insights", period],
+    queryKey: ["insights", period.preset, period.from ?? "", period.to ?? ""],
     queryFn: ({ signal }) => fetchInsights(period, signal),
   });
 
