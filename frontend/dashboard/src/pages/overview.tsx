@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ChartContainer } from "@/components/ui/chart";
+import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import { CostBarChart } from "@/components/charts";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchOverview, fetchRegisteredProviders } from "@/lib/api";
@@ -179,7 +179,7 @@ export function OverviewPage() {
                 axisLine={false}
               />
               <YAxis tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
-              <Tooltip
+              <ChartTooltip
                 cursor={{ fill: "rgba(255,255,255,0.05)" }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;

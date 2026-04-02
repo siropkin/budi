@@ -3,7 +3,6 @@ import {
   BarChart,
   CartesianGrid,
   LabelList,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
@@ -118,7 +117,7 @@ export function CountBarChart({
           <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
           <YAxis dataKey="label" type="category" tickLine={false} axisLine={false} width={140} />
           <XAxis dataKey="value" type="number" axisLine={false} tickLine={false} tickFormatter={(value) => fmtNum(value)} />
-          <Tooltip
+          <ChartTooltip
             cursor={{ fill: "rgba(255,255,255,0.05)" }}
             content={({ active, payload }) => {
               if (!active || !payload || payload.length === 0) return null;

@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ChartContainer } from "@/components/ui/chart";
+import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchRegisteredProviders, fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
 import { fmtCost, fmtDate, fmtNum, formatModelName } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 function healthVariant(state: string): "default" | "warning" | "success" {
   if (state === "red") return "default";
@@ -129,7 +131,7 @@ export function SessionDetailPage() {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link to="/sessions" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-muted">
+        <Link to="/sessions" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
           ← Back to Sessions
         </Link>
         <p className="max-w-[760px] truncate text-sm text-muted-foreground">Session ID: {decodeURIComponent(sessionId)}</p>
@@ -208,7 +210,7 @@ export function SessionDetailPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
               <XAxis dataKey="label" tickLine={false} axisLine={false} />
               <YAxis dataKey="input_tokens" tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
-              <Tooltip
+              <ChartTooltip
                 cursor={{ fill: "rgba(255,255,255,0.05)" }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;

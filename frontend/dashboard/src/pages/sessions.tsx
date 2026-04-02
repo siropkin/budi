@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -157,22 +158,24 @@ export function SessionsPage() {
             Showing {sessions.length === 0 ? 0 : offset + 1}-{offset + sessions.length} of {fmtNum(totalCount)}
           </p>
           <div className="flex gap-2">
-            <button
+            <Button
               type="button"
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              variant="outline"
+              size="sm"
               disabled={offset === 0}
               onClick={() => setOffset((previous) => Math.max(0, previous - LIMIT))}
             >
               Previous
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              variant="outline"
+              size="sm"
               disabled={!hasMore}
               onClick={() => setOffset((previous) => previous + LIMIT)}
             >
               Next
-            </button>
+            </Button>
           </div>
         </div>
       </CardContent>
