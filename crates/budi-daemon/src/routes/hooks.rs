@@ -580,7 +580,8 @@ pub async fn analytics_sync(
     }
     let flag = state.syncing.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let r = (|| -> anyhow::Result<_> {
+        let _busy = BusyFlagGuard::new(flag);
+        (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = if params.migrate {
                 budi_core::analytics::open_db_with_migration(&db_path)?
@@ -600,9 +601,7 @@ pub async fn analytics_sync(
                 messages_ingested,
                 warnings,
             })
-        })();
-        flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        r
+        })()
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -631,7 +630,8 @@ pub async fn analytics_sync_reset(
     }
     let flag = state.syncing.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let r = (|| -> anyhow::Result<_> {
+        let _busy = BusyFlagGuard::new(flag);
+        (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
             budi_core::analytics::reset_sync_state(&conn)?;
@@ -642,9 +642,7 @@ pub async fn analytics_sync_reset(
                 messages_ingested,
                 warnings,
             })
-        })();
-        flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        r
+        })()
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -673,7 +671,8 @@ pub async fn analytics_history(
     }
     let flag = state.syncing.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let r = (|| -> anyhow::Result<_> {
+        let _busy = BusyFlagGuard::new(flag);
+        (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
             let (files_synced, messages_ingested, warnings) =
@@ -683,9 +682,7 @@ pub async fn analytics_history(
                 messages_ingested,
                 warnings,
             })
-        })();
-        flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        r
+        })()
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

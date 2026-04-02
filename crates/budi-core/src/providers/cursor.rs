@@ -7,6 +7,7 @@
 //! Secondary fallback: JSONL agent transcripts under `~/.cursor/projects/*/agent-transcripts/`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -368,7 +369,13 @@ fn fetch_usage_events(
 
     let since = since_ms.unwrap_or(0);
     let mut all_events: Vec<CursorUsageEvent> = Vec::new();
-    let agent = ureq::agent();
+    // Keep API probes bounded so sync does not look "stuck" when Cursor's
+    // endpoint is slow/unreachable. We fall back to local transcript files.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_global(Some(Duration::from_secs(8)))
+        .build()
+        .into();
 
     // API returns 100 events per page, newest first. Page 1 is default (no param needed).
     let max_pages: u32 = if paginate_all { 200 } else { 1 };
@@ -608,7 +615,14 @@ fn sync_from_usage_api(
 
     let events = match fetch_usage_events(&auth, watermark, paginate_all) {
         Ok(e) => e,
-        Err(e) => return Some(Err(e)),
+        Err(e) => {
+            // API can be unavailable transiently (network/VPN/outage). Fall back
+            // to local transcript files so Cursor sessions still appear.
+            tracing::warn!(
+                "Cursor Usage API unavailable ({e:#}); falling back to local transcript sync"
+            );
+            return None;
+        }
     };
 
     if events.is_empty() {

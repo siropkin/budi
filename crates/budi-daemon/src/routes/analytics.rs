@@ -8,6 +8,22 @@ use serde_json::json;
 use super::{bad_request, internal_error, not_found};
 use crate::AppState;
 
+struct BusyFlagGuard {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BusyFlagGuard {
+    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for BusyFlagGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct DateRangeParams {
     pub since: Option<String>,
@@ -643,7 +659,8 @@ pub async fn analytics_migrate(
     }
     let flag = state.syncing.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let r = (|| -> anyhow::Result<MigrateResponse> {
+        let _busy = BusyFlagGuard::new(flag);
+        (|| -> anyhow::Result<MigrateResponse> {
             let db_path = analytics::db_path()?;
             let conn = analytics::open_db(&db_path)?;
             let current = budi_core::migration::current_version(&conn);
@@ -664,9 +681,7 @@ pub async fn analytics_migrate(
                 migrated: true,
                 from: Some(current),
             })
-        })();
-        flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        r
+        })()
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -694,7 +709,8 @@ pub async fn analytics_repair(
     }
     let flag = state.syncing.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let r = (|| -> anyhow::Result<RepairResponse> {
+        let _busy = BusyFlagGuard::new(flag);
+        (|| -> anyhow::Result<RepairResponse> {
             let db_path = analytics::db_path()?;
             let conn = analytics::open_db(&db_path)?;
             let report = budi_core::migration::repair(&conn)?;
@@ -705,9 +721,7 @@ pub async fn analytics_repair(
                 repaired: !report.added_columns.is_empty(),
                 added_columns: report.added_columns,
             })
-        })();
-        flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        r
+        })()
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

@@ -36,6 +36,22 @@ pub struct AppState {
     pub integrations_installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+struct BusyFlagGuard {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BusyFlagGuard {
+    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for BusyFlagGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn build_router(app_state: AppState) -> Router {
     use routes::{analytics as a, dashboard as d, hooks as h, otel as o};
 
@@ -171,7 +187,8 @@ async fn main() -> Result<()> {
             }
             let flag = sync_flag.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                let result = (|| {
+                let _busy = BusyFlagGuard::new(flag);
+                (|| {
                     let db_path = analytics::db_path().ok()?;
                     let mut conn = analytics::open_db(&db_path).ok()?;
                     if budi_core::migration::needs_migration(&conn) {
@@ -181,9 +198,7 @@ async fn main() -> Result<()> {
                     analytics::sync_all(&mut conn)
                         .ok()
                         .map(|(f, m, _warnings)| (f, m))
-                })();
-                flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                result
+                })()
             })
             .await;
         }
