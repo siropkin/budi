@@ -29,7 +29,11 @@ Run `budi doctor` to verify.
 
 ```bash
 cd extensions/cursor-budi
-npm install && npm run build
+npm ci
+npm run lint
+npm run format:check
+npm run test
+npm run build
 npx vsce package --no-dependencies -o cursor-budi.vsix
 cursor --install-extension cursor-budi.vsix --force
 ```
@@ -38,19 +42,19 @@ Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| **Budi: Toggle Health Panel** | Open/focus the health side panel |
-| **Budi: Select Session** | Pick which session to display (quick pick) |
-| **Budi: Open Dashboard** | Open the budi web dashboard |
-| **Budi: Refresh Status** | Force-refresh status bar data |
+| Command                       | Description                                |
+| ----------------------------- | ------------------------------------------ |
+| **Budi: Toggle Health Panel** | Open/focus the health side panel           |
+| **Budi: Select Session**      | Pick which session to display (quick pick) |
+| **Budi: Open Dashboard**      | Open the budi web dashboard                |
+| **Budi: Refresh Status**      | Force-refresh status bar data              |
 
 ## Configuration
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `budi.pollingIntervalMs` | `15000` | Status bar refresh interval (ms) |
-| `budi.daemonUrl` | `http://127.0.0.1:7878` | Daemon URL |
+| Setting                  | Default                 | Description                      |
+| ------------------------ | ----------------------- | -------------------------------- |
+| `budi.pollingIntervalMs` | `15000`                 | Status bar refresh interval (ms) |
+| `budi.daemonUrl`         | `http://127.0.0.1:7878` | Daemon URL                       |
 
 ## How it works
 
@@ -61,4 +65,4 @@ Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**
 
 ## Limitations
 
-Cursor does not expose the currently focused chat tab to extensions. The statusline tracks the most recently *interacted-with* session (via hooks). For passive tab switching, use **Budi: Select Session** or click a session in the health panel.
+Cursor does not expose the currently focused chat tab to extensions. The statusline tracks the most recently _interacted-with_ session (via hooks). For passive tab switching, use **Budi: Select Session** or click a session in the health panel.

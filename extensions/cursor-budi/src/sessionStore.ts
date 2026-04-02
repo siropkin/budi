@@ -18,16 +18,12 @@ interface SessionState {
 const STATE_DIR = path.join(os.homedir(), ".local", "share", "budi");
 export const SESSION_FILE = path.join(STATE_DIR, "cursor-sessions.json");
 
-export function getActiveSessionFromFile(
-  workspacePath: string
-): { session_id: string } | null {
+export function getActiveSessionFromFile(workspacePath: string): { session_id: string } | null {
   const matches = getActiveSessions(workspacePath);
   return matches[0] ? { session_id: matches[0].session_id } : null;
 }
 
-export function getAllActiveSessions(
-  workspacePath: string
-): SessionEntry[] {
+export function getAllActiveSessions(workspacePath: string): SessionEntry[] {
   return getActiveSessions(workspacePath);
 }
 
@@ -38,9 +34,7 @@ function getActiveSessions(workspacePath: string): SessionEntry[] {
   const normalized = normalizePath(workspacePath);
 
   return state.sessions
-    .filter(
-      (s) => s.active && normalizePath(s.workspace_path) === normalized
-    )
+    .filter((s) => s.active && normalizePath(s.workspace_path) === normalized)
     .sort((a, b) => {
       const aTime = new Date(a.last_active_at ?? a.started_at).getTime();
       const bTime = new Date(b.last_active_at ?? b.started_at).getTime();

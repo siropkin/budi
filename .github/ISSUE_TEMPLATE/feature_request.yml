@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest a new capability or workflow improvement
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user problem are you trying to solve?
+      placeholder: The current behavior makes it hard to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the change you want.
+      placeholder: Add a command/API/UI change that...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you evaluate?
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria
+      description: How will we know this is complete and working?
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true

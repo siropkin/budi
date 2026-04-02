@@ -1,17 +1,40 @@
 # Contributing to budi
 
-## Build
+Thanks for helping improve budi.
+
+## Quick start
 
 ```bash
 cargo build
-cargo build --release   # production binary
+cargo test
 ```
 
-## Test
+## Local development workflow
+
+1. Create a branch from `main`.
+2. Implement your change in the relevant crate (`budi-core`, `budi-cli`, `budi-daemon`) or extension.
+3. Run the local quality checks.
+4. Open a pull request with test evidence and a short risk note.
+
+## Local quality checks
+
+### Rust workspace
 
 ```bash
-cargo test              # all tests (budi-core + budi-cli + budi-daemon)
-cargo test -p budi-core # core tests only
+cargo fmt --all
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+### Cursor extension
+
+```bash
+cd extensions/cursor-budi
+npm ci
+npm run lint
+npm run format:check
+npm run test
+npm run build
 ```
 
 ## Install locally
@@ -30,14 +53,22 @@ pkill -f "budi-daemon serve"   # graceful stop (avoid -9 unless stuck)
 budi init               # restarts daemon + re-syncs data
 ```
 
-## Validate cost accuracy
+## Filing issues and feature requests
 
-```bash
-python3 scripts/dev/validate_costs.py              # all time
-python3 scripts/dev/validate_costs.py --since 2026-03-18  # last 7 days
-```
+Use GitHub Issues:
 
-Compares Budi's cost calculations against raw JSONL transcript data. Reports per-model breakdown, rounding error, and 1-hour cache token detection.
+- **Bug report**: include expected behavior, actual behavior, reproduction steps, and environment details.
+- **Feature request**: include problem statement, proposed change, alternatives considered, and success criteria.
+
+Issue templates are available in the repository to keep reports actionable.
+
+## Pull request checklist
+
+- [ ] Change is scoped and described clearly.
+- [ ] `cargo fmt`, `clippy`, and tests pass locally.
+- [ ] Extension lint/format/test/build checks pass if extension code changed.
+- [ ] Docs were updated for user-visible behavior changes.
+- [ ] Migration or compatibility impact is noted (if relevant).
 
 ## Adding a new provider
 
@@ -52,9 +83,9 @@ Compares Budi's cost calculations against raw JSONL transcript data. Reports per
 ## Adding a new enricher
 
 1. Create a struct implementing `pipeline::Enricher` in `crates/budi-core/src/pipeline/enrichers.rs`
-2. `enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag>` — mutate the message and/or return tags
+2. `enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag>` - mutate the message and/or return tags
 3. Register in `Pipeline::new()` in `crates/budi-core/src/pipeline/mod.rs`
-4. Enricher order matters: Hook → Identity → Git → Cost → Tag
+4. Enricher order matters: Hook -> Identity -> Git -> Cost -> Tag
 
 ## Testing MCP server
 
@@ -63,7 +94,7 @@ Compares Budi's cost calculations against raw JSONL transcript data. Reports per
 printf '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/list","id":2}\n' | cargo run --bin budi -- mcp-serve 2>/dev/null
 ```
 
-The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTTP client to the daemon — make sure `budi-daemon` is running first.
+The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTTP client to the daemon - make sure `budi-daemon` is running first.
 
 ## Releasing
 

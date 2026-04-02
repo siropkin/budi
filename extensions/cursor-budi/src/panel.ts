@@ -21,7 +21,7 @@ export class HealthPanelProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    daemonUrl: string
+    daemonUrl: string,
   ) {
     this.daemonUrl = daemonUrl;
   }
@@ -60,10 +60,7 @@ export class HealthPanelProvider implements vscode.WebviewViewProvider {
     this.refresh().catch(() => {});
   }
 
-  updateContext(
-    daemonUrl: string,
-    sessionId?: string,
-  ): void {
+  updateContext(daemonUrl: string, sessionId?: string): void {
     this.daemonUrl = daemonUrl;
     this.sessionId = sessionId;
   }
@@ -86,7 +83,7 @@ export class HealthPanelProvider implements vscode.WebviewViewProvider {
       this.latestHealth,
       this.latestSessions,
       this.sessionId,
-      this.daemonUrl
+      this.daemonUrl,
     );
   }
 }
@@ -95,7 +92,7 @@ function buildHtml(
   health: SessionHealthData | undefined,
   sessions: SessionListEntry[] | undefined,
   activeSessionId: string | undefined,
-  dashboardUrl: string
+  dashboardUrl: string,
 ): string {
   if (!sessions && !health) {
     return `<!DOCTYPE html>
@@ -120,9 +117,12 @@ function buildHtml(
 
   const icon = (state: string) => {
     switch (state) {
-      case "red": return "\u{1F534}";
-      case "yellow": return "\u{1F7E1}";
-      default: return "\u{1F7E2}";
+      case "red":
+        return "\u{1F534}";
+      case "yellow":
+        return "\u{1F7E1}";
+      default:
+        return "\u{1F7E2}";
     }
   };
 
@@ -132,7 +132,13 @@ function buildHtml(
     if (s.title) titleMap.set(s.session_id, s.title);
   }
   const sessionName = (id: string) => titleMap.get(id) || id;
-  const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  const escapeHtml = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
 
   // Session details
   let detailSection = "";
@@ -144,11 +150,29 @@ function buildHtml(
     if (health) {
       const vitals = health.vitals;
       const vitalRows = [
-        vitals.context_drag ? vitalRow(icon(vitals.context_drag.state), "Context Growth", vitals.context_drag.label) : "",
-        vitals.cache_efficiency ? vitalRow(icon(vitals.cache_efficiency.state), "Cache Reuse", vitals.cache_efficiency.label) : "",
-        vitals.cost_acceleration ? vitalRow(icon(vitals.cost_acceleration.state), "Cost Acceleration", vitals.cost_acceleration.label) : "",
-        vitals.thrashing ? vitalRow(icon(vitals.thrashing.state), "Retry Loops", vitals.thrashing.label) : "",
-      ].filter(Boolean).join("\n");
+        vitals.context_drag
+          ? vitalRow(icon(vitals.context_drag.state), "Context Growth", vitals.context_drag.label)
+          : "",
+        vitals.cache_efficiency
+          ? vitalRow(
+              icon(vitals.cache_efficiency.state),
+              "Cache Reuse",
+              vitals.cache_efficiency.label,
+            )
+          : "",
+        vitals.cost_acceleration
+          ? vitalRow(
+              icon(vitals.cost_acceleration.state),
+              "Cost Acceleration",
+              vitals.cost_acceleration.label,
+            )
+          : "",
+        vitals.thrashing
+          ? vitalRow(icon(vitals.thrashing.state), "Retry Loops", vitals.thrashing.label)
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
       const tipHtml = health.tip ? `<div class="tip">${escapeHtml(health.tip)}</div>` : "";
 
       healthHtml = `
@@ -176,7 +200,7 @@ function buildHtml(
 
   // Ensure the active session is in the list (it may not be synced yet)
   let enrichedSessions = allSessions;
-  if (activeSessionId && !allSessions.some(s => s.session_id === activeSessionId)) {
+  if (activeSessionId && !allSessions.some((s) => s.session_id === activeSessionId)) {
     const stub: SessionListEntry = {
       session_id: activeSessionId,
       started_at: new Date().toISOString(),
@@ -190,15 +214,17 @@ function buildHtml(
   }
 
   // Sessions grouped by day
-  const { today, yesterday } = enrichedSessions.length > 0
-    ? splitSessionsByDay(enrichedSessions)
-    : { today: [] as SessionListEntry[], yesterday: [] as SessionListEntry[] };
+  const { today, yesterday } =
+    enrichedSessions.length > 0
+      ? splitSessionsByDay(enrichedSessions)
+      : { today: [] as SessionListEntry[], yesterday: [] as SessionListEntry[] };
 
   const renderSessionList = (list: SessionListEntry[]) =>
-    list.map((s) => {
-      const isActive = s.session_id === activeSessionId;
-      const title = escapeHtml(sessionName(s.session_id));
-      return `
+    list
+      .map((s) => {
+        const isActive = s.session_id === activeSessionId;
+        const title = escapeHtml(sessionName(s.session_id));
+        return `
         <div class="session-row${isActive ? " session-active" : ""}" onclick="selectSession('${s.session_id}')">
           <span class="session-health">${icon(s.health_state || "green")}</span>
           <div class="session-info">
@@ -206,16 +232,19 @@ function buildHtml(
             <span class="session-meta">${fmtCents(s.cost_cents)} · ${s.message_count} msgs</span>
           </div>
         </div>`;
-    }).join("");
+      })
+      .join("");
 
   let sessionsHtml = "";
   if (today.length > 0 || yesterday.length > 0) {
-    const todayBlock = today.length > 0
-      ? `<div class="day-group"><div class="day-label">Today</div>${renderSessionList(today)}</div>`
-      : "";
-    const yesterdayBlock = yesterday.length > 0
-      ? `<div class="day-group"><div class="day-label">Yesterday</div>${renderSessionList(yesterday)}</div>`
-      : "";
+    const todayBlock =
+      today.length > 0
+        ? `<div class="day-group"><div class="day-label">Today</div>${renderSessionList(today)}</div>`
+        : "";
+    const yesterdayBlock =
+      yesterday.length > 0
+        ? `<div class="day-group"><div class="day-label">Yesterday</div>${renderSessionList(yesterday)}</div>`
+        : "";
 
     sessionsHtml = `
     <div class="card">

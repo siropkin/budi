@@ -8,11 +8,7 @@ import {
   formatAggregationStatusText,
   formatAggregationTooltip,
 } from "./budiClient";
-import {
-  getActiveSessionFromFile,
-  getAllActiveSessions,
-  SESSION_FILE,
-} from "./sessionStore";
+import { getActiveSessionFromFile, getAllActiveSessions, SESSION_FILE } from "./sessionStore";
 import { HealthPanelProvider } from "./panel";
 
 let statusBarItem: vscode.StatusBarItem;
@@ -34,13 +30,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const folders = vscode.workspace.workspaceFolders;
   log.appendLine(
-    `[budi] workspaceFolders = ${folders?.map((f) => f.uri.fsPath).join(", ") ?? "none"}`
+    `[budi] workspaceFolders = ${folders?.map((f) => f.uri.fsPath).join(", ") ?? "none"}`,
   );
 
-  statusBarItem = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Left,
-    -100
-  );
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -100);
   statusBarItem.name = "budi";
   statusBarItem.command = "budi.toggleHealthPanel";
   statusBarItem.text = "budi";
@@ -56,10 +49,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(
-      HealthPanelProvider.viewType,
-      healthProvider
-    )
+    vscode.window.registerWebviewViewProvider(HealthPanelProvider.viewType, healthProvider),
   );
 
   context.subscriptions.push(
@@ -69,14 +59,14 @@ export function activate(context: vscode.ExtensionContext): void {
         ? `${daemonUrl}/dashboard/sessions/${encodeURIComponent(sid)}`
         : `${daemonUrl}/dashboard`;
       vscode.env.openExternal(vscode.Uri.parse(url));
-    })
+    }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("budi.refreshStatus", () => {
       log.appendLine(`[budi] manual refresh triggered`);
       refreshData(daemonUrl);
-    })
+    }),
   );
 
   context.subscriptions.push(
@@ -90,7 +80,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const sessions = getAllActiveSessions(workspacePath);
       if (sessions.length === 0) {
         vscode.window.showInformationMessage(
-          "budi: No active sessions found. Start a chat to create one."
+          "budi: No active sessions found. Start a chat to create one.",
         );
         return;
       }
@@ -128,13 +118,13 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       refreshData(daemonUrl);
-    })
+    }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("budi.toggleHealthPanel", () => {
       vscode.commands.executeCommand("budi.healthPanel.focus");
-    })
+    }),
   );
 
   context.subscriptions.push(
@@ -145,7 +135,7 @@ export function activate(context: vscode.ExtensionContext): void {
         dataPollInterval = updated.get("pollingIntervalMs", 15000);
         restartDataPoll(daemonUrl, dataPollInterval);
       }
-    })
+    }),
   );
 
   watchSessionFile(daemonUrl);
@@ -196,7 +186,7 @@ function watchSessionFile(daemonUrl: string): void {
         const newId = resolveSessionId();
         if (newId !== currentSessionId) {
           log.appendLine(
-            `[budi] session file changed: ${currentSessionId ?? "none"} → ${newId ?? "none"}`
+            `[budi] session file changed: ${currentSessionId ?? "none"} → ${newId ?? "none"}`,
           );
         }
         refreshData(daemonUrl).catch(() => {});
@@ -223,9 +213,7 @@ async function refreshData(daemonUrl: string): Promise<void> {
   const sessionId = resolveSessionId();
   currentSessionId = sessionId;
 
-  log.appendLine(
-    `[budi] refreshData: session=${sessionId ?? "none"}, cwd=${cwd ?? "none"}`
-  );
+  log.appendLine(`[budi] refreshData: session=${sessionId ?? "none"}, cwd=${cwd ?? "none"}`);
 
   healthProvider.updateContext(daemonUrl, sessionId);
 
@@ -245,7 +233,7 @@ async function refreshData(daemonUrl: string): Promise<void> {
     const tooltip = formatAggregationTooltip(agg, todayCost);
 
     log.appendLine(
-      `[budi] refreshData: sessions=${agg.total}, green=${agg.green}, yellow=${agg.yellow}, red=${agg.red}, text="${text}"`
+      `[budi] refreshData: sessions=${agg.total}, green=${agg.green}, yellow=${agg.yellow}, red=${agg.red}, text="${text}"`,
     );
     statusBarItem.text = text;
     statusBarItem.tooltip = tooltip;

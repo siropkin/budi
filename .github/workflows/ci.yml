@@ -37,10 +37,29 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Build Cursor extension package
+      - name: Install Cursor extension dependencies
         run: |
           cd extensions/cursor-budi
           npm ci
+
+      - name: Lint Cursor extension
+        run: |
+          cd extensions/cursor-budi
+          npm run lint
+
+      - name: Check Cursor extension formatting
+        run: |
+          cd extensions/cursor-budi
+          npm run format:check
+
+      - name: Test Cursor extension
+        run: |
+          cd extensions/cursor-budi
+          npm run test
+
+      - name: Build Cursor extension package
+        run: |
+          cd extensions/cursor-budi
           npm run build
           npx vsce package --no-dependencies -o cursor-budi.vsix
           test -s cursor-budi.vsix

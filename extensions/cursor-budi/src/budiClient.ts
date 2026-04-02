@@ -72,10 +72,7 @@ export function formatAggregationStatusText(agg: HealthAggregation): string {
   return `budi · \u{1F7E2} ${agg.green} \u{1F7E1} ${agg.yellow} \u{1F534} ${agg.red}`;
 }
 
-export function formatAggregationTooltip(
-  agg: HealthAggregation,
-  todayCost: number
-): string {
+export function formatAggregationTooltip(agg: HealthAggregation, todayCost: number): string {
   const lines: string[] = ["budi — AI cost tracker", ""];
   lines.push(`Today's sessions: ${agg.total}`);
   if (agg.green > 0) lines.push(`  \u{1F7E2} ${agg.green} healthy`);
@@ -92,23 +89,18 @@ export function aggregateHealth(sessions: SessionListEntry[]): HealthAggregation
   for (const s of sessions) {
     agg.total++;
     switch (s.health_state) {
-      case "yellow": agg.yellow++; break;
-      case "red": agg.red++; break;
-      default: agg.green++; break;
+      case "yellow":
+        agg.yellow++;
+        break;
+      case "red":
+        agg.red++;
+        break;
+      default:
+        agg.green++;
+        break;
     }
   }
   return agg;
-}
-
-function healthIcon(state: string): string {
-  switch (state) {
-    case "red":
-      return "\u{1F534}";
-    case "yellow":
-      return "\u{1F7E1}";
-    default:
-      return "\u{1F7E2}";
-  }
 }
 
 /**
@@ -118,7 +110,7 @@ function healthIcon(state: string): string {
 export async function fetchStatusline(
   daemonUrl: string,
   sessionId?: string,
-  cwd?: string
+  cwd?: string,
 ): Promise<StatuslineData | null> {
   const cliResult = await fetchViaCli(sessionId, cwd);
   if (cliResult) {
@@ -128,10 +120,7 @@ export async function fetchStatusline(
   return fetchViaDaemon(daemonUrl, sessionId, cwd);
 }
 
-function fetchViaCli(
-  sessionId?: string,
-  cwd?: string
-): Promise<StatuslineData | null> {
+function fetchViaCli(sessionId?: string, cwd?: string): Promise<StatuslineData | null> {
   return new Promise((resolve) => {
     const child = spawn("budi", ["statusline", "--format", "json"], {
       stdio: ["pipe", "pipe", "ignore"],
@@ -172,7 +161,7 @@ function fetchViaCli(
 function fetchViaDaemon(
   baseUrl: string,
   sessionId?: string,
-  cwd?: string
+  cwd?: string,
 ): Promise<StatuslineData | null> {
   return new Promise((resolve) => {
     const url = new URL("/analytics/statusline", baseUrl);
@@ -207,7 +196,7 @@ function fetchViaDaemon(
 
 export function fetchSessionHealth(
   daemonUrl: string,
-  sessionId?: string
+  sessionId?: string,
 ): Promise<SessionHealthData | null> {
   return new Promise((resolve) => {
     const url = new URL("/analytics/session-health", daemonUrl);
@@ -240,9 +229,7 @@ export function fetchSessionHealth(
 /**
  * Fetch recent sessions (today + yesterday) with health state from the daemon.
  */
-export function fetchRecentSessions(
-  daemonUrl: string
-): Promise<SessionListEntry[] | null> {
+export function fetchRecentSessions(daemonUrl: string): Promise<SessionListEntry[] | null> {
   return new Promise((resolve) => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);

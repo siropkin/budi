@@ -63,6 +63,12 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 | **Cursor** | Supported | Usage API + hooks |
 | **Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI** | Planned | |
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, quality checks, and PR workflow.
+
+To report a bug or request a feature, open a GitHub issue using the repository templates so maintainers get reproducible details quickly.
+
 ## Install
 
 Use Homebrew if you have it. Otherwise use the shell script (macOS/Linux) or PowerShell script (Windows). Build from source only if you want to contribute.
@@ -172,7 +178,11 @@ The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 �
 
 ```bash
 cd extensions/cursor-budi
-npm install && npm run build
+npm ci
+npm run lint
+npm run format:check
+npm run test
+npm run build
 npx vsce package --no-dependencies -o cursor-budi.vsix
 cursor --install-extension cursor-budi.vsix --force
 ```
