@@ -193,18 +193,32 @@ pub fn cmd_init(
     }
     println!("  Dashboard: {dashboard_url}");
     println!();
-    if let Err(e) = sync_result {
-        tracing::warn!("auto-sync failed: {e}");
-        println!("  Sync: skipped (run `budi sync` manually).");
-    }
+    let sync_counts = match sync_result {
+        Ok(counts) => Some(counts),
+        Err(e) => {
+            tracing::warn!("auto-sync failed: {e}");
+            println!("  Sync: skipped (run `budi sync` manually).");
+            None
+        }
+    };
     println!();
     let dim = super::ansi("\x1b[90m");
     println!("  {bold}Next steps:{reset}");
     println!("    1. Open the dashboard: {underline}{dashboard_url}{reset}");
     println!("    2. Run `budi stats` to see your spending");
+    let mut next_step = 3usize;
     if is_reinit {
         println!(
-            "    3. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
+            "    {next_step}. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
+        );
+        next_step += 1;
+    }
+    if !no_sync
+        && let Some((_, messages_synced)) = sync_counts
+        && messages_synced == 0
+    {
+        println!(
+            "    {next_step}. No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
         );
     }
     println!();

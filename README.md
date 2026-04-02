@@ -110,7 +110,16 @@ Copy-Item .\target\release\budi-daemon.exe $BinDir -Force
 
 > Install budi from https://github.com/siropkin/budi following the install instructions in the README
 
-All installers automatically run `budi init` after installation. Homebrew users need to run `budi init` manually.
+`budi init` behavior by install method:
+
+| Method | Runs `budi init` automatically? |
+|---|---|
+| Homebrew (`brew install ...`) | No — run `budi init` manually |
+| Standalone shell script (`curl ... \| bash`) | Yes |
+| Standalone PowerShell script (`irm ... \| iex`) | Yes |
+| From source (`./scripts/install.sh`) | Yes |
+
+If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 

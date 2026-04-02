@@ -3,6 +3,12 @@
 //! All analytics queries go through the daemon so it is the single owner of
 //! the SQLite database.
 
+use std::io::Write;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,17 +37,54 @@ fn analytics_branch_detail_url(base_url: &str, branch: &str) -> Result<String> {
 
 /// Produce a user-friendly error message based on the kind of reqwest error.
 fn describe_send_error(e: reqwest::Error) -> anyhow::Error {
+    let log_hint = daemon_log_hint();
     if e.is_connect() {
         anyhow::anyhow!(
-            "daemon is not running — start it with `budi init`, or run `budi doctor` to diagnose"
+            "daemon is not running — start it with `budi init`, or run `budi doctor` to diagnose. \
+             If this repeats, rerun `budi init`.{log_hint}"
         )
     } else if e.is_timeout() {
         anyhow::anyhow!(
             "daemon timed out — first sync or full history can take several minutes. Run `budi doctor` to check status"
         )
     } else {
-        anyhow::anyhow!("cannot reach daemon: {e} — run `budi doctor` to diagnose")
+        anyhow::anyhow!(
+            "cannot reach daemon: {e} — run `budi doctor` to diagnose. \
+             If this repeats, rerun `budi init`.{log_hint}"
+        )
     }
+}
+
+fn daemon_log_hint() -> String {
+    budi_core::config::budi_home_dir()
+        .map(|p| p.join("logs").join("daemon.log"))
+        .map(|p| format!(" Check daemon log: {}.", p.display()))
+        .unwrap_or_default()
+}
+
+fn run_with_sync_heartbeat<T, E>(
+    op: &impl Fn() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let running = Arc::new(AtomicBool::new(true));
+    let running_flag = running.clone();
+
+    let heartbeat = thread::spawn(move || {
+        let mut elapsed_secs = 0u64;
+        while running_flag.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(15));
+            if !running_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            elapsed_secs += 15;
+            print!(" {elapsed_secs}s...");
+            let _ = std::io::stdout().flush();
+        }
+    });
+
+    let result = op();
+    running.store(false, Ordering::Relaxed);
+    let _ = heartbeat.join();
+    result
 }
 
 /// Check the response status and return a descriptive error for non-success codes.
@@ -98,7 +141,6 @@ impl DaemonClient {
     // ─── Sync & Migration ────────────────────────────────────────────
 
     fn wait_for_sync(&self) -> Result<()> {
-        use std::io::Write;
         print!(" sync in progress, waiting");
         let _ = std::io::stdout().flush();
         let start = std::time::Instant::now();
@@ -133,10 +175,10 @@ impl DaemonClient {
         &self,
         send: impl Fn() -> std::result::Result<Response, reqwest::Error>,
     ) -> Result<Value> {
-        let resp = send().map_err(describe_send_error)?;
+        let resp = run_with_sync_heartbeat(&send).map_err(describe_send_error)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             self.wait_for_sync()?;
-            let resp = send().map_err(describe_send_error)?;
+            let resp = run_with_sync_heartbeat(&send).map_err(describe_send_error)?;
             let resp = check_response(resp)?;
             return Ok(resp.json()?);
         }

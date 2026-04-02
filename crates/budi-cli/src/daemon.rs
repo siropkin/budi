@@ -90,8 +90,9 @@ pub fn ensure_daemon_running_with_binary(
         let log_excerpt = daemon_log_tail(repo_root);
         anyhow::bail!(
             "Daemon port is occupied but health endpoint is unavailable at {}.\n\
-             Try `pkill -f budi-daemon` to kill stale processes, or check `budi doctor` for details.{log_excerpt}",
+             {}{log_excerpt}",
             config.daemon_base_url(),
+            daemon_port_conflict_hint(config.daemon_port),
         );
     }
 
@@ -106,10 +107,31 @@ pub fn ensure_daemon_running_with_binary(
         return Ok(());
     }
     let log_excerpt = daemon_log_tail(repo_root);
+    let conflict_hint = if log_excerpt.contains("Address already in use") {
+        format!("\n{}", daemon_port_conflict_hint(config.daemon_port))
+    } else {
+        String::new()
+    };
     anyhow::bail!(
-        "Daemon failed to become healthy at {}.{log_excerpt}",
-        config.daemon_base_url()
+        "Daemon failed to become healthy at {}.{conflict_hint}{log_excerpt}",
+        config.daemon_base_url(),
     );
+}
+
+fn daemon_port_conflict_hint(port: u16) -> String {
+    if cfg!(target_os = "windows") {
+        format!(
+            "Another process may be using port {port}. \
+             Check listeners with `Get-NetTCPConnection -LocalPort {port} -State Listen`, \
+             stop stale daemon processes with `taskkill /IM budi-daemon.exe /F`, and rerun `budi init`.\n"
+        )
+    } else {
+        format!(
+            "Another process may be using port {port}. \
+             Check listeners with `lsof -i :{port}`, \
+             stop stale daemon processes with `pkill -f \"budi-daemon serve\"`, and rerun `budi init`.\n"
+        )
+    }
 }
 
 /// Check if the running daemon reports the same version as this CLI binary.
