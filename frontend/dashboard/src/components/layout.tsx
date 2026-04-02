@@ -88,7 +88,6 @@ function PeriodSelector({ hidden }: { hidden: boolean }) {
           </Popover>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground">{periodLabel(period)}</p>
     </div>
   );
 }
@@ -105,7 +104,6 @@ function ShellBody() {
             <div className="flex h-10 w-10 items-center justify-center rounded-md border bg-muted text-lg">📊</div>
             <div className="space-y-1">
               <h1 className="text-xl font-semibold tracking-tight text-foreground">budi</h1>
-              <p className="text-xs text-muted-foreground">Dashboard</p>
             </div>
           </div>
           <PeriodSelector hidden={periodHidden} />
