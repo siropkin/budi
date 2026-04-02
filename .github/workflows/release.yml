@@ -140,6 +140,7 @@ jobs:
           cp "target/${target}/release/budi${ext}" "${stage_dir}/"
           cp "target/${target}/release/budi-daemon${ext}" "${stage_dir}/"
           cp README.md "${stage_dir}/"
+          cp LICENSE "${stage_dir}/"
 
           if [[ "$target" == *windows* ]]; then
             archive="${package}.zip"
