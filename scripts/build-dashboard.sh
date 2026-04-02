@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-FRONTEND_DIR="$ROOT_DIR/frontend/dashboard-v2"
+FRONTEND_DIR="$ROOT_DIR/frontend/dashboard"
 
 if [[ ! -d "$FRONTEND_DIR" ]]; then
   echo "dashboard frontend directory not found: $FRONTEND_DIR" >&2

@@ -92,7 +92,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
 - `crates/budi-cli/src/mcp.rs` - MCP server handler (15 tools: analytics + config + health)
 - `crates/budi-cli/src/commands/mcp.rs` - `mcp-serve` subcommand (stdio transport)
-- `frontend/dashboard-v2/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
+- `frontend/dashboard/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
 - `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`
 - `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
 - `extensions/cursor-budi/src/panel.ts` - Side panel webview (session details, vitals, session list)
@@ -113,7 +113,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
   - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools, MCP servers
   - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` - Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
-- Dashboard frontend sources live in `frontend/dashboard-v2/`; built assets are embedded from `crates/budi-daemon/static/dashboard-dist` (served at `/static/dashboard/*`)
+- Dashboard frontend sources live in `frontend/dashboard/`; built assets are embedded from `crates/budi-daemon/static/dashboard-dist` (served at `/static/dashboard/*`)
 - Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion - not used by dashboard/MCP)
 - Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration)
 - Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
