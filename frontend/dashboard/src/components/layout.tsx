@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import type { DateRange } from "react-day-picker";
+import { CalendarIcon } from "lucide-react";
 import { PeriodProvider, usePeriod } from "@/lib/period";
 import type { DateRangePreset } from "@/lib/types";
 import { periodLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const QUICK_PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "today", label: "Today" },
@@ -25,56 +28,64 @@ const NAV_ITEMS = [
 
 function PeriodSelector({ hidden }: { hidden: boolean }) {
   const { period, setPreset, setCustomRange } = usePeriod();
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-
-  useEffect(() => {
-    if (period.preset !== "custom") return;
-    setFrom(period.from ?? "");
-    setTo(period.to ?? "");
-  }, [period.from, period.preset, period.to]);
 
   if (hidden) return null;
 
   const showCustomRange = period.preset === "custom";
-  const customRangeInvalid = showCustomRange && (!from || !to || from > to);
+  const selectedRange: DateRange | undefined =
+    showCustomRange && period.from && period.to
+      ? {
+          from: new Date(`${period.from}T00:00:00`),
+          to: new Date(`${period.to}T00:00:00`),
+        }
+      : undefined;
+
+  const toDateInput = (date: Date) => {
+    const year = String(date.getFullYear());
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
 
   return (
     <div className="flex flex-col gap-2 md:items-end">
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          aria-label="Date range preset"
+        <Select
           value={period.preset}
-          onChange={(event) => setPreset(event.target.value as DateRangePreset)}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          onValueChange={(value) => setPreset(value as DateRangePreset)}
         >
-          {QUICK_PRESETS.map((item) => (
-            <option key={item.value} value={item.value}>
-              {item.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger aria-label="Date range preset" className="h-9 w-[190px]">
+            <SelectValue placeholder="Select range" />
+          </SelectTrigger>
+          <SelectContent align="end">
+            {QUICK_PRESETS.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {showCustomRange ? (
-          <>
-            <Input
-              type="date"
-              aria-label="Start date"
-              value={from}
-              onChange={(event) => setFrom(event.target.value)}
-              className="h-9 w-40"
-            />
-            <span className="text-xs text-muted-foreground">to</span>
-            <Input
-              type="date"
-              aria-label="End date"
-              value={to}
-              onChange={(event) => setTo(event.target.value)}
-              className="h-9 w-40"
-            />
-            <Button type="button" size="sm" variant="secondary" disabled={customRangeInvalid} onClick={() => setCustomRange(from, to)}>
-              Apply
-            </Button>
-          </>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button type="button" variant="outline" size="sm" className="h-9 min-w-[220px] justify-start text-left font-normal">
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {period.from && period.to ? periodLabel(period) : "Pick date range"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-auto p-0">
+              <Calendar
+                mode="range"
+                numberOfMonths={2}
+                selected={selectedRange}
+                defaultMonth={selectedRange?.from}
+                onSelect={(range) => {
+                  if (!range?.from || !range.to) return;
+                  setCustomRange(toDateInput(range.from), toDateInput(range.to));
+                }}
+              />
+            </PopoverContent>
+          </Popover>
         ) : null}
       </div>
       <p className="text-xs text-muted-foreground">{periodLabel(period)}</p>
