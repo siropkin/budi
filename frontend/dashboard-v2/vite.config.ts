@@ -4,7 +4,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
-  base: mode === "production" ? "/static/dashboard-v2/" : "/",
+  base: mode === "production" ? "/static/dashboard/" : "/",
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -22,7 +22,7 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    outDir: "../../crates/budi-daemon/static/dashboard-v2-dist",
+    outDir: "../../crates/budi-daemon/static/dashboard-dist",
     emptyOutDir: true,
   },
 }));

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
@@ -6,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ChartContainer } from "@/components/ui/chart";
 import { ErrorState, LoadingState } from "@/components/state";
-import { fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
+import { fetchRegisteredProviders, fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
 import { fmtCost, fmtDate, fmtNum, formatModelName } from "@/lib/format";
 
 function healthVariant(state: string): "default" | "warning" | "success" {
@@ -15,9 +16,14 @@ function healthVariant(state: string): "default" | "warning" | "success" {
   return "success";
 }
 
+const MESSAGE_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
+type MessageSortColumn = "timestamp" | "provider" | "model" | "tokens" | "cost";
+
 export function SessionDetailPage() {
   const params = useParams<{ sessionId: string }>();
   const sessionId = params.sessionId;
+  const [sortBy, setSortBy] = useState<MessageSortColumn>("timestamp");
+  const [sortAsc, setSortAsc] = useState(false);
 
   const messagesQuery = useQuery({
     queryKey: ["session-messages", sessionId],
@@ -37,11 +43,17 @@ export function SessionDetailPage() {
     enabled: Boolean(sessionId),
   });
 
+  const providersQuery = useQuery({
+    queryKey: ["registered-providers"],
+    queryFn: ({ signal }) => fetchRegisteredProviders(signal),
+    staleTime: 60_000,
+  });
+
   if (!sessionId) {
     return <ErrorState error={new Error("Session ID is missing in route")} />;
   }
 
-  if (messagesQuery.isPending || tagsQuery.isPending || healthQuery.isPending) {
+  if (messagesQuery.isPending || tagsQuery.isPending || healthQuery.isPending || providersQuery.isPending) {
     return <LoadingState label="Loading session detail..." />;
   }
 
@@ -57,9 +69,15 @@ export function SessionDetailPage() {
     return <ErrorState error={healthQuery.error} onRetry={() => healthQuery.refetch()} />;
   }
 
+  if (providersQuery.error) {
+    return <ErrorState error={providersQuery.error} onRetry={() => providersQuery.refetch()} />;
+  }
+
   const messages = messagesQuery.data;
   const tags = tagsQuery.data.filter((tag) => !["provider", "model", "repo", "machine", "cost_confidence"].includes(tag.key));
   const health = healthQuery.data;
+  const providers = providersQuery.data;
+  const vitals = Object.entries(health?.vitals ?? {}).filter(([, vital]) => vital != null);
 
   let tokenTotal = 0;
   let costTotalCents = 0;
@@ -72,6 +90,41 @@ export function SessionDetailPage() {
     label: `#${index + 1}`,
     input_tokens: message.input_tokens,
   }));
+
+  const sortedMessages = [...messages];
+  sortedMessages.sort((left, right) => {
+    let compare = 0;
+    if (sortBy === "timestamp") {
+      compare = left.timestamp.localeCompare(right.timestamp);
+    } else if (sortBy === "provider") {
+      const leftProvider = providers.find((entry) => entry.name === left.provider)?.display_name ?? left.provider;
+      const rightProvider = providers.find((entry) => entry.name === right.provider)?.display_name ?? right.provider;
+      compare = leftProvider.localeCompare(rightProvider);
+    } else if (sortBy === "model") {
+      compare = formatModelName(left.model ?? "").localeCompare(formatModelName(right.model ?? ""));
+    } else if (sortBy === "tokens") {
+      const leftTokens = (left.input_tokens ?? 0) + (left.output_tokens ?? 0);
+      const rightTokens = (right.input_tokens ?? 0) + (right.output_tokens ?? 0);
+      compare = leftTokens - rightTokens;
+    } else if (sortBy === "cost") {
+      compare = (left.cost_cents ?? 0) - (right.cost_cents ?? 0);
+    }
+    return sortAsc ? compare : -compare;
+  });
+
+  const onSort = (column: MessageSortColumn) => {
+    if (column === sortBy) {
+      setSortAsc((previous) => !previous);
+      return;
+    }
+    setSortBy(column);
+    setSortAsc(false);
+  };
+
+  const sortArrow = (column: MessageSortColumn) => {
+    if (column !== sortBy) return null;
+    return sortAsc ? "▲" : "▼";
+  };
 
   return (
     <div className="space-y-5">
@@ -110,13 +163,13 @@ export function SessionDetailPage() {
             <CardTitle>Health Vitals</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-2">
-            {Object.entries(health?.vitals ?? {}).map(([key, vital]) => (
+            {vitals.map(([key, vital]) => (
               <div key={key} className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
                 <span className="text-sm text-muted-foreground">{key.replace(/_/g, " ")}</span>
                 <Badge variant={healthVariant(vital.state)}>{vital.label}</Badge>
               </div>
             ))}
-            {Object.keys(health?.vitals ?? {}).length === 0 ? (
+            {vitals.length === 0 ? (
               <p className="text-sm text-muted-foreground">No session-health vitals available.</p>
             ) : null}
           </CardContent>
@@ -156,6 +209,7 @@ export function SessionDetailPage() {
               <XAxis dataKey="label" tickLine={false} axisLine={false} />
               <YAxis dataKey="input_tokens" tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
               <Tooltip
+                cursor={{ fill: "rgba(255,255,255,0.05)" }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;
                   const value = Number(payload[0].value ?? 0);
@@ -178,34 +232,32 @@ export function SessionDetailPage() {
           <CardTitle>Messages</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto rounded-md border border-border">
-            <Table>
+          <div className="overflow-hidden rounded-md border border-border">
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Time</TableHead>
-                  <TableHead>Agent</TableHead>
-                  <TableHead>Model</TableHead>
-                  <TableHead className="text-right">Tokens</TableHead>
-                  <TableHead className="text-right">Cost</TableHead>
+                  <TableHead className="cursor-pointer" onClick={() => onSort("timestamp")}>Time {sortArrow("timestamp")}</TableHead>
+                  <TableHead className="cursor-pointer" onClick={() => onSort("provider")}>Agent {sortArrow("provider")}</TableHead>
+                  <TableHead className="cursor-pointer" onClick={() => onSort("model")}>Model {sortArrow("model")}</TableHead>
+                  <TableHead className="cursor-pointer text-right" onClick={() => onSort("tokens")}>Tokens {sortArrow("tokens")}</TableHead>
+                  <TableHead className="cursor-pointer text-right" onClick={() => onSort("cost")}>Cost {sortArrow("cost")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {messages.map((message, index) => {
-                  const isExact =
-                    !message.cost_confidence ||
-                    message.cost_confidence === "exact" ||
-                    message.cost_confidence === "exact_cost" ||
-                    message.cost_confidence === "otel_exact";
+                {sortedMessages.map((message, index) => {
+                  const providerDisplay = providers.find((entry) => entry.name === message.provider)?.display_name ?? message.provider;
+                  const rawModel = message.model ?? "";
                   return (
                     <TableRow key={`${message.timestamp}-${index}`}>
-                      <TableCell className="text-muted-foreground">{fmtDate(message.timestamp)}</TableCell>
-                      <TableCell className="text-muted-foreground">{message.provider}</TableCell>
-                      <TableCell>{formatModelName(message.model)}</TableCell>
-                      <TableCell className="text-right font-mono text-muted-foreground">
+                      <TableCell className={MESSAGE_CELL_CLASS}>{fmtDate(message.timestamp)}</TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS}>{providerDisplay}</TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS} title={rawModel}>
+                        {formatModelName(rawModel)}
+                      </TableCell>
+                      <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap text-right`}>
                         {fmtNum((message.input_tokens ?? 0) + (message.output_tokens ?? 0))}
                       </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {isExact ? "" : "~"}
+                      <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap text-right`}>
                         {fmtCost((message.cost_cents ?? 0) / 100)}
                       </TableCell>
                     </TableRow>

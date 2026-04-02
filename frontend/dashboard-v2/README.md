@@ -1,6 +1,6 @@
-# budi dashboard-v2
+# budi dashboard
 
-React + TypeScript dashboard app for `/dashboard-v2`.
+React + TypeScript dashboard app for `/dashboard`.
 
 ## Development
 
@@ -17,4 +17,4 @@ npm run dev
 npm run build
 ```
 
-Build output is written directly into `crates/budi-daemon/static/dashboard-v2-dist` and served by `budi-daemon` at `/dashboard-v2`.
+Build output is written directly into `crates/budi-daemon/static/dashboard-dist` and served by `budi-daemon` at `/dashboard`.

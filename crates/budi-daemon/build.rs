@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    let dist = Path::new("static/dashboard-v2-dist");
+    let dist = Path::new("static/dashboard-dist");
     println!("cargo:rerun-if-changed={}", dist.display());
     emit_rerun_for_dir(dist);
 }

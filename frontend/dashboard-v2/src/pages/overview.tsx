@@ -180,6 +180,7 @@ export function OverviewPage() {
               />
               <YAxis tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
               <Tooltip
+                cursor={{ fill: "rgba(255,255,255,0.05)" }}
                 content={({ active, payload, label }) => {
                   if (!active || !payload || payload.length === 0) return null;
                   const input = Number(payload.find((item) => item.dataKey === "input_tokens")?.value ?? 0);

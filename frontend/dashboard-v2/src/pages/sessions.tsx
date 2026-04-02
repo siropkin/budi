@@ -12,6 +12,7 @@ import { usePeriod } from "@/lib/period";
 const LIMIT = 50;
 
 type SortColumn = "started_at" | "title" | "duration" | "provider" | "model" | "repo_id" | "git_branch" | "tokens" | "cost";
+const SESSION_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
 
 export function SessionsPage() {
   const { period } = usePeriod();
@@ -95,8 +96,8 @@ export function SessionsPage() {
       <CardContent className="space-y-4">
         <Input placeholder="Search sessions..." value={search} onChange={onSearchChange} />
 
-        <div className="overflow-x-auto rounded-md border border-border">
-          <Table>
+        <div className="overflow-hidden rounded-md border border-border">
+          <Table className="table-fixed">
             <TableHeader>
               <TableRow>
                 <TableHead className="cursor-pointer" onClick={() => onSort("started_at")}>Time {sortArrow("started_at")}</TableHead>
@@ -135,15 +136,15 @@ export function SessionsPage() {
                     className="cursor-pointer"
                     onClick={() => navigate(`/sessions/${encodeURIComponent(session.session_id)}`)}
                   >
-                    <TableCell className="whitespace-nowrap text-muted-foreground">{fmtDate(session.started_at)}</TableCell>
-                    <TableCell className="max-w-[260px] truncate" title={session.title ?? ""}>{session.title || "--"}</TableCell>
-                    <TableCell className="text-muted-foreground">{duration}</TableCell>
-                    {multiProvider ? <TableCell className="text-muted-foreground">{providerDisplay}</TableCell> : null}
-                    <TableCell title={rawModel}>{modelSummary}</TableCell>
-                    <TableCell className="max-w-[180px] truncate text-muted-foreground" title={session.repo_id ?? ""}>{repoName(session.repo_id)}</TableCell>
-                    <TableCell className="max-w-[180px] truncate text-muted-foreground" title={branch}>{branch}</TableCell>
-                    <TableCell className="text-right font-mono text-muted-foreground">{fmtNum(tokenCount)}</TableCell>
-                    <TableCell className="text-right font-mono">{fmtCost((session.cost_cents ?? 0) / 100)}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS}>{fmtDate(session.started_at)}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS} title={session.title ?? ""}>{session.title || "--"}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS}>{duration}</TableCell>
+                    {multiProvider ? <TableCell className={SESSION_CELL_CLASS}>{providerDisplay}</TableCell> : null}
+                    <TableCell className={SESSION_CELL_CLASS} title={rawModel}>{modelSummary}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS} title={session.repo_id ?? ""}>{repoName(session.repo_id)}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS} title={branch}>{branch}</TableCell>
+                    <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtNum(tokenCount)}</TableCell>
+                    <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtCost((session.cost_cents ?? 0) / 100)}</TableCell>
                   </TableRow>
                 );
               })}

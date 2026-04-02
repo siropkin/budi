@@ -260,6 +260,16 @@ main() {
       BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
     else
       if [[ "$SKIP_BUILD" -eq 0 ]]; then
+        # Build dashboard frontend bundle so daemon embeds current assets.
+        if command -v npm >/dev/null 2>&1; then
+          log "Building dashboard frontend..."
+          "$REPO_ROOT/scripts/build-dashboard.sh"
+        elif [[ ! -f "$REPO_ROOT/crates/budi-daemon/static/dashboard-dist/index.html" ]]; then
+          fail "npm not found and no prebuilt dashboard bundle present at crates/budi-daemon/static/dashboard-dist"
+        else
+          log "npm not found — using checked-in dashboard bundle"
+        fi
+
         # Build Cursor extension (.vsix) before cargo build so it gets embedded.
         # This is best-effort: install should still succeed even if packaging cannot run.
         if command -v npm >/dev/null 2>&1; then

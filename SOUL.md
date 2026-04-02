@@ -9,7 +9,7 @@ cargo build              # dev build
 cargo build --release    # release build
 cargo test               # all workspace tests
 cargo test -p budi-core  # core tests only
-./scripts/build-dashboard-v2.sh  # build React dashboard-v2 bundle into daemon static assets
+./scripts/build-dashboard.sh  # build React dashboard bundle into daemon static assets
 ./scripts/install.sh     # build release + install to ~/.local/bin/
 ```
 
@@ -92,9 +92,8 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
 - `crates/budi-cli/src/mcp.rs` - MCP server handler (15 tools: analytics + config + health)
 - `crates/budi-cli/src/commands/mcp.rs` - `mcp-serve` subcommand (stdio transport)
-- `crates/budi-daemon/static/js/` - Dashboard JS (vanilla, no framework)
-- `frontend/dashboard-v2/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard-v2`
-- `crates/budi-daemon/static/dashboard-v2-dist/` - Built dashboard-v2 bundle served under `/static/dashboard-v2/*`
+- `frontend/dashboard-v2/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
+- `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`
 - `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
 - `extensions/cursor-budi/src/panel.ts` - Side panel webview (session details, vitals, session list)
 - `extensions/cursor-budi/src/budiClient.ts` - Daemon HTTP client + health aggregation logic
@@ -109,13 +108,12 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-turn or per-reply cost growth), retry loops (tool failure loops from hook_events). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Auto-installed by `budi init` when Cursor CLI is on PATH (`.vsix` embedded in binary via `include_bytes!`). Communicates with daemon via HTTP. Tracks active session via `~/.local/share/budi/cursor-sessions.json` (written by hooks, watched by extension). `budi doctor` and `/health/integrations` both check extension install status.
-- **Dashboard** is multi-page at `/dashboard` with URL-based routing (vanilla JS, no framework):
+- **Dashboard** is a React SPA at `/dashboard` with client-side routing:
   - `/dashboard` (Overview) - Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
   - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools, MCP servers
   - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` - Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
-- Dashboard JS files: `state.js`, `utils.js`, `api.js`, `stats.js` (shared components), `views.js` (overview), `views-insights.js`, `views-sessions.js`, `views-settings.js`, `events.js` (routing/lifecycle)
-- **Dashboard v2** lives at `/dashboard-v2` and is served from the React build in `crates/budi-daemon/static/dashboard-v2-dist` (assets at `/static/dashboard-v2/*`)
+- Dashboard frontend sources live in `frontend/dashboard-v2/`; built assets are embedded from `crates/budi-daemon/static/dashboard-dist` (served at `/static/dashboard/*`)
 - Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion - not used by dashboard/MCP)
 - Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration)
 - Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
