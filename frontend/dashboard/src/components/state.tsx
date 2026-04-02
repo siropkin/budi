@@ -11,7 +11,7 @@ export function LoadingState({ label = "Loading analytics..." }: { label?: strin
 
 export function EmptyState({ label }: { label: string }) {
   return (
-    <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground">
+    <div className="flex h-[280px] items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground">
       {label}
     </div>
   );

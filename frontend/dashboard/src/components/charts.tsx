@@ -2,7 +2,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   LabelList,
   Tooltip,
   XAxis,
@@ -11,14 +10,6 @@ import {
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import { EmptyState } from "@/components/state";
 import { fmtCost, fmtNum } from "@/lib/format";
-
-const PALETTE = [
-  "hsl(var(--chart-1))",
-  "hsl(var(--chart-2))",
-  "hsl(var(--chart-3))",
-  "hsl(var(--chart-4))",
-  "hsl(var(--chart-5))",
-];
 
 export interface CostBarDatum {
   label: string;
@@ -34,6 +25,11 @@ export function CostBarChart({
   data: CostBarDatum[];
   emptyLabel: string;
 }) {
+  const sortedData = [...data].sort((left, right) => {
+    if (right.cost_cents !== left.cost_cents) return right.cost_cents - left.cost_cents;
+    return left.label.localeCompare(right.label);
+  });
+
   if (data.length === 0) {
     return <EmptyState label={emptyLabel} />;
   }
@@ -49,7 +45,7 @@ export function CostBarChart({
           },
         }}
       >
-        <BarChart data={data} layout="vertical" margin={{ left: 20, right: 20, top: 6, bottom: 6 }}>
+        <BarChart data={sortedData} layout="vertical" margin={{ left: 20, right: 20, top: 6, bottom: 6 }}>
           <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
           <YAxis dataKey="label" type="category" tickLine={false} axisLine={false} width={140} />
           <XAxis dataKey="cost_cents" type="number" tickFormatter={(value) => fmtCost(value / 100)} axisLine={false} tickLine={false} />
@@ -66,10 +62,7 @@ export function CostBarChart({
             }}
             cursor={{ fill: "rgba(255,255,255,0.05)" }}
           />
-          <Bar dataKey="cost_cents" radius={[5, 5, 5, 5]}>
-            {data.map((entry, index) => (
-              <Cell key={`${entry.label}-${index}`} fill={PALETTE[index % PALETTE.length]} />
-            ))}
+          <Bar dataKey="cost_cents" fill="hsl(var(--chart-1))" barSize={14} radius={[5, 5, 5, 5]}>
             <LabelList
               dataKey="cost_cents"
               position="right"
@@ -99,6 +92,11 @@ export function CountBarChart({
   emptyLabel: string;
   valueLabel?: string;
 }) {
+  const sortedData = [...data].sort((left, right) => {
+    if (right.value !== left.value) return right.value - left.value;
+    return left.label.localeCompare(right.label);
+  });
+
   if (data.length === 0) {
     return <EmptyState label={emptyLabel} />;
   }
@@ -114,7 +112,7 @@ export function CountBarChart({
           },
         }}
       >
-        <BarChart data={data} layout="vertical" margin={{ left: 20, right: 20, top: 6, bottom: 6 }}>
+        <BarChart data={sortedData} layout="vertical" margin={{ left: 20, right: 20, top: 6, bottom: 6 }}>
           <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
           <YAxis dataKey="label" type="category" tickLine={false} axisLine={false} width={140} />
           <XAxis dataKey="value" type="number" axisLine={false} tickLine={false} tickFormatter={(value) => fmtNum(value)} />
@@ -133,7 +131,7 @@ export function CountBarChart({
               );
             }}
           />
-          <Bar dataKey="value" fill="hsl(var(--chart-2))" radius={[5, 5, 5, 5]}>
+          <Bar dataKey="value" fill="hsl(var(--chart-2))" barSize={14} radius={[5, 5, 5, 5]}>
             <LabelList dataKey="value" position="right" className="fill-muted-foreground text-xs" formatter={(value: number) => fmtNum(value)} />
           </Bar>
         </BarChart>
