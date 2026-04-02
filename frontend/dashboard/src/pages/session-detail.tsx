@@ -221,7 +221,7 @@ export function SessionDetailPage() {
                   );
                 }}
               />
-              <Bar dataKey="input_tokens" fill="var(--color-input)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="input_tokens" fill="var(--color-input)" maxBarSize={28} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ChartContainer>
         </CardContent>

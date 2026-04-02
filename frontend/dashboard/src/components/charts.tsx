@@ -11,6 +11,8 @@ import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import { EmptyState } from "@/components/state";
 import { fmtCost, fmtNum } from "@/lib/format";
 
+const BAR_SIZE = 28;
+
 export interface CostBarDatum {
   label: string;
   cost_cents: number;
@@ -62,7 +64,7 @@ export function CostBarChart({
             }}
             cursor={{ fill: "rgba(255,255,255,0.05)" }}
           />
-          <Bar dataKey="cost_cents" fill="hsl(var(--chart-1))" barSize={14} radius={[5, 5, 5, 5]}>
+          <Bar dataKey="cost_cents" fill="hsl(var(--chart-1))" barSize={BAR_SIZE} radius={[5, 5, 5, 5]}>
             <LabelList
               dataKey="cost_cents"
               position="right"
@@ -131,7 +133,7 @@ export function CountBarChart({
               );
             }}
           />
-          <Bar dataKey="value" fill="hsl(var(--chart-2))" barSize={14} radius={[5, 5, 5, 5]}>
+          <Bar dataKey="value" fill="hsl(var(--chart-2))" barSize={BAR_SIZE} radius={[5, 5, 5, 5]}>
             <LabelList dataKey="value" position="right" className="fill-muted-foreground text-xs" formatter={(value: number) => fmtNum(value)} />
           </Bar>
         </BarChart>
