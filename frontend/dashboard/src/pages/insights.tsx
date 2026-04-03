@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { CostBarChart, CountBarChart } from "@/components/charts";
+import { CostBarChart, CountBarChart, SessionCurveChart } from "@/components/charts";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchInsights } from "@/lib/api";
 import { fmtCost, fmtNum } from "@/lib/format";
@@ -22,10 +22,21 @@ function mcpName(raw: string): string {
   return raw;
 }
 
+function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
+  );
+}
+
 export function InsightsPage() {
   const { period } = usePeriod();
   const insightsQuery = useQuery({
-    queryKey: ["insights", period.preset, period.from ?? "", period.to ?? ""],
+    queryKey: ["insights", period.preset],
     queryFn: ({ signal }) => fetchInsights(period, signal),
   });
 
@@ -44,14 +55,10 @@ export function InsightsPage() {
     cost_cents: row.cost_cents,
   }));
 
-  const sessionCostRows = data.sessionCurve.map((row) => ({
+  const sessionCurveRows = data.sessionCurve.map((row) => ({
     label: `${row.bucket} msgs`,
-    cost_cents: row.avg_cost_per_message_cents,
-  }));
-
-  const sessionCountRows = data.sessionCurve.map((row) => ({
-    label: `${row.bucket} msgs`,
-    value: row.session_count,
+    avg_cost_per_message_cents: row.avg_cost_per_message_cents,
+    session_count: row.session_count,
   }));
 
   const speedRows = data.speedTags
@@ -83,12 +90,6 @@ export function InsightsPage() {
 
   return (
     <div className="space-y-5">
-      <Card>
-        <CardContent className="pt-5">
-          <CostBarChart title="Cost Confidence" data={confidenceRows} emptyLabel="No confidence data for this period" />
-        </CardContent>
-      </Card>
-
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
@@ -111,55 +112,32 @@ export function InsightsPage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart
-              title="Avg Cost per Message by Session Length"
-              data={sessionCostRows}
-              emptyLabel="No session-cost data for this period"
-            />
-          </CardContent>
-        </Card>
+      <ChartCard title="Cost Confidence">
+        <CostBarChart data={confidenceRows} emptyLabel="No confidence data for this period" />
+      </ChartCard>
 
-        <Card>
-          <CardContent className="pt-5">
-            <CountBarChart
-              title="Sessions by Length"
-              data={sessionCountRows}
-              emptyLabel="No session-count data for this period"
-              valueLabel="sessions"
-            />
-          </CardContent>
-        </Card>
+      <ChartCard title="Session Length vs Cost">
+        <SessionCurveChart data={sessionCurveRows} emptyLabel="No session-cost data for this period" />
+      </ChartCard>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <ChartCard title="Speed Mode">
+          <CostBarChart data={speedRows} emptyLabel="No speed tags for this period" />
+        </ChartCard>
+
+        <ChartCard title="Subagent vs Main">
+          <CostBarChart data={subagentRows} emptyLabel="No subagent data for this period" />
+        </ChartCard>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Speed Mode" data={speedRows} emptyLabel="No speed tags for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Tools">
+          <CountBarChart data={toolsRows} emptyLabel="No tool usage for this period" valueLabel="calls" />
+        </ChartCard>
 
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Subagent vs Main" data={subagentRows} emptyLabel="No subagent data for this period" />
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardContent className="pt-5">
-            <CountBarChart title="Tools" data={toolsRows} emptyLabel="No tool usage for this period" valueLabel="calls" />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="pt-5">
-            <CountBarChart title="MCP Servers" data={mcpRows} emptyLabel="No MCP usage for this period" valueLabel="calls" />
-          </CardContent>
-        </Card>
+        <ChartCard title="MCP Servers">
+          <CountBarChart data={mcpRows} emptyLabel="No MCP usage for this period" valueLabel="calls" />
+        </ChartCard>
       </div>
     </div>
   );

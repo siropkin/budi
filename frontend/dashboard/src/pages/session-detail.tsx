@@ -2,11 +2,12 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchRegisteredProviders, fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
 import { fmtCost, fmtDate, fmtNum, formatModelName } from "@/lib/format";
@@ -20,6 +21,40 @@ function healthVariant(state: string): "default" | "warning" | "success" {
 
 const MESSAGE_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
 type MessageSortColumn = "timestamp" | "provider" | "model" | "tokens" | "cost";
+
+function SortableHead({
+  label,
+  column,
+  sortBy,
+  sortAsc,
+  onSort,
+  right = false,
+}: {
+  label: string;
+  column: MessageSortColumn;
+  sortBy: MessageSortColumn;
+  sortAsc: boolean;
+  onSort: (column: MessageSortColumn) => void;
+  right?: boolean;
+}) {
+  const isActive = sortBy === column;
+  return (
+    <TableHead aria-sort={isActive ? (sortAsc ? "ascending" : "descending") : "none"} className={right ? "text-right" : undefined}>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={cn("h-8 px-0 text-muted-foreground hover:text-foreground", isActive && "text-foreground", right && "ml-auto")}
+        onClick={() => onSort(column)}
+      >
+        {label}
+        {isActive ? (
+          sortAsc ? <ArrowUp className="ml-1 h-3.5 w-3.5" aria-hidden="true" /> : <ArrowDown className="ml-1 h-3.5 w-3.5" aria-hidden="true" />
+        ) : null}
+      </Button>
+    </TableHead>
+  );
+}
 
 export function SessionDetailPage() {
   const params = useParams<{ sessionId: string }>();
@@ -123,11 +158,6 @@ export function SessionDetailPage() {
     setSortAsc(false);
   };
 
-  const sortArrow = (column: MessageSortColumn) => {
-    if (column !== sortBy) return null;
-    return sortAsc ? "▲" : "▼";
-  };
-
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -200,30 +230,31 @@ export function SessionDetailPage() {
         <CardContent>
           <ChartContainer
             config={{
-              input: {
+              input_tokens: {
                 label: "Input tokens",
                 color: "hsl(var(--chart-1))",
               },
             }}
           >
-            <BarChart data={tokenGrowth} margin={{ left: 12, right: 8 }}>
+            <BarChart data={tokenGrowth} margin={{ left: 12, right: 8 }} accessibilityLayer>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
               <XAxis dataKey="label" tickLine={false} axisLine={false} />
               <YAxis dataKey="input_tokens" tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
               <ChartTooltip
-                cursor={{ fill: "rgba(255,255,255,0.05)" }}
-                content={({ active, payload, label }) => {
-                  if (!active || !payload || payload.length === 0) return null;
-                  const value = Number(payload[0].value ?? 0);
-                  return (
-                    <div className="rounded-md border border-border bg-card px-3 py-2 text-xs shadow-md">
-                      <p className="font-medium">{label}</p>
-                      <p className="text-muted-foreground">Input: {fmtNum(value)}</p>
-                    </div>
-                  );
-                }}
+                cursor={false}
+                content={
+                  <ChartTooltipContent
+                    indicator="dot"
+                    formatter={(value, name) => (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">{name}</span>
+                        <span className="font-medium tabular-nums text-foreground">{fmtNum(Number(value))}</span>
+                      </div>
+                    )}
+                  />
+                }
               />
-              <Bar dataKey="input_tokens" fill="var(--color-input)" maxBarSize={28} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="input_tokens" fill="var(--color-input_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ChartContainer>
         </CardContent>
@@ -234,15 +265,15 @@ export function SessionDetailPage() {
           <CardTitle>Messages</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-hidden rounded-md border border-border">
+          <div className="overflow-hidden rounded-md border border-border bg-background p-1">
             <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="cursor-pointer" onClick={() => onSort("timestamp")}>Time {sortArrow("timestamp")}</TableHead>
-                  <TableHead className="cursor-pointer" onClick={() => onSort("provider")}>Agent {sortArrow("provider")}</TableHead>
-                  <TableHead className="cursor-pointer" onClick={() => onSort("model")}>Model {sortArrow("model")}</TableHead>
-                  <TableHead className="cursor-pointer text-right" onClick={() => onSort("tokens")}>Tokens {sortArrow("tokens")}</TableHead>
-                  <TableHead className="cursor-pointer text-right" onClick={() => onSort("cost")}>Cost {sortArrow("cost")}</TableHead>
+                  <SortableHead label="Time" column="timestamp" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <SortableHead label="Agent" column="provider" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <SortableHead label="Model" column="model" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <SortableHead label="Tokens" column="tokens" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
+                  <SortableHead label="Cost" column="cost" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
                 </TableRow>
               </TableHeader>
               <TableBody>

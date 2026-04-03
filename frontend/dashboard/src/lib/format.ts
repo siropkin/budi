@@ -1,7 +1,6 @@
 import type { DateRangeSelection } from "@/lib/types";
 
 const DAY_MS = 86_400_000;
-const DATE_INPUT_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -11,43 +10,14 @@ function addDays(date: Date, days: number): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 }
 
-function parseDateInput(value: string): Date | null {
-  if (!DATE_INPUT_PATTERN.test(value)) return null;
-  const [yearStr, monthStr, dayStr] = value.split("-");
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  const day = Number(dayStr);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
-  const parsed = new Date(year, month - 1, day);
-  if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
-  return parsed;
-}
-
-function formatShortDate(date: Date): string {
-  return date.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
-function formatCustomRange(from: string, to: string): string {
-  const fromDate = parseDateInput(from);
-  const toDate = parseDateInput(to);
-  if (!fromDate || !toDate) return "Custom";
-  return `${formatShortDate(fromDate)} to ${formatShortDate(toDate)}`;
-}
-
 export function periodLabel(period: DateRangeSelection): string {
   switch (period.preset) {
     case "today":
       return "Today";
-    case "month_to_date":
-      return "Month to date";
     case "last_7_days":
       return "Last 7 days";
     case "last_30_days":
       return "Last 30 days";
-    case "last_month":
-      return "Last Month";
-    case "custom":
-      return period.from && period.to ? formatCustomRange(period.from, period.to) : "Custom";
     default:
       return "Today";
   }
@@ -56,35 +26,15 @@ export function periodLabel(period: DateRangeSelection): string {
 export function periodRange(period: DateRangeSelection): { since?: string; until?: string } {
   const now = new Date();
   const today = startOfDay(now);
-  const y = today.getFullYear();
-  const m = today.getMonth();
   const toIso = (value: Date) => value.toISOString();
 
   switch (period.preset) {
     case "today":
       return { since: toIso(today), until: toIso(addDays(today, 1)) };
-    case "month_to_date":
-      return { since: toIso(new Date(y, m, 1)), until: toIso(addDays(today, 1)) };
     case "last_7_days":
       return { since: toIso(addDays(today, -6)), until: toIso(addDays(today, 1)) };
     case "last_30_days":
       return { since: toIso(addDays(today, -29)), until: toIso(addDays(today, 1)) };
-    case "last_month":
-      return { since: toIso(new Date(y, m - 1, 1)), until: toIso(new Date(y, m, 1)) };
-    case "custom": {
-      if (!period.from || !period.to || period.from > period.to) {
-        return { since: toIso(today), until: toIso(addDays(today, 1)) };
-      }
-      const fromDate = parseDateInput(period.from);
-      const toDate = parseDateInput(period.to);
-      if (!fromDate || !toDate) {
-        return { since: toIso(today), until: toIso(addDays(today, 1)) };
-      }
-      return {
-        since: toIso(startOfDay(fromDate)),
-        until: toIso(addDays(startOfDay(toDate), 1)),
-      };
-    }
     default:
       return { since: toIso(today), until: toIso(addDays(today, 1)) };
   }

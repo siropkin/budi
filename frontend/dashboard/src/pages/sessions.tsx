@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -9,11 +10,46 @@ import { ErrorState, LoadingState } from "@/components/state";
 import { fetchRegisteredProviders, fetchSessions } from "@/lib/api";
 import { fmtCost, fmtDate, fmtDurationMs, fmtNum, formatModelName, repoName } from "@/lib/format";
 import { usePeriod } from "@/lib/period";
+import { cn } from "@/lib/utils";
 
 const LIMIT = 50;
 
 type SortColumn = "started_at" | "title" | "duration" | "provider" | "model" | "repo_id" | "git_branch" | "tokens" | "cost";
 const SESSION_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
+
+function SortableHead({
+  label,
+  column,
+  sortBy,
+  sortAsc,
+  onSort,
+  right = false,
+}: {
+  label: string;
+  column: SortColumn;
+  sortBy: SortColumn;
+  sortAsc: boolean;
+  onSort: (column: SortColumn) => void;
+  right?: boolean;
+}) {
+  const isActive = sortBy === column;
+  return (
+    <TableHead aria-sort={isActive ? (sortAsc ? "ascending" : "descending") : "none"} className={right ? "text-right" : undefined}>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={cn("h-8 px-0 text-muted-foreground hover:text-foreground", isActive && "text-foreground", right && "ml-auto")}
+        onClick={() => onSort(column)}
+      >
+        {label}
+        {isActive ? (
+          sortAsc ? <ArrowUp className="ml-1 h-3.5 w-3.5" aria-hidden="true" /> : <ArrowDown className="ml-1 h-3.5 w-3.5" aria-hidden="true" />
+        ) : null}
+      </Button>
+    </TableHead>
+  );
+}
 
 export function SessionsPage() {
   const { period } = usePeriod();
@@ -31,7 +67,7 @@ export function SessionsPage() {
   });
 
   const sessionsQuery = useQuery({
-    queryKey: ["sessions", period.preset, period.from ?? "", period.to ?? "", sortBy, sortAsc, search, offset],
+    queryKey: ["sessions", period.preset, sortBy, sortAsc, search, offset],
     queryFn: ({ signal }) =>
       fetchSessions(
         period,
@@ -79,11 +115,6 @@ export function SessionsPage() {
     setSortAsc(false);
   };
 
-  const sortArrow = (column: SortColumn) => {
-    if (column !== sortBy) return null;
-    return sortAsc ? "▲" : "▼";
-  };
-
   const onSearchChange: React.ChangeEventHandler<HTMLInputElement> = (event) => {
     setSearch(event.target.value);
     setOffset(0);
@@ -95,23 +126,28 @@ export function SessionsPage() {
         <CardTitle>Sessions</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Input placeholder="Search sessions..." value={search} onChange={onSearchChange} />
+        <div className="space-y-1">
+          <label htmlFor="session-search" className="sr-only">
+            Search sessions
+          </label>
+          <Input id="session-search" placeholder="Search sessions..." value={search} onChange={onSearchChange} />
+        </div>
 
-        <div className="overflow-hidden rounded-md border border-border">
+        <div className="overflow-hidden rounded-md border border-border bg-background p-1">
           <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead className="cursor-pointer" onClick={() => onSort("started_at")}>Time {sortArrow("started_at")}</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => onSort("title")}>Title {sortArrow("title")}</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => onSort("duration")}>Duration {sortArrow("duration")}</TableHead>
+                <SortableHead label="Time" column="started_at" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                <SortableHead label="Title" column="title" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                <SortableHead label="Duration" column="duration" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
                 {multiProvider ? (
-                  <TableHead className="cursor-pointer" onClick={() => onSort("provider")}>Agent {sortArrow("provider")}</TableHead>
+                  <SortableHead label="Agent" column="provider" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
                 ) : null}
-                <TableHead className="cursor-pointer" onClick={() => onSort("model")}>Model {sortArrow("model")}</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => onSort("repo_id")}>Repo {sortArrow("repo_id")}</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => onSort("git_branch")}>Branch {sortArrow("git_branch")}</TableHead>
-                <TableHead className="cursor-pointer text-right" onClick={() => onSort("tokens")}>Tokens {sortArrow("tokens")}</TableHead>
-                <TableHead className="cursor-pointer text-right" onClick={() => onSort("cost")}>Cost {sortArrow("cost")}</TableHead>
+                <SortableHead label="Model" column="model" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                <SortableHead label="Repo" column="repo_id" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                <SortableHead label="Branch" column="git_branch" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                <SortableHead label="Tokens" column="tokens" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
+                <SortableHead label="Cost" column="cost" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -134,8 +170,16 @@ export function SessionsPage() {
                 return (
                   <TableRow
                     key={session.session_id}
-                    className="cursor-pointer"
+                    role="link"
+                    tabIndex={0}
+                    className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onClick={() => navigate(`/sessions/${encodeURIComponent(session.session_id)}`)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        navigate(`/sessions/${encodeURIComponent(session.session_id)}`);
+                      }
+                    }}
                   >
                     <TableCell className={SESSION_CELL_CLASS}>{fmtDate(session.started_at)}</TableCell>
                     <TableCell className={SESSION_CELL_CLASS} title={session.title ?? ""}>{session.title || "--"}</TableCell>

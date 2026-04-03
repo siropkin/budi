@@ -1,17 +1,30 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
+import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { CostBarChart } from "@/components/charts";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchOverview, fetchRegisteredProviders } from "@/lib/api";
 import { fmtCost, fmtNum, formatModelName, granularityForPeriod, repoName } from "@/lib/format";
 import { usePeriod } from "@/lib/period";
 
+const MAX_BAR_ROWS = 10;
+
 function getActivityTitle(granularity: "hour" | "day" | "month") {
   if (granularity === "hour") return "Activity (Hourly)";
   if (granularity === "month") return "Activity (Monthly)";
   return "Activity (Daily)";
+}
+
+function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
+  );
 }
 
 export function OverviewPage() {
@@ -24,7 +37,7 @@ export function OverviewPage() {
   });
 
   const overviewQuery = useQuery({
-    queryKey: ["overview", period.preset, period.from ?? "", period.to ?? ""],
+    queryKey: ["overview", period.preset],
     queryFn: ({ signal }) => fetchOverview(period, signal),
     refetchInterval: period.preset === "today" ? 30_000 : false,
   });
@@ -66,7 +79,7 @@ export function OverviewPage() {
       };
     })
     .filter((entry) => entry.cost_cents > 0)
-    .slice(0, 15);
+    .slice(0, MAX_BAR_ROWS);
 
   const modelMap = new Map<string, { label: string; cost_cents: number }>();
   for (const model of data.models) {
@@ -85,14 +98,14 @@ export function OverviewPage() {
   }
   const modelCostRows = Array.from(modelMap.values())
     .sort((a, b) => b.cost_cents - a.cost_cents)
-    .slice(0, 15);
+    .slice(0, MAX_BAR_ROWS);
 
   const projectCostRows = data.projects
     .map((row) => ({
       label: repoName(row.repo_id),
       cost_cents: row.cost_cents,
     }))
-    .slice(0, 15);
+    .slice(0, MAX_BAR_ROWS);
 
   const branchCostRows = data.branches
     .map((row) => {
@@ -102,10 +115,10 @@ export function OverviewPage() {
         cost_cents: row.cost_cents,
       };
     })
-    .slice(0, 15);
+    .slice(0, MAX_BAR_ROWS);
 
-  const ticketCostRows = data.tickets.slice(0, 15).map((row) => ({ label: row.value, cost_cents: row.cost_cents }));
-  const activityTypeRows = data.activities.slice(0, 15).map((row) => ({ label: row.value, cost_cents: row.cost_cents }));
+  const ticketCostRows = data.tickets.slice(0, MAX_BAR_ROWS).map((row) => ({ label: row.value, cost_cents: row.cost_cents }));
+  const activityTypeRows = data.activities.slice(0, MAX_BAR_ROWS).map((row) => ({ label: row.value, cost_cents: row.cost_cents }));
 
   const activityRows = data.activity.map((entry) => ({
     label: entry.label,
@@ -162,11 +175,11 @@ export function OverviewPage() {
         <CardContent>
           <ChartContainer
             config={{
-              input: { label: "Input", color: "hsl(var(--chart-1))" },
-              output: { label: "Output", color: "hsl(var(--chart-2))" },
+              input_tokens: { label: "Input", color: "hsl(var(--chart-1))" },
+              output_tokens: { label: "Output", color: "hsl(var(--chart-2))" },
             }}
           >
-            <BarChart data={activityRows} margin={{ left: 12, right: 8 }}>
+            <BarChart data={activityRows} margin={{ left: 12, right: 8 }} accessibilityLayer>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
               <XAxis
                 dataKey="label"
@@ -180,67 +193,55 @@ export function OverviewPage() {
               />
               <YAxis tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
               <ChartTooltip
-                cursor={{ fill: "rgba(255,255,255,0.05)" }}
-                content={({ active, payload, label }) => {
-                  if (!active || !payload || payload.length === 0) return null;
-                  const input = Number(payload.find((item) => item.dataKey === "input_tokens")?.value ?? 0);
-                  const output = Number(payload.find((item) => item.dataKey === "output_tokens")?.value ?? 0);
-                  return (
-                    <div className="rounded-md border border-border bg-card px-3 py-2 text-xs shadow-md">
-                      <p className="font-medium">{label}</p>
-                      <p className="text-muted-foreground">Input: {fmtNum(input)}</p>
-                      <p className="text-muted-foreground">Output: {fmtNum(output)}</p>
-                    </div>
-                  );
-                }}
+                cursor={false}
+                content={
+                  <ChartTooltipContent
+                    indicator="dot"
+                    formatter={(value, name) => (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">{name}</span>
+                        <span className="font-medium tabular-nums text-foreground">{fmtNum(Number(value))}</span>
+                      </div>
+                    )}
+                  />
+                }
               />
-              <Bar dataKey="input_tokens" fill="var(--color-input)" maxBarSize={28} radius={[4, 4, 0, 0]} />
-              <Bar dataKey="output_tokens" fill="var(--color-output)" maxBarSize={28} radius={[4, 4, 0, 0]} />
+              <ChartLegend content={<ChartLegendContent />} />
+              <Bar dataKey="input_tokens" fill="var(--color-input_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="output_tokens" fill="var(--color-output_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ChartContainer>
         </CardContent>
       </Card>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Agents" data={providerCostRows} emptyLabel="No provider data for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Agents">
+          <CostBarChart data={providerCostRows} emptyLabel="No provider data for this period" />
+        </ChartCard>
 
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Models" data={modelCostRows} emptyLabel="No model data for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Models">
+          <CostBarChart data={modelCostRows} emptyLabel="No model data for this period" />
+        </ChartCard>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Projects" data={projectCostRows} emptyLabel="No project data for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Projects">
+          <CostBarChart data={projectCostRows} emptyLabel="No project data for this period" />
+        </ChartCard>
 
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Branches" data={branchCostRows} emptyLabel="No branch data for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Branches">
+          <CostBarChart data={branchCostRows} emptyLabel="No branch data for this period" />
+        </ChartCard>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Tickets" data={ticketCostRows} emptyLabel="No ticket data for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Tickets">
+          <CostBarChart data={ticketCostRows} emptyLabel="No ticket data for this period" />
+        </ChartCard>
 
-        <Card>
-          <CardContent className="pt-5">
-            <CostBarChart title="Activity Types" data={activityTypeRows} emptyLabel="No activity data for this period" />
-          </CardContent>
-        </Card>
+        <ChartCard title="Activity Types">
+          <CostBarChart data={activityTypeRows} emptyLabel="No activity data for this period" />
+        </ChartCard>
       </div>
     </div>
   );
