@@ -39,7 +39,7 @@ function SortableHead({
         type="button"
         variant="ghost"
         size="sm"
-        className={cn("h-8 px-0 text-muted-foreground hover:text-foreground", isActive && "text-foreground", right && "ml-auto")}
+        className={cn("h-8 px-1 text-muted-foreground hover:text-foreground", isActive && "text-foreground", right && "ml-auto")}
         onClick={() => onSort(column)}
       >
         {label}

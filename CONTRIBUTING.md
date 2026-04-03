@@ -26,6 +26,42 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+### Dashboard frontend (`frontend/dashboard`)
+
+```bash
+cd frontend/dashboard
+npm install
+npm run build
+```
+
+`npm run build` compiles the React app and writes static assets to `crates/budi-daemon/static/dashboard-dist`, which are embedded/served by `budi-daemon`.
+
+From repo root you can also run:
+
+```bash
+./scripts/build-dashboard.sh
+```
+
+One-liner to rebuild dashboard assets and run daemon locally (foreground):
+
+```bash
+(cd frontend/dashboard && npm ci && npm run build) && CARGO_INCREMENTAL=0 cargo run -p budi-daemon -- serve
+```
+
+`CARGO_INCREMENTAL=0` avoids noisy incremental-cache warnings on some machines.
+
+For local dashboard UI development (hot reload + API proxy):
+
+```bash
+# terminal A (repo root)
+cargo run -p budi-daemon
+
+# terminal B
+cd frontend/dashboard
+npm install
+npm run dev
+```
+
 ### Cursor extension
 
 ```bash
@@ -66,6 +102,7 @@ Issue templates are available in the repository to keep reports actionable.
 
 - [ ] Change is scoped and described clearly.
 - [ ] `cargo fmt`, `clippy`, and tests pass locally.
+- [ ] Dashboard frontend build passes (`cd frontend/dashboard && npm run build`) if dashboard code changed.
 - [ ] Extension lint/format/test/build checks pass if extension code changed.
 - [ ] Docs were updated for user-visible behavior changes.
 - [ ] Migration or compatibility impact is noted (if relevant).

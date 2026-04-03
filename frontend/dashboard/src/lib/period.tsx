@@ -8,7 +8,7 @@ interface PeriodState {
 
 const PeriodContext = createContext<PeriodState | null>(null);
 
-const QUICK_PRESETS: DateRangePreset[] = ["today", "last_7_days", "last_30_days"];
+const QUICK_PRESETS: DateRangePreset[] = ["today", "last_7_days", "last_30_days", "all"];
 
 function validPreset(value: unknown): value is DateRangePreset {
   return typeof value === "string" && QUICK_PRESETS.includes(value as DateRangePreset);
@@ -28,8 +28,9 @@ function legacyPeriodRange(value: string | null): DateRangeSelection | null {
     case "week":
       return { preset: "last_7_days" };
     case "month":
-    case "all":
       return { preset: "last_30_days" };
+    case "all":
+      return { preset: "all" };
     default:
       return null;
   }

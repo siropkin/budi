@@ -8,6 +8,7 @@ const QUICK_PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "today", label: "Today" },
   { value: "last_7_days", label: "Last 7 days" },
   { value: "last_30_days", label: "Last 30 days" },
+  { value: "all", label: "All" },
 ];
 
 const NAV_ITEMS = [

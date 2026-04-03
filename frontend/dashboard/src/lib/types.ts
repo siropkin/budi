@@ -1,4 +1,4 @@
-export type DateRangePreset = "today" | "last_7_days" | "last_30_days";
+export type DateRangePreset = "today" | "last_7_days" | "last_30_days" | "all";
 
 export interface DateRangeSelection {
   preset: DateRangePreset;

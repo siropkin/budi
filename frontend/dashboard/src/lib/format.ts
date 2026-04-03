@@ -18,6 +18,8 @@ export function periodLabel(period: DateRangeSelection): string {
       return "Last 7 days";
     case "last_30_days":
       return "Last 30 days";
+    case "all":
+      return "All";
     default:
       return "Today";
   }
@@ -35,6 +37,8 @@ export function periodRange(period: DateRangeSelection): { since?: string; until
       return { since: toIso(addDays(today, -6)), until: toIso(addDays(today, 1)) };
     case "last_30_days":
       return { since: toIso(addDays(today, -29)), until: toIso(addDays(today, 1)) };
+    case "all":
+      return {};
     default:
       return { since: toIso(today), until: toIso(addDays(today, 1)) };
   }
@@ -43,6 +47,9 @@ export function periodRange(period: DateRangeSelection): { since?: string; until
 export function granularityForPeriod(period: DateRangeSelection): "hour" | "day" | "month" {
   if (period.preset === "today") {
     return "hour";
+  }
+  if (period.preset === "all") {
+    return "month";
   }
 
   const range = periodRange(period);
