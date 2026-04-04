@@ -68,6 +68,7 @@ fn ingest_and_query() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -94,6 +95,7 @@ fn ingest_and_query() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ];
 
@@ -143,6 +145,7 @@ fn cost_cents_baked_at_ingest() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     // CostEnricher is the single source of truth for cost_cents
     CostEnricher.enrich(&mut msg);
@@ -201,6 +204,7 @@ fn last_seen_derived_from_messages() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "m2".to_string(),
@@ -227,6 +231,7 @@ fn last_seen_derived_from_messages() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -268,6 +273,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -294,6 +300,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "u2".to_string(),
@@ -320,6 +327,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ]
 }
@@ -372,6 +380,24 @@ fn repo_usage_groups_by_repo_id() {
     assert_eq!(repos[1].message_count, 1);
 }
 
+#[test]
+fn repo_usage_multi_repo_single_session_is_message_attributed() {
+    let mut conn = test_db();
+    let mut m1 = assistant_msg("repo-multi-1", "sess-multi", 2.0);
+    m1.repo_id = Some("repo-a".to_string());
+    let mut m2 = assistant_msg("repo-multi-2", "sess-multi", 8.0);
+    m2.repo_id = Some("repo-b".to_string());
+    ingest_messages(&mut conn, &[m1, m2], None).unwrap();
+
+    let repos = repo_usage(&conn, None, None, 10).unwrap();
+    let repo_a = repos.iter().find(|r| r.repo_id == "repo-a").unwrap();
+    let repo_b = repos.iter().find(|r| r.repo_id == "repo-b").unwrap();
+    assert!((repo_a.cost_cents - 2.0).abs() < 0.01);
+    assert!((repo_b.cost_cents - 8.0).abs() < 0.01);
+    assert_eq!(repo_a.message_count, 1);
+    assert_eq!(repo_b.message_count, 1);
+}
+
 fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
     vec![
         ParsedMessage {
@@ -399,6 +425,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "t2".to_string(),
@@ -425,6 +452,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "t3".to_string(),
@@ -451,6 +479,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ]
 }
@@ -543,6 +572,7 @@ fn multi_provider_ingest_and_query() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "cc-a1".to_string(),
@@ -569,6 +599,7 @@ fn multi_provider_ingest_and_query() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ];
 
@@ -598,6 +629,7 @@ fn multi_provider_ingest_and_query() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "cu-a1".to_string(),
@@ -624,6 +656,7 @@ fn multi_provider_ingest_and_query() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ];
 
@@ -685,6 +718,7 @@ fn cross_parse_dedup_by_request_id() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -718,6 +752,7 @@ fn cross_parse_dedup_by_request_id() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -766,6 +801,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -794,6 +830,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -840,6 +877,7 @@ fn no_request_id_no_dedup() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg1], None).unwrap();
 
@@ -868,6 +906,7 @@ fn no_request_id_no_dedup() {
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg2], None).unwrap();
 
@@ -921,6 +960,7 @@ fn session_cost_curve_buckets() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         });
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -960,6 +1000,7 @@ fn cost_confidence_stats_groups_correctly() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "conf-2".to_string(),
@@ -986,6 +1027,7 @@ fn cost_confidence_stats_groups_correctly() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1027,6 +1069,7 @@ fn subagent_cost_stats_splits_correctly() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
         ParsedMessage {
             uuid: "sub-1".to_string(),
@@ -1053,6 +1096,7 @@ fn subagent_cost_stats_splits_correctly() {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1089,6 +1133,77 @@ fn session_list_returns_sessions() {
     assert!(result.total_count >= 1);
 }
 
+#[test]
+fn session_detail_returns_row_for_message_only_session() {
+    let mut conn = test_db();
+    ingest_messages(&mut conn, &sample_messages(), None).unwrap();
+
+    let detail = session_detail(&conn, "sess-abc")
+        .unwrap()
+        .expect("session should exist");
+    assert_eq!(detail.session_id, "sess-abc");
+    assert!(detail.message_count >= 1);
+    assert!(detail.cost_cents >= 0.0);
+}
+
+#[test]
+fn session_detail_uses_session_title_when_available() {
+    let mut conn = test_db();
+    ingest_messages(&mut conn, &sample_messages(), None).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (session_id, provider, title)
+         VALUES ('sess-abc', 'claude_code', 'Fix flaky test')",
+        [],
+    )
+    .unwrap();
+
+    let detail = session_detail(&conn, "sess-abc")
+        .unwrap()
+        .expect("session should exist");
+    assert_eq!(detail.title.as_deref(), Some("Fix flaky test"));
+}
+
+#[test]
+fn session_detail_tracks_multi_repo_and_branch() {
+    let mut conn = test_db();
+
+    let mut m1 = assistant_msg("multi-1", "sess-multi", 2.0);
+    m1.repo_id = Some("github.com/acme/repo-a".to_string());
+    m1.git_branch = Some("feature/AAA-1".to_string());
+    let mut m2 = assistant_msg("multi-2", "sess-multi", 5.0);
+    m2.repo_id = Some("github.com/acme/repo-b".to_string());
+    m2.git_branch = Some("refs/heads/feature/BBB-2".to_string());
+    ingest_messages(&mut conn, &[m1, m2], None).unwrap();
+
+    let detail = session_detail(&conn, "sess-multi")
+        .unwrap()
+        .expect("session should exist");
+    assert_eq!(detail.repo_count, Some(2));
+    assert_eq!(detail.git_branch_count, Some(2));
+    assert_eq!(detail.repo_ids.as_ref().map(|v| v.len()), Some(2));
+    assert_eq!(detail.git_branches.as_ref().map(|v| v.len()), Some(2));
+}
+
+#[test]
+fn session_tags_do_not_derive_repo_and_branch_from_message_columns() {
+    let mut conn = test_db();
+
+    let mut msg = assistant_msg("sess-tags-cols-1", "sess-tags-cols", 1.0);
+    msg.repo_id = Some("github.com/acme/repo-z".to_string());
+    msg.git_branch = Some("refs/heads/feature/ZZZ-99".to_string());
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let result = session_tags(&conn, "sess-tags-cols").unwrap();
+    assert!(
+        !result.iter().any(|(k, _)| k == "repo"),
+        "repo is a canonical message/session field, not a tag"
+    );
+    assert!(
+        !result.iter().any(|(k, _)| k == "branch"),
+        "branch is a canonical message/session field, not a tag"
+    );
+}
+
 /// Helper: create a minimal assistant ParsedMessage, overriding only what matters.
 fn assistant_msg(uuid: &str, session_id: &str, cost_cents: f64) -> ParsedMessage {
     ParsedMessage {
@@ -1116,6 +1231,7 @@ fn assistant_msg(uuid: &str, session_id: &str, cost_cents: f64) -> ParsedMessage
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     }
 }
 
@@ -1178,14 +1294,46 @@ fn branch_cost_single_finds_branch() {
     msg.repo_id = Some("repo".to_string());
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
-    let result = branch_cost_single(&conn, "fix/bug-123", None, None).unwrap();
+    let result = branch_cost_single(&conn, "fix/bug-123", None, None, None).unwrap();
     assert!(result.is_some());
     let bc = result.unwrap();
     assert_eq!(bc.git_branch, "fix/bug-123");
     assert!((bc.cost_cents - 4.0).abs() < 0.01);
 
-    let none = branch_cost_single(&conn, "nonexistent", None, None).unwrap();
+    let none = branch_cost_single(&conn, "nonexistent", None, None, None).unwrap();
     assert!(none.is_none());
+}
+
+#[test]
+fn branch_cost_single_handles_multi_repo_branches() {
+    let mut conn = test_db();
+    let mut msg1 = assistant_msg("brs-multi-1", "s1", 4.0);
+    msg1.git_branch = Some("feature/shared".to_string());
+    msg1.repo_id = Some("repo-a".to_string());
+    let mut msg2 = assistant_msg("brs-multi-2", "s2", 6.0);
+    msg2.git_branch = Some("feature/shared".to_string());
+    msg2.repo_id = Some("repo-b".to_string());
+    ingest_messages(&mut conn, &[msg1, msg2], None).unwrap();
+
+    let all = branch_cost_single(&conn, "feature/shared", None, None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(all.git_branch, "feature/shared");
+    assert_eq!(all.repo_id, "");
+    assert_eq!(all.session_count, 2);
+    assert_eq!(all.message_count, 2);
+    assert!((all.cost_cents - 10.0).abs() < 0.01);
+
+    let repo_a = branch_cost_single(&conn, "feature/shared", Some("repo-a"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(repo_a.repo_id, "repo-a");
+    assert_eq!(repo_a.session_count, 1);
+    assert_eq!(repo_a.message_count, 1);
+    assert!((repo_a.cost_cents - 4.0).abs() < 0.01);
+
+    let missing = branch_cost_single(&conn, "feature/shared", Some("repo-c"), None, None).unwrap();
+    assert!(missing.is_none());
 }
 
 #[test]
@@ -1218,25 +1366,72 @@ fn model_usage_groups_by_model() {
 #[test]
 fn tag_stats_groups_by_tag() {
     let mut conn = test_db();
-    let msg1 = assistant_msg("ts-1", "s1", 10.0);
-    let msg2 = assistant_msg("ts-2", "s2", 6.0);
-    let tags = vec![
-        vec![Tag {
-            key: "repo".to_string(),
-            value: "proj-a".to_string(),
-        }],
-        vec![Tag {
-            key: "repo".to_string(),
-            value: "proj-b".to_string(),
-        }],
-    ];
-    ingest_messages(&mut conn, &[msg1, msg2], Some(&tags)).unwrap();
+    let mut msg1 = assistant_msg("ts-1", "s1", 10.0);
+    msg1.repo_id = Some("proj-a".to_string());
+    let mut msg2 = assistant_msg("ts-2", "s2", 6.0);
+    msg2.repo_id = Some("proj-b".to_string());
+    ingest_messages(&mut conn, &[msg1, msg2], None).unwrap();
 
     let stats = tag_stats(&conn, Some("repo"), None, None, 10).unwrap();
     let proj_a = stats.iter().find(|s| s.value == "proj-a").unwrap();
     assert!((proj_a.cost_cents - 10.0).abs() < 0.01);
     let proj_b = stats.iter().find(|s| s.value == "proj-b").unwrap();
     assert!((proj_b.cost_cents - 6.0).abs() < 0.01);
+}
+
+#[test]
+fn tag_stats_repo_uses_message_columns_not_tag_fanout() {
+    let mut conn = test_db();
+    let mut msg = assistant_msg("ts-repo-col-1", "s1", 10.0);
+    msg.repo_id = Some("proj-a".to_string());
+    let tags = vec![vec![
+        Tag {
+            key: "repo".to_string(),
+            value: "proj-a".to_string(),
+        },
+        Tag {
+            key: "repo".to_string(),
+            value: "proj-b".to_string(),
+        },
+    ]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let stats = tag_stats(&conn, Some("repo"), None, None, 10).unwrap();
+    let proj_a = stats.iter().find(|s| s.value == "proj-a").unwrap();
+    assert!((proj_a.cost_cents - 10.0).abs() < 0.01);
+    assert!(
+        stats.iter().all(|s| s.value != "proj-b"),
+        "repo stats should not be driven by duplicate repo tags"
+    );
+}
+
+#[test]
+fn tag_stats_branch_uses_message_columns_not_tag_fanout() {
+    let mut conn = test_db();
+    let mut msg = assistant_msg("ts-branch-col-1", "s1", 7.0);
+    msg.git_branch = Some("refs/heads/feature/clean-cost".to_string());
+    let tags = vec![vec![
+        Tag {
+            key: "branch".to_string(),
+            value: "feature/clean-cost".to_string(),
+        },
+        Tag {
+            key: "branch".to_string(),
+            value: "feature/other".to_string(),
+        },
+    ]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let stats = tag_stats(&conn, Some("branch"), None, None, 10).unwrap();
+    let branch = stats
+        .iter()
+        .find(|s| s.value == "feature/clean-cost")
+        .unwrap();
+    assert!((branch.cost_cents - 7.0).abs() < 0.01);
+    assert!(
+        stats.iter().all(|s| s.value != "feature/other"),
+        "branch stats should not be driven by duplicate branch tags"
+    );
 }
 
 #[test]
@@ -1263,6 +1458,29 @@ fn tag_stats_even_split_across_values() {
 }
 
 #[test]
+fn tag_stats_tool_splits_cost_for_multi_tool_message() {
+    let mut conn = test_db();
+    let msg = assistant_msg("ts-tool-split", "s-tool", 12.0);
+    let tags = vec![vec![
+        Tag {
+            key: "tool".to_string(),
+            value: "Read".to_string(),
+        },
+        Tag {
+            key: "tool".to_string(),
+            value: "Bash".to_string(),
+        },
+    ]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let stats = tag_stats(&conn, Some("tool"), None, None, 10).unwrap();
+    let read = stats.iter().find(|s| s.value == "Read").unwrap();
+    let bash = stats.iter().find(|s| s.value == "Bash").unwrap();
+    assert!((read.cost_cents - 6.0).abs() < 0.01);
+    assert!((bash.cost_cents - 6.0).abs() < 0.01);
+}
+
+#[test]
 fn session_messages_returns_assistant_only() {
     let mut conn = test_db();
     let msgs = sample_messages();
@@ -1275,13 +1493,27 @@ fn session_messages_returns_assistant_only() {
 }
 
 #[test]
+fn session_messages_does_not_alias_prefixed_session_id() {
+    let mut conn = test_db();
+    let canonical = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
+    let prefixed = "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb";
+    let msg = assistant_msg("sm-no-alias-1", canonical, 3.0);
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let canonical_rows = session_messages(&conn, canonical).unwrap();
+    let prefixed_rows = session_messages(&conn, prefixed).unwrap();
+    assert_eq!(canonical_rows.len(), 1);
+    assert!(prefixed_rows.is_empty());
+}
+
+#[test]
 fn session_tags_returns_distinct_tags() {
     let mut conn = test_db();
     let msg = assistant_msg("st-1", "sess-tags", 1.0);
     let tags = vec![vec![
         Tag {
-            key: "repo".to_string(),
-            value: "my-repo".to_string(),
+            key: "team".to_string(),
+            value: "platform".to_string(),
         },
         Tag {
             key: "activity".to_string(),
@@ -1293,7 +1525,57 @@ fn session_tags_returns_distinct_tags() {
     let result = session_tags(&conn, "sess-tags").unwrap();
     assert_eq!(result.len(), 2);
     assert!(result.contains(&("activity".to_string(), "feature".to_string())));
-    assert!(result.contains(&("repo".to_string(), "my-repo".to_string())));
+    assert!(result.contains(&("team".to_string(), "platform".to_string())));
+}
+
+#[test]
+fn session_tags_filter_legacy_auto_keys() {
+    let mut conn = test_db();
+    let msg = assistant_msg("st-legacy-1", "sess-tags-legacy", 1.0);
+    let tags = vec![vec![
+        Tag {
+            key: "repo".to_string(),
+            value: "github.com/acme/repo".to_string(),
+        },
+        Tag {
+            key: "branch".to_string(),
+            value: "feature/abc".to_string(),
+        },
+        Tag {
+            key: "dominant_tool".to_string(),
+            value: "Bash".to_string(),
+        },
+        Tag {
+            key: "ticket_id".to_string(),
+            value: "ABC-123".to_string(),
+        },
+    ]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let result = session_tags(&conn, "sess-tags-legacy").unwrap();
+    assert!(result.contains(&("ticket_id".to_string(), "ABC-123".to_string())));
+    assert!(!result.iter().any(|(k, _)| k == "repo"));
+    assert!(!result.iter().any(|(k, _)| k == "branch"));
+    assert!(!result.iter().any(|(k, _)| k == "dominant_tool"));
+}
+
+#[test]
+fn session_tags_does_not_alias_prefixed_session_id() {
+    let mut conn = test_db();
+    let canonical = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
+    let prefixed = "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb";
+    let msg = assistant_msg("st-no-alias-1", canonical, 1.0);
+    let tags = vec![vec![Tag {
+        key: "team".to_string(),
+        value: "platform".to_string(),
+    }]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let canonical_tags = session_tags(&conn, canonical).unwrap();
+    let prefixed_tags = session_tags(&conn, prefixed).unwrap();
+    assert_eq!(canonical_tags.len(), 1);
+    assert!(canonical_tags.contains(&("team".to_string(), "platform".to_string())));
+    assert!(prefixed_tags.is_empty());
 }
 
 #[test]
@@ -1344,6 +1626,7 @@ fn health_msg(
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        tool_names: Vec::new(),
     }
 }
 
@@ -1698,6 +1981,36 @@ fn health_auto_selects_latest_session() {
 
     let h = session_health(&conn, None).unwrap();
     assert_eq!(h.message_count, 6);
+}
+
+#[test]
+fn health_does_not_alias_prefixed_session_id() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('d99dfe22-d05c-4c78-8698-015d06e5dabb', 'cursor', '2026-03-14')",
+        [],
+    )
+    .unwrap();
+
+    let msgs: Vec<ParsedMessage> = (0..6)
+        .map(|i| {
+            health_msg(
+                &format!("h-no-alias-{i}"),
+                "d99dfe22-d05c-4c78-8698-015d06e5dabb",
+                i,
+                100,
+                900,
+                5.0,
+            )
+        })
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let canonical = session_health(&conn, Some("d99dfe22-d05c-4c78-8698-015d06e5dabb")).unwrap();
+    let prefixed =
+        session_health(&conn, Some("cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb")).unwrap();
+    assert_eq!(canonical.message_count, 6);
+    assert_eq!(prefixed.message_count, 0);
 }
 
 #[test]

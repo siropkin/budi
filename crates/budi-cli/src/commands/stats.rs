@@ -56,6 +56,7 @@ pub fn cmd_stats(
     projects: bool,
     branches: bool,
     branch: Option<String>,
+    repo: Option<String>,
     models: bool,
     provider: Option<String>,
     tag: Option<String>,
@@ -82,7 +83,7 @@ pub fn cmd_stats(
     }
 
     if let Some(ref br) = branch {
-        return cmd_stats_branch_detail(&client, period, br, json_output);
+        return cmd_stats_branch_detail(&client, period, br, repo.as_deref(), json_output);
     }
 
     if branches {
@@ -399,10 +400,11 @@ fn cmd_stats_branch_detail(
     client: &DaemonClient,
     period: StatsPeriod,
     branch: &str,
+    repo: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let result = client.branch_detail(branch, since.as_deref(), until.as_deref())?;
+    let result = client.branch_detail(branch, repo, since.as_deref(), until.as_deref())?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -422,6 +424,9 @@ fn cmd_stats_branch_detail(
         "  {bold_cyan} Branch{reset} {bold}{}{reset} — {dim}{}{reset}",
         branch, period_label
     );
+    if let Some(repo_id) = repo {
+        println!("  {bold}Repo filter{reset} {}", repo_id);
+    }
     println!("  {dim}{}{reset}", "─".repeat(40));
 
     match result {

@@ -14,6 +14,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::analytics;
 use crate::jsonl::ParsedMessage;
@@ -475,6 +476,120 @@ struct SessionContext {
     git_branch: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ComposerHeadersPayload {
+    #[serde(default, rename = "allComposers")]
+    all_composers: Vec<ComposerHeader>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposerHeader {
+    #[serde(rename = "composerId")]
+    composer_id: String,
+    #[serde(rename = "createdAt")]
+    created_at: i64,
+    #[serde(default, rename = "lastUpdatedAt")]
+    last_updated_at: Option<i64>,
+    #[serde(default, rename = "isArchived")]
+    is_archived: bool,
+    #[serde(default, rename = "workspaceIdentifier")]
+    workspace_identifier: Option<ComposerWorkspaceIdentifier>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposerWorkspaceIdentifier {
+    #[serde(default)]
+    uri: Option<ComposerWorkspaceUri>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposerWorkspaceUri {
+    #[serde(default, rename = "fsPath")]
+    fs_path: Option<String>,
+}
+
+/// Build Cursor session contexts from global state.vscdb composer headers.
+/// This is more reliable than relying on our own sessions table timestamps
+/// when hooks were missing or late.
+fn load_composer_header_contexts(now_ms: i64) -> Vec<SessionContext> {
+    const LOOKBACK_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+    const END_SKEW_MS: i64 = 5 * 60 * 1000;
+
+    let global_path = match all_state_vscdb_paths()
+        .into_iter()
+        .find(|p| p.to_string_lossy().contains("globalStorage"))
+    {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let vscdb = match Connection::open_with_flags(
+        &global_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(db) => db,
+        Err(_) => return Vec::new(),
+    };
+
+    let raw_headers: String = match vscdb.query_row(
+        "SELECT value FROM ItemTable WHERE key = 'composer.composerHeaders'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let payload: ComposerHeadersPayload = match serde_json::from_str(&raw_headers) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for composer in payload.all_composers {
+        if composer.is_archived {
+            continue;
+        }
+        if composer.composer_id.trim().is_empty() {
+            continue;
+        }
+        let start_ms = composer.created_at;
+        let mut end_ms = composer.last_updated_at.unwrap_or(start_ms);
+        if end_ms < start_ms {
+            end_ms = start_ms;
+        }
+        end_ms = end_ms.saturating_add(END_SKEW_MS);
+        if end_ms < now_ms - LOOKBACK_MS {
+            continue;
+        }
+
+        let workspace_root = composer
+            .workspace_identifier
+            .and_then(|w| w.uri)
+            .and_then(|u| u.fs_path)
+            .filter(|p| !p.trim().is_empty());
+        let repo_id = workspace_root
+            .as_deref()
+            .map(std::path::Path::new)
+            .map(crate::repo_id::resolve_repo_id);
+        let git_branch = workspace_root
+            .as_deref()
+            .and_then(resolve_git_branch_from_head);
+
+        out.push(SessionContext {
+            start_ms,
+            end_ms,
+            session_id: crate::identity::normalize_session_id(&composer.composer_id),
+            workspace_root,
+            repo_id,
+            git_branch,
+        });
+    }
+
+    out.sort_by_key(|s| s.start_ms);
+    out
+}
+
 /// Load session contexts from the sessions table.
 fn load_session_contexts(conn: &Connection) -> Vec<SessionContext> {
     // Only load sessions from the last 30 days to avoid stale attribution.
@@ -489,32 +604,124 @@ fn load_session_contexts(conn: &Connection) -> Vec<SessionContext> {
         Err(_) => return Vec::new(),
     };
 
-    stmt.query_map([], |row| {
-        let cid: String = row.get(0)?;
-        let started: String = row.get(1)?;
-        let ended: Option<String> = row.get(2)?;
+    let db_contexts = stmt
+        .query_map([], |row| {
+            let cid: String = row.get(0)?;
+            let started: String = row.get(1)?;
+            let ended: Option<String> = row.get(2)?;
 
-        let start_ms = started
-            .parse::<DateTime<Utc>>()
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or(0);
-        let end_ms = ended
-            .and_then(|e| e.parse::<DateTime<Utc>>().ok())
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or(i64::MAX);
+            let start_ms = started
+                .parse::<DateTime<Utc>>()
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0);
+            let end_ms = ended
+                .and_then(|e| e.parse::<DateTime<Utc>>().ok())
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(i64::MAX);
 
-        Ok(SessionContext {
-            start_ms,
-            end_ms,
-            session_id: cid,
-            workspace_root: row.get(3)?,
-            repo_id: row.get(4)?,
-            git_branch: row.get(5)?,
+            Ok(SessionContext {
+                start_ms,
+                end_ms,
+                session_id: crate::identity::normalize_session_id(&cid),
+                workspace_root: row.get(3)?,
+                repo_id: row.get(4)?,
+                git_branch: row.get(5)?,
+            })
         })
-    })
-    .ok()
-    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-    .unwrap_or_default()
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let mut merged: std::collections::HashMap<String, SessionContext> = db_contexts
+        .into_iter()
+        .map(|s| (s.session_id.clone(), s))
+        .collect();
+
+    // Merge in authoritative local Cursor composer windows from state.vscdb.
+    // They provide real conversation timing even when hooks were missing.
+    let now_ms = Utc::now().timestamp_millis();
+    for local in load_composer_header_contexts(now_ms) {
+        if let Some(existing) = merged.get_mut(&local.session_id) {
+            existing.start_ms = existing.start_ms.min(local.start_ms);
+            existing.end_ms = existing.end_ms.max(local.end_ms);
+            if existing.workspace_root.is_none() {
+                existing.workspace_root = local.workspace_root.clone();
+            }
+            let repo_missing = existing
+                .repo_id
+                .as_deref()
+                .map(|v| v.is_empty() || v == "unknown")
+                .unwrap_or(true);
+            if repo_missing {
+                existing.repo_id = local.repo_id.clone();
+            }
+            if existing.git_branch.is_none() {
+                existing.git_branch = local.git_branch.clone();
+            }
+        } else {
+            merged.insert(local.session_id.clone(), local);
+        }
+    }
+
+    let mut contexts: Vec<SessionContext> = merged.into_values().collect();
+    contexts.sort_by_key(|s| s.start_ms);
+    contexts
+}
+
+fn deterministic_cursor_message_uuid(session_id: &str, line_index: usize, line: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(line_index.to_le_bytes());
+    hasher.update(b"\n");
+    hasher.update(line.as_bytes());
+    let hash = hasher.finalize();
+
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    // RFC4122 version 4/variant bits for canonical UUID-like representation.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u16::from_be_bytes([bytes[4], bytes[5]]),
+        u16::from_be_bytes([bytes[6], bytes[7]]),
+        u16::from_be_bytes([bytes[8], bytes[9]]),
+        u64::from_be_bytes([
+            0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        ])
+    )
+}
+
+fn deterministic_cursor_usage_uuid(ev: &CursorUsageEvent) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ev.timestamp_ms.to_le_bytes());
+    hasher.update(b"\n");
+    hasher.update(ev.model.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(ev.input_tokens.to_le_bytes());
+    hasher.update(ev.output_tokens.to_le_bytes());
+    hasher.update(ev.cache_creation_tokens.to_le_bytes());
+    hasher.update(ev.cache_read_tokens.to_le_bytes());
+    let hash = hasher.finalize();
+
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u16::from_be_bytes([bytes[4], bytes[5]]),
+        u16::from_be_bytes([bytes[6], bytes[7]]),
+        u16::from_be_bytes([bytes[8], bytes[9]]),
+        u64::from_be_bytes([
+            0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        ])
+    )
 }
 
 /// Convert API usage events into ParsedMessages, correlating with hook sessions.
@@ -527,24 +734,14 @@ fn usage_events_to_messages(
         .map(|ev| {
             let matched = find_matching_session(ev.timestamp_ms, sessions);
 
-            let session_id = matched.map(|s| s.session_id.clone());
+            let session_id = matched.map(|s| crate::identity::normalize_session_id(&s.session_id));
 
             let timestamp =
                 DateTime::from_timestamp_millis(ev.timestamp_ms).unwrap_or_else(Utc::now);
 
-            // Deterministic UUID from timestamp + model + all token counts.
-            // Uses all 4 token fields to avoid collisions when two requests share
-            // the same millisecond and model (sequential counter was unstable when
-            // previously-skipped events changed the ordering).
-            let uuid = format!(
-                "cursor-api-{}-{}-{}-{}-{}-{}",
-                ev.timestamp_ms,
-                ev.model,
-                ev.input_tokens,
-                ev.output_tokens,
-                ev.cache_creation_tokens,
-                ev.cache_read_tokens
-            );
+            // Deterministic UUID-like id derived from event fields.
+            // Keeps IDs stable across re-syncs while enforcing canonical UUID format.
+            let uuid = deterministic_cursor_usage_uuid(ev);
 
             ParsedMessage {
                 uuid,
@@ -575,6 +772,7 @@ fn usage_events_to_messages(
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
                 prompt_category: None,
+                tool_names: Vec::new(),
             }
         })
         .collect()
@@ -652,6 +850,14 @@ fn sync_from_usage_api(
 
 /// Session repair and backfill that runs on every sync regardless of auth status.
 fn run_cursor_repairs(conn: &mut Connection) {
+    // Persist session windows/metadata discovered from Cursor local composer
+    // headers so session rows stay useful even when hooks were missing.
+    repair_cursor_sessions_from_composer_headers(conn);
+
+    // Upgrade legacy Cursor-internal cwd paths (`~/.cursor/projects/<slug>`) to
+    // real workspace roots discovered in worker.log, then backfill repo/branch.
+    repair_cursor_workspace_metadata(conn);
+
     // Repair sessions whose started_at was set by a late-arriving hook instead
     // of the earliest hook. Use MIN(hook_events.timestamp) as the true start.
     let _ = conn.execute(
@@ -693,6 +899,113 @@ fn run_cursor_repairs(conn: &mut Connection) {
            )",
         [],
     );
+}
+
+fn repair_cursor_sessions_from_composer_headers(conn: &mut Connection) {
+    let contexts = load_composer_header_contexts(Utc::now().timestamp_millis());
+    if contexts.is_empty() {
+        return;
+    }
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for s in &contexts {
+        let start_iso = DateTime::from_timestamp_millis(s.start_ms)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let end_iso = DateTime::from_timestamp_millis(s.end_ms)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let _ = tx.execute(
+            "UPDATE sessions SET
+                started_at = COALESCE(started_at, ?2),
+                ended_at = COALESCE(ended_at, ?3),
+                workspace_root = COALESCE(NULLIF(workspace_root, ''), ?4),
+                repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?5),
+                git_branch = COALESCE(NULLIF(git_branch, ''), ?6)
+             WHERE session_id = ?1 AND provider = 'cursor'",
+            params![
+                s.session_id,
+                start_iso,
+                end_iso,
+                s.workspace_root,
+                s.repo_id,
+                s.git_branch
+            ],
+        );
+    }
+    let _ = tx.commit();
+}
+
+fn repair_cursor_workspace_metadata(conn: &mut Connection) {
+    let legacy_cwds: Vec<String> = {
+        let mut stmt = match conn.prepare(
+            "SELECT DISTINCT cwd
+             FROM messages
+             WHERE provider = 'cursor'
+               AND cwd IS NOT NULL
+               AND cwd != ''
+               AND cwd LIKE '%/.cursor/projects/%'",
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        stmt.query_map([], |row| row.get(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    if legacy_cwds.is_empty() {
+        return;
+    }
+
+    for old_cwd in legacy_cwds {
+        let project_dir = std::path::Path::new(&old_cwd);
+        let Some(workspace_root) = workspace_root_from_project_dir(project_dir) else {
+            continue;
+        };
+
+        let repo_id = crate::repo_id::resolve_repo_id(std::path::Path::new(&workspace_root));
+        let git_branch = resolve_git_branch_from_head(&workspace_root);
+
+        let session_ids: Vec<String> = {
+            let mut stmt = match conn.prepare(
+                "SELECT DISTINCT session_id
+                 FROM messages
+                 WHERE provider = 'cursor' AND cwd = ?1 AND session_id IS NOT NULL",
+            ) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stmt.query_map([&old_cwd], |row| row.get(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        };
+
+        let _ = conn.execute(
+            "UPDATE messages SET
+                cwd = ?1,
+                repo_id = ?2,
+                git_branch = COALESCE(NULLIF(git_branch, ''), ?3)
+             WHERE provider = 'cursor' AND cwd = ?4",
+            params![workspace_root, repo_id, git_branch, old_cwd],
+        );
+
+        for sid in &session_ids {
+            let _ = conn.execute(
+                "UPDATE sessions SET
+                    workspace_root = COALESCE(NULLIF(workspace_root, ''), ?2),
+                    repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?3),
+                    git_branch = COALESCE(NULLIF(git_branch, ''), ?4)
+                 WHERE session_id = ?1 AND provider = 'cursor'",
+                params![sid, workspace_root, repo_id, git_branch],
+            );
+        }
+    }
 }
 
 /// Retroactively assign session_id to Cursor messages that have NULL session_id.
@@ -758,99 +1071,6 @@ fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext
     updated
 }
 
-/// Group orphaned Cursor messages (session_id IS NULL) into synthetic sessions
-/// based on time proximity. Messages within 30 minutes of each other are grouped
-/// into the same session. Creates stub session rows for each synthetic group.
-pub fn create_synthetic_cursor_sessions(conn: &mut Connection) -> usize {
-    const GAP_MS: i64 = 30 * 60 * 1000; // 30 minutes
-
-    let orphans: Vec<(String, i64)> = {
-        let mut stmt = match conn.prepare(
-            "SELECT uuid, CAST(strftime('%s', timestamp) AS INTEGER) * 1000
-             FROM messages
-             WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'
-             ORDER BY timestamp ASC
-             LIMIT 10000",
-        ) {
-            Ok(s) => s,
-            Err(_) => return 0,
-        };
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .ok()
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
-    };
-
-    if orphans.is_empty() {
-        return 0;
-    }
-
-    // Group by 30-minute time gaps
-    let mut groups: Vec<Vec<(String, i64)>> = Vec::new();
-    let mut current_group: Vec<(String, i64)> = vec![orphans[0].clone()];
-
-    for pair in orphans.iter().skip(1) {
-        let prev_ts = current_group.last().unwrap().1;
-        if pair.1 - prev_ts > GAP_MS {
-            groups.push(std::mem::take(&mut current_group));
-        }
-        current_group.push(pair.clone());
-    }
-    if !current_group.is_empty() {
-        groups.push(current_group);
-    }
-
-    let tx = match conn.transaction() {
-        Ok(t) => t,
-        Err(_) => return 0,
-    };
-
-    let mut total = 0;
-    for group in &groups {
-        let first_ts = group[0].1;
-        let synth_id = format!("cursor-synth-{first_ts}");
-
-        // Create stub session row (no context — Cursor API doesn't provide
-        // branch/repo and we won't guess from nearby sessions).
-        let _ = tx.execute(
-            "INSERT OR IGNORE INTO sessions (session_id, provider, started_at)
-             VALUES (?1, 'cursor', datetime(?2 / 1000, 'unixepoch'))",
-            rusqlite::params![synth_id, first_ts],
-        );
-
-        // Update ended_at from the last message in the group
-        if let Some(last) = group.last() {
-            let _ = tx.execute(
-                "UPDATE sessions SET ended_at = datetime(?2 / 1000, 'unixepoch')
-                 WHERE session_id = ?1 AND (ended_at IS NULL OR ended_at < datetime(?2 / 1000, 'unixepoch'))",
-                rusqlite::params![synth_id, last.1],
-            );
-        }
-
-        // Assign all messages in this group to the synthetic session
-        for (uuid, _) in group {
-            if tx
-                .execute(
-                    "UPDATE messages SET session_id = ?1 WHERE uuid = ?2",
-                    rusqlite::params![synth_id, uuid],
-                )
-                .is_ok()
-            {
-                total += 1;
-            }
-        }
-    }
-
-    let _ = tx.commit();
-    if total > 0 {
-        tracing::info!(
-            "Created {} synthetic Cursor sessions from {total} orphaned messages",
-            groups.len()
-        );
-    }
-    total
-}
-
 /// Read `.git/HEAD` to resolve the current branch name without spawning a subprocess.
 /// Returns `None` for detached HEAD or if the file can't be read.
 pub fn resolve_git_branch_from_head(dir: &str) -> Option<String> {
@@ -906,8 +1126,8 @@ fn collect_cursor_transcripts(projects_dir: &Path, files: &mut Vec<PathBuf>) {
 fn session_id_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
-        .map(|s| format!("cursor-{}", s))
-        .unwrap_or_else(|| "cursor-unknown".to_string())
+        .map(crate::identity::normalize_session_id)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Extract the Cursor project slug from the transcript path.
@@ -917,14 +1137,34 @@ fn cwd_from_path(path: &Path) -> Option<String> {
         if parent.file_name().is_some_and(|n| n == "agent-transcripts")
             && let Some(project_dir) = parent.parent()
         {
-            return project_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|_| project_dir.display().to_string());
+            return workspace_root_from_project_dir(project_dir);
         }
         current = parent;
     }
     None
+}
+
+/// Best-effort workspace root lookup from Cursor's per-project `worker.log`.
+///
+/// This keeps repo_id/git metadata aligned with Claude sessions by using the
+/// real workspace path (e.g. `/Users/me/repo`) instead of Cursor's internal
+/// project storage path (`~/.cursor/projects/<slug>`).
+fn workspace_root_from_project_dir(project_dir: &Path) -> Option<String> {
+    let worker_log = project_dir.join("worker.log");
+    let content = std::fs::read_to_string(worker_log).ok()?;
+
+    let mut last_seen: Option<String> = None;
+    for line in content.lines() {
+        let Some(idx) = line.find("workspacePath=") else {
+            continue;
+        };
+        let tail = &line[idx + "workspacePath=".len()..];
+        let candidate = tail.split_whitespace().next().unwrap_or("").trim();
+        if !candidate.is_empty() {
+            last_seen = Some(candidate.to_string());
+        }
+    }
+    last_seen
 }
 
 /// Get file modification time as a UTC DateTime.
@@ -952,12 +1192,21 @@ struct CursorEntry {
     model: Option<String>,
     timestamp: Option<String>,
     usage: Option<CursorUsage>,
+    #[serde(rename = "toolCalls")]
+    tool_calls: Option<Vec<CursorToolCall>>,
+    #[serde(rename = "tool_calls")]
+    tool_calls_alt: Option<Vec<CursorToolCall>>,
     uuid: Option<String>,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CursorToolCall {
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1010,14 +1259,28 @@ fn parse_cursor_line(
         .and_then(parse_timestamp)
         .unwrap_or(fallback_ts);
 
+    let msg_session_id =
+        crate::identity::normalize_session_id(entry.session_id.as_deref().unwrap_or(session_id));
     let request_id = entry.request_id;
     let uuid = entry
         .uuid
-        .or_else(|| request_id.clone())
-        .unwrap_or_else(|| format!("{}-{}", session_id, line_index));
-
-    let msg_session_id = entry.session_id.unwrap_or_else(|| session_id.to_string());
+        .or_else(|| request_id.clone().filter(|id| !id.is_empty()))
+        .unwrap_or_else(|| deterministic_cursor_message_uuid(&msg_session_id, line_index, line));
     let msg_cwd = entry.cwd.or_else(|| cwd.map(|s| s.to_string()));
+    let git_branch = msg_cwd
+        .as_deref()
+        .and_then(|dir| resolve_git_branch_from_head(dir));
+
+    let mut tool_names: Vec<String> = entry
+        .tool_calls
+        .or(entry.tool_calls_alt)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|t| t.name.map(|n| n.trim().to_string()))
+        .filter(|n| !n.is_empty())
+        .collect();
+    tool_names.sort();
+    tool_names.dedup();
 
     match role {
         "user" | "human" => Some(ParsedMessage {
@@ -1031,7 +1294,7 @@ fn parse_cursor_line(
             output_tokens: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            git_branch: None,
+            git_branch: git_branch.clone(),
             repo_id: None,
             provider: "cursor".to_string(),
             cost_cents: None,
@@ -1045,6 +1308,7 @@ fn parse_cursor_line(
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -1059,7 +1323,7 @@ fn parse_cursor_line(
                 output_tokens: usage.and_then(|u| u.output_tokens).unwrap_or(0),
                 cache_creation_tokens: usage.map(|u| u.cache_creation()).unwrap_or(0),
                 cache_read_tokens: usage.map(|u| u.cache_read()).unwrap_or(0),
-                git_branch: None,
+                git_branch: git_branch.clone(),
                 repo_id: None,
                 provider: "cursor".to_string(),
                 cost_cents: None,
@@ -1073,6 +1337,7 @@ fn parse_cursor_line(
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
                 prompt_category: None,
+                tool_names,
             })
         }
         _ => None,
@@ -1349,6 +1614,22 @@ pub fn cursor_pricing_for_model(model: &str) -> ModelPricing {
 mod tests {
     use super::*;
 
+    fn looks_like_uuid(s: &str) -> bool {
+        if s.len() != 36 {
+            return false;
+        }
+        for (i, ch) in s.chars().enumerate() {
+            if [8, 13, 18, 23].contains(&i) {
+                if ch != '-' {
+                    return false;
+                }
+            } else if !ch.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+        true
+    }
+
     // --- JSONL parsing tests ---
 
     #[test]
@@ -1357,7 +1638,7 @@ mod tests {
         let ts = Utc::now();
         let msg = parse_cursor_line(line, 0, "cursor-abc", Some("/proj"), ts).unwrap();
         assert_eq!(msg.role, "user");
-        assert_eq!(msg.uuid, "cursor-abc-0");
+        assert!(looks_like_uuid(&msg.uuid));
         assert_eq!(msg.session_id.as_deref(), Some("cursor-abc"));
         assert_eq!(msg.cwd.as_deref(), Some("/proj"));
         assert_eq!(msg.provider, "cursor");
@@ -1371,7 +1652,7 @@ mod tests {
         let ts = Utc::now();
         let msg = parse_cursor_line(line, 1, "cursor-abc", Some("/proj"), ts).unwrap();
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.uuid, "cursor-abc-1");
+        assert!(looks_like_uuid(&msg.uuid));
         assert_eq!(msg.model, None);
         assert_eq!(msg.input_tokens, 0);
     }
@@ -1397,9 +1678,10 @@ mod tests {
                 .all(|m| m.session_id.as_deref() == Some("cursor-s1"))
         );
         assert!(msgs.iter().all(|m| m.provider == "cursor"));
-        assert_eq!(msgs[0].uuid, "cursor-s1-0");
-        assert_eq!(msgs[1].uuid, "cursor-s1-1");
-        assert_eq!(msgs[2].uuid, "cursor-s1-2");
+        assert!(msgs.iter().all(|m| looks_like_uuid(&m.uuid)));
+        assert_ne!(msgs[0].uuid, msgs[1].uuid);
+        assert_ne!(msgs[1].uuid, msgs[2].uuid);
+        assert_ne!(msgs[0].uuid, msgs[2].uuid);
 
         let (msgs2, _) = parse_cursor_transcript(content, offset, "cursor-s1", Some("/proj"), ts);
         assert!(msgs2.is_empty());
@@ -1415,6 +1697,7 @@ mod tests {
         assert_eq!(msg.model.as_deref(), Some("gpt-4o"));
         assert_eq!(msg.input_tokens, 500);
         assert_eq!(msg.output_tokens, 200);
+        assert_eq!(msg.tool_names, vec!["edit_file".to_string()]);
     }
 
     #[test]
@@ -1437,13 +1720,40 @@ mod tests {
         let path = Path::new(
             "/home/.cursor/projects/proj/agent-transcripts/abc-def-123/abc-def-123.jsonl",
         );
-        assert_eq!(session_id_from_path(path), "cursor-abc-def-123");
+        assert_eq!(session_id_from_path(path), "abc-def-123");
     }
 
     #[test]
     fn session_id_from_path_flat() {
         let path = Path::new("/home/.cursor/projects/proj/agent-transcripts/xyz.jsonl");
-        assert_eq!(session_id_from_path(path), "cursor-xyz");
+        assert_eq!(session_id_from_path(path), "xyz");
+    }
+
+    #[test]
+    fn parse_cursor_line_normalizes_prefixed_session_uuid() {
+        let line =
+            r#"{"role":"assistant","sessionId":"cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb"}"#;
+        let ts = Utc::now();
+        let msg = parse_cursor_line(line, 1, "fallback", None, ts).unwrap();
+        assert_eq!(
+            msg.session_id.as_deref(),
+            Some("d99dfe22-d05c-4c78-8698-015d06e5dabb")
+        );
+    }
+
+    #[test]
+    fn workspace_root_from_project_dir_reads_worker_log() {
+        let dir = make_test_dir("cursor-worker-log");
+        std::fs::write(
+            dir.join("worker.log"),
+            "[info] foo\n[info] Getting tree structure for workspacePath=/Users/test/repo\n",
+        )
+        .unwrap();
+
+        let workspace = workspace_root_from_project_dir(&dir);
+        assert_eq!(workspace.as_deref(), Some("/Users/test/repo"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1654,7 +1964,7 @@ mod tests {
         }];
 
         let msgs = usage_events_to_messages(&events, &[]);
-        assert_eq!(msgs[0].uuid, "cursor-api-1774455909363-gpt-4o-100-50-0-0");
+        assert!(looks_like_uuid(&msgs[0].uuid));
     }
 
     #[test]
@@ -1678,120 +1988,5 @@ mod tests {
         // cost_cents is None so CostEnricher will estimate
         assert_eq!(msgs[0].cost_cents, None);
         assert_eq!(msgs[0].cost_confidence, "estimated");
-    }
-
-    // --- Synthetic session tests ---
-
-    fn test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .unwrap();
-        crate::migration::migrate(&conn).unwrap();
-        conn
-    }
-
-    #[test]
-    fn synthetic_sessions_groups_by_time_gap() {
-        let mut conn = test_db();
-        // Insert 4 orphaned Cursor messages: 2 close together, gap, then 2 more
-        for (i, ts) in [
-            "2026-03-14 10:00:00",
-            "2026-03-14 10:05:00",
-            "2026-03-14 12:00:00", // >30 min gap
-            "2026-03-14 12:10:00",
-        ]
-        .iter()
-        .enumerate()
-        {
-            conn.execute(
-                "INSERT INTO messages (uuid, provider, role, timestamp, input_tokens, output_tokens)
-                 VALUES (?1, 'cursor', 'assistant', ?2, 100, 50)",
-                rusqlite::params![format!("orphan-{i}"), ts],
-            )
-            .unwrap();
-        }
-
-        let assigned = create_synthetic_cursor_sessions(&mut conn);
-        assert_eq!(assigned, 4);
-
-        // Should have created 2 synthetic sessions
-        let session_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(DISTINCT session_id) FROM sessions WHERE session_id LIKE 'cursor-synth-%'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(session_count, 2);
-
-        // All messages should now have session_ids
-        let null_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE session_id IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(null_count, 0);
-
-        // First two share a session, last two share a different one
-        let s1: String = conn
-            .query_row(
-                "SELECT session_id FROM messages WHERE uuid = 'orphan-0'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let s2: String = conn
-            .query_row(
-                "SELECT session_id FROM messages WHERE uuid = 'orphan-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let s3: String = conn
-            .query_row(
-                "SELECT session_id FROM messages WHERE uuid = 'orphan-2'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(s1, s2, "first two messages should share a session");
-        assert_ne!(
-            s1, s3,
-            "messages across the gap should be in different sessions"
-        );
-    }
-
-    #[test]
-    fn synthetic_sessions_idempotent() {
-        let mut conn = test_db();
-        conn.execute(
-            "INSERT INTO messages (uuid, provider, role, timestamp, input_tokens, output_tokens)
-             VALUES ('orphan-1', 'cursor', 'assistant', '2026-03-14 10:00:00', 100, 50)",
-            [],
-        )
-        .unwrap();
-
-        let first = create_synthetic_cursor_sessions(&mut conn);
-        assert_eq!(first, 1);
-
-        // Running again should find no orphans
-        let second = create_synthetic_cursor_sessions(&mut conn);
-        assert_eq!(second, 0);
-    }
-
-    #[test]
-    fn synthetic_sessions_skips_non_cursor() {
-        let mut conn = test_db();
-        conn.execute(
-            "INSERT INTO messages (uuid, provider, role, timestamp, session_id, input_tokens, output_tokens)
-             VALUES ('cc-1', 'claude_code', 'assistant', '2026-03-14 10:00:00', NULL, 100, 50)",
-            [],
-        )
-        .unwrap();
-
-        let assigned = create_synthetic_cursor_sessions(&mut conn);
-        assert_eq!(assigned, 0);
     }
 }

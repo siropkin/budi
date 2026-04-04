@@ -350,10 +350,14 @@ impl DaemonClient {
     pub fn branch_detail(
         &self,
         branch: &str,
+        repo_id: Option<&str>,
         since: Option<&str>,
         until: Option<&str>,
     ) -> Result<Option<BranchCost>> {
         let mut params = Vec::new();
+        if let Some(repo) = repo_id {
+            params.push(("repo_id", repo));
+        }
         if let Some(s) = since {
             params.push(("since", s));
         }

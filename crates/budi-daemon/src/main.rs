@@ -116,6 +116,10 @@ fn build_router(app_state: AppState) -> Router {
         )
         .route("/analytics/sessions", get(a::analytics_sessions))
         .route(
+            "/analytics/sessions/{session_id}",
+            get(a::analytics_session_detail),
+        )
+        .route(
             "/analytics/sessions/{session_id}/messages",
             get(a::analytics_session_messages),
         )

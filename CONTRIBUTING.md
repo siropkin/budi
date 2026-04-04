@@ -80,11 +80,23 @@ npm run build
 budi --version
 ```
 
-Or manually:
+If scripts are blocked (for example by anti-virus), install to Cargo bin (`~/.cargo/bin`):
 
 ```bash
-cargo build --release
+cargo install --path crates/budi-cli --bin budi --force --locked
+cargo install --path crates/budi-daemon --bin budi-daemon --force --locked
+budi --version
+budi init
+```
+
+Or build and copy binaries manually:
+
+```bash
+cargo build --release --locked
+mkdir -p ~/.local/bin
 cp target/release/budi target/release/budi-daemon ~/.local/bin/
+chmod +x ~/.local/bin/budi ~/.local/bin/budi-daemon
+rehash
 pkill -f "budi-daemon serve"   # graceful stop (avoid -9 unless stuck)
 budi init               # restarts daemon + re-syncs data
 ```

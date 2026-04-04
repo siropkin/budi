@@ -160,17 +160,17 @@ fn sync_with_max_age(
         tracing::info!("Backfilled ticket_id tags on {tickets_backfilled} messages");
     }
 
+    let removed_legacy_auto_tags = cleanup_legacy_auto_tags(conn);
+    if removed_legacy_auto_tags > 0 {
+        tracing::info!(
+            "Removed {removed_legacy_auto_tags} legacy auto tags (dominant_tool/repo/branch)"
+        );
+    }
+
     // Backfill session titles from provider-specific sources.
     let titles_backfilled = backfill_session_titles(conn);
     if titles_backfilled > 0 {
         tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
-    }
-
-    // Group orphaned Cursor messages into synthetic sessions so they appear
-    // in the Sessions tab even when hooks weren't installed at the time.
-    let synth = crate::providers::cursor::create_synthetic_cursor_sessions(conn);
-    if synth > 0 {
-        tracing::info!("Assigned {synth} orphaned Cursor messages to synthetic sessions");
     }
 
     Ok((total_files, total_messages, warnings))
@@ -238,6 +238,14 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
         return 0;
     }
     count
+}
+
+fn cleanup_legacy_auto_tags(conn: &mut Connection) -> usize {
+    conn.execute(
+        "DELETE FROM tags WHERE key IN ('dominant_tool', 'repo', 'branch')",
+        [],
+    )
+    .unwrap_or(0)
 }
 
 /// Backfill `sessions.title` for sessions that don't have one yet.

@@ -11,7 +11,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Result of running schema repair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -114,6 +114,12 @@ fn run_version_migrations(conn: &Connection) -> Result<()> {
     }
     if current_version(conn) == 14 {
         migrate_v14_to_v15(conn)?;
+    }
+    if current_version(conn) == 15 {
+        migrate_v15_to_v16(conn)?;
+    }
+    if current_version(conn) == 16 {
+        migrate_v16_to_v17(conn)?;
     }
     Ok(())
 }
@@ -434,7 +440,7 @@ fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
         tracing::info!("Session backfill: created {from_hooks} stub rows from hook_events");
     }
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    conn.pragma_update(None, "user_version", 14u32)?;
     Ok(())
 }
 
@@ -442,7 +448,184 @@ fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
 fn migrate_v14_to_v15(conn: &Connection) -> Result<()> {
     tracing::info!("Migrating schema v14 → v15: adding title column to sessions");
     conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT;")?;
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    conn.pragma_update(None, "user_version", 15u32)?;
+    Ok(())
+}
+
+/// Incremental migration from v15 to v16: normalize provider-prefixed session IDs.
+///
+/// Historical Cursor transcript parsing prefixed session IDs with `cursor-` when
+/// the underlying ID was already a UUID. This migration rewrites those rows to
+/// canonical plain UUID form across sessions/messages/hook_events/otel_events.
+fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v15 → v16: normalizing prefixed session IDs");
+    normalize_session_ids(conn)?;
+    conn.pragma_update(None, "user_version", 16u32)?;
+    Ok(())
+}
+
+/// Incremental migration from v16 to v17: purge legacy Cursor artifacts.
+///
+/// Removes synthetic Cursor sessions and legacy non-UUID Cursor message IDs
+/// (`cursor-*`) so future syncs rebuild clean data using canonical UUID IDs.
+fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v16 → v17: purging legacy Cursor artifacts");
+
+    let deleted_tags = conn.execute(
+        "DELETE FROM tags
+         WHERE message_uuid IN (
+            SELECT uuid
+            FROM messages
+            WHERE provider = 'cursor'
+              AND (uuid LIKE 'cursor-%' OR session_id LIKE 'cursor-synth-%')
+         )",
+        [],
+    )?;
+
+    let deleted_messages = conn.execute(
+        "DELETE FROM messages
+         WHERE provider = 'cursor'
+           AND (uuid LIKE 'cursor-%' OR session_id LIKE 'cursor-synth-%')",
+        [],
+    )?;
+
+    let deleted_sessions = conn.execute(
+        "DELETE FROM sessions
+         WHERE provider = 'cursor'
+           AND session_id LIKE 'cursor-synth-%'",
+        [],
+    )?;
+
+    // Clear Cursor sync watermarks/offsets so next sync rebuilds from source.
+    let deleted_sync_state = conn.execute(
+        "DELETE FROM sync_state
+         WHERE file_path = 'cursor-api-usage'
+            OR file_path LIKE '%/agent-transcripts/%'",
+        [],
+    )?;
+
+    if deleted_tags + deleted_messages + deleted_sessions + deleted_sync_state > 0 {
+        tracing::info!(
+            "Cursor cleanup: removed {deleted_messages} messages, {deleted_sessions} synthetic sessions, {deleted_tags} tags, reset {deleted_sync_state} sync offsets"
+        );
+    }
+
+    conn.pragma_update(None, "user_version", 17u32)?;
+    Ok(())
+}
+
+fn normalize_session_ids(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT session_id
+         FROM (
+            SELECT session_id FROM sessions
+            UNION ALL
+            SELECT session_id FROM messages
+            UNION ALL
+            SELECT session_id FROM hook_events
+            UNION ALL
+            SELECT session_id FROM otel_events
+         )
+         WHERE session_id IS NOT NULL",
+    )?;
+
+    let all_ids: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+
+    let mut mappings: Vec<(String, String)> = Vec::new();
+    for old in all_ids {
+        let normalized = crate::identity::normalize_session_id(&old);
+        if !normalized.is_empty() && normalized != old {
+            mappings.push((old, normalized));
+        }
+    }
+    mappings.sort_unstable();
+    mappings.dedup();
+
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    for (old_id, new_id) in &mappings {
+        normalize_single_session_id(conn, old_id, new_id)?;
+    }
+
+    tracing::info!(
+        "Session ID normalization: rewrote {} id mappings",
+        mappings.len()
+    );
+    Ok(())
+}
+
+fn normalize_single_session_id(conn: &Connection, old_id: &str, new_id: &str) -> Result<()> {
+    if old_id == new_id {
+        return Ok(());
+    }
+
+    let old_session_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+        [old_id],
+        |r| r.get(0),
+    )?;
+    let new_session_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+        [new_id],
+        |r| r.get(0),
+    )?;
+
+    if old_session_exists {
+        if new_session_exists {
+            merge_session_row(conn, old_id, new_id)?;
+            conn.execute("DELETE FROM sessions WHERE session_id = ?1", [old_id])?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET session_id = ?1 WHERE session_id = ?2",
+                rusqlite::params![new_id, old_id],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "UPDATE messages SET session_id = ?1 WHERE session_id = ?2",
+        rusqlite::params![new_id, old_id],
+    )?;
+    conn.execute(
+        "UPDATE hook_events SET session_id = ?1 WHERE session_id = ?2",
+        rusqlite::params![new_id, old_id],
+    )?;
+    conn.execute(
+        "UPDATE otel_events SET session_id = ?1 WHERE session_id = ?2",
+        rusqlite::params![new_id, old_id],
+    )?;
+
+    Ok(())
+}
+
+fn merge_session_row(conn: &Connection, old_id: &str, new_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET
+            provider = COALESCE(NULLIF(provider, ''), (SELECT provider FROM sessions WHERE session_id = ?2), 'claude_code'),
+            started_at = COALESCE(started_at, (SELECT started_at FROM sessions WHERE session_id = ?2)),
+            ended_at = COALESCE(ended_at, (SELECT ended_at FROM sessions WHERE session_id = ?2)),
+            duration_ms = COALESCE(duration_ms, (SELECT duration_ms FROM sessions WHERE session_id = ?2)),
+            composer_mode = COALESCE(NULLIF(composer_mode, ''), (SELECT composer_mode FROM sessions WHERE session_id = ?2)),
+            permission_mode = COALESCE(NULLIF(permission_mode, ''), (SELECT permission_mode FROM sessions WHERE session_id = ?2)),
+            user_email = COALESCE(NULLIF(user_email, ''), (SELECT user_email FROM sessions WHERE session_id = ?2)),
+            workspace_root = COALESCE(NULLIF(workspace_root, ''), (SELECT workspace_root FROM sessions WHERE session_id = ?2)),
+            end_reason = COALESCE(NULLIF(end_reason, ''), (SELECT end_reason FROM sessions WHERE session_id = ?2)),
+            prompt_category = COALESCE(NULLIF(prompt_category, ''), (SELECT prompt_category FROM sessions WHERE session_id = ?2)),
+            model = COALESCE(NULLIF(model, ''), (SELECT model FROM sessions WHERE session_id = ?2)),
+            raw_json = COALESCE(NULLIF(raw_json, ''), (SELECT raw_json FROM sessions WHERE session_id = ?2)),
+            repo_id = COALESCE(
+                NULLIF(NULLIF(repo_id, ''), 'unknown'),
+                NULLIF(NULLIF((SELECT repo_id FROM sessions WHERE session_id = ?2), ''), 'unknown')
+            ),
+            git_branch = COALESCE(NULLIF(git_branch, ''), (SELECT git_branch FROM sessions WHERE session_id = ?2)),
+            title = COALESCE(NULLIF(title, ''), (SELECT title FROM sessions WHERE session_id = ?2))
+         WHERE session_id = ?1",
+        rusqlite::params![new_id, old_id],
+    )?;
     Ok(())
 }
 
@@ -1024,5 +1207,303 @@ mod tests {
             report.added_columns.contains(&"sessions.title".to_string()),
             "repair should report sessions.title addition"
         );
+    }
+
+    #[test]
+    fn migrate_v15_to_v16_normalizes_prefixed_cursor_session_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 15u32).unwrap();
+
+        let old_id = "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb";
+        let new_id = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
+
+        conn.execute(
+            "INSERT INTO sessions (session_id, provider, started_at) VALUES (?1, 'cursor', '2026-03-31T16:43:25+00:00')",
+            [old_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+             VALUES ('m1', ?1, 'assistant', '2026-03-31T16:43:25+00:00', 'cursor')",
+            [old_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hook_events (provider, event, session_id, timestamp)
+             VALUES ('cursor', 'session_start', ?1, '2026-03-31T16:43:25+00:00')",
+            [old_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO otel_events (event_name, session_id, timestamp, processed)
+             VALUES ('claude_code.api_request', ?1, '2026-03-31T16:43:25+00:00', 1)",
+            [old_id],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        let old_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                [old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let new_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                [new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!old_exists, "old prefixed id should be removed");
+        assert!(new_exists, "normalized id should exist");
+
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                [new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let hook_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hook_events WHERE session_id = ?1",
+                [new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let otel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM otel_events WHERE session_id = ?1",
+                [new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(msg_count, 1);
+        assert_eq!(hook_count, 1);
+        assert_eq!(otel_count, 1);
+    }
+
+    #[test]
+    fn migrate_v15_to_v16_merges_colliding_session_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 15u32).unwrap();
+
+        let old_id = "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb";
+        let new_id = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
+
+        conn.execute(
+            "INSERT INTO sessions (session_id, provider, started_at, repo_id, git_branch)
+             VALUES (?1, 'cursor', '2026-03-31T16:43:25+00:00', 'github.com/acme/repo', 'main')",
+            [old_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, provider, started_at, title)
+             VALUES (?1, 'cursor', '2026-03-31T16:43:00+00:00', 'Already normalized row')",
+            [new_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+             VALUES ('m1', ?1, 'assistant', '2026-03-31T16:43:25+00:00', 'cursor')",
+            [old_id],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let sessions_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_id IN (?1, ?2)",
+                rusqlite::params![old_id, new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sessions_count, 1, "rows should be merged into one session");
+
+        let (repo_id, git_branch, title): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT repo_id, git_branch, title FROM sessions WHERE session_id = ?1",
+                [new_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(repo_id.as_deref(), Some("github.com/acme/repo"));
+        assert_eq!(git_branch.as_deref(), Some("main"));
+        assert_eq!(title.as_deref(), Some("Already normalized row"));
+
+        let msg_sid: String = conn
+            .query_row(
+                "SELECT session_id FROM messages WHERE uuid = 'm1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(msg_sid, new_id);
+    }
+
+    #[test]
+    fn migrate_v16_to_v17_purges_legacy_cursor_artifacts() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 16u32).unwrap();
+
+        conn.execute(
+            "INSERT INTO sessions (session_id, provider, started_at)
+             VALUES ('cursor-synth-1774974046000', 'cursor', '2026-03-31T10:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, provider, started_at)
+             VALUES ('d99dfe22-d05c-4c78-8698-015d06e5dabb', 'cursor', '2026-03-31T10:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+             VALUES ('cursor-api-legacy', 'cursor-synth-1774974046000', 'assistant', '2026-03-31T10:01:00+00:00', 'cursor')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+             VALUES ('clean-uuid', 'd99dfe22-d05c-4c78-8698-015d06e5dabb', 'assistant', '2026-03-31T10:02:00+00:00', 'cursor')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (message_uuid, key, value)
+             VALUES ('cursor-api-legacy', 'provider', 'cursor')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (message_uuid, key, value)
+             VALUES ('clean-uuid', 'provider', 'cursor')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_state (file_path, byte_offset, last_synced)
+             VALUES ('cursor-api-usage', 123, '2026-03-31T10:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_state (file_path, byte_offset, last_synced)
+             VALUES ('/Users/me/.cursor/projects/p/agent-transcripts/s.jsonl', 456, '2026-03-31T10:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_state (file_path, byte_offset, last_synced)
+             VALUES ('/Users/me/.claude/projects/p/session.jsonl', 789, '2026-03-31T10:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        let legacy_msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE uuid = 'cursor-api-legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy_msg_count, 0,
+            "legacy cursor message should be purged"
+        );
+
+        let clean_msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE uuid = 'clean-uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            clean_msg_count, 1,
+            "canonical cursor message should be kept"
+        );
+
+        let synth_session_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_id LIKE 'cursor-synth-%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            synth_session_count, 0,
+            "synthetic sessions should be purged"
+        );
+
+        let legacy_tag_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE message_uuid = 'cursor-api-legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_tag_count, 0, "legacy tags should be purged");
+
+        let kept_tag_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE message_uuid = 'clean-uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kept_tag_count, 1,
+            "tags for clean messages should be preserved"
+        );
+
+        let cursor_watermark_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_state WHERE file_path = 'cursor-api-usage')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!cursor_watermark_exists, "cursor watermark should be reset");
+
+        let cursor_transcript_offset_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sync_state
+                    WHERE file_path LIKE '%/agent-transcripts/%'
+                )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !cursor_transcript_offset_exists,
+            "cursor transcript offsets should be reset"
+        );
+
+        let claude_offset_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sync_state
+                    WHERE file_path = '/Users/me/.claude/projects/p/session.jsonl'
+                )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(claude_offset_exists, "non-cursor offsets must be preserved");
     }
 }

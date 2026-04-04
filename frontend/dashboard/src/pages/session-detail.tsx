@@ -1,16 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
+import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { ErrorState, LoadingState } from "@/components/state";
-import { fetchRegisteredProviders, fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
-import { fmtCost, fmtDate, fmtNum, formatModelName } from "@/lib/format";
+import { fetchRegisteredProviders, fetchSessionDetail, fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
+import { fmtCost, fmtDate, fmtNum, formatModelName, repoName } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 function healthVariant(state: string): "default" | "warning" | "success" {
@@ -20,6 +20,7 @@ function healthVariant(state: string): "default" | "warning" | "success" {
 }
 
 const MESSAGE_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
+const MESSAGE_PAGE_SIZE = 50;
 type MessageSortColumn = "timestamp" | "provider" | "model" | "tokens" | "cost";
 
 function SortableHead({
@@ -61,6 +62,13 @@ export function SessionDetailPage() {
   const sessionId = params.sessionId;
   const [sortBy, setSortBy] = useState<MessageSortColumn>("timestamp");
   const [sortAsc, setSortAsc] = useState(false);
+  const [messageOffset, setMessageOffset] = useState(0);
+
+  const detailQuery = useQuery({
+    queryKey: ["session-detail", sessionId],
+    queryFn: ({ signal }) => fetchSessionDetail(sessionId ?? "", signal),
+    enabled: Boolean(sessionId),
+  });
 
   const messagesQuery = useQuery({
     queryKey: ["session-messages", sessionId],
@@ -86,48 +94,8 @@ export function SessionDetailPage() {
     staleTime: 60_000,
   });
 
-  if (!sessionId) {
-    return <ErrorState error={new Error("Session ID is missing in route")} />;
-  }
-
-  if (messagesQuery.isPending || tagsQuery.isPending || healthQuery.isPending || providersQuery.isPending) {
-    return <LoadingState label="Loading session detail..." />;
-  }
-
-  if (messagesQuery.error) {
-    return <ErrorState error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} />;
-  }
-
-  if (tagsQuery.error) {
-    return <ErrorState error={tagsQuery.error} onRetry={() => tagsQuery.refetch()} />;
-  }
-
-  if (healthQuery.error) {
-    return <ErrorState error={healthQuery.error} onRetry={() => healthQuery.refetch()} />;
-  }
-
-  if (providersQuery.error) {
-    return <ErrorState error={providersQuery.error} onRetry={() => providersQuery.refetch()} />;
-  }
-
-  const messages = messagesQuery.data;
-  const tags = tagsQuery.data.filter((tag) => !["provider", "model", "repo", "machine", "cost_confidence"].includes(tag.key));
-  const health = healthQuery.data;
-  const providers = providersQuery.data;
-  const vitals = Object.entries(health?.vitals ?? {}).filter(([, vital]) => vital != null);
-
-  let tokenTotal = 0;
-  let costTotalCents = 0;
-  for (const message of messages) {
-    tokenTotal += (message.input_tokens ?? 0) + (message.output_tokens ?? 0);
-    costTotalCents += message.cost_cents ?? 0;
-  }
-
-  const tokenGrowth = messages.map((message, index) => ({
-    label: `#${index + 1}`,
-    input_tokens: message.input_tokens,
-  }));
-
+  const messages = messagesQuery.data ?? [];
+  const providers = providersQuery.data ?? [];
   const sortedMessages = [...messages];
   sortedMessages.sort((left, right) => {
     let compare = 0;
@@ -149,6 +117,129 @@ export function SessionDetailPage() {
     return sortAsc ? compare : -compare;
   });
 
+  useEffect(() => {
+    setMessageOffset(0);
+  }, [sortBy, sortAsc, sessionId]);
+
+  useEffect(() => {
+    if (messageOffset >= sortedMessages.length && messageOffset > 0) {
+      setMessageOffset(Math.max(0, sortedMessages.length - MESSAGE_PAGE_SIZE));
+    }
+  }, [messageOffset, sortedMessages.length]);
+
+  if (!sessionId) {
+    return <ErrorState error={new Error("Session ID is missing in route")} />;
+  }
+
+  if (messagesQuery.isPending || tagsQuery.isPending || healthQuery.isPending || providersQuery.isPending || detailQuery.isPending) {
+    return <LoadingState label="Loading session detail..." />;
+  }
+
+  const detailErrorMessage = detailQuery.error?.message?.toLowerCase() ?? "";
+  const isSessionNotFound = detailErrorMessage.includes("session") && detailErrorMessage.includes("not found");
+  if (isSessionNotFound) {
+    return (
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Link to="/sessions" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
+            ← Back to Sessions
+          </Link>
+        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Session Not Found</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>We could not find a session for this ID.</p>
+            <p className="font-mono text-foreground">{decodeURIComponent(sessionId)}</p>
+            <p>The session may have been deleted, or the ID may be invalid.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (detailQuery.error) {
+    return <ErrorState error={detailQuery.error} onRetry={() => detailQuery.refetch()} />;
+  }
+
+  if (messagesQuery.error) {
+    return <ErrorState error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} />;
+  }
+
+  if (tagsQuery.error) {
+    return <ErrorState error={tagsQuery.error} onRetry={() => tagsQuery.refetch()} />;
+  }
+
+  if (healthQuery.error) {
+    return <ErrorState error={healthQuery.error} onRetry={() => healthQuery.refetch()} />;
+  }
+
+  if (providersQuery.error) {
+    return <ErrorState error={providersQuery.error} onRetry={() => providersQuery.refetch()} />;
+  }
+
+  const sessionDetail = detailQuery.data;
+  if (!sessionDetail) {
+    return <ErrorState error={new Error("Session detail is unavailable")} />;
+  }
+
+  const tags = tagsQuery.data ?? [];
+  const health = healthQuery.data;
+  const vitals = Object.entries(health?.vitals ?? {}).filter(([, vital]) => vital != null);
+
+  let tokenTotal = 0;
+  let costTotalCents = 0;
+  for (const message of messages) {
+    tokenTotal += (message.input_tokens ?? 0) + (message.output_tokens ?? 0);
+    costTotalCents += message.cost_cents ?? 0;
+  }
+
+  const sessionCurve = [];
+  let cumulativeCostCents = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    cumulativeCostCents += message.cost_cents ?? 0;
+    sessionCurve.push({
+      label: `#${index + 1}`,
+      tokens: (message.input_tokens ?? 0) + (message.output_tokens ?? 0),
+      cumulative_cost_cents: cumulativeCostCents,
+    });
+  }
+
+  const paginatedMessages = sortedMessages.slice(messageOffset, messageOffset + MESSAGE_PAGE_SIZE);
+  const hasMoreMessages = messageOffset + paginatedMessages.length < sortedMessages.length;
+
+  const overviewRepoIds =
+    sessionDetail.repo_ids?.filter((repo) => repo && repo !== "unknown") ??
+    [];
+  const overviewRepoPrimary =
+    overviewRepoIds[0] ??
+    sessionDetail.repo_id ??
+    messages.find((message) => message.repo_id && message.repo_id !== "unknown")?.repo_id ??
+    null;
+  const overviewRepoCount = sessionDetail.repo_count ?? overviewRepoIds.length;
+  const overviewRepoLabel =
+    overviewRepoCount > 1
+      ? `${repoName(overviewRepoPrimary)} +${overviewRepoCount - 1}`
+      : repoName(overviewRepoPrimary);
+
+  const overviewBranches =
+    sessionDetail.git_branches?.filter((branch) => branch && branch !== "") ??
+    [];
+  const rawOverviewBranch =
+    overviewBranches[0] ??
+    sessionDetail.git_branch ??
+    messages.find((message) => message.git_branch && message.git_branch !== "")?.git_branch ??
+    null;
+  const overviewBranchPrimary = rawOverviewBranch?.replace(/^refs\/heads\//, "") ?? "--";
+  const overviewBranchCount = sessionDetail.git_branch_count ?? overviewBranches.length;
+  const overviewBranchLabel =
+    overviewBranchCount > 1
+      ? `${overviewBranchPrimary} +${overviewBranchCount - 1}`
+      : overviewBranchPrimary;
+  const overviewName = sessionDetail.title || "--";
+
   const onSort = (column: MessageSortColumn) => {
     if (column === sortBy) {
       setSortAsc((previous) => !previous);
@@ -164,29 +255,35 @@ export function SessionDetailPage() {
         <Link to="/sessions" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
           ← Back to Sessions
         </Link>
-        <p className="max-w-[760px] truncate text-sm text-muted-foreground">Session ID: {decodeURIComponent(sessionId)}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Usage</CardTitle>
+            <CardTitle>Overview</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1 text-sm">
             <p>
-              Messages: <span className="font-semibold text-foreground">{fmtNum(messages.length)}</span>
+              Session ID: <span className="font-semibold text-foreground">{decodeURIComponent(sessionId)}</span>
+            </p>
+            <p>
+              Session Name: <span className="font-semibold text-foreground">{overviewName}</span>
+            </p>
+            <p>
+              Cost: <span className="font-semibold text-primary">{fmtCost(costTotalCents / 100)}</span>
             </p>
             <p>
               Tokens: <span className="font-semibold text-foreground">{fmtNum(tokenTotal)}</span>
             </p>
             <p>
-              Cost: <span className="font-semibold text-primary">{fmtCost(costTotalCents / 100)}</span>
+              Messages: <span className="font-semibold text-foreground">{fmtNum(messages.length)}</span>
             </p>
-            {health?.tip ? (
-              <p className="text-muted-foreground">
-                Health tip: <span className="text-foreground">{health.tip}</span>
-              </p>
-            ) : null}
+            <p>
+              Repo: <span className="font-semibold text-foreground">{overviewRepoLabel}</span>
+            </p>
+            <p>
+              Branch: <span className="font-semibold text-foreground">{overviewBranchLabel}</span>
+            </p>
           </CardContent>
         </Card>
 
@@ -225,38 +322,57 @@ export function SessionDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Input Token Growth</CardTitle>
+          <CardTitle>Session Length vs Cost</CardTitle>
         </CardHeader>
         <CardContent>
-          <ChartContainer
-            config={{
-              input_tokens: {
-                label: "Input tokens",
-                color: "hsl(var(--chart-1))",
-              },
-            }}
-          >
-            <BarChart data={tokenGrowth} margin={{ left: 12, right: 8 }} accessibilityLayer>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
-              <XAxis dataKey="label" tickLine={false} axisLine={false} />
-              <YAxis dataKey="input_tokens" tickFormatter={(value) => fmtNum(value)} tickLine={false} axisLine={false} />
-              <ChartTooltip
-                cursor={false}
-                content={
-                  <ChartTooltipContent
-                    indicator="dot"
-                    formatter={(value, name) => (
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-muted-foreground">{name}</span>
-                        <span className="font-medium tabular-nums text-foreground">{fmtNum(Number(value))}</span>
-                      </div>
-                    )}
-                  />
-                }
-              />
-              <Bar dataKey="input_tokens" fill="var(--color-input_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ChartContainer>
+          {sessionCurve.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No assistant messages available.</p>
+          ) : (
+            <ChartContainer
+              config={{
+                tokens: {
+                  label: "Tokens/message",
+                  color: "hsl(var(--chart-2))",
+                },
+                cumulative_cost_cents: {
+                  label: "Cumulative cost",
+                  color: "hsl(var(--chart-1))",
+                },
+              }}
+            >
+              <ComposedChart data={sessionCurve} margin={{ left: 12, right: 12, top: 6, bottom: 6 }} accessibilityLayer>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                <YAxis yAxisId="left" tickFormatter={(value) => fmtNum(Number(value))} tickLine={false} axisLine={false} />
+                <YAxis
+                  yAxisId="right"
+                  orientation="right"
+                  tickFormatter={(value) => fmtCost(Number(value) / 100)}
+                  tickLine={false}
+                  axisLine={false}
+                />
+                <ChartTooltip
+                  cursor={false}
+                  content={
+                    <ChartTooltipContent
+                      indicator="line"
+                      formatter={(value, name, item) => (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-muted-foreground">{name}</span>
+                          <span className="font-medium tabular-nums text-foreground">
+                            {item.dataKey === "cumulative_cost_cents" ? fmtCost(Number(value) / 100) : fmtNum(Number(value))}
+                          </span>
+                        </div>
+                      )}
+                    />
+                  }
+                />
+                <ChartLegend content={<ChartLegendContent />} />
+                <Bar yAxisId="left" dataKey="tokens" fill="var(--color-tokens)" maxBarSize={22} radius={[4, 4, 0, 0]} />
+                <Line yAxisId="right" type="monotone" dataKey="cumulative_cost_cents" stroke="var(--color-cumulative_cost_cents)" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ChartContainer>
+          )}
         </CardContent>
       </Card>
 
@@ -277,11 +393,11 @@ export function SessionDetailPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sortedMessages.map((message, index) => {
+                {paginatedMessages.map((message, index) => {
                   const providerDisplay = providers.find((entry) => entry.name === message.provider)?.display_name ?? message.provider;
                   const rawModel = message.model ?? "";
                   return (
-                    <TableRow key={`${message.timestamp}-${index}`}>
+                    <TableRow key={message.uuid ?? `${message.timestamp}-${messageOffset + index}`}>
                       <TableCell className={MESSAGE_CELL_CLASS}>{fmtDate(message.timestamp)}</TableCell>
                       <TableCell className={MESSAGE_CELL_CLASS}>{providerDisplay}</TableCell>
                       <TableCell className={MESSAGE_CELL_CLASS} title={rawModel}>
@@ -298,6 +414,31 @@ export function SessionDetailPage() {
                 })}
               </TableBody>
             </Table>
+          </div>
+          <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+            <p>
+              Showing {paginatedMessages.length === 0 ? 0 : messageOffset + 1}-{messageOffset + paginatedMessages.length} of {fmtNum(sortedMessages.length)}
+            </p>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={messageOffset === 0}
+                onClick={() => setMessageOffset((previous) => Math.max(0, previous - MESSAGE_PAGE_SIZE))}
+              >
+                Previous
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!hasMoreMessages}
+                onClick={() => setMessageOffset((previous) => previous + MESSAGE_PAGE_SIZE)}
+              >
+                Next
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>

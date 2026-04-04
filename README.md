@@ -245,7 +245,9 @@ All data commands support `--period today|week|month|all` and `--format json`.
 
 ## Tags & cost attribution
 
-Every message is automatically tagged with: `provider`, `model`, `repo`, `branch`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `dominant_tool`, `user_email`.
+Every message is automatically tagged with: `provider`, `model`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `tool`, `user_email`.
+
+`repo_id` and `git_branch` are stored as canonical message/session fields (not tags), so repo/branch analytics stay single-source and do not double-count.
 
 Add custom tags in `~/.config/budi/tags.toml`:
 

@@ -56,7 +56,7 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         .get("session_id")
         .or_else(|| json.get("conversation_id"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(crate::identity::normalize_session_id);
 
     let model = json
         .get("model")
@@ -536,13 +536,12 @@ pub fn load_session_meta(
 ) -> Result<std::collections::HashMap<String, SessionMeta>> {
     let mut map = std::collections::HashMap::new();
 
-    let (date_clause, hook_date_clause, date_param) = match max_age_days {
+    let (date_clause, date_param) = match max_age_days {
         Some(days) => (
             " AND started_at >= datetime('now', ?1)".to_string(),
-            " AND timestamp >= datetime('now', ?1)".to_string(),
             Some(format!("-{} days", days)),
         ),
-        None => (String::new(), String::new(), None),
+        None => (String::new(), None),
     };
     let sql = format!(
         "SELECT session_id, composer_mode, permission_mode, prompt_category,
@@ -568,39 +567,10 @@ pub fn load_session_meta(
             user_email: row.get(4)?,
             duration_ms: row.get(5)?,
             model: row.get(6)?,
-            dominant_tool: None,
             repo_id: row.get(7)?,
             git_branch: row.get(8)?,
         };
         map.insert(id, meta);
-    }
-    drop(rows);
-    drop(stmt);
-
-    // Load dominant tool per session from hook_events using window function.
-    // Scoped by the same max_age_days to avoid scanning the full hook_events table.
-    let tool_sql = format!(
-        "SELECT session_id, tool_name FROM (
-             SELECT session_id, tool_name, COUNT(*) as cnt,
-                    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY COUNT(*) DESC) as rn
-             FROM hook_events
-             WHERE event = 'post_tool_use' AND tool_name IS NOT NULL AND session_id IS NOT NULL{}
-             GROUP BY session_id, tool_name
-         ) WHERE rn = 1",
-        hook_date_clause
-    );
-    let mut tool_stmt = conn.prepare(&tool_sql)?;
-
-    let tool_rows = tool_stmt.query_map(param_refs.as_slice(), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    for row in tool_rows {
-        if let Ok((sid, tool)) = row
-            && let Some(meta) = map.get_mut(&sid)
-        {
-            meta.dominant_tool = Some(tool);
-        }
     }
 
     Ok(map)
@@ -615,7 +585,6 @@ pub struct SessionMeta {
     pub user_email: Option<String>,
     pub duration_ms: Option<i64>,
     pub model: Option<String>,
-    pub dominant_tool: Option<String>,
     pub repo_id: Option<String>,
     pub git_branch: Option<String>,
 }
@@ -869,6 +838,24 @@ mod tests {
         assert_eq!(event.composer_mode.as_deref(), Some("agent"));
         assert_eq!(event.user_email.as_deref(), Some("test@example.com"));
         assert_eq!(event.workspace_root.as_deref(), Some("/Users/test/project"));
+    }
+
+    #[test]
+    fn parse_cursor_session_id_strips_provider_prefix_for_uuid() {
+        let json: Value = serde_json::from_str(
+            r#"{
+            "conversation_id": "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb",
+            "hook_event_name": "sessionStart",
+            "cursor_version": "1.7.0"
+        }"#,
+        )
+        .unwrap();
+
+        let event = parse_hook_event(&json).unwrap();
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some("d99dfe22-d05c-4c78-8698-015d06e5dabb")
+        );
     }
 
     #[test]

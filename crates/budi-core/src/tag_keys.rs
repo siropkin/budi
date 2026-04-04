@@ -4,7 +4,6 @@
 //! queries, dedup logic, and dashboard code. Add new keys here rather than
 //! scattering string literals across the codebase.
 
-pub const REPO: &str = "repo";
 pub const TICKET_ID: &str = "ticket_id";
 pub const TICKET_PREFIX: &str = "ticket_prefix";
 pub const USER: &str = "user";
@@ -19,7 +18,7 @@ pub const PERMISSION_MODE: &str = "permission_mode";
 pub const ACTIVITY: &str = "activity";
 pub const USER_EMAIL: &str = "user_email";
 pub const DURATION: &str = "duration";
-pub const DOMINANT_TOOL: &str = "dominant_tool";
+pub const TOOL: &str = "tool";
 
 /// Identity tags: constant for the entire session, deduplicated to one
 /// assistant message per session.
@@ -30,6 +29,5 @@ pub const SESSION_IDENTITY_KEYS: &[&str] = &[
     COMPOSER_MODE,
     PERMISSION_MODE,
     DURATION,
-    DOMINANT_TOOL,
     SESSION_TITLE,
 ];

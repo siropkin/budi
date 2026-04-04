@@ -35,6 +35,8 @@ fn default_period() -> String {
 pub struct BranchRequest {
     /// Git branch name to query
     pub branch: String,
+    /// Optional repository filter (recommended when branch names exist in multiple repos)
+    pub repo_id: Option<String>,
     /// Time period: "today", "week", "month", "all". Default: "month"
     #[serde(default = "default_period")]
     pub period: String,
@@ -42,7 +44,7 @@ pub struct BranchRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TagRequest {
-    /// Tag key to break down by (e.g. "ticket_id", "activity", "user", "composer_mode", "permission_mode", "duration", "dominant_tool", "cost_confidence")
+    /// Tag key to break down by (e.g. "ticket_id", "activity", "user", "composer_mode", "permission_mode", "duration", "tool", "cost_confidence")
     pub key: String,
     /// Time period: "today", "week", "month", "all". Default: "month"
     #[serde(default = "default_period")]
@@ -336,7 +338,10 @@ impl BudiMcpServer {
         let period_label = period_label(&params.0.period);
         let branch = &params.0.branch;
 
-        let query = build_params(since.as_deref(), until.as_deref());
+        let mut query = build_params(since.as_deref(), until.as_deref());
+        if let Some(repo) = params.0.repo_id.as_deref() {
+            query.push(("repo_id".to_string(), repo.to_string()));
+        }
         let url = format!("/analytics/branches/{}", urlencoding_simple(branch));
         let result: Value = match self.daemon_get_raw(&url, &query) {
             Ok((status, body)) => {
@@ -388,7 +393,7 @@ impl BudiMcpServer {
     }
 
     #[tool(
-        description = "Get cost breakdown by tag. Tags include: ticket_id, activity (bugfix/feature/refactor/question/ops), user, composer_mode, permission_mode, duration (short/medium/long), dominant_tool, cost_confidence, and custom tags."
+        description = "Get cost breakdown by tag. Tags include: ticket_id, activity (bugfix/feature/refactor/question/ops), user, composer_mode, permission_mode, duration (short/medium/long), tool, cost_confidence, and custom tags."
     )]
     async fn get_tag_breakdown(
         &self,
@@ -659,8 +664,13 @@ impl BudiMcpServer {
             .map_err(|e| McpError::invalid_params(format!("Invalid TOML: {e}"), None))?;
 
         let mut warnings = Vec::new();
-        let auto_keys = &[
+        let reserved_keys = &[
+            // Canonical dimensions backed by message/session columns.
             "repo",
+            "repo_id",
+            "branch",
+            "git_branch",
+            // Auto-generated tags.
             "ticket_id",
             "ticket_prefix",
             "user",
@@ -675,7 +685,7 @@ impl BudiMcpServer {
             "activity",
             "user_email",
             "duration",
-            "dominant_tool",
+            "tool",
         ];
         for rule in &config.rules {
             if rule.key.is_empty() || rule.value.is_empty() {
@@ -684,9 +694,9 @@ impl BudiMcpServer {
                     rule.key, rule.value
                 ));
             }
-            if auto_keys.contains(&rule.key.as_str()) {
+            if reserved_keys.contains(&rule.key.as_str()) {
                 warnings.push(format!(
-                    "Key {:?} collides with auto-generated tag; custom value may conflict",
+                    "Key {:?} collides with a built-in analytics dimension/tag; custom value may conflict",
                     rule.key
                 ));
             }

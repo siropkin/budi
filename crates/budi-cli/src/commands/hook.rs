@@ -4,7 +4,7 @@
 
 use std::io::Read;
 
-use budi_core::config;
+use budi_core::{config, identity};
 
 pub fn cmd_hook() -> anyhow::Result<()> {
     let mut input = String::new();
@@ -107,6 +107,10 @@ fn update_cursor_session_state(json: &serde_json::Value) {
     let Some(session_id) = session_id else {
         return;
     };
+    let session_id = identity::normalize_session_id(session_id);
+    if session_id.is_empty() {
+        return;
+    }
 
     let workspace = json
         .get("workspace_roots")
@@ -118,13 +122,13 @@ fn update_cursor_session_state(json: &serde_json::Value) {
     match event {
         "sessionStart" => {
             let composer_mode = json.get("composer_mode").and_then(|v| v.as_str());
-            session_state_upsert(session_id, workspace, composer_mode, true);
+            session_state_upsert(&session_id, workspace, composer_mode, true);
         }
         "sessionEnd" => {
-            session_state_mark_inactive(session_id);
+            session_state_mark_inactive(&session_id);
         }
         _ => {
-            session_state_touch(session_id, workspace);
+            session_state_touch(&session_id, workspace);
         }
     }
 }

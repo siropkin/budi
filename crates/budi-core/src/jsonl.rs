@@ -62,6 +62,7 @@ pub(crate) struct AssistantMessage {
     /// blocks (thinking, text, tool_use). We deduplicate by this field.
     pub id: Option<String>,
     pub model: Option<String>,
+    pub content: Option<Vec<serde_json::Value>>,
     pub usage: Option<TokenUsage>,
 }
 
@@ -139,6 +140,8 @@ pub struct ParsedMessage {
     /// Classified activity type from user prompt text (e.g. "bugfix", "feature").
     /// Set during JSONL parsing or from hook events. Propagated user→assistant in pipeline.
     pub prompt_category: Option<String>,
+    /// Tool names used by this assistant message (may contain multiple values).
+    pub tool_names: Vec<String>,
 }
 
 impl Default for ParsedMessage {
@@ -168,8 +171,33 @@ impl Default for ParsedMessage {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         }
     }
+}
+
+fn extract_assistant_tool_names(content: Option<&Vec<serde_json::Value>>) -> Vec<String> {
+    let mut names = std::collections::HashSet::new();
+    let Some(blocks) = content else {
+        return Vec::new();
+    };
+
+    for block in blocks {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if block_type != "tool_use" {
+            continue;
+        }
+        if let Some(name) = block.get("name").and_then(|v| v.as_str()) {
+            let normalized = name.trim();
+            if !normalized.is_empty() {
+                names.insert(normalized.to_string());
+            }
+        }
+    }
+
+    let mut out: Vec<String> = names.into_iter().collect();
+    out.sort();
+    out
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -204,7 +232,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 .and_then(crate::hooks::classify_prompt);
             Some(ParsedMessage {
                 uuid: u.uuid,
-                session_id: u.session_id,
+                session_id: crate::identity::normalize_optional_session_id(u.session_id.as_deref()),
                 timestamp: u.timestamp,
                 cwd: u.cwd,
                 role: "user".to_string(),
@@ -227,6 +255,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
                 prompt_category,
+                tool_names: Vec::new(),
             })
         }
         TranscriptEntry::Assistant(a) => {
@@ -245,7 +274,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 .unwrap_or(0);
             Some(ParsedMessage {
                 uuid: a.uuid,
-                session_id: a.session_id,
+                session_id: crate::identity::normalize_optional_session_id(a.session_id.as_deref()),
                 timestamp: a.timestamp,
                 cwd: a.cwd,
                 role: "assistant".to_string(),
@@ -270,6 +299,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 cache_creation_1h_tokens: cache_1h,
                 web_search_requests: web_searches,
                 prompt_category: None,
+                tool_names: extract_assistant_tool_names(a.message.content.as_ref()),
             })
         }
         TranscriptEntry::Other => None,
@@ -378,6 +408,7 @@ mod tests {
         assert_eq!(msg.cache_creation_tokens, 200);
         assert_eq!(msg.cache_read_tokens, 300);
         assert_eq!(msg.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(msg.tool_names, vec!["Read".to_string()]);
     }
 
     #[test]

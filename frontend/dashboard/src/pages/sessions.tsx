@@ -166,6 +166,13 @@ export function SessionsPage() {
                 const duration = fmtDurationMs(session.duration_ms);
                 const tokenCount = (session.input_tokens ?? 0) + (session.output_tokens ?? 0);
                 const branch = session.git_branch?.replace(/^refs\/heads\//, "") || "--";
+                const repoCount = session.repo_count ?? 0;
+                const branchCount = session.git_branch_count ?? 0;
+                const repoLabel =
+                  repoCount > 1
+                    ? `${repoName(session.repo_id)} +${repoCount - 1}`
+                    : repoName(session.repo_id);
+                const branchLabel = branchCount > 1 ? `${branch} +${branchCount - 1}` : branch;
 
                 return (
                   <TableRow
@@ -186,8 +193,8 @@ export function SessionsPage() {
                     <TableCell className={SESSION_CELL_CLASS}>{duration}</TableCell>
                     {multiProvider ? <TableCell className={SESSION_CELL_CLASS}>{providerDisplay}</TableCell> : null}
                     <TableCell className={SESSION_CELL_CLASS} title={rawModel}>{modelSummary}</TableCell>
-                    <TableCell className={SESSION_CELL_CLASS} title={session.repo_id ?? ""}>{repoName(session.repo_id)}</TableCell>
-                    <TableCell className={SESSION_CELL_CLASS} title={branch}>{branch}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS} title={session.repo_id ?? ""}>{repoLabel}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS} title={branch}>{branchLabel}</TableCell>
                     <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtNum(tokenCount)}</TableCell>
                     <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtCost((session.cost_cents ?? 0) / 100)}</TableCell>
                   </TableRow>

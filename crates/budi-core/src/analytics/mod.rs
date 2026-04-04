@@ -188,6 +188,10 @@ pub fn ingest_messages_with_sync(
     for (i, msg) in messages.iter().enumerate() {
         // Insert message (skip duplicates).
         let ts = msg.timestamp.to_rfc3339();
+        let normalized_session_id = msg
+            .session_id
+            .as_deref()
+            .map(crate::identity::normalize_session_id);
         // cost_cents is set by CostEnricher in the pipeline before ingest
         let cost_cents = msg.cost_cents;
         // Strip refs/heads/ prefix from git_branch at write time
@@ -200,20 +204,20 @@ pub fn ingest_messages_with_sync(
         // model + close timestamp but different UUID), don't insert a duplicate. Instead,
         // enrich the OTEL row with JSONL-only context (parent_uuid, cwd, git_branch)
         // that OTEL doesn't carry.
-        if msg.role == "assistant" && msg.session_id.is_some() && msg.model.is_some() {
+        if msg.role == "assistant" && normalized_session_id.is_some() && msg.model.is_some() {
             // Pre-compute ±1 second window for index-friendly range predicates
             let ts_lo = (msg.timestamp - chrono::Duration::seconds(1)).to_rfc3339();
             let ts_hi = (msg.timestamp + chrono::Duration::seconds(1)).to_rfc3339();
             let otel_uuid: Option<String> = tx
                 .query_row(
                     "SELECT uuid FROM messages
-                     WHERE session_id = ?1
+                    WHERE session_id = ?1
                        AND model = ?2
                        AND role = 'assistant'
                        AND cost_confidence = 'otel_exact'
                        AND timestamp BETWEEN ?3 AND ?4
                      LIMIT 1",
-                    params![msg.session_id, msg.model, ts_lo, ts_hi],
+                    params![normalized_session_id.as_deref(), msg.model, ts_lo, ts_hi],
                     |row| row.get(0),
                 )
                 .ok();
@@ -259,7 +263,7 @@ pub fn ingest_messages_with_sync(
             let existing: Option<(String, i64)> = tx
                 .query_row(
                     "SELECT uuid, output_tokens FROM messages WHERE request_id = ?1 AND (?2 IS NULL OR session_id = ?2) LIMIT 1",
-                    params![request_id, msg.session_id],
+                    params![request_id, normalized_session_id.as_deref()],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .ok();
@@ -298,7 +302,7 @@ pub fn ingest_messages_with_sync(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 msg.uuid,
-                msg.session_id,
+                normalized_session_id.as_deref(),
                 msg.role,
                 ts,
                 msg.model,
@@ -340,12 +344,15 @@ pub fn ingest_messages_with_sync(
         let mut session_categories: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for msg in messages {
-            if let Some(ref sid) = msg.session_id {
+            if let Some(sid) = msg
+                .session_id
+                .as_deref()
+                .map(crate::identity::normalize_session_id)
+                .filter(|sid| !sid.is_empty())
+            {
                 seen_sessions.insert((sid.clone(), msg.provider.clone()));
                 if let Some(ref cat) = msg.prompt_category {
-                    session_categories
-                        .entry(sid.clone())
-                        .or_insert_with(|| cat.clone());
+                    session_categories.entry(sid).or_insert_with(|| cat.clone());
                 }
             }
         }

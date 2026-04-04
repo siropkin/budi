@@ -47,17 +47,8 @@ impl Enricher for GitEnricher {
             }
             if let Some(ref cwd) = msg.cwd {
                 let repo_id = self.repo_cache.resolve(Path::new(cwd));
-                msg.repo_id = Some(repo_id.clone());
-                tags.push(Tag {
-                    key: tk::REPO.to_string(),
-                    value: repo_id,
-                });
+                msg.repo_id = Some(repo_id);
             }
-        } else if let Some(ref repo_id) = msg.repo_id {
-            tags.push(Tag {
-                key: tk::REPO.to_string(),
-                value: repo_id.clone(),
-            });
         }
 
         // Extract ticket_id from git_branch (branch itself is stored as a column, not a tag)
@@ -76,6 +67,36 @@ impl Enricher for GitEnricher {
             }
         }
 
+        tags
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolEnricher — emits per-message tool tags from parsed tool names
+// ---------------------------------------------------------------------------
+
+pub struct ToolEnricher;
+
+impl Enricher for ToolEnricher {
+    fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
+        if msg.role != "assistant" {
+            return Vec::new();
+        }
+
+        let mut dedup = std::collections::HashSet::new();
+        let mut tags = Vec::new();
+        for tool in &msg.tool_names {
+            let normalized = tool.trim();
+            if normalized.is_empty() {
+                continue;
+            }
+            if dedup.insert(normalized.to_string()) {
+                tags.push(Tag {
+                    key: tk::TOOL.to_string(),
+                    value: normalized.to_string(),
+                });
+            }
+        }
         tags
     }
 }
@@ -381,13 +402,6 @@ impl Enricher for HookEnricher {
                 value: bucket.to_string(),
             });
         }
-        if let Some(ref tool) = meta.dominant_tool {
-            tags.push(Tag {
-                key: tk::DOMINANT_TOOL.to_string(),
-                value: tool.clone(),
-            });
-        }
-
         tags
     }
 }
@@ -505,7 +519,7 @@ mod tests {
             tags.iter()
                 .any(|t| t.key == "ticket_prefix" && t.value == "PAVA")
         );
-        // branch should NOT be emitted as a tag (stored as column only)
+        assert!(!tags.iter().any(|t| t.key == "repo"));
         assert!(!tags.iter().any(|t| t.key == "branch"));
     }
 

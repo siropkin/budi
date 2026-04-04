@@ -160,6 +160,7 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
                 if session_id.is_empty() {
                     continue;
                 }
+                let session_id = crate::identity::normalize_session_id(&session_id);
 
                 let timestamp_nano = record.time_unix_nano.as_deref().unwrap_or("0").to_string();
                 let timestamp = match parse_timestamp_nano(&timestamp_nano) {

@@ -636,17 +636,25 @@ pub fn branch_cost(
 pub fn branch_cost_single(
     conn: &Connection,
     branch: &str,
+    repo_id: Option<&str>,
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Option<BranchCost>> {
     let branch_stripped = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    let branch_with_ref = format!("refs/heads/{branch_stripped}");
 
     let mut conditions = vec![
         "role = 'assistant'".to_string(),
-        "git_branch = ?1".to_string(),
+        "(git_branch = ?1 OR git_branch = ?2)".to_string(),
     ];
-    let mut param_values: Vec<String> = vec![branch_stripped.to_string()];
-    let mut idx = 1usize;
+    let mut param_values: Vec<String> = vec![branch_stripped.to_string(), branch_with_ref];
+    let mut idx = 2usize;
+
+    if let Some(repo) = repo_id {
+        idx += 1;
+        conditions.push(format!("COALESCE(repo_id, '') = ?{idx}"));
+        param_values.push(repo.to_string());
+    }
 
     if let Some(s) = since {
         idx += 1;
@@ -660,21 +668,40 @@ pub fn branch_cost_single(
     }
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
-    let sql = format!(
-        "SELECT git_branch, COALESCE(repo_id, '') as repo,
-                COUNT(DISTINCT session_id) as sess,
-                COUNT(*) as cnt,
-                COALESCE(SUM(input_tokens), 0) as inp,
-                COALESCE(SUM(output_tokens), 0) as outp,
-                COALESCE(SUM(cache_read_tokens), 0) as cache_r,
-                COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
-                COALESCE(SUM(cost_cents), 0.0) as cost
-         FROM messages
-         {where_clause}
-         GROUP BY git_branch, COALESCE(repo_id, '')
-         ORDER BY cost DESC
-         LIMIT 1",
-    );
+    let sql = if repo_id.is_some() {
+        format!(
+            "SELECT ?1 as git_branch, COALESCE(repo_id, '') as repo,
+                    COUNT(DISTINCT session_id) as sess,
+                    COUNT(*) as cnt,
+                    COALESCE(SUM(input_tokens), 0) as inp,
+                    COALESCE(SUM(output_tokens), 0) as outp,
+                    COALESCE(SUM(cache_read_tokens), 0) as cache_r,
+                    COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
+                    COALESCE(SUM(cost_cents), 0.0) as cost
+             FROM messages
+             {where_clause}
+             GROUP BY COALESCE(repo_id, '')
+             LIMIT 1",
+        )
+    } else {
+        format!(
+            "SELECT ?1 as git_branch,
+                    CASE WHEN COUNT(DISTINCT COALESCE(repo_id, '')) = 1
+                         THEN COALESCE(MIN(repo_id), '')
+                         ELSE '' END as repo,
+                    COUNT(DISTINCT session_id) as sess,
+                    COUNT(*) as cnt,
+                    COALESCE(SUM(input_tokens), 0) as inp,
+                    COALESCE(SUM(output_tokens), 0) as outp,
+                    COALESCE(SUM(cache_read_tokens), 0) as cache_r,
+                    COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
+                    COALESCE(SUM(cost_cents), 0.0) as cost
+             FROM messages
+             {where_clause}
+             GROUP BY ?1
+             LIMIT 1",
+        )
+    };
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
@@ -731,6 +758,21 @@ pub fn tag_stats(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TagCost>> {
+    // Repo/branch attribution must come from message columns, not tag fanout.
+    // This guarantees one message contributes its full cost to its real repo/branch,
+    // even if a message carries extra tags with the same key.
+    if let Some(key) = tag_key {
+        match key {
+            "repo" | "repo_id" => {
+                return tag_stats_repo_from_messages(conn, key, since, until, limit);
+            }
+            "branch" | "git_branch" => {
+                return tag_stats_branch_from_messages(conn, key, since, until, limit);
+            }
+            _ => {}
+        }
+    }
+
     let mut param_values: Vec<String> = Vec::new();
     let mut idx = 0usize;
 
@@ -800,7 +842,7 @@ pub fn tag_stats(
     // multi-value tags (e.g. two ticket IDs on one message) split cost fairly.
     // The all-keys overview uses a direct sum — 2x faster on 500K+ rows.
     // NOTE: the all-keys path shows per-key totals; since one message carries
-    // multiple keys (provider, model, repo, …), cost appears under each key
+    // multiple keys (provider, model, tool, …), cost appears under each key
     // independently. This is intentional — callers should filter by key for
     // accurate per-value cost attribution.
     let sql = if tag_key.is_some() {
@@ -855,6 +897,127 @@ pub fn tag_stats(
         .filter_map(|r| r.ok())
         .collect();
 
+    Ok(rows)
+}
+
+fn tag_stats_repo_from_messages(
+    conn: &Connection,
+    key_label: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TagCost>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+
+    if let Some(s) = since {
+        idx += 1;
+        conditions.push(format!("timestamp >= ?{idx}"));
+        param_values.push(s.to_string());
+    }
+    if let Some(u) = until {
+        idx += 1;
+        conditions.push(format!("timestamp < ?{idx}"));
+        param_values.push(u.to_string());
+    }
+    param_values.push(limit.to_string());
+    let limit_idx = param_values.len();
+
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let sql = format!(
+        "SELECT '{key_label}' as key,
+                COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '(untagged)') as value,
+                COUNT(DISTINCT session_id) as session_count,
+                COALESCE(SUM(cost_cents), 0.0) as total_cost_cents
+         FROM messages
+         {where_clause}
+         GROUP BY value
+         ORDER BY total_cost_cents DESC
+         LIMIT ?{limit_idx}",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(TagCost {
+                key: row.get(0)?,
+                value: row.get(1)?,
+                session_count: row.get(2)?,
+                cost_cents: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+fn tag_stats_branch_from_messages(
+    conn: &Connection,
+    key_label: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TagCost>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+
+    if let Some(s) = since {
+        idx += 1;
+        conditions.push(format!("timestamp >= ?{idx}"));
+        param_values.push(s.to_string());
+    }
+    if let Some(u) = until {
+        idx += 1;
+        conditions.push(format!("timestamp < ?{idx}"));
+        param_values.push(u.to_string());
+    }
+    param_values.push(limit.to_string());
+    let limit_idx = param_values.len();
+
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let sql = format!(
+        "SELECT '{key_label}' as key,
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN git_branch LIKE 'refs/heads/%' THEN SUBSTR(git_branch, 12)
+                            ELSE git_branch
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ) as value,
+                COUNT(DISTINCT session_id) as session_count,
+                COALESCE(SUM(cost_cents), 0.0) as total_cost_cents
+         FROM messages
+         {where_clause}
+         GROUP BY value
+         ORDER BY total_cost_cents DESC
+         LIMIT ?{limit_idx}",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(TagCost {
+                key: row.get(0)?,
+                value: row.get(1)?,
+                session_count: row.get(2)?,
+                cost_cents: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(rows)
 }
 
@@ -998,9 +1161,13 @@ pub fn statusline_stats(
     let today_cost = cost_since(conn, today);
     let week_cost = cost_since(conn, week_start);
     let month_cost = cost_since(conn, month_start);
+    let normalized_session_id = params
+        .session_id
+        .as_deref()
+        .map(crate::identity::normalize_session_id);
 
     // Session cost: total cost for a specific session
-    let session_cost = params.session_id.as_ref().map(|sid| {
+    let session_cost = normalized_session_id.as_ref().map(|sid| {
         conn.query_row(
             "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE session_id = ?1 AND role = 'assistant'",
             [sid],
@@ -1044,8 +1211,7 @@ pub fn statusline_stats(
         )
         .ok();
 
-    let (health_state, health_tip, session_msg_cost) = params
-        .session_id
+    let (health_state, health_tip, session_msg_cost) = normalized_session_id
         .as_ref()
         .and_then(|sid| super::health::session_health(conn, Some(sid)).ok())
         .map(|h| {

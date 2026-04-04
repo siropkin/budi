@@ -111,9 +111,31 @@ export interface SessionRow {
   model: string;
   repo_id: string | null;
   git_branch: string | null;
+  repo_count?: number | null;
+  git_branch_count?: number | null;
   input_tokens: number;
   output_tokens: number;
   cost_cents: number;
+}
+
+export interface SessionDetailRow {
+  session_id: string;
+  provider: string;
+  title: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_ms: number | null;
+  model: string | null;
+  repo_id: string | null;
+  git_branch: string | null;
+  repo_count?: number | null;
+  git_branch_count?: number | null;
+  repo_ids?: string[] | null;
+  git_branches?: string[] | null;
+  input_tokens: number;
+  output_tokens: number;
+  cost_cents: number;
+  message_count: number;
 }
 
 export interface SessionsResponse {
@@ -122,13 +144,17 @@ export interface SessionsResponse {
 }
 
 export interface MessageRow {
+  uuid?: string;
+  role?: string;
   timestamp: string;
   provider: string;
-  model: string;
+  model: string | null;
   input_tokens: number;
   output_tokens: number;
   cost_cents: number;
   cost_confidence?: string;
+  repo_id?: string | null;
+  git_branch?: string | null;
 }
 
 export interface SessionTag {

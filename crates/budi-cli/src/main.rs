@@ -73,6 +73,7 @@ Examples:
   budi stats -p month --models     Model breakdown for the month
   budi stats --branches            Branches ranked by cost (today)
   budi stats --branch main         Cost details for a specific branch
+  budi stats --branch main --repo github.com/acme/app
   budi stats --projects -p all     All-time project costs
   budi stats --tag activity        Cost by activity type
   budi stats --provider cursor     Filter to Cursor only
@@ -91,6 +92,9 @@ Examples:
         /// Show cost for a specific branch
         #[arg(long)]
         branch: Option<String>,
+        /// Optional repository filter for --branch (recommended when branch names repeat)
+        #[arg(long, requires = "branch")]
+        repo: Option<String>,
         /// Show model usage breakdown
         #[arg(long, default_value_t = false)]
         models: bool,
@@ -268,6 +272,7 @@ fn main() -> Result<()> {
             projects,
             branches,
             branch,
+            repo,
             models,
             provider,
             tag,
@@ -279,6 +284,7 @@ fn main() -> Result<()> {
                 projects,
                 branches,
                 branch,
+                repo,
                 models,
                 provider,
                 tag,

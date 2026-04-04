@@ -31,6 +31,13 @@ pub struct DateRangeParams {
 }
 
 #[derive(serde::Deserialize)]
+pub struct BranchDetailParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub repo_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 pub struct SummaryParams {
     pub since: Option<String>,
     pub until: Option<String>,
@@ -423,7 +430,7 @@ pub async fn analytics_tags(
 
 pub async fn analytics_branch_detail(
     Path(branch): Path<String>,
-    Query(params): Query<DateRangeParams>,
+    Query(params): Query<BranchDetailParams>,
 ) -> Result<Json<analytics::BranchCost>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -431,6 +438,7 @@ pub async fn analytics_branch_detail(
         analytics::branch_cost_single(
             &conn,
             &branch,
+            params.repo_id.as_deref(),
             params.since.as_deref(),
             params.until.as_deref(),
         )
@@ -585,6 +593,25 @@ pub async fn analytics_sessions(
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
     Ok(Json(result))
+}
+
+pub async fn analytics_session_detail(
+    Path(session_id): Path<String>,
+) -> Result<Json<analytics::SessionListEntry>, (StatusCode, Json<serde_json::Value>)> {
+    let sid = session_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_detail(&conn, &sid)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    match result {
+        Some(session) => Ok(Json(session)),
+        None => Err(not_found(format!("session '{session_id}' not found"))),
+    }
 }
 
 pub async fn analytics_session_tags(

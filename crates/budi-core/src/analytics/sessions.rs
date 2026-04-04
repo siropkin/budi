@@ -102,6 +102,14 @@ pub struct SessionListEntry {
     pub provider: String,
     pub repo_id: Option<String>,
     pub git_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branch_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_branches: Option<Vec<String>>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,8 +244,66 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                          GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
                      ) sub) as models_by_cost,
                     COALESCE(MAX(m.provider), 'claude_code') as provider,
-                    COALESCE(MAX(m.repo_id), MAX(s.repo_id)) as repo_id,
-                    COALESCE(MAX(m.git_branch), MAX(s.git_branch)) as git_branch,
+                    COALESCE(
+                        (
+                            SELECT m2.repo_id
+                            FROM messages m2
+                            WHERE m2.session_id = m.session_id
+                              AND m2.role = 'assistant'
+                              AND m2.repo_id IS NOT NULL
+                              AND m2.repo_id != ''
+                              AND m2.repo_id != 'unknown'
+                            GROUP BY m2.repo_id
+                            ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                            LIMIT 1
+                        ),
+                        MAX(s.repo_id)
+                    ) as repo_id,
+                    COALESCE(
+                        (
+                            SELECT branch_value
+                            FROM (
+                                SELECT
+                                    CASE
+                                        WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
+                                        ELSE m2.git_branch
+                                    END as branch_value,
+                                    SUM(m2.cost_cents) as branch_cost,
+                                    COUNT(*) as branch_count
+                                FROM messages m2
+                                WHERE m2.session_id = m.session_id
+                                  AND m2.role = 'assistant'
+                                  AND m2.git_branch IS NOT NULL
+                                  AND m2.git_branch != ''
+                                GROUP BY branch_value
+                                ORDER BY branch_cost DESC, branch_count DESC, branch_value ASC
+                                LIMIT 1
+                            ) dominant_branch
+                        ),
+                        MAX(s.git_branch)
+                    ) as git_branch,
+                    (
+                        SELECT COUNT(DISTINCT m2.repo_id)
+                        FROM messages m2
+                        WHERE m2.session_id = m.session_id
+                          AND m2.role = 'assistant'
+                          AND m2.repo_id IS NOT NULL
+                          AND m2.repo_id != ''
+                          AND m2.repo_id != 'unknown'
+                    ) as repo_count,
+                    (
+                        SELECT COUNT(DISTINCT
+                            CASE
+                                WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
+                                ELSE m2.git_branch
+                            END
+                        )
+                        FROM messages m2
+                        WHERE m2.session_id = m.session_id
+                          AND m2.role = 'assistant'
+                          AND m2.git_branch IS NOT NULL
+                          AND m2.git_branch != ''
+                    ) as git_branch_count,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
                     COALESCE(s.duration_ms,
@@ -253,7 +319,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
          SELECT COUNT(*) OVER() as total,
                 sa.session_id, sa.started_at, sa.ended_at, sa.duration_ms,
                 sa.msg_count, sa.cost, sa.models_by_cost, sa.provider, sa.repo_id, sa.git_branch,
-                sa.inp, sa.outp, sa.title
+                sa.repo_count, sa.git_branch_count, sa.inp, sa.outp, sa.title
          FROM session_agg sa
          ORDER BY {order_expr}
          LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -273,10 +339,14 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 provider: row.get::<_, String>(8)?,
                 repo_id: row.get(9)?,
                 git_branch: row.get(10)?,
-                input_tokens: row.get(11)?,
-                output_tokens: row.get(12)?,
+                repo_count: row.get(11)?,
+                git_branch_count: row.get(12)?,
+                repo_ids: None,
+                git_branches: None,
+                input_tokens: row.get(13)?,
+                output_tokens: row.get(14)?,
                 health_state: None,
-                title: row.get(13)?,
+                title: row.get(15)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -286,6 +356,184 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         sessions,
         total_count,
     })
+}
+
+/// Get a single session summary row for session detail metadata.
+pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<SessionListEntry>> {
+    let row = conn.query_row(
+        "WITH session_agg AS (
+             SELECT sid.session_id,
+                    COALESCE(MIN(m.timestamp), MAX(s.started_at)) as started_at,
+                    COALESCE(MAX(m.timestamp), MAX(s.ended_at)) as ended_at,
+                    COALESCE(
+                        MAX(s.duration_ms),
+                        CASE
+                            WHEN MIN(m.timestamp) IS NOT NULL AND MAX(m.timestamp) IS NOT NULL
+                            THEN CAST((julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400000 AS INTEGER)
+                            ELSE NULL
+                        END
+                    ) as duration_ms,
+                    COUNT(m.uuid) as msg_count,
+                    COALESCE(SUM(m.cost_cents), 0.0) as cost,
+                    (SELECT GROUP_CONCAT(sub.model, ',') FROM (
+                         SELECT m2.model FROM messages m2
+                         WHERE m2.session_id = sid.session_id AND m2.role = 'assistant'
+                           AND m2.model IS NOT NULL AND m2.model != '' AND SUBSTR(m2.model, 1, 1) != '<'
+                         GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
+                     ) sub) as models_by_cost,
+                    COALESCE(MAX(m.provider), MAX(s.provider), 'claude_code') as provider,
+                    COALESCE(
+                        (
+                            SELECT m2.repo_id
+                            FROM messages m2
+                            WHERE m2.session_id = sid.session_id
+                              AND m2.role = 'assistant'
+                              AND m2.repo_id IS NOT NULL
+                              AND m2.repo_id != ''
+                              AND m2.repo_id != 'unknown'
+                            GROUP BY m2.repo_id
+                            ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                            LIMIT 1
+                        ),
+                        MAX(s.repo_id)
+                    ) as repo_id,
+                    COALESCE(
+                        (
+                            SELECT branch_value
+                            FROM (
+                                SELECT
+                                    CASE
+                                        WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
+                                        ELSE m2.git_branch
+                                    END as branch_value,
+                                    SUM(m2.cost_cents) as branch_cost,
+                                    COUNT(*) as branch_count
+                                FROM messages m2
+                                WHERE m2.session_id = sid.session_id
+                                  AND m2.role = 'assistant'
+                                  AND m2.git_branch IS NOT NULL
+                                  AND m2.git_branch != ''
+                                GROUP BY branch_value
+                                ORDER BY branch_cost DESC, branch_count DESC, branch_value ASC
+                                LIMIT 1
+                            ) dominant_branch
+                        ),
+                        MAX(s.git_branch)
+                    ) as git_branch,
+                    (
+                        SELECT COUNT(DISTINCT m2.repo_id)
+                        FROM messages m2
+                        WHERE m2.session_id = sid.session_id
+                          AND m2.role = 'assistant'
+                          AND m2.repo_id IS NOT NULL
+                          AND m2.repo_id != ''
+                          AND m2.repo_id != 'unknown'
+                    ) as repo_count,
+                    (
+                        SELECT COUNT(DISTINCT
+                            CASE
+                                WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
+                                ELSE m2.git_branch
+                            END
+                        )
+                        FROM messages m2
+                        WHERE m2.session_id = sid.session_id
+                          AND m2.role = 'assistant'
+                          AND m2.git_branch IS NOT NULL
+                          AND m2.git_branch != ''
+                    ) as git_branch_count,
+                    COALESCE(SUM(m.input_tokens), 0) as inp,
+                    COALESCE(SUM(m.output_tokens), 0) as outp,
+                    MAX(s.title) as title
+             FROM (SELECT ?1 AS session_id) sid
+             LEFT JOIN sessions s ON s.session_id = sid.session_id
+             LEFT JOIN messages m ON m.session_id = sid.session_id AND m.role = 'assistant'
+             GROUP BY sid.session_id
+             HAVING COUNT(m.uuid) > 0 OR MAX(s.session_id) IS NOT NULL
+         )
+         SELECT session_id, started_at, ended_at, duration_ms, msg_count, cost,
+                models_by_cost, provider, repo_id, git_branch, repo_count, git_branch_count,
+                inp, outp, title
+         FROM session_agg",
+        params![session_id],
+        |row| {
+            Ok(SessionListEntry {
+                session_id: row.get(0)?,
+                started_at: row.get(1)?,
+                ended_at: row.get(2)?,
+                duration_ms: row.get(3)?,
+                message_count: row.get(4)?,
+                cost_cents: row.get(5)?,
+                model: row.get(6)?,
+                provider: row.get(7)?,
+                repo_id: row.get(8)?,
+                git_branch: row.get(9)?,
+                repo_count: row.get(10)?,
+                git_branch_count: row.get(11)?,
+                repo_ids: None,
+                git_branches: None,
+                input_tokens: row.get(12)?,
+                output_tokens: row.get(13)?,
+                health_state: None,
+                title: row.get(14)?,
+            })
+        },
+    );
+
+    match row {
+        Ok(mut entry) => {
+            let mut repo_stmt = conn.prepare(
+                "SELECT m.repo_id
+                 FROM messages m
+                 WHERE m.session_id = ?1
+                   AND m.role = 'assistant'
+                   AND m.repo_id IS NOT NULL
+                   AND m.repo_id != ''
+                   AND m.repo_id != 'unknown'
+                 GROUP BY m.repo_id
+                 ORDER BY SUM(m.cost_cents) DESC, COUNT(*) DESC, m.repo_id ASC",
+            )?;
+            let repo_ids: Vec<String> = repo_stmt
+                .query_map(params![session_id], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !repo_ids.is_empty() {
+                entry.repo_count = Some(repo_ids.len() as u64);
+                entry.repo_ids = Some(repo_ids);
+            }
+
+            let mut branch_stmt = conn.prepare(
+                "SELECT branch_value FROM (
+                    SELECT
+                        CASE
+                            WHEN m.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m.git_branch, 12)
+                            ELSE m.git_branch
+                        END as branch_value,
+                        SUM(m.cost_cents) as branch_cost,
+                        COUNT(*) as branch_count
+                    FROM messages m
+                    WHERE m.session_id = ?1
+                      AND m.role = 'assistant'
+                      AND m.git_branch IS NOT NULL
+                      AND m.git_branch != ''
+                    GROUP BY branch_value
+                    ORDER BY branch_cost DESC, branch_count DESC, branch_value ASC
+                )",
+            )?;
+            let git_branches: Vec<String> = branch_stmt
+                .query_map(params![session_id], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !git_branches.is_empty() {
+                entry.git_branch_count = Some(git_branches.len() as u64);
+                entry.git_branches = Some(git_branches);
+            }
+
+            Ok(Some(entry))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +547,8 @@ pub fn session_tags(conn: &Connection, session_id: &str) -> Result<Vec<(String, 
          FROM tags t
          JOIN messages m ON t.message_uuid = m.uuid
          WHERE m.session_id = ?1
-         ORDER BY t.key, t.value",
+           AND t.key NOT IN ('repo', 'branch', 'dominant_tool')
+         ORDER BY key, value",
     )?;
     let rows = stmt
         .query_map(params![session_id], |row| {

@@ -30,12 +30,14 @@ impl Pipeline {
         //   1. HookEnricher  — populates session-level metadata (composer_mode, etc.)
         //   2. IdentityEnricher — populates user/machine tags
         //   3. GitEnricher   — sets repo_id for glob_match (MUST run before TagEnricher)
-        //   4. CostEnricher  — calculates cost_cents and cost_confidence
-        //   5. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
+        //   4. ToolEnricher  — emits per-message tool tags from parsed tool calls
+        //   5. CostEnricher  — calculates cost_cents and cost_confidence
+        //   6. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
         let enrichers: Vec<Box<dyn Enricher>> = vec![
             Box::new(enrichers::HookEnricher::new(session_cache)),
             Box::new(enrichers::IdentityEnricher::new()),
             Box::new(enrichers::GitEnricher::new()),
+            Box::new(enrichers::ToolEnricher),
             Box::new(enrichers::CostEnricher),
             Box::new(enrichers::TagEnricher::new(tags_config)),
         ];
@@ -48,7 +50,7 @@ impl Pipeline {
     /// Two kinds of tags:
     /// - **Identity tags** (user, machine, composer_mode, …): constant for the
     ///   whole session → deduplicated, emitted once on the first assistant msg.
-    /// - **Context tags** (repo, ticket_id, activity, …): can change mid-session
+    /// - **Context tags** (ticket_id, activity, tool, …): can change mid-session
     ///   → emitted on every assistant message so cost attribution is accurate.
     ///
     /// All tags land on assistant messages only (queries filter `role='assistant'`).
@@ -356,6 +358,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            tool_names: Vec::new(),
         }
     }
 
@@ -394,10 +397,6 @@ mod tests {
         );
 
         let asst_keys: Vec<&str> = all_tags[1].iter().map(|t| t.key.as_str()).collect();
-        assert!(
-            asst_keys.contains(&"repo"),
-            "missing repo, got: {asst_keys:?}"
-        );
         assert!(
             asst_keys.contains(&"ticket_id"),
             "missing ticket_id, got: {asst_keys:?}"
@@ -450,13 +449,9 @@ mod tests {
         let mut msgs = vec![u1, a1, u2, a2];
         let all_tags = pipeline.process(&mut msgs);
 
-        // Both assistant messages should have repo and ticket_id (context tags).
+        // Both assistant messages should have ticket_id (context tag).
         for (idx, label) in [(1, "a1"), (3, "a2")] {
             let keys: Vec<&str> = all_tags[idx].iter().map(|t| t.key.as_str()).collect();
-            assert!(
-                keys.contains(&"repo"),
-                "{label} should have 'repo' tag, got: {keys:?}"
-            );
             assert!(
                 keys.contains(&"ticket_id"),
                 "{label} should have 'ticket_id' tag, got: {keys:?}"
@@ -474,5 +469,37 @@ mod tests {
             "identity tag 'user' should be deduplicated, found {} occurrences",
             all_user_tags.len()
         );
+    }
+
+    #[test]
+    fn tool_tags_emit_all_tools_per_message() {
+        use crate::config::TagsConfig;
+        let mut pipeline = Pipeline::default_pipeline(
+            Some(TagsConfig::default()),
+            std::collections::HashMap::new(),
+        );
+
+        let mut msg = test_msg();
+        msg.uuid = "a1".into();
+        msg.session_id = Some("sess-1".into());
+        msg.role = "assistant".into();
+        msg.model = Some("claude-opus".into());
+        msg.tool_names = vec![
+            "Read".into(),
+            "Bash".into(),
+            "Read".into(), // duplicate should be deduped
+        ];
+
+        let mut msgs = vec![msg];
+        let tags = pipeline.process(&mut msgs);
+        let tool_values: std::collections::HashSet<String> = tags[0]
+            .iter()
+            .filter(|t| t.key == "tool")
+            .map(|t| t.value.clone())
+            .collect();
+
+        assert!(tool_values.contains("Read"));
+        assert!(tool_values.contains("Bash"));
+        assert_eq!(tool_values.len(), 2);
     }
 }

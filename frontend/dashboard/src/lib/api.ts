@@ -15,6 +15,7 @@ import type {
   ProviderStats,
   RegisteredProvider,
   SchemaVersion,
+  SessionDetailRow,
   SessionCurveRow,
   SessionHealth,
   SessionsResponse,
@@ -147,6 +148,10 @@ export async function fetchSessions(
 
 export async function fetchSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRow[]> {
   return fetchJson<MessageRow[]>(`/analytics/sessions/${encodeURIComponent(sessionId)}/messages`, signal ? { signal } : undefined);
+}
+
+export async function fetchSessionDetail(sessionId: string, signal?: AbortSignal): Promise<SessionDetailRow> {
+  return fetchJson<SessionDetailRow>(`/analytics/sessions/${encodeURIComponent(sessionId)}`, signal ? { signal } : undefined);
 }
 
 export async function fetchSessionTags(sessionId: string, signal?: AbortSignal): Promise<SessionTag[]> {
