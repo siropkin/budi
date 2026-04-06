@@ -192,6 +192,9 @@ export interface SchemaVersion {
 
 export interface SyncStatus {
   syncing: boolean;
+  last_sync_completed_at?: string;
+  newest_data_at?: string;
+  // Deprecated server alias kept for backwards compatibility.
   last_synced?: string;
 }
 

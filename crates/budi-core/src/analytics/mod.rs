@@ -24,6 +24,10 @@ use rusqlite::{Connection, params};
 
 use crate::jsonl::ParsedMessage;
 
+/// Sentinel row key in `sync_state` that stores the timestamp of the most
+/// recent successful sync completion (independent of per-file offsets).
+pub const SYNC_COMPLETION_MARKER_KEY: &str = "__budi_sync_completed__";
+
 /// Open the analytics database with pragmas only (no migration).
 /// Use `open_db_with_migration` for paths that should auto-migrate.
 pub fn open_db(db_path: &Path) -> Result<Connection> {
@@ -75,6 +79,41 @@ pub fn set_sync_offset(conn: &Connection, file_path: &str, offset: usize) -> Res
         params![file_path, offset as i64, now],
     )?;
     Ok(())
+}
+
+/// Record that a full sync run completed successfully at the current time.
+pub fn mark_sync_completed(conn: &Connection) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO sync_state (file_path, byte_offset, last_synced)
+         VALUES (?1, 0, ?2)
+         ON CONFLICT(file_path) DO UPDATE SET last_synced = ?2",
+        params![SYNC_COMPLETION_MARKER_KEY, now],
+    )?;
+    Ok(())
+}
+
+/// Return the timestamp of the latest successful sync completion.
+pub fn last_sync_completed_at(conn: &Connection) -> Result<Option<String>> {
+    match conn.query_row(
+        "SELECT last_synced FROM sync_state WHERE file_path = ?1",
+        params![SYNC_COMPLETION_MARKER_KEY],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(ts) => Ok(Some(ts)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Return the timestamp of the newest ingested assistant message, if any.
+pub fn newest_ingested_data_at(conn: &Connection) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT MAX(timestamp) FROM messages WHERE role = 'assistant'",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .map_err(Into::into)
 }
 
 /// Reset sync state and re-ingested data so the next sync starts from scratch.

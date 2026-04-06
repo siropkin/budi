@@ -20,7 +20,7 @@ function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
-      <Toaster richColors position="bottom-right" />
+      <Toaster richColors position="top-right" />
     </>
   );
 }

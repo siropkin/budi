@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::internal_error;
@@ -24,6 +24,9 @@ pub struct SyncResponse {
 #[derive(serde::Serialize)]
 pub struct SyncStatusResponse {
     pub syncing: bool,
+    pub last_sync_completed_at: Option<String>,
+    pub newest_data_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_synced: Option<String>,
 }
 
@@ -127,6 +130,88 @@ fn shell_quote(arg: &str) -> String {
         return arg.to_string();
     }
     format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+const CURSOR_EXTENSION_ID: &str = "siropkin.budi";
+
+fn cursor_cli_candidates() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            "cursor",
+            "/usr/local/bin/cursor",
+            "/opt/homebrew/bin/cursor",
+        ]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &["cursor"]
+    }
+}
+
+fn output_has_cursor_extension(output: &str) -> bool {
+    output.lines().any(|line| {
+        let normalized = line.trim().split('@').next().unwrap_or("").trim();
+        normalized.eq_ignore_ascii_case(CURSOR_EXTENSION_ID)
+    })
+}
+
+fn manifest_has_cursor_extension(raw: &str) -> bool {
+    let manifest: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    manifest.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry
+                .get("identifier")
+                .and_then(|id| id.get("id"))
+                .and_then(|id| id.as_str())
+                .is_some_and(|id| id.eq_ignore_ascii_case(CURSOR_EXTENSION_ID))
+        })
+    })
+}
+
+fn cursor_extension_installed_via_cli() -> Option<bool> {
+    for candidate in cursor_cli_candidates() {
+        let Ok(output) = std::process::Command::new(candidate)
+            .arg("--list-extensions")
+            .output()
+        else {
+            continue;
+        };
+        if output.status.success() {
+            let out = String::from_utf8_lossy(&output.stdout);
+            return Some(output_has_cursor_extension(&out));
+        }
+    }
+    None
+}
+
+fn cursor_extension_installed_via_filesystem(home: &str) -> bool {
+    let extensions_dir = Path::new(home).join(".cursor").join("extensions");
+    if let Ok(entries) = std::fs::read_dir(&extensions_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                let lower = name.to_ascii_lowercase();
+                if lower == CURSOR_EXTENSION_ID
+                    || lower.starts_with(&format!("{CURSOR_EXTENSION_ID}-"))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    let manifest_path = extensions_dir.join("extensions.json");
+    std::fs::read_to_string(manifest_path)
+        .ok()
+        .is_some_and(|raw| manifest_has_cursor_extension(&raw))
+}
+
+fn is_cursor_extension_installed(home: &str) -> bool {
+    cursor_extension_installed_via_cli().unwrap_or(false)
+        || cursor_extension_installed_via_filesystem(home)
 }
 
 pub async fn health() -> Json<HealthResponse> {
@@ -442,17 +527,7 @@ pub async fn health_integrations()
             });
 
         // Cursor extension
-        let cursor_extension = std::process::Command::new("cursor")
-            .arg("--list-extensions")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout);
-                out.lines()
-                    .any(|l| l.trim().eq_ignore_ascii_case("siropkin.budi"))
-            })
-            .unwrap_or(false);
+        let cursor_extension = is_cursor_extension_installed(&home);
 
         // Starship integration (optional shell prompt integration)
         let starship_path = format!("{home}/.config/starship.toml");
@@ -534,22 +609,52 @@ pub async fn health_integrations()
 
 pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusResponse> {
     let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
-    let last_synced = tokio::task::spawn_blocking(|| {
+    let status = tokio::task::spawn_blocking(|| {
         let db_path = budi_core::analytics::db_path().ok()?;
         let conn = budi_core::analytics::open_db(&db_path).ok()?;
-        conn.query_row("SELECT MAX(last_synced) FROM sync_state", [], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .ok()
-        .flatten()
+        Some((
+            budi_core::analytics::last_sync_completed_at(&conn)
+                .ok()
+                .flatten(),
+            budi_core::analytics::newest_ingested_data_at(&conn)
+                .ok()
+                .flatten(),
+        ))
     })
     .await
     .ok()
     .flatten();
+    let (last_sync_completed_at, newest_data_at) = status.unwrap_or((None, None));
     Json(SyncStatusResponse {
         syncing,
-        last_synced,
+        last_sync_completed_at: last_sync_completed_at.clone(),
+        newest_data_at,
+        last_synced: last_sync_completed_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{manifest_has_cursor_extension, output_has_cursor_extension};
+
+    #[test]
+    fn cursor_extension_cli_output_detection_handles_versioned_lines() {
+        let output = "ms-python.python\nsiropkin.budi@0.1.0\n";
+        assert!(output_has_cursor_extension(output));
+        assert!(!output_has_cursor_extension("ms-python.python\n"));
+    }
+
+    #[test]
+    fn cursor_extension_manifest_detection_finds_identifier() {
+        let raw = r#"[
+          {"identifier":{"id":"ms-python.python"},"version":"1.0.0"},
+          {"identifier":{"id":"siropkin.budi"},"version":"0.1.0"}
+        ]"#;
+        assert!(manifest_has_cursor_extension(raw));
+        assert!(!manifest_has_cursor_extension(
+            r#"[{"identifier":{"id":"ms-python.python"}}]"#
+        ));
+    }
 }
 
 #[derive(serde::Deserialize, Default)]

@@ -179,6 +179,19 @@ fn sync_offset_round_trip() {
 }
 
 #[test]
+fn sync_completion_marker_round_trip() {
+    let conn = test_db();
+    assert_eq!(last_sync_completed_at(&conn).unwrap(), None);
+    mark_sync_completed(&conn).unwrap();
+    let ts = last_sync_completed_at(&conn).unwrap();
+    assert!(ts.is_some());
+    assert_eq!(
+        get_sync_offset(&conn, SYNC_COMPLETION_MARKER_KEY).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn last_seen_derived_from_messages() {
     let mut conn = test_db();
     let msgs = vec![
@@ -249,6 +262,72 @@ fn last_seen_derived_from_messages() {
         )
         .unwrap();
     assert!(last_seen.contains("12:00:00"));
+}
+
+#[test]
+fn newest_ingested_data_uses_assistant_rows() {
+    let mut conn = test_db();
+    let msgs = vec![
+        ParsedMessage {
+            uuid: "u-only".to_string(),
+            session_id: Some("s-usage".to_string()),
+            timestamp: "2026-03-14T11:00:00Z".parse().unwrap(),
+            cwd: Some("/tmp".to_string()),
+            role: "user".to_string(),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: None,
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "exact".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+        },
+        ParsedMessage {
+            uuid: "a-only".to_string(),
+            session_id: Some("s-usage".to_string()),
+            timestamp: "2026-03-14T12:30:00Z".parse().unwrap(),
+            cwd: Some("/tmp".to_string()),
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: None,
+            repo_id: None,
+            provider: "claude_code".to_string(),
+            cost_cents: Some(0.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "exact".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+        },
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+    let newest = newest_ingested_data_at(&conn).unwrap();
+    assert_eq!(newest.as_deref(), Some("2026-03-14T12:30:00+00:00"));
 }
 
 fn sample_messages() -> Vec<ParsedMessage> {

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use super::{get_sync_offset, ingest_messages_with_sync, set_sync_offset};
+use super::{get_sync_offset, ingest_messages_with_sync, mark_sync_completed, set_sync_offset};
 
 /// Quick sync: only files modified in the last 30 days.
 /// Used by `budi sync` and the daemon's 30s auto-sync.
@@ -173,6 +173,7 @@ fn sync_with_max_age(
         tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
     }
 
+    mark_sync_completed(conn)?;
     Ok((total_files, total_messages, warnings))
 }
 
