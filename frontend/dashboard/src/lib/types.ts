@@ -145,6 +145,7 @@ export interface SessionsResponse {
 
 export interface MessageRow {
   uuid?: string;
+  session_id?: string | null;
   role?: string;
   timestamp: string;
   provider: string;
@@ -155,6 +156,8 @@ export interface MessageRow {
   cost_confidence?: string;
   repo_id?: string | null;
   git_branch?: string | null;
+  request_id?: string | null;
+  tools?: string[];
 }
 
 export interface SessionTag {
@@ -215,4 +218,34 @@ export interface IntegrationsHealth {
 export interface InstallIntegrationsRequest {
   components: string[];
   statusline_preset?: string;
+}
+
+export interface SessionHookEventRow {
+  id: number;
+  timestamp: string;
+  event: string;
+  provider: string;
+  session_id?: string | null;
+  message_id?: string | null;
+  link_confidence?: string | null;
+  tool_name?: string | null;
+  tool_use_id?: string | null;
+  tool_duration_ms?: number | null;
+  mcp_server?: string | null;
+  message_request_id?: string | null;
+  raw_json?: string | null;
+}
+
+export interface OtelEventRow {
+  id: number;
+  event_name: string;
+  timestamp: string;
+  timestamp_nano?: string | null;
+  session_id?: string | null;
+  message_id?: string | null;
+  model?: string | null;
+  cost_usd_reported?: number | null;
+  cost_cents_computed?: number | null;
+  processed: boolean;
+  raw_json?: string | null;
 }

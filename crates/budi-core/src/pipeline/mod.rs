@@ -359,6 +359,7 @@ mod tests {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         }
     }
 

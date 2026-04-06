@@ -537,8 +537,112 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
 }
 
 // ---------------------------------------------------------------------------
-// Session Tags & Messages
+// Session Tags, Messages, Hook Events, Message Detail
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMessageRoles {
+    Assistant,
+    All,
+}
+
+impl SessionMessageRoles {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assistant => "assistant",
+            Self::All => "all",
+        }
+    }
+}
+
+impl std::str::FromStr for SessionMessageRoles {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "assistant" => Ok(Self::Assistant),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "invalid roles '{other}'; valid values: assistant, all"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionHookEventRow {
+    pub id: i64,
+    pub timestamp: String,
+    pub event: String,
+    pub provider: String,
+    pub session_id: Option<String>,
+    pub message_id: Option<String>,
+    pub link_confidence: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub tool_duration_ms: Option<i64>,
+    pub mcp_server: Option<String>,
+    pub message_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionHookEventsParams<'a> {
+    pub linked_only: bool,
+    pub event: Option<&'a str>,
+    pub limit: usize,
+    pub offset: usize,
+    pub include_raw: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionOtelEventsParams {
+    pub linked_only: bool,
+    pub limit: usize,
+    pub offset: usize,
+    pub include_raw: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OtelEventRow {
+    pub id: i64,
+    pub event_name: String,
+    pub timestamp: String,
+    pub timestamp_nano: Option<String>,
+    pub session_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model: Option<String>,
+    pub cost_usd_reported: Option<f64>,
+    pub cost_cents_computed: Option<f64>,
+    pub processed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_json: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MessageDetail {
+    pub message: MessageRow,
+    pub tags: Vec<super::SessionTag>,
+    pub tools: Vec<String>,
+    pub hook_events: Vec<SessionHookEventRow>,
+    pub otel_events: Vec<OtelEventRow>,
+}
+
+fn message_tools(conn: &Connection, message_uuid: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT value
+         FROM tags
+         WHERE message_uuid = ?1
+           AND key = 'tool'
+         ORDER BY value ASC",
+    )?;
+    let tools = stmt
+        .query_map(params![message_uuid], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(tools)
+}
 
 /// Get distinct tags for a session.
 pub fn session_tags(conn: &Connection, session_id: &str) -> Result<Vec<(String, String)>> {
@@ -547,7 +651,7 @@ pub fn session_tags(conn: &Connection, session_id: &str) -> Result<Vec<(String, 
          FROM tags t
          JOIN messages m ON t.message_uuid = m.uuid
          WHERE m.session_id = ?1
-           AND t.key NOT IN ('repo', 'branch', 'dominant_tool')
+           AND t.key NOT IN ('repo', 'branch', 'dominant_tool', 'tool_use_id', 'provider', 'model', 'cost_confidence')
          ORDER BY key, value",
     )?;
     let rows = stmt
@@ -559,9 +663,17 @@ pub fn session_tags(conn: &Connection, session_id: &str) -> Result<Vec<(String, 
     Ok(rows)
 }
 
-/// Messages within a specific session for drill-down.
+/// Messages within a specific session for drill-down (assistant-only default).
 pub fn session_messages(conn: &Connection, session_id: &str) -> Result<Vec<MessageRow>> {
-    let mut stmt = conn.prepare(
+    session_messages_with_roles(conn, session_id, SessionMessageRoles::Assistant)
+}
+
+pub fn session_messages_with_roles(
+    conn: &Connection,
+    session_id: &str,
+    roles: SessionMessageRoles,
+) -> Result<Vec<MessageRow>> {
+    let mut sql = String::from(
         "SELECT uuid, timestamp, role, model,
                 COALESCE(provider, 'claude_code'),
                 repo_id,
@@ -569,16 +681,22 @@ pub fn session_messages(conn: &Connection, session_id: &str) -> Result<Vec<Messa
                 cache_creation_tokens, cache_read_tokens,
                 COALESCE(cost_cents, 0.0),
                 COALESCE(cost_confidence, 'estimated'),
-                git_branch
+                git_branch,
+                request_id
          FROM messages
-         WHERE session_id = ?1 AND role = 'assistant'
-         ORDER BY timestamp ASC",
-    )?;
+         WHERE session_id = ?1",
+    );
+    if roles == SessionMessageRoles::Assistant {
+        sql.push_str(" AND role = 'assistant'");
+    }
+    sql.push_str(" ORDER BY timestamp ASC");
 
-    let rows = stmt
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows: Vec<MessageRow> = stmt
         .query_map(params![session_id], |row| {
             Ok(MessageRow {
                 uuid: row.get(0)?,
+                session_id: Some(session_id.to_string()),
                 timestamp: row.get(1)?,
                 role: row.get(2)?,
                 model: row.get(3)?,
@@ -591,10 +709,270 @@ pub fn session_messages(conn: &Connection, session_id: &str) -> Result<Vec<Messa
                 cost_cents: row.get(10)?,
                 cost_confidence: row.get(11)?,
                 git_branch: row.get(12)?,
+                request_id: row.get(13)?,
+                tools: Vec::new(),
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
 
+    for row in &mut rows {
+        row.tools = message_tools(conn, &row.uuid)?;
+    }
+
     Ok(rows)
+}
+
+pub fn session_hook_events(
+    conn: &Connection,
+    session_id: &str,
+    params: &SessionHookEventsParams<'_>,
+) -> Result<Vec<SessionHookEventRow>> {
+    let mut conditions = vec!["session_id = ?1".to_string()];
+    let mut bindings: Vec<String> = vec![session_id.to_string()];
+    if params.linked_only {
+        conditions.push("message_id IS NOT NULL".to_string());
+    }
+    if let Some(event) = params.event
+        && !event.trim().is_empty()
+    {
+        bindings.push(event.trim().to_string());
+        conditions.push(format!("event = ?{}", bindings.len()));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    bindings.push(params.limit.min(500).to_string());
+    let limit_idx = bindings.len();
+    bindings.push(params.offset.to_string());
+    let offset_idx = bindings.len();
+
+    let raw_select = if params.include_raw {
+        "raw_json"
+    } else {
+        "NULL AS raw_json"
+    };
+    let sql = format!(
+        "SELECT id, timestamp, event, provider, session_id,
+                message_id, link_confidence, tool_name,
+                tool_use_id, tool_duration_ms, mcp_server,
+                message_request_id, {raw_select}
+         FROM hook_events
+         {where_clause}
+         ORDER BY timestamp DESC
+         LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+    );
+    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(bind_refs.as_slice(), |row| {
+            Ok(SessionHookEventRow {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                event: row.get(2)?,
+                provider: row.get(3)?,
+                session_id: row.get(4)?,
+                message_id: row.get(5)?,
+                link_confidence: row.get(6)?,
+                tool_name: row.get(7)?,
+                tool_use_id: row.get(8)?,
+                tool_duration_ms: row.get(9)?,
+                mcp_server: row.get(10)?,
+                message_request_id: row.get(11)?,
+                raw_json: row.get(12)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn session_otel_events(
+    conn: &Connection,
+    session_id: &str,
+    params: &SessionOtelEventsParams,
+) -> Result<Vec<OtelEventRow>> {
+    let mut conditions = vec!["session_id = ?1".to_string()];
+    let mut bindings: Vec<String> = vec![session_id.to_string()];
+    if params.linked_only {
+        conditions.push("message_id IS NOT NULL".to_string());
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    bindings.push(params.limit.min(500).to_string());
+    let limit_idx = bindings.len();
+    bindings.push(params.offset.to_string());
+    let offset_idx = bindings.len();
+
+    let raw_select = if params.include_raw {
+        "raw_json"
+    } else {
+        "NULL AS raw_json"
+    };
+    let sql = format!(
+        "SELECT id, event_name, timestamp, timestamp_nano, session_id,
+                message_id, model, cost_usd_reported, cost_cents_computed,
+                processed, {raw_select}
+         FROM otel_events
+         {where_clause}
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+    );
+    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(bind_refs.as_slice(), |row| {
+            let processed: i64 = row.get(9)?;
+            Ok(OtelEventRow {
+                id: row.get(0)?,
+                event_name: row.get(1)?,
+                timestamp: row.get(2)?,
+                timestamp_nano: row.get(3)?,
+                session_id: row.get(4)?,
+                message_id: row.get(5)?,
+                model: row.get(6)?,
+                cost_usd_reported: row.get(7)?,
+                cost_cents_computed: row.get(8)?,
+                processed: processed != 0,
+                raw_json: row.get(10)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<MessageDetail>> {
+    let message_result = conn.query_row(
+        "SELECT uuid, session_id, timestamp, role, model,
+                COALESCE(provider, 'claude_code'),
+                repo_id,
+                input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens,
+                COALESCE(cost_cents, 0.0),
+                COALESCE(cost_confidence, 'estimated'),
+                git_branch,
+                request_id
+         FROM messages
+         WHERE uuid = ?1",
+        params![message_uuid],
+        |row| {
+            Ok(MessageRow {
+                uuid: row.get(0)?,
+                session_id: row.get(1)?,
+                timestamp: row.get(2)?,
+                role: row.get(3)?,
+                model: row.get(4)?,
+                provider: row.get(5)?,
+                repo_id: row.get(6)?,
+                input_tokens: row.get(7)?,
+                output_tokens: row.get(8)?,
+                cache_creation_tokens: row.get(9)?,
+                cache_read_tokens: row.get(10)?,
+                cost_cents: row.get(11)?,
+                cost_confidence: row.get(12)?,
+                git_branch: row.get(13)?,
+                request_id: row.get(14)?,
+                tools: Vec::new(),
+            })
+        },
+    );
+
+    let mut message = match message_result {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    message.tools = message_tools(conn, message_uuid)?;
+
+    let tags: Vec<super::SessionTag> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT key, value
+             FROM tags
+             WHERE message_uuid = ?1
+               AND key NOT IN ('tool_use_id')
+             ORDER BY key, value",
+        )?;
+        stmt.query_map(params![message_uuid], |row| {
+            Ok(super::SessionTag {
+                key: row.get(0)?,
+                value: row.get(1)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
+    };
+
+    let hook_events: Vec<SessionHookEventRow> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, event, provider, session_id,
+                    message_id, link_confidence, tool_name,
+                    tool_use_id, tool_duration_ms, mcp_server,
+                    message_request_id, raw_json
+             FROM hook_events
+             WHERE message_id = ?1
+             ORDER BY timestamp ASC, id ASC",
+        )?;
+        stmt.query_map(params![message_uuid], |row| {
+            Ok(SessionHookEventRow {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                event: row.get(2)?,
+                provider: row.get(3)?,
+                session_id: row.get(4)?,
+                message_id: row.get(5)?,
+                link_confidence: row.get(6)?,
+                tool_name: row.get(7)?,
+                tool_use_id: row.get(8)?,
+                tool_duration_ms: row.get(9)?,
+                mcp_server: row.get(10)?,
+                message_request_id: row.get(11)?,
+                raw_json: row.get(12)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
+    };
+
+    let otel_events: Vec<OtelEventRow> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, event_name, timestamp, timestamp_nano, session_id,
+                    message_id, model, cost_usd_reported, cost_cents_computed,
+                    processed, raw_json
+             FROM otel_events
+             WHERE message_id = ?1
+             ORDER BY timestamp ASC, id ASC",
+        )?;
+        stmt.query_map(params![message_uuid], |row| {
+            let processed: i64 = row.get(9)?;
+            Ok(OtelEventRow {
+                id: row.get(0)?,
+                event_name: row.get(1)?,
+                timestamp: row.get(2)?,
+                timestamp_nano: row.get(3)?,
+                session_id: row.get(4)?,
+                message_id: row.get(5)?,
+                model: row.get(6)?,
+                cost_usd_reported: row.get(7)?,
+                cost_cents_computed: row.get(8)?,
+                processed: processed != 0,
+                raw_json: row.get(10)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
+    };
+
+    Ok(Some(MessageDetail {
+        tools: message.tools.clone(),
+        message,
+        tags,
+        hook_events,
+        otel_events,
+    }))
 }

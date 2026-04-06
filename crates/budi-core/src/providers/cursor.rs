@@ -773,6 +773,7 @@ fn usage_events_to_messages(
                 web_search_requests: 0,
                 prompt_category: None,
                 tool_names: Vec::new(),
+                tool_use_ids: Vec::new(),
             }
         })
         .collect()
@@ -1309,6 +1310,7 @@ fn parse_cursor_line(
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         }),
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
@@ -1338,6 +1340,7 @@ fn parse_cursor_line(
                 web_search_requests: 0,
                 prompt_category: None,
                 tool_names,
+                tool_use_ids: Vec::new(),
             })
         }
         _ => None,

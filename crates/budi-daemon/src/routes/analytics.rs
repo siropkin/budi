@@ -635,16 +635,112 @@ pub async fn analytics_session_tags(
 
 pub async fn analytics_session_messages(
     Path(session_id): Path<String>,
+    Query(params): Query<SessionMessagesQueryParams>,
 ) -> Result<Json<Vec<analytics::MessageRow>>, (StatusCode, Json<serde_json::Value>)> {
+    let roles = match params.roles.as_deref() {
+        None => analytics::SessionMessageRoles::Assistant,
+        Some(raw) => raw
+            .parse::<analytics::SessionMessageRoles>()
+            .map_err(bad_request)?,
+    };
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_messages(&conn, &session_id)
+        analytics::session_messages_with_roles(&conn, &session_id, roles)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
     Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SessionMessagesQueryParams {
+    pub roles: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SessionHookEventsQueryParams {
+    pub linked_only: Option<bool>,
+    pub event: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub include_raw: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SessionOtelEventsQueryParams {
+    pub linked_only: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub include_raw: Option<bool>,
+}
+
+pub async fn analytics_session_hook_events(
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionHookEventsQueryParams>,
+) -> Result<Json<Vec<analytics::SessionHookEventRow>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_hook_events(
+            &conn,
+            &session_id,
+            &analytics::SessionHookEventsParams {
+                linked_only: params.linked_only.unwrap_or(false),
+                event: params.event.as_deref(),
+                limit: params.limit.unwrap_or(50).min(500),
+                offset: params.offset.unwrap_or(0),
+                include_raw: params.include_raw.unwrap_or(false),
+            },
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_session_otel_events(
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionOtelEventsQueryParams>,
+) -> Result<Json<Vec<analytics::OtelEventRow>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_otel_events(
+            &conn,
+            &session_id,
+            &analytics::SessionOtelEventsParams {
+                linked_only: params.linked_only.unwrap_or(false),
+                limit: params.limit.unwrap_or(50).min(500),
+                offset: params.offset.unwrap_or(0),
+                include_raw: params.include_raw.unwrap_or(false),
+            },
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_message_detail(
+    Path(message_uuid): Path<String>,
+) -> Result<Json<analytics::MessageDetail>, (StatusCode, Json<serde_json::Value>)> {
+    let lookup_uuid = message_uuid.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::message_detail(&conn, &lookup_uuid)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    match result {
+        Some(detail) => Ok(Json(detail)),
+        None => Err(not_found(format!("message '{message_uuid}' not found"))),
+    }
 }
 
 #[derive(serde::Deserialize)]

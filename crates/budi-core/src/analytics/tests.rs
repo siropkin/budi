@@ -69,6 +69,7 @@ fn ingest_and_query() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -96,6 +97,7 @@ fn ingest_and_query() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ];
 
@@ -146,6 +148,7 @@ fn cost_cents_baked_at_ingest() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     // CostEnricher is the single source of truth for cost_cents
     CostEnricher.enrich(&mut msg);
@@ -205,6 +208,7 @@ fn last_seen_derived_from_messages() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "m2".to_string(),
@@ -232,6 +236,7 @@ fn last_seen_derived_from_messages() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -274,6 +279,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -301,6 +307,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "u2".to_string(),
@@ -328,6 +335,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ]
 }
@@ -426,6 +434,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "t2".to_string(),
@@ -453,6 +462,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "t3".to_string(),
@@ -480,6 +490,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ]
 }
@@ -573,6 +584,7 @@ fn multi_provider_ingest_and_query() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "cc-a1".to_string(),
@@ -600,6 +612,7 @@ fn multi_provider_ingest_and_query() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ];
 
@@ -630,6 +643,7 @@ fn multi_provider_ingest_and_query() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "cu-a1".to_string(),
@@ -657,6 +671,7 @@ fn multi_provider_ingest_and_query() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ];
 
@@ -719,6 +734,7 @@ fn cross_parse_dedup_by_request_id() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -753,6 +769,7 @@ fn cross_parse_dedup_by_request_id() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -802,6 +819,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -831,6 +849,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -878,6 +897,7 @@ fn no_request_id_no_dedup() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg1], None).unwrap();
 
@@ -907,6 +927,7 @@ fn no_request_id_no_dedup() {
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg2], None).unwrap();
 
@@ -961,6 +982,7 @@ fn session_cost_curve_buckets() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         });
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1001,6 +1023,7 @@ fn cost_confidence_stats_groups_correctly() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "conf-2".to_string(),
@@ -1028,6 +1051,7 @@ fn cost_confidence_stats_groups_correctly() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1070,6 +1094,7 @@ fn subagent_cost_stats_splits_correctly() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
         ParsedMessage {
             uuid: "sub-1".to_string(),
@@ -1097,6 +1122,7 @@ fn subagent_cost_stats_splits_correctly() {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1232,6 +1258,7 @@ fn assistant_msg(uuid: &str, session_id: &str, cost_cents: f64) -> ParsedMessage
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     }
 }
 
@@ -1493,6 +1520,49 @@ fn session_messages_returns_assistant_only() {
 }
 
 #[test]
+fn session_messages_roles_all_returns_user_and_assistant_with_tools() {
+    let mut conn = test_db();
+    let user = ParsedMessage {
+        uuid: "sm-user-1".to_string(),
+        session_id: Some("sess-all".to_string()),
+        timestamp: "2026-03-25T00:00:00Z".parse().unwrap(),
+        role: "user".to_string(),
+        request_id: Some("req-user".to_string()),
+        ..Default::default()
+    };
+    let assistant = ParsedMessage {
+        uuid: "sm-assistant-1".to_string(),
+        session_id: Some("sess-all".to_string()),
+        timestamp: "2026-03-25T00:00:01Z".parse().unwrap(),
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        provider: "claude_code".to_string(),
+        input_tokens: 10,
+        output_tokens: 5,
+        request_id: Some("req-assistant".to_string()),
+        cost_confidence: "estimated".to_string(),
+        tool_names: vec!["Read".to_string()],
+        tool_use_ids: vec!["toolu_123".to_string()],
+        ..Default::default()
+    };
+    let tags = vec![
+        vec![],
+        vec![Tag {
+            key: "tool".to_string(),
+            value: "Read".to_string(),
+        }],
+    ];
+    ingest_messages(&mut conn, &[user, assistant], Some(&tags)).unwrap();
+
+    let rows = session_messages_with_roles(&conn, "sess-all", SessionMessageRoles::All).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].role, "user");
+    assert_eq!(rows[1].role, "assistant");
+    assert_eq!(rows[1].request_id.as_deref(), Some("req-assistant"));
+    assert_eq!(rows[1].tools, vec!["Read".to_string()]);
+}
+
+#[test]
 fn session_messages_does_not_alias_prefixed_session_id() {
     let mut conn = test_db();
     let canonical = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
@@ -1560,6 +1630,42 @@ fn session_tags_filter_legacy_auto_keys() {
 }
 
 #[test]
+fn session_tags_filter_internal_linkage_and_redundant_keys() {
+    let mut conn = test_db();
+    let msg = assistant_msg("st-internal-1", "sess-tags-internal", 1.0);
+    let tags = vec![vec![
+        Tag {
+            key: "tool_use_id".to_string(),
+            value: "toolu_123".to_string(),
+        },
+        Tag {
+            key: "provider".to_string(),
+            value: "claude_code".to_string(),
+        },
+        Tag {
+            key: "model".to_string(),
+            value: "claude-sonnet-4-6".to_string(),
+        },
+        Tag {
+            key: "cost_confidence".to_string(),
+            value: "estimated".to_string(),
+        },
+        Tag {
+            key: "ticket_id".to_string(),
+            value: "ABC-123".to_string(),
+        },
+    ]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let result = session_tags(&conn, "sess-tags-internal").unwrap();
+    assert!(result.contains(&("ticket_id".to_string(), "ABC-123".to_string())));
+    assert!(!result.iter().any(|(k, _)| k == "tool_use_id"));
+    assert!(!result.iter().any(|(k, _)| k == "provider"));
+    assert!(!result.iter().any(|(k, _)| k == "model"));
+    assert!(!result.iter().any(|(k, _)| k == "cost_confidence"));
+}
+
+#[test]
 fn session_tags_does_not_alias_prefixed_session_id() {
     let mut conn = test_db();
     let canonical = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
@@ -1583,6 +1689,215 @@ fn session_tags_empty_for_unknown_session() {
     let conn = test_db();
     let result = session_tags(&conn, "nonexistent").unwrap();
     assert!(result.is_empty());
+}
+
+#[test]
+fn session_hook_events_support_filters_and_include_raw() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO hook_events (
+            provider, event, session_id, timestamp, raw_json,
+            message_id, link_confidence, tool_name, tool_use_id, message_request_id
+         ) VALUES (
+            'claude_code', 'post_tool_use', 'sess-hooks', '2026-03-25T00:00:01Z', '{\"ok\":true}',
+            'msg-1', 'exact_tool_use_id', 'Read', 'toolu_1', 'req-1'
+         )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO hook_events (
+            provider, event, session_id, timestamp, raw_json, link_confidence
+         ) VALUES (
+            'claude_code', 'session_start', 'sess-hooks', '2026-03-25T00:00:00Z', '{\"start\":true}', 'unlinked'
+         )",
+        [],
+    )
+    .unwrap();
+
+    let linked = session_hook_events(
+        &conn,
+        "sess-hooks",
+        &SessionHookEventsParams {
+            linked_only: true,
+            event: Some("post_tool_use"),
+            limit: 50,
+            offset: 0,
+            include_raw: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].message_id.as_deref(), Some("msg-1"));
+    assert!(linked[0].raw_json.is_none());
+
+    let with_raw = session_hook_events(
+        &conn,
+        "sess-hooks",
+        &SessionHookEventsParams {
+            linked_only: false,
+            event: None,
+            limit: 50,
+            offset: 0,
+            include_raw: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(with_raw.len(), 2);
+    assert!(with_raw[0].raw_json.is_some());
+}
+
+#[test]
+fn message_detail_returns_linked_hook_and_otel_sets() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO messages (uuid, session_id, role, timestamp, model, request_id, provider, cost_confidence, cost_cents)
+         VALUES ('msg-detail-1', 'sess-detail', 'assistant', '2026-03-25T00:00:01Z', 'claude-opus-4-6', 'req-1', 'claude_code', 'otel_exact', 7.5)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tags (message_uuid, key, value) VALUES ('msg-detail-1', 'tool', 'Read')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tags (message_uuid, key, value) VALUES ('msg-detail-1', 'tool_use_id', 'toolu_1')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO hook_events (
+            provider, event, session_id, timestamp, raw_json,
+            message_id, link_confidence, tool_name, tool_use_id, message_request_id
+         ) VALUES (
+            'claude_code', 'post_tool_use', 'sess-detail', '2026-03-25T00:00:02Z', '{\"hook\":1}',
+            'msg-detail-1', 'exact_request_id', 'Read', 'toolu_1', 'req-1'
+         )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO otel_events (
+            event_name, session_id, timestamp, processed, raw_json,
+            message_id, timestamp_nano, model, cost_usd_reported, cost_cents_computed
+         ) VALUES (
+            'claude_code.api_request', 'sess-detail', '2026-03-25T00:00:01.100Z', 1, '{\"otel\":1}',
+            'msg-detail-1', '1711324801100000000', 'claude-opus-4-6', 0.075, 7.5
+         )",
+        [],
+    )
+    .unwrap();
+
+    let detail = message_detail(&conn, "msg-detail-1").unwrap().unwrap();
+    assert_eq!(detail.message.uuid, "msg-detail-1");
+    assert_eq!(detail.tools, vec!["Read".to_string()]);
+    assert_eq!(detail.hook_events.len(), 1);
+    assert_eq!(detail.otel_events.len(), 1);
+    assert_eq!(
+        detail.otel_events[0].cost_cents_computed,
+        Some(7.5),
+        "computed cost should be surfaced"
+    );
+}
+
+#[test]
+fn ingest_messages_relinks_existing_unlinked_hook_and_otel_rows() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO hook_events (
+            provider, event, session_id, timestamp, raw_json, message_request_id, link_confidence
+         ) VALUES (
+            'claude_code', 'post_tool_use', 'sess-relink', '2026-03-25T00:00:01.050Z', '{}', 'msg_req_1', 'unlinked'
+         )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO hook_events (
+            provider, event, session_id, timestamp, raw_json, tool_use_id, link_confidence
+         ) VALUES (
+            'claude_code', 'post_tool_use', 'sess-relink', '2026-03-25T00:00:01.060Z', '{}', 'toolu_link_1', 'unlinked'
+         )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO otel_events (
+            event_name, session_id, timestamp, processed, raw_json,
+            message_id, timestamp_nano, model, cost_usd_reported, cost_cents_computed
+         ) VALUES (
+            'claude_code.api_request', 'sess-relink', '2026-03-25T00:00:01.080Z', 1, '{\"otel\":1}',
+            NULL, '1711324801080000000', NULL, 0.095, NULL
+         )",
+        [],
+    )
+    .unwrap();
+
+    let msg = ParsedMessage {
+        uuid: "msg-relink-1".to_string(),
+        session_id: Some("sess-relink".to_string()),
+        timestamp: "2026-03-25T00:00:01.000Z".parse().unwrap(),
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_cents: Some(9.5),
+        cost_confidence: "otel_exact".to_string(),
+        request_id: Some("msg_req_1".to_string()),
+        ..Default::default()
+    };
+    let tags = vec![vec![Tag {
+        key: "tool_use_id".to_string(),
+        value: "toolu_link_1".to_string(),
+    }]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let (req_link_uuid, req_link_conf): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT message_id, link_confidence
+             FROM hook_events
+             WHERE session_id = 'sess-relink' AND message_request_id = 'msg_req_1'
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(req_link_uuid.as_deref(), Some("msg-relink-1"));
+    assert_eq!(
+        req_link_conf.as_deref(),
+        Some(crate::hooks::HOOK_LINK_EXACT_REQUEST_ID)
+    );
+
+    let (tool_link_uuid, tool_link_conf): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT message_id, link_confidence
+             FROM hook_events
+             WHERE session_id = 'sess-relink' AND tool_use_id = 'toolu_link_1'
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(tool_link_uuid.as_deref(), Some("msg-relink-1"));
+    assert_eq!(
+        tool_link_conf.as_deref(),
+        Some(crate::hooks::HOOK_LINK_EXACT_TOOL_USE_ID)
+    );
+
+    let (otel_link_uuid, otel_model, otel_computed): (Option<String>, Option<String>, Option<f64>) =
+        conn.query_row(
+            "SELECT message_id, model, cost_cents_computed
+             FROM otel_events
+             WHERE session_id = 'sess-relink'
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(otel_link_uuid.as_deref(), Some("msg-relink-1"));
+    assert_eq!(otel_model.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(otel_computed, Some(9.5));
 }
 
 // --- Session Health tests ---
@@ -1627,6 +1942,7 @@ fn health_msg(
         web_search_requests: 0,
         prompt_category: None,
         tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
     }
 }
 

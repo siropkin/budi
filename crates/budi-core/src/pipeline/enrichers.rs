@@ -97,6 +97,20 @@ impl Enricher for ToolEnricher {
                 });
             }
         }
+
+        let mut dedup_ids = std::collections::HashSet::new();
+        for tool_use_id in &msg.tool_use_ids {
+            let normalized = tool_use_id.trim();
+            if normalized.is_empty() {
+                continue;
+            }
+            if dedup_ids.insert(normalized.to_string()) {
+                tags.push(Tag {
+                    key: tk::TOOL_USE_ID.to_string(),
+                    value: normalized.to_string(),
+                });
+            }
+        }
         tags
     }
 }

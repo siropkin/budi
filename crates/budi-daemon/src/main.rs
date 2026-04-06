@@ -124,8 +124,20 @@ fn build_router(app_state: AppState) -> Router {
             get(a::analytics_session_messages),
         )
         .route(
+            "/analytics/sessions/{session_id}/hook-events",
+            get(a::analytics_session_hook_events),
+        )
+        .route(
+            "/analytics/sessions/{session_id}/otel-events",
+            get(a::analytics_session_otel_events),
+        )
+        .route(
             "/analytics/sessions/{session_id}/tags",
             get(a::analytics_session_tags),
+        )
+        .route(
+            "/analytics/messages/{message_uuid}/detail",
+            get(a::analytics_message_detail),
         )
         .route("/hooks/ingest", post(h::hooks_ingest))
         // Dashboard SPA shell + hashed static assets.

@@ -1,15 +1,21 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { ErrorState, LoadingState } from "@/components/state";
-import { fetchRegisteredProviders, fetchSessionDetail, fetchSessionHealth, fetchSessionMessages, fetchSessionTags } from "@/lib/api";
+import {
+  fetchRegisteredProviders,
+  fetchSessionDetail,
+  fetchSessionHealth,
+  fetchSessionMessages,
+  fetchSessionTags,
+} from "@/lib/api";
 import { fmtCost, fmtDate, fmtNum, formatModelName, repoName } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +28,21 @@ function healthVariant(state: string): "default" | "warning" | "success" {
 const MESSAGE_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
 const MESSAGE_PAGE_SIZE = 50;
 type MessageSortColumn = "timestamp" | "provider" | "model" | "tokens" | "cost";
+
+function compactTools(tools: string[] | undefined, max = 2): string {
+  const values = (tools ?? []).filter(Boolean);
+  if (values.length === 0) return "--";
+  if (values.length <= max) return values.join(", ");
+  return `${values.slice(0, max).join(", ")} +${values.length - max}`;
+}
+
+function sourceLabel(confidence: string | undefined): string {
+  const value = (confidence ?? "estimated").toLowerCase();
+  if (value === "otel_exact") return "OTEL exact";
+  if (value === "exact" || value === "exact_cost") return "exact";
+  if (value === "estimated_unknown_model") return "estimated (model)";
+  return value;
+}
 
 function SortableHead({
   label,
@@ -95,6 +116,7 @@ export function SessionDetailPage() {
   });
 
   const messages = messagesQuery.data ?? [];
+  const assistantMessages = messages;
   const providers = providersQuery.data ?? [];
   const sortedMessages = [...messages];
   sortedMessages.sort((left, right) => {
@@ -131,7 +153,13 @@ export function SessionDetailPage() {
     return <ErrorState error={new Error("Session ID is missing in route")} />;
   }
 
-  if (messagesQuery.isPending || tagsQuery.isPending || healthQuery.isPending || providersQuery.isPending || detailQuery.isPending) {
+  if (
+    messagesQuery.isPending ||
+    tagsQuery.isPending ||
+    healthQuery.isPending ||
+    providersQuery.isPending ||
+    detailQuery.isPending
+  ) {
     return <LoadingState label="Loading session detail..." />;
   }
 
@@ -140,11 +168,6 @@ export function SessionDetailPage() {
   if (isSessionNotFound) {
     return (
       <div className="space-y-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <Link to="/sessions" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
-            ← Back to Sessions
-          </Link>
-        </div>
         <Card>
           <CardHeader>
             <CardTitle>Session Not Found</CardTitle>
@@ -190,15 +213,15 @@ export function SessionDetailPage() {
 
   let tokenTotal = 0;
   let costTotalCents = 0;
-  for (const message of messages) {
+  for (const message of assistantMessages) {
     tokenTotal += (message.input_tokens ?? 0) + (message.output_tokens ?? 0);
     costTotalCents += message.cost_cents ?? 0;
   }
 
   const sessionCurve = [];
   let cumulativeCostCents = 0;
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
+  for (let index = 0; index < assistantMessages.length; index += 1) {
+    const message = assistantMessages[index];
     cumulativeCostCents += message.cost_cents ?? 0;
     sessionCurve.push({
       label: `#${index + 1}`,
@@ -209,6 +232,13 @@ export function SessionDetailPage() {
 
   const paginatedMessages = sortedMessages.slice(messageOffset, messageOffset + MESSAGE_PAGE_SIZE);
   const hasMoreMessages = messageOffset + paginatedMessages.length < sortedMessages.length;
+  const messageNumberById = new Map<string, number>();
+  for (let index = 0; index < assistantMessages.length; index += 1) {
+    const uuid = assistantMessages[index].uuid;
+    if (uuid) {
+      messageNumberById.set(uuid, index + 1);
+    }
+  }
 
   const overviewRepoIds =
     sessionDetail.repo_ids?.filter((repo) => repo && repo !== "unknown") ??
@@ -252,9 +282,10 @@ export function SessionDetailPage() {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link to="/sessions" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
-          ← Back to Sessions
-        </Link>
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight text-foreground">{overviewName}</h2>
+          <p className="font-mono text-xs text-muted-foreground">{decodeURIComponent(sessionId)}</p>
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -264,10 +295,7 @@ export function SessionDetailPage() {
           </CardHeader>
           <CardContent className="space-y-1 text-sm">
             <p>
-              Session ID: <span className="font-semibold text-foreground">{decodeURIComponent(sessionId)}</span>
-            </p>
-            <p>
-              Session Name: <span className="font-semibold text-foreground">{overviewName}</span>
+              Session: <span className="font-semibold text-foreground">{overviewName}</span>
             </p>
             <p>
               Cost: <span className="font-semibold text-primary">{fmtCost(costTotalCents / 100)}</span>
@@ -276,7 +304,7 @@ export function SessionDetailPage() {
               Tokens: <span className="font-semibold text-foreground">{fmtNum(tokenTotal)}</span>
             </p>
             <p>
-              Messages: <span className="font-semibold text-foreground">{fmtNum(messages.length)}</span>
+              Messages: <span className="font-semibold text-foreground">{fmtNum(assistantMessages.length)}</span>
             </p>
             <p>
               Repo: <span className="font-semibold text-foreground">{overviewRepoLabel}</span>
@@ -385,9 +413,12 @@ export function SessionDetailPage() {
             <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
+                  <TableHead>#</TableHead>
                   <SortableHead label="Time" column="timestamp" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
                   <SortableHead label="Agent" column="provider" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
                   <SortableHead label="Model" column="model" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <TableHead>Tools</TableHead>
+                  <TableHead>Source</TableHead>
                   <SortableHead label="Tokens" column="tokens" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
                   <SortableHead label="Cost" column="cost" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
                 </TableRow>
@@ -396,12 +427,22 @@ export function SessionDetailPage() {
                 {paginatedMessages.map((message, index) => {
                   const providerDisplay = providers.find((entry) => entry.name === message.provider)?.display_name ?? message.provider;
                   const rawModel = message.model ?? "";
+                  const number = message.uuid ? messageNumberById.get(message.uuid) : undefined;
                   return (
                     <TableRow key={message.uuid ?? `${message.timestamp}-${messageOffset + index}`}>
+                      <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap`}>{number != null ? `#${number}` : "--"}</TableCell>
                       <TableCell className={MESSAGE_CELL_CLASS}>{fmtDate(message.timestamp)}</TableCell>
                       <TableCell className={MESSAGE_CELL_CLASS}>{providerDisplay}</TableCell>
                       <TableCell className={MESSAGE_CELL_CLASS} title={rawModel}>
                         {formatModelName(rawModel)}
+                      </TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS} title={(message.tools ?? []).join(", ")}>
+                        {compactTools(message.tools)}
+                      </TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS}>
+                        <Badge variant={message.cost_confidence === "otel_exact" ? "success" : "outline"}>
+                          {sourceLabel(message.cost_confidence)}
+                        </Badge>
                       </TableCell>
                       <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap text-right`}>
                         {fmtNum((message.input_tokens ?? 0) + (message.output_tokens ?? 0))}

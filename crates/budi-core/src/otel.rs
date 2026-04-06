@@ -208,7 +208,23 @@ fn otel_uuid(session_id: &str, timestamp_nano: &str) -> String {
     hasher.update(b":");
     hasher.update(timestamp_nano.as_bytes());
     let hash = hasher.finalize();
-    format!("otel-{}", hex::encode(&hash[..16]))
+    hex::encode(&hash[..16])
+}
+
+fn otel_event_snapshot_json(event: &OtelApiRequest, cost_cents_computed: f64) -> String {
+    serde_json::json!({
+        "session_id": event.session_id,
+        "timestamp": event.timestamp.to_rfc3339(),
+        "timestamp_nano": event.timestamp_nano,
+        "model": event.model,
+        "cost_usd_reported": event.cost_usd,
+        "cost_cents_computed": cost_cents_computed,
+        "input_tokens": event.input_tokens,
+        "output_tokens": event.output_tokens,
+        "cache_read_tokens": event.cache_read_tokens,
+        "cache_creation_tokens": event.cache_creation_tokens
+    })
+    .to_string()
 }
 
 /// Hex-encode bytes (no extra dependency).
@@ -229,7 +245,7 @@ mod hex {
 /// When an OTEL event arrives we first try to find an existing JSONL row for the
 /// same session + model + close timestamp (±1s) and upgrade it in-place. If no
 /// match exists (OTEL arrived before JSONL sync), we insert a new row with an
-/// `otel-` prefixed UUID. Either way, the row ends up with `cost_confidence = 'otel_exact'`.
+/// deterministic OTEL UUID. Either way, the row ends up with `cost_confidence = 'otel_exact'`.
 ///
 /// Returns the number of rows upserted.
 pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> Result<usize> {
@@ -270,27 +286,41 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         let (repo_id, git_branch, cwd) = session_ctx.unwrap_or((None, None, None));
 
         // Check if an otel_exact row already exists for this API call (dedup repeated OTEL events)
-        let already_has_otel: bool = tx
+        let existing_otel_uuid: Option<String> = tx
             .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM messages
-                    WHERE session_id = ?1
-                      AND model = ?2
-                      AND role = 'assistant'
-                      AND cost_confidence = 'otel_exact'
-                      AND timestamp BETWEEN ?3 AND ?4
-                )",
+                "SELECT uuid
+                 FROM messages
+                 WHERE session_id = ?1
+                   AND model = ?2
+                   AND role = 'assistant'
+                   AND cost_confidence = 'otel_exact'
+                   AND timestamp BETWEEN ?3 AND ?4
+                 LIMIT 1",
                 params![event.session_id, event.model, ts_lo, ts_hi],
                 |row| row.get(0),
             )
-            .unwrap_or(false);
+            .ok();
 
-        if already_has_otel {
+        let snapshot_json = otel_event_snapshot_json(event, cost_cents);
+
+        if let Some(existing_uuid) = existing_otel_uuid {
             // Already processed — just log to otel_events and skip
             tx.execute(
-                "INSERT INTO otel_events (event_name, session_id, timestamp, processed)
-                VALUES ('claude_code.api_request', ?1, ?2, 1)",
-                params![event.session_id, ts],
+                "INSERT INTO otel_events (
+                    event_name, session_id, timestamp, raw_json, processed,
+                    message_id, timestamp_nano, model, cost_usd_reported, cost_cents_computed
+                )
+                VALUES ('claude_code.api_request', ?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    event.session_id,
+                    ts,
+                    snapshot_json,
+                    existing_uuid,
+                    event.timestamp_nano,
+                    event.model,
+                    event.cost_usd,
+                    cost_cents
+                ],
             )?;
             continue;
         }
@@ -324,7 +354,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                 .map(|(uuid, _, _)| uuid)
         };
 
-        if let Some(ref jsonl_uuid) = existing_uuid {
+        let message_id: String = if let Some(ref jsonl_uuid) = existing_uuid {
             // Upgrade the existing JSONL row in-place with exact OTEL data
             tx.execute(
                 "UPDATE messages SET
@@ -347,8 +377,9 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                 ],
             )?;
             upserted += 1;
+            jsonl_uuid.clone()
         } else {
-            // Strategy 2: No JSONL row yet — insert with otel-prefixed UUID.
+            // Strategy 2: No JSONL row yet — insert with deterministic OTEL UUID.
             // If JSONL syncs later, the JSONL row will be a separate INSERT OR IGNORE
             // with a different UUID. We handle that via the reverse path: JSONL's
             // INSERT OR IGNORE succeeds (different UUID), but we'll clean it up
@@ -386,7 +417,8 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                 ],
             )?;
             upserted += 1;
-        }
+            uuid
+        };
 
         // Insert stub session if it doesn't exist yet (hooks may arrive later)
         tx.execute(
@@ -396,9 +428,21 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
 
         // Store raw event in otel_events for debugging
         tx.execute(
-            "INSERT INTO otel_events (event_name, session_id, timestamp, processed)
-            VALUES ('claude_code.api_request', ?1, ?2, 1)",
-            params![event.session_id, ts],
+            "INSERT INTO otel_events (
+                event_name, session_id, timestamp, raw_json, processed,
+                message_id, timestamp_nano, model, cost_usd_reported, cost_cents_computed
+            )
+            VALUES ('claude_code.api_request', ?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event.session_id,
+                ts,
+                snapshot_json,
+                message_id,
+                event.timestamp_nano,
+                event.model,
+                event.cost_usd,
+                cost_cents
+            ],
         )?;
     }
 
@@ -613,6 +657,15 @@ mod tests {
             .query_row("SELECT count(*) FROM otel_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(otel_count, 2);
+
+        let linked_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM otel_events WHERE message_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_count, 2);
     }
 
     #[test]
@@ -674,13 +727,22 @@ mod tests {
         );
         assert_eq!(confidence, "otel_exact");
         assert_eq!(input_tokens, 1000);
+
+        let linked_uuid: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM otel_events ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_uuid.as_deref(), Some(jsonl_uuid));
     }
 
     #[test]
     fn otel_does_not_overwrite_existing_otel_data() {
         let mut conn = setup_db();
 
-        // Insert OTEL data (no existing JSONL row, so it inserts with otel- UUID)
+        // Insert OTEL data (no existing JSONL row, so it inserts with deterministic OTEL UUID)
         let events = vec![OtelApiRequest {
             session_id: "sess-keep".to_string(),
             timestamp: DateTime::parse_from_rfc3339("2024-03-27T00:00:00Z")
@@ -735,6 +797,15 @@ mod tests {
             (cost - 7.375).abs() < 0.001,
             "original cost should be preserved, got {cost}"
         );
+
+        let linked_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM otel_events WHERE message_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_rows, 2);
     }
 
     #[test]
@@ -789,7 +860,7 @@ mod tests {
         assert_eq!(uuid1, uuid2); // same input → same uuid
         assert_ne!(uuid1, uuid3); // different timestamp → different uuid
         assert_ne!(uuid1, uuid4); // different session → different uuid
-        assert!(uuid1.starts_with("otel-"));
+        assert_eq!(uuid1.len(), 32);
     }
 
     #[test]

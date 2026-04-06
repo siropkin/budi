@@ -19,7 +19,7 @@ pub use sync::*;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 use crate::jsonl::ParsedMessage;
@@ -150,6 +150,8 @@ pub struct Tag {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MessageRow {
     pub uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub timestamp: String,
     pub role: String,
     pub model: Option<String>,
@@ -162,6 +164,10 @@ pub struct MessageRow {
     pub cost_cents: f64,
     pub cost_confidence: String,
     pub git_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// Ingest a batch of parsed messages into the database.
@@ -249,6 +255,7 @@ pub fn ingest_messages_with_sync(
                         )?;
                     }
                 }
+                relink_unlinked_events_for_message(&tx, &otel_id)?;
                 continue;
             }
         }
@@ -288,6 +295,7 @@ pub fn ingest_messages_with_sync(
                         )?;
                     }
                 }
+                relink_unlinked_events_for_message(&tx, &existing_uuid)?;
                 continue;
             }
         }
@@ -332,6 +340,7 @@ pub fn ingest_messages_with_sync(
                     )?;
                 }
             }
+            relink_unlinked_events_for_message(&tx, &msg.uuid)?;
         }
     }
 
@@ -384,6 +393,132 @@ pub fn ingest_messages_with_sync(
 
     tx.commit()?;
     Ok(count)
+}
+
+fn relink_unlinked_events_for_message(conn: &Connection, message_id: &str) -> Result<()> {
+    let row: Option<(
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<f64>,
+    )> = conn
+        .query_row(
+            "SELECT session_id, request_id, timestamp, role, cost_confidence, model, cost_cents
+             FROM messages
+             WHERE uuid = ?1",
+            params![message_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .ok();
+
+    let Some((session_id, request_id, timestamp, role, cost_confidence, model, cost_cents)) = row
+    else {
+        return Ok(());
+    };
+    let Some(session_id) = session_id.filter(|sid| !sid.trim().is_empty()) else {
+        return Ok(());
+    };
+
+    if let Some(request_id) = request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        conn.execute(
+            "UPDATE hook_events
+             SET message_id = ?1,
+                 link_confidence = ?2
+             WHERE message_id IS NULL
+               AND session_id = ?3
+               AND message_request_id = ?4",
+            params![
+                message_id,
+                crate::hooks::HOOK_LINK_EXACT_REQUEST_ID,
+                session_id,
+                request_id
+            ],
+        )?;
+    }
+
+    let mut tool_stmt = conn.prepare(
+        "SELECT DISTINCT value
+         FROM tags
+         WHERE message_uuid = ?1
+           AND key = 'tool_use_id'
+           AND TRIM(value) <> ''",
+    )?;
+    let tool_use_ids: Vec<String> = tool_stmt
+        .query_map(params![message_id], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for tool_use_id in tool_use_ids {
+        conn.execute(
+            "UPDATE hook_events
+             SET message_id = ?1,
+                 link_confidence = CASE
+                    WHEN link_confidence IS NULL OR TRIM(link_confidence) = '' OR link_confidence = ?2
+                    THEN ?3
+                    ELSE link_confidence
+                 END
+             WHERE message_id IS NULL
+               AND session_id = ?4
+               AND tool_use_id = ?5",
+            params![
+                message_id,
+                crate::hooks::HOOK_LINK_UNLINKED,
+                crate::hooks::HOOK_LINK_EXACT_TOOL_USE_ID,
+                session_id,
+                tool_use_id
+            ],
+        )?;
+    }
+
+    if role == "assistant"
+        && cost_confidence == "otel_exact"
+        && let Ok(event_ts) = DateTime::parse_from_rfc3339(&timestamp)
+    {
+        let event_ts = event_ts.with_timezone(&Utc);
+        let ts_lo = (event_ts - chrono::Duration::seconds(1)).to_rfc3339();
+        let ts_hi = (event_ts + chrono::Duration::seconds(1)).to_rfc3339();
+        let otel_id: Option<i64> = conn
+            .query_row(
+                "SELECT id
+                 FROM otel_events
+                 WHERE session_id = ?1
+                   AND message_id IS NULL
+                   AND timestamp BETWEEN ?2 AND ?3
+                 ORDER BY ABS(strftime('%s', timestamp) - strftime('%s', ?4)), id DESC
+                 LIMIT 1",
+                params![session_id, ts_lo, ts_hi, timestamp],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(otel_id) = otel_id {
+            conn.execute(
+                "UPDATE otel_events
+                 SET message_id = ?2,
+                     model = COALESCE(model, ?3),
+                     cost_cents_computed = COALESCE(cost_cents_computed, ?4)
+                 WHERE id = ?1",
+                params![otel_id, message_id, model, cost_cents],
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolve the default analytics DB path.

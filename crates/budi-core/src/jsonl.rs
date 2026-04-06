@@ -142,6 +142,8 @@ pub struct ParsedMessage {
     pub prompt_category: Option<String>,
     /// Tool names used by this assistant message (may contain multiple values).
     pub tool_names: Vec<String>,
+    /// Tool-use block IDs emitted by assistant content blocks.
+    pub tool_use_ids: Vec<String>,
 }
 
 impl Default for ParsedMessage {
@@ -172,14 +174,18 @@ impl Default for ParsedMessage {
             web_search_requests: 0,
             prompt_category: None,
             tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
         }
     }
 }
 
-fn extract_assistant_tool_names(content: Option<&Vec<serde_json::Value>>) -> Vec<String> {
+fn extract_assistant_tool_metadata(
+    content: Option<&Vec<serde_json::Value>>,
+) -> (Vec<String>, Vec<String>) {
     let mut names = std::collections::HashSet::new();
+    let mut tool_use_ids = std::collections::HashSet::new();
     let Some(blocks) = content else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
 
     for block in blocks {
@@ -193,11 +199,19 @@ fn extract_assistant_tool_names(content: Option<&Vec<serde_json::Value>>) -> Vec
                 names.insert(normalized.to_string());
             }
         }
+        if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+            let normalized = id.trim();
+            if !normalized.is_empty() {
+                tool_use_ids.insert(normalized.to_string());
+            }
+        }
     }
 
     let mut out: Vec<String> = names.into_iter().collect();
     out.sort();
-    out
+    let mut out_ids: Vec<String> = tool_use_ids.into_iter().collect();
+    out_ids.sort();
+    (out, out_ids)
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -256,6 +270,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 web_search_requests: 0,
                 prompt_category,
                 tool_names: Vec::new(),
+                tool_use_ids: Vec::new(),
             })
         }
         TranscriptEntry::Assistant(a) => {
@@ -263,6 +278,8 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 return None;
             }
             let usage = a.message.usage.as_ref();
+            let (tool_names, tool_use_ids) =
+                extract_assistant_tool_metadata(a.message.content.as_ref());
             // Extract 1-hour cache tier tokens from cache_creation breakdown
             let cache_1h = usage
                 .and_then(|u| u.cache_creation.as_ref())
@@ -299,7 +316,8 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 cache_creation_1h_tokens: cache_1h,
                 web_search_requests: web_searches,
                 prompt_category: None,
-                tool_names: extract_assistant_tool_names(a.message.content.as_ref()),
+                tool_names,
+                tool_use_ids,
             })
         }
         TranscriptEntry::Other => None,
@@ -409,6 +427,7 @@ mod tests {
         assert_eq!(msg.cache_read_tokens, 300);
         assert_eq!(msg.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(msg.tool_names, vec!["Read".to_string()]);
+        assert_eq!(msg.tool_use_ids, vec!["t1".to_string()]);
     }
 
     #[test]

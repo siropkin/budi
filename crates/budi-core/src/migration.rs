@@ -8,10 +8,11 @@
 //! Migrations run explicitly via `budi sync` or daemon auto-sync, not on every `open_db()`.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// Result of running schema repair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -121,6 +122,12 @@ fn run_version_migrations(conn: &Connection) -> Result<()> {
     if current_version(conn) == 16 {
         migrate_v16_to_v17(conn)?;
     }
+    if current_version(conn) == 17 {
+        migrate_v17_to_v18(conn)?;
+    }
+    if current_version(conn) == 18 {
+        migrate_v18_to_v19(conn)?;
+    }
     Ok(())
 }
 
@@ -224,7 +231,11 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
             tool_duration_ms    INTEGER,
             tool_call_count     INTEGER,
             raw_json            TEXT,
-            mcp_server          TEXT
+            mcp_server          TEXT,
+            message_id          TEXT,
+            message_request_id  TEXT,
+            tool_use_id         TEXT,
+            link_confidence     TEXT
         );
         ",
     )?;
@@ -241,7 +252,12 @@ fn create_otel_events(conn: &Connection) -> Result<()> {
             session_id  TEXT,
             timestamp   TEXT NOT NULL,
             raw_json    TEXT,
-            processed   INTEGER NOT NULL DEFAULT 0
+            processed   INTEGER NOT NULL DEFAULT 0,
+            message_id TEXT,
+            timestamp_nano TEXT,
+            model TEXT,
+            cost_usd_reported REAL,
+            cost_cents_computed REAL
         );
         ",
     )?;
@@ -514,6 +530,267 @@ fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Incremental migration from v17 to v18: add message-centric linkage columns
+/// for hook/OTEL event drilldowns and backfill deterministic links.
+fn migrate_v17_to_v18(conn: &Connection) -> Result<()> {
+    tracing::info!(
+        "Migrating schema v17 → v18: adding hook/otel linkage columns and backfilling links"
+    );
+
+    let _ = ensure_column(conn, "hook_events", "message_uuid", "message_uuid TEXT")?;
+    let _ = ensure_column(
+        conn,
+        "hook_events",
+        "message_request_id",
+        "message_request_id TEXT",
+    )?;
+    let _ = ensure_column(conn, "hook_events", "tool_use_id", "tool_use_id TEXT")?;
+    let _ = ensure_column(
+        conn,
+        "hook_events",
+        "link_confidence",
+        "link_confidence TEXT",
+    )?;
+
+    let _ = ensure_column(conn, "otel_events", "message_uuid", "message_uuid TEXT")?;
+    let _ = ensure_column(conn, "otel_events", "timestamp_nano", "timestamp_nano TEXT")?;
+    let _ = ensure_column(conn, "otel_events", "model", "model TEXT")?;
+    let _ = ensure_column(
+        conn,
+        "otel_events",
+        "cost_usd_reported",
+        "cost_usd_reported REAL",
+    )?;
+    let _ = ensure_column(
+        conn,
+        "otel_events",
+        "cost_cents_computed",
+        "cost_cents_computed REAL",
+    )?;
+
+    create_indexes(conn)?;
+    backfill_hook_event_links(conn)?;
+    backfill_otel_event_links(conn)?;
+
+    conn.pragma_update(None, "user_version", 18u32)?;
+    Ok(())
+}
+
+/// Incremental migration from v18 to v19: rename event linkage columns from
+/// `message_uuid` to `message_id` for hook/OTEL events.
+fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v18 → v19: renaming hook/otel linkage columns to message_id");
+
+    if table_exists(conn, "hook_events")?
+        && has_column(conn, "hook_events", "message_uuid")?
+        && !has_column(conn, "hook_events", "message_id")?
+    {
+        conn.execute_batch("ALTER TABLE hook_events RENAME COLUMN message_uuid TO message_id;")?;
+    }
+
+    if table_exists(conn, "otel_events")?
+        && has_column(conn, "otel_events", "message_uuid")?
+        && !has_column(conn, "otel_events", "message_id")?
+    {
+        conn.execute_batch("ALTER TABLE otel_events RENAME COLUMN message_uuid TO message_id;")?;
+    }
+
+    conn.execute_batch(
+        "
+        DROP INDEX IF EXISTS idx_hook_events_message_ts;
+        DROP INDEX IF EXISTS idx_otel_events_message_ts;
+        ",
+    )?;
+    create_indexes(conn)?;
+
+    conn.pragma_update(None, "user_version", 19u32)?;
+    Ok(())
+}
+
+fn parse_hook_row_ids(raw_json: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(raw) = raw_json else {
+        return (None, None);
+    };
+    let Ok(value): std::result::Result<serde_json::Value, _> = serde_json::from_str(raw) else {
+        return (None, None);
+    };
+    (
+        crate::hooks::extract_hook_message_request_id(&value),
+        crate::hooks::extract_hook_tool_use_id(&value),
+    )
+}
+
+fn backfill_hook_event_links(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "hook_events")? {
+        return Ok(());
+    }
+
+    let rows: Vec<(i64, Option<String>, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, raw_json
+             FROM hook_events
+             ORDER BY id ASC",
+        )?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+
+    let mut linked_count = 0usize;
+    for (id, session_id, raw_json) in &rows {
+        let (message_request_id, tool_use_id) = parse_hook_row_ids(raw_json.as_deref());
+        let (message_uuid, link_confidence) = crate::hooks::resolve_hook_message_link(
+            conn,
+            session_id.as_deref(),
+            message_request_id.as_deref(),
+            tool_use_id.as_deref(),
+        )?;
+        if message_uuid.is_some() {
+            linked_count += 1;
+        }
+
+        conn.execute(
+            "UPDATE hook_events SET
+                message_request_id = COALESCE(message_request_id, ?2),
+                tool_use_id = COALESCE(tool_use_id, ?3),
+                message_uuid = COALESCE(message_uuid, ?4),
+                link_confidence = COALESCE(link_confidence, ?5)
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                message_request_id,
+                tool_use_id,
+                message_uuid,
+                link_confidence
+            ],
+        )?;
+    }
+
+    if linked_count > 0 {
+        tracing::info!("Hook backfill: deterministically linked {linked_count} hook events");
+    }
+    Ok(())
+}
+
+fn extract_otel_snapshot_fields(
+    raw_json: Option<&str>,
+) -> (Option<String>, Option<String>, Option<f64>) {
+    let Some(raw) = raw_json else {
+        return (None, None, None);
+    };
+    let Ok(value): std::result::Result<serde_json::Value, _> = serde_json::from_str(raw) else {
+        return (None, None, None);
+    };
+    let timestamp_nano = value
+        .get("timestamp_nano")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let model = value
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let cost_usd_reported = value
+        .get("cost_usd_reported")
+        .and_then(|v| v.as_f64())
+        .or_else(|| value.get("cost_usd").and_then(|v| v.as_f64()));
+    (timestamp_nano, model, cost_usd_reported)
+}
+
+fn backfill_otel_event_links(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "otel_events")? {
+        return Ok(());
+    }
+
+    let rows: Vec<(i64, Option<String>, String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, timestamp, raw_json
+             FROM otel_events
+             ORDER BY id ASC",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?
+    };
+
+    let mut linked_count = 0usize;
+    for (id, session_id, timestamp, raw_json) in &rows {
+        let (timestamp_nano_from_raw, model_from_raw, cost_usd_reported) =
+            extract_otel_snapshot_fields(raw_json.as_deref());
+
+        let mut linked_uuid: Option<String> = None;
+        let mut linked_model: Option<String> = None;
+        let mut linked_cost_cents: Option<f64> = None;
+
+        if let Some(sid) = session_id.as_deref().filter(|s| !s.trim().is_empty())
+            && let Ok(event_ts) = DateTime::parse_from_rfc3339(timestamp)
+        {
+            let event_ts = event_ts.with_timezone(&Utc);
+            let ts_lo = (event_ts - chrono::Duration::seconds(1)).to_rfc3339();
+            let ts_hi = (event_ts + chrono::Duration::seconds(1)).to_rfc3339();
+            let candidates: Vec<(String, String, Option<String>, Option<f64>)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT uuid, timestamp, model, cost_cents
+                     FROM messages
+                     WHERE session_id = ?1
+                       AND role = 'assistant'
+                       AND cost_confidence = 'otel_exact'
+                       AND timestamp BETWEEN ?2 AND ?3",
+                )?;
+                stmt.query_map(rusqlite::params![sid, ts_lo, ts_hi], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<std::result::Result<_, _>>()?
+            };
+
+            if let Some((uuid, _, model, cost_cents)) =
+                candidates
+                    .into_iter()
+                    .min_by_key(|(_, candidate_ts, _, _)| {
+                        DateTime::parse_from_rfc3339(candidate_ts)
+                            .map(|dt| {
+                                (dt.with_timezone(&Utc).timestamp() - event_ts.timestamp())
+                                    .unsigned_abs()
+                            })
+                            .unwrap_or(u64::MAX)
+                    })
+            {
+                linked_uuid = Some(uuid);
+                linked_model = model;
+                linked_cost_cents = cost_cents;
+                linked_count += 1;
+            }
+        }
+
+        let model = linked_model.or(model_from_raw);
+        conn.execute(
+            "UPDATE otel_events SET
+                message_uuid = COALESCE(message_uuid, ?2),
+                timestamp_nano = COALESCE(timestamp_nano, ?3),
+                model = COALESCE(model, ?4),
+                cost_usd_reported = COALESCE(cost_usd_reported, ?5),
+                cost_cents_computed = COALESCE(cost_cents_computed, ?6)
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                linked_uuid,
+                timestamp_nano_from_raw,
+                model,
+                cost_usd_reported,
+                linked_cost_cents
+            ],
+        )?;
+    }
+
+    if linked_count > 0 {
+        tracing::info!("OTEL backfill: linked {linked_count} otel_events to messages");
+    }
+    Ok(())
+}
+
 fn normalize_session_ids(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT session_id
@@ -676,12 +953,39 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
         CREATE INDEX IF NOT EXISTS idx_hook_events_event_session_ts ON hook_events(event, session_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_tool_use_id_partial ON hook_events(tool_use_id) WHERE tool_use_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_hook_events_message_request_id_partial ON hook_events(message_request_id) WHERE message_request_id IS NOT NULL;
 
         -- otel_events
         CREATE INDEX IF NOT EXISTS idx_otel_events_session ON otel_events(session_id);
         CREATE INDEX IF NOT EXISTS idx_otel_events_timestamp ON otel_events(timestamp);
         ",
     )?;
+
+    if table_exists(conn, "hook_events")? {
+        if has_column(conn, "hook_events", "message_id")? {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_hook_events_message_id_ts ON hook_events(message_id, timestamp);",
+            )?;
+        } else if has_column(conn, "hook_events", "message_uuid")? {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_hook_events_message_ts ON hook_events(message_uuid, timestamp);",
+            )?;
+        }
+    }
+
+    if table_exists(conn, "otel_events")? {
+        if has_column(conn, "otel_events", "message_id")? {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_otel_events_message_id_ts ON otel_events(message_id, timestamp);",
+            )?;
+        } else if has_column(conn, "otel_events", "message_uuid")? {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_otel_events_message_ts ON otel_events(message_uuid, timestamp);",
+            )?;
+        }
+    }
+
     Ok(())
 }
 
@@ -740,6 +1044,35 @@ fn reconcile_schema(conn: &Connection) -> Result<Vec<String>> {
     if ensure_column(conn, "hook_events", "mcp_server", "mcp_server TEXT")? {
         added_columns.push("hook_events.mcp_server".to_string());
     }
+    if table_exists(conn, "hook_events")?
+        && has_column(conn, "hook_events", "message_uuid")?
+        && !has_column(conn, "hook_events", "message_id")?
+    {
+        conn.execute_batch("ALTER TABLE hook_events RENAME COLUMN message_uuid TO message_id;")?;
+        added_columns.push("hook_events.message_id".to_string());
+    }
+    if ensure_column(conn, "hook_events", "message_id", "message_id TEXT")? {
+        added_columns.push("hook_events.message_id".to_string());
+    }
+    if ensure_column(
+        conn,
+        "hook_events",
+        "message_request_id",
+        "message_request_id TEXT",
+    )? {
+        added_columns.push("hook_events.message_request_id".to_string());
+    }
+    if ensure_column(conn, "hook_events", "tool_use_id", "tool_use_id TEXT")? {
+        added_columns.push("hook_events.tool_use_id".to_string());
+    }
+    if ensure_column(
+        conn,
+        "hook_events",
+        "link_confidence",
+        "link_confidence TEXT",
+    )? {
+        added_columns.push("hook_events.link_confidence".to_string());
+    }
     if ensure_column(
         conn,
         "otel_events",
@@ -747,6 +1080,38 @@ fn reconcile_schema(conn: &Connection) -> Result<Vec<String>> {
         "processed INTEGER NOT NULL DEFAULT 0",
     )? {
         added_columns.push("otel_events.processed".to_string());
+    }
+    if table_exists(conn, "otel_events")?
+        && has_column(conn, "otel_events", "message_uuid")?
+        && !has_column(conn, "otel_events", "message_id")?
+    {
+        conn.execute_batch("ALTER TABLE otel_events RENAME COLUMN message_uuid TO message_id;")?;
+        added_columns.push("otel_events.message_id".to_string());
+    }
+    if ensure_column(conn, "otel_events", "message_id", "message_id TEXT")? {
+        added_columns.push("otel_events.message_id".to_string());
+    }
+    if ensure_column(conn, "otel_events", "timestamp_nano", "timestamp_nano TEXT")? {
+        added_columns.push("otel_events.timestamp_nano".to_string());
+    }
+    if ensure_column(conn, "otel_events", "model", "model TEXT")? {
+        added_columns.push("otel_events.model".to_string());
+    }
+    if ensure_column(
+        conn,
+        "otel_events",
+        "cost_usd_reported",
+        "cost_usd_reported REAL",
+    )? {
+        added_columns.push("otel_events.cost_usd_reported".to_string());
+    }
+    if ensure_column(
+        conn,
+        "otel_events",
+        "cost_cents_computed",
+        "cost_cents_computed REAL",
+    )? {
+        added_columns.push("otel_events.cost_cents_computed".to_string());
     }
 
     // Index creation is idempotent and also heals drift where indexes were dropped.
@@ -1505,5 +1870,200 @@ mod tests {
             )
             .unwrap();
         assert!(claude_offset_exists, "non-cursor offsets must be preserved");
+    }
+
+    #[test]
+    fn migrate_v17_to_v18_adds_linkage_columns_and_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE hook_events_new (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider            TEXT NOT NULL,
+                event               TEXT NOT NULL,
+                session_id          TEXT,
+                timestamp           TEXT NOT NULL,
+                model               TEXT,
+                tool_name           TEXT,
+                tool_duration_ms    INTEGER,
+                tool_call_count     INTEGER,
+                raw_json            TEXT,
+                mcp_server          TEXT
+            );
+            INSERT INTO hook_events_new (id, provider, event, session_id, timestamp, model, tool_name, tool_duration_ms, tool_call_count, raw_json, mcp_server)
+            SELECT id, provider, event, session_id, timestamp, model, tool_name, tool_duration_ms, tool_call_count, raw_json, mcp_server
+            FROM hook_events;
+            DROP TABLE hook_events;
+            ALTER TABLE hook_events_new RENAME TO hook_events;
+
+            CREATE TABLE otel_events_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_name  TEXT NOT NULL,
+                session_id  TEXT,
+                timestamp   TEXT NOT NULL,
+                raw_json    TEXT,
+                processed   INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO otel_events_new (id, event_name, session_id, timestamp, raw_json, processed)
+            SELECT id, event_name, session_id, timestamp, raw_json, processed
+            FROM otel_events;
+            DROP TABLE otel_events;
+            ALTER TABLE otel_events_new RENAME TO otel_events;
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 17u32).unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        conn.execute("SELECT message_id FROM hook_events LIMIT 0", [])
+            .expect("hook_events.message_id should exist");
+        conn.execute("SELECT message_request_id FROM hook_events LIMIT 0", [])
+            .expect("hook_events.message_request_id should exist");
+        conn.execute("SELECT tool_use_id FROM hook_events LIMIT 0", [])
+            .expect("hook_events.tool_use_id should exist");
+        conn.execute("SELECT link_confidence FROM hook_events LIMIT 0", [])
+            .expect("hook_events.link_confidence should exist");
+
+        conn.execute("SELECT message_id FROM otel_events LIMIT 0", [])
+            .expect("otel_events.message_id should exist");
+        conn.execute("SELECT timestamp_nano FROM otel_events LIMIT 0", [])
+            .expect("otel_events.timestamp_nano should exist");
+        conn.execute("SELECT model FROM otel_events LIMIT 0", [])
+            .expect("otel_events.model should exist");
+        conn.execute("SELECT cost_usd_reported FROM otel_events LIMIT 0", [])
+            .expect("otel_events.cost_usd_reported should exist");
+        conn.execute("SELECT cost_cents_computed FROM otel_events LIMIT 0", [])
+            .expect("otel_events.cost_cents_computed should exist");
+
+        let has_hook_message_idx: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hook_events_message_id_ts')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let has_otel_message_idx: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_otel_events_message_id_ts')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(has_hook_message_idx);
+        assert!(has_otel_message_idx);
+    }
+
+    #[test]
+    fn migrate_v17_to_v18_backfills_hook_and_otel_links() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, model, request_id, cost_confidence, cost_cents, provider)
+             VALUES ('m-link', 'sess-link', 'assistant', '2026-03-25T00:00:01Z', 'claude-opus-4-6', 'msg_123', 'otel_exact', 7.5, 'claude_code')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (message_uuid, key, value)
+             VALUES ('m-link', 'tool_use_id', 'toolu_456')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE hook_events_new (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider            TEXT NOT NULL,
+                event               TEXT NOT NULL,
+                session_id          TEXT,
+                timestamp           TEXT NOT NULL,
+                model               TEXT,
+                tool_name           TEXT,
+                tool_duration_ms    INTEGER,
+                tool_call_count     INTEGER,
+                raw_json            TEXT,
+                mcp_server          TEXT
+            );
+            INSERT INTO hook_events_new (provider, event, session_id, timestamp, raw_json)
+            VALUES (
+              'claude_code',
+              'post_tool_use',
+              'sess-link',
+              '2026-03-25T00:00:01Z',
+              '{\"message_id\":\"msg_123\",\"tool_use_id\":\"toolu_456\"}'
+            );
+            DROP TABLE hook_events;
+            ALTER TABLE hook_events_new RENAME TO hook_events;
+
+            CREATE TABLE otel_events_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_name  TEXT NOT NULL,
+                session_id  TEXT,
+                timestamp   TEXT NOT NULL,
+                raw_json    TEXT,
+                processed   INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO otel_events_new (event_name, session_id, timestamp, raw_json, processed)
+            VALUES (
+              'claude_code.api_request',
+              'sess-link',
+              '2026-03-25T00:00:01.100Z',
+              '{\"timestamp_nano\":\"1711324801100000000\",\"model\":\"claude-opus-4-6\",\"cost_usd_reported\":0.075}',
+              1
+            );
+            DROP TABLE otel_events;
+            ALTER TABLE otel_events_new RENAME TO otel_events;
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 17u32).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let (message_request_id, tool_use_id, message_id, confidence): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT message_request_id, tool_use_id, message_id, link_confidence
+                 FROM hook_events
+                 LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(message_request_id.as_deref(), Some("msg_123"));
+        assert_eq!(tool_use_id.as_deref(), Some("toolu_456"));
+        assert_eq!(message_id.as_deref(), Some("m-link"));
+        assert_eq!(confidence.as_deref(), Some("exact_request_id"));
+
+        let (otel_message_id, model, cost_cents_computed): (
+            Option<String>,
+            Option<String>,
+            Option<f64>,
+        ) = conn
+            .query_row(
+                "SELECT message_id, model, cost_cents_computed
+                 FROM otel_events
+                 LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(otel_message_id.as_deref(), Some("m-link"));
+        assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(cost_cents_computed, Some(7.5));
     }
 }

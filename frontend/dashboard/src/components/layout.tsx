@@ -48,6 +48,7 @@ function PeriodSelector({ hidden }: { hidden: boolean }) {
 function ShellBody() {
   const location = useLocation();
   const periodHidden = location.pathname.startsWith("/settings");
+  const inSessionDetail = /^\/sessions\/.+/.test(location.pathname);
 
   return (
     <div className="mx-auto min-h-screen w-full max-w-7xl px-4 pb-10 pt-6 md:px-6">
@@ -73,7 +74,7 @@ function ShellBody() {
                     )
                   }
                 >
-                  {item.label}
+                  {item.to === "/sessions" && inSessionDetail ? "↑ Sessions" : item.label}
                 </NavLink>
               ))}
             </nav>

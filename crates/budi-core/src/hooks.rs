@@ -34,8 +34,83 @@ pub struct HookEvent {
     pub git_branch: Option<String>,
     // MCP
     pub mcp_server: Option<String>,
+    pub message_id: Option<String>,
+    pub message_request_id: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub link_confidence: Option<String>,
     // Raw
     pub raw_json: String,
+}
+
+pub const HOOK_LINK_EXACT_REQUEST_ID: &str = "exact_request_id";
+pub const HOOK_LINK_EXACT_TOOL_USE_ID: &str = "exact_tool_use_id";
+pub const HOOK_LINK_UNLINKED: &str = "unlinked";
+
+fn extract_string_path(json: &Value, path: &[&str]) -> Option<String> {
+    let mut current = json;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+pub fn extract_hook_message_request_id(json: &Value) -> Option<String> {
+    let top_level_keys = [
+        "message_request_id",
+        "message_id",
+        "request_id",
+        "response_id",
+        "id",
+    ];
+    for key in top_level_keys {
+        if let Some(value) = json
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    let nested_paths = [
+        ["message", "id"].as_slice(),
+        ["request", "id"].as_slice(),
+        ["response", "id"].as_slice(),
+        ["payload", "id"].as_slice(),
+        ["data", "id"].as_slice(),
+    ];
+    nested_paths
+        .iter()
+        .find_map(|path| extract_string_path(json, path))
+}
+
+pub fn extract_hook_tool_use_id(json: &Value) -> Option<String> {
+    let top_level_keys = ["tool_use_id", "tool_call_id"];
+    for key in top_level_keys {
+        if let Some(value) = json
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    let nested_paths = [
+        ["tool_use", "id"].as_slice(),
+        ["tool_call", "id"].as_slice(),
+        ["payload", "tool_use_id"].as_slice(),
+        ["payload", "tool_call_id"].as_slice(),
+    ];
+    nested_paths
+        .iter()
+        .find_map(|path| extract_string_path(json, path))
 }
 
 /// Parse a hook event from raw JSON (stdin from hook command).
@@ -132,6 +207,8 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
     });
 
     let raw_json = json.to_string();
+    let message_request_id = extract_hook_message_request_id(json);
+    let tool_use_id = extract_hook_tool_use_id(json);
 
     Ok(HookEvent {
         provider: provider.to_string(),
@@ -151,18 +228,111 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
         repo_id,
         git_branch,
         mcp_server,
+        message_id: None,
+        message_request_id,
+        tool_use_id,
+        link_confidence: Some(HOOK_LINK_UNLINKED.to_string()),
         raw_json,
     })
 }
 
+pub fn resolve_hook_message_link(
+    conn: &Connection,
+    session_id: Option<&str>,
+    message_request_id: Option<&str>,
+    tool_use_id: Option<&str>,
+) -> Result<(Option<String>, String)> {
+    let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((None, HOOK_LINK_UNLINKED.to_string()));
+    };
+
+    if let Some(request_id) = message_request_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let linked_by_request: Option<String> = conn
+            .query_row(
+                "SELECT uuid
+                 FROM messages
+                 WHERE session_id = ?1 AND request_id = ?2
+                 ORDER BY timestamp DESC
+                 LIMIT 1",
+                params![sid, request_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(uuid) = linked_by_request {
+            return Ok((Some(uuid), HOOK_LINK_EXACT_REQUEST_ID.to_string()));
+        }
+    }
+
+    if let Some(tool_id) = tool_use_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let linked_by_tool: Option<String> = conn
+            .query_row(
+                "SELECT m.uuid
+                 FROM messages m
+                 JOIN tags t ON t.message_uuid = m.uuid
+                 WHERE m.session_id = ?1
+                   AND t.key = 'tool_use_id'
+                   AND t.value = ?2
+                 ORDER BY m.timestamp DESC
+                 LIMIT 1",
+                params![sid, tool_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(uuid) = linked_by_tool {
+            return Ok((Some(uuid), HOOK_LINK_EXACT_TOOL_USE_ID.to_string()));
+        }
+    }
+
+    Ok((None, HOOK_LINK_UNLINKED.to_string()))
+}
+
 /// Insert a hook event into the `hook_events` table.
 pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
+    if let (Some(session_id), Some(tool_use_id)) =
+        (event.session_id.as_deref(), event.tool_use_id.as_deref())
+        && event.event == "post_tool_use"
+    {
+        let already_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM hook_events
+                    WHERE session_id = ?1
+                      AND event = 'post_tool_use'
+                      AND tool_use_id = ?2
+                )",
+                params![session_id, tool_use_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if already_exists {
+            return Ok(());
+        }
+    }
+
+    let (linked_message_id, link_confidence) = resolve_hook_message_link(
+        conn,
+        event.session_id.as_deref(),
+        event.message_request_id.as_deref(),
+        event.tool_use_id.as_deref(),
+    )?;
+    let message_id = event
+        .message_id
+        .clone()
+        .or(linked_message_id)
+        .filter(|s| !s.trim().is_empty());
+    let confidence = event
+        .link_confidence
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(link_confidence);
+
     conn.execute(
         "INSERT INTO hook_events (
             provider, event, session_id, timestamp, model,
             tool_name, tool_duration_ms, tool_call_count,
-            raw_json, mcp_server
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            raw_json, mcp_server, message_id, message_request_id,
+            tool_use_id, link_confidence
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             event.provider,
             event.event,
@@ -174,6 +344,10 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
             event.tool_call_count,
             event.raw_json,
             event.mcp_server,
+            message_id,
+            event.message_request_id,
+            event.tool_use_id,
+            confidence,
         ],
     )
     .context("Failed to insert hook event")?;
@@ -953,6 +1127,82 @@ mod tests {
     }
 
     #[test]
+    fn parse_hook_extracts_message_and_tool_use_ids() {
+        let json: Value = serde_json::from_str(
+            r#"{
+            "session_id": "abc-123",
+            "hook_event_name": "PostToolUse",
+            "message_id": "msg_123",
+            "tool_use": {"id": "toolu_456"},
+            "tool_name": "Read"
+        }"#,
+        )
+        .unwrap();
+
+        let event = parse_hook_event(&json).unwrap();
+        assert_eq!(event.message_request_id.as_deref(), Some("msg_123"));
+        assert_eq!(event.tool_use_id.as_deref(), Some("toolu_456"));
+        assert_eq!(event.link_confidence.as_deref(), Some(HOOK_LINK_UNLINKED));
+    }
+
+    #[test]
+    fn resolve_hook_message_link_prefers_request_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, request_id, provider)
+             VALUES ('m-req', 'sess-1', 'assistant', '2026-03-25T00:00:01Z', 'msg_123', 'claude_code')",
+            [],
+        )
+        .unwrap();
+
+        let (uuid, confidence) =
+            resolve_hook_message_link(&conn, Some("sess-1"), Some("msg_123"), Some("toolu_unused"))
+                .unwrap();
+        assert_eq!(uuid.as_deref(), Some("m-req"));
+        assert_eq!(confidence, HOOK_LINK_EXACT_REQUEST_ID);
+    }
+
+    #[test]
+    fn resolve_hook_message_link_falls_back_to_tool_use_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+             VALUES ('m-tool', 'sess-2', 'assistant', '2026-03-25T00:00:02Z', 'claude_code')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (message_uuid, key, value)
+             VALUES ('m-tool', 'tool_use_id', 'toolu_456')",
+            [],
+        )
+        .unwrap();
+
+        let (uuid, confidence) = resolve_hook_message_link(
+            &conn,
+            Some("sess-2"),
+            Some("missing_req"),
+            Some("toolu_456"),
+        )
+        .unwrap();
+        assert_eq!(uuid.as_deref(), Some("m-tool"));
+        assert_eq!(confidence, HOOK_LINK_EXACT_TOOL_USE_ID);
+    }
+
+    #[test]
+    fn resolve_hook_message_link_unlinked_when_no_deterministic_match() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&conn).unwrap();
+        let (uuid, confidence) =
+            resolve_hook_message_link(&conn, Some("sess-3"), Some("req_x"), Some("tool_x"))
+                .unwrap();
+        assert!(uuid.is_none());
+        assert_eq!(confidence, HOOK_LINK_UNLINKED);
+    }
+
+    #[test]
     fn classify_bugfix() {
         assert_eq!(
             classify_prompt("fix the login bug"),
@@ -1185,6 +1435,10 @@ mod tests {
             repo_id: None,
             git_branch: None,
             mcp_server: None,
+            message_id: None,
+            message_request_id: None,
+            tool_use_id: None,
+            link_confidence: Some(HOOK_LINK_UNLINKED.to_string()),
             raw_json: "{}".to_string(),
         };
         upsert_session(&conn, &start_event).unwrap();
@@ -1218,5 +1472,48 @@ mod tests {
             .unwrap();
         assert_eq!(reason, "completed");
         assert_eq!(dur, 60000);
+    }
+
+    #[test]
+    fn ingest_hook_event_dedups_duplicate_post_tool_use_by_tool_use_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&conn).unwrap();
+
+        let event = HookEvent {
+            provider: "claude_code".to_string(),
+            event: "post_tool_use".to_string(),
+            session_id: Some("sess-1".to_string()),
+            timestamp: Utc::now(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            duration_ms: None,
+            composer_mode: None,
+            permission_mode: None,
+            workspace_root: None,
+            user_email: None,
+            end_reason: None,
+            tool_name: Some("Read".to_string()),
+            tool_duration_ms: Some(10),
+            tool_call_count: None,
+            repo_id: None,
+            git_branch: None,
+            mcp_server: None,
+            message_id: None,
+            message_request_id: None,
+            tool_use_id: Some("toolu_dup_1".to_string()),
+            link_confidence: Some(HOOK_LINK_UNLINKED.to_string()),
+            raw_json: "{}".to_string(),
+        };
+
+        ingest_hook_event(&conn, &event).unwrap();
+        ingest_hook_event(&conn, &event).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hook_events WHERE session_id='sess-1' AND tool_use_id='toolu_dup_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

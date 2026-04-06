@@ -19,6 +19,7 @@ pub const ACTIVITY: &str = "activity";
 pub const USER_EMAIL: &str = "user_email";
 pub const DURATION: &str = "duration";
 pub const TOOL: &str = "tool";
+pub const TOOL_USE_ID: &str = "tool_use_id";
 
 /// Identity tags: constant for the entire session, deduplicated to one
 /// assistant message per session.

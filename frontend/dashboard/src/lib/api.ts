@@ -11,9 +11,11 @@ import type {
   IntegrationsHealth,
   MessageRow,
   ModelRow,
+  OtelEventRow,
   ProjectRow,
   ProviderStats,
   RegisteredProvider,
+  SessionHookEventRow,
   SchemaVersion,
   SessionDetailRow,
   SessionCurveRow,
@@ -147,7 +149,18 @@ export async function fetchSessions(
 }
 
 export async function fetchSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRow[]> {
-  return fetchJson<MessageRow[]>(`/analytics/sessions/${encodeURIComponent(sessionId)}/messages`, signal ? { signal } : undefined);
+  return fetchSessionMessagesWithRoles(sessionId, "assistant", signal);
+}
+
+export async function fetchSessionMessagesWithRoles(
+  sessionId: string,
+  roles: "assistant" | "all",
+  signal?: AbortSignal,
+): Promise<MessageRow[]> {
+  return fetchJson<MessageRow[]>(
+    `/analytics/sessions/${encodeURIComponent(sessionId)}/messages?roles=${encodeURIComponent(roles)}`,
+    signal ? { signal } : undefined,
+  );
 }
 
 export async function fetchSessionDetail(sessionId: string, signal?: AbortSignal): Promise<SessionDetailRow> {
@@ -160,6 +173,48 @@ export async function fetchSessionTags(sessionId: string, signal?: AbortSignal):
 
 export async function fetchSessionHealth(sessionId: string, signal?: AbortSignal): Promise<SessionHealth | null> {
   return fetchJson<SessionHealth>(`/analytics/session-health?session_id=${encodeURIComponent(sessionId)}`, signal ? { signal } : undefined);
+}
+
+export async function fetchSessionHookEvents(
+  sessionId: string,
+  query: {
+    linked_only?: boolean;
+    event?: string;
+    limit?: number;
+    offset?: number;
+    include_raw?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<SessionHookEventRow[]> {
+  const params = new URLSearchParams();
+  if (query.linked_only != null) params.set("linked_only", String(query.linked_only));
+  if (query.event) params.set("event", query.event);
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.offset != null) params.set("offset", String(query.offset));
+  if (query.include_raw != null) params.set("include_raw", String(query.include_raw));
+  const search = params.toString();
+  const url = `/analytics/sessions/${encodeURIComponent(sessionId)}/hook-events${search ? `?${search}` : ""}`;
+  return fetchJson<SessionHookEventRow[]>(url, signal ? { signal } : undefined);
+}
+
+export async function fetchSessionOtelEvents(
+  sessionId: string,
+  query: {
+    linked_only?: boolean;
+    limit?: number;
+    offset?: number;
+    include_raw?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<OtelEventRow[]> {
+  const params = new URLSearchParams();
+  if (query.linked_only != null) params.set("linked_only", String(query.linked_only));
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.offset != null) params.set("offset", String(query.offset));
+  if (query.include_raw != null) params.set("include_raw", String(query.include_raw));
+  const search = params.toString();
+  const url = `/analytics/sessions/${encodeURIComponent(sessionId)}/otel-events${search ? `?${search}` : ""}`;
+  return fetchJson<OtelEventRow[]>(url, signal ? { signal } : undefined);
 }
 
 export async function fetchDaemonHealth(signal?: AbortSignal): Promise<DaemonHealth> {

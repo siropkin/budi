@@ -311,7 +311,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     };
 
     let sql = format!(
-        "SELECT messages.uuid, messages.timestamp, messages.role, messages.model,
+        "SELECT messages.uuid, messages.session_id, messages.timestamp, messages.role, messages.model,
                 COALESCE(messages.provider, 'claude_code'),
                 COALESCE(messages.repo_id, s.repo_id),
                 messages.input_tokens, messages.output_tokens,
@@ -341,18 +341,21 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         .query_map(param_refs.as_slice(), |row| {
             Ok(MessageRow {
                 uuid: row.get(0)?,
-                timestamp: row.get(1)?,
-                role: row.get(2)?,
-                model: row.get(3)?,
-                provider: row.get(4)?,
-                repo_id: row.get(5)?,
-                input_tokens: row.get(6)?,
-                output_tokens: row.get(7)?,
-                cache_creation_tokens: row.get(8)?,
-                cache_read_tokens: row.get(9)?,
-                cost_cents: row.get(10)?,
-                cost_confidence: row.get(11)?,
-                git_branch: row.get(12)?,
+                session_id: row.get(1)?,
+                timestamp: row.get(2)?,
+                role: row.get(3)?,
+                model: row.get(4)?,
+                provider: row.get(5)?,
+                repo_id: row.get(6)?,
+                input_tokens: row.get(7)?,
+                output_tokens: row.get(8)?,
+                cache_creation_tokens: row.get(9)?,
+                cache_read_tokens: row.get(10)?,
+                cost_cents: row.get(11)?,
+                cost_confidence: row.get(12)?,
+                git_branch: row.get(13)?,
+                request_id: None,
+                tools: Vec::new(),
             })
         })?
         .filter_map(|r| r.ok())
