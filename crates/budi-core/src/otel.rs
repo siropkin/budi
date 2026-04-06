@@ -277,7 +277,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         // Look up session context (repo_id, git_branch, cwd)
         let session_ctx: Option<(Option<String>, Option<String>, Option<String>)> = tx
             .query_row(
-                "SELECT repo_id, git_branch, workspace_root FROM sessions WHERE session_id = ?1",
+                "SELECT repo_id, git_branch, workspace_root FROM sessions WHERE id = ?1",
                 params![event.session_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -288,7 +288,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         // Check if an otel_exact row already exists for this API call (dedup repeated OTEL events)
         let existing_otel_uuid: Option<String> = tx
             .query_row(
-                "SELECT uuid
+                "SELECT id
                  FROM messages
                  WHERE session_id = ?1
                    AND model = ?2
@@ -329,7 +329,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
         // Fetch candidates from the index-friendly range, then filter in Rust.
         let existing_uuid: Option<String> = {
             let mut stmt = tx.prepare_cached(
-                "SELECT uuid, cost_confidence, timestamp FROM messages
+                "SELECT id, cost_confidence, timestamp FROM messages
                  WHERE session_id = ?1
                    AND model = ?2
                    AND role = 'assistant'
@@ -365,7 +365,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                     cache_creation_tokens = ?4,
                     cache_read_tokens = ?5,
                     model = ?6
-                 WHERE uuid = ?7",
+                 WHERE id = ?7",
                 params![
                     cost_cents,
                     event.input_tokens as i64,
@@ -388,11 +388,11 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
             // timestamp_nano will match it via ON CONFLICT and be no-ops.
             let uuid = otel_uuid(&event.session_id, &event.timestamp_nano);
             tx.execute(
-                "INSERT INTO messages (uuid, session_id, role, timestamp, model, provider,
+                "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
                     cost_cents, cost_confidence, repo_id, git_branch, cwd)
                 VALUES (?1, ?2, 'assistant', ?3, ?4, 'claude_code', ?5, ?6, ?7, ?8, ?9, 'otel_exact', ?10, ?11, ?12)
-                ON CONFLICT(uuid) DO UPDATE SET
+                ON CONFLICT(id) DO UPDATE SET
                     cost_cents = excluded.cost_cents,
                     cost_confidence = excluded.cost_confidence,
                     input_tokens = excluded.input_tokens,
@@ -422,7 +422,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
 
         // Insert stub session if it doesn't exist yet (hooks may arrive later)
         tx.execute(
-            "INSERT OR IGNORE INTO sessions (session_id, provider) VALUES (?1, 'claude_code')",
+            "INSERT OR IGNORE INTO sessions (id, provider) VALUES (?1, 'claude_code')",
             params![event.session_id],
         )?;
 
@@ -675,7 +675,7 @@ mod tests {
         // Simulate JSONL sync: insert a message with estimated cost and a JSONL UUID
         let jsonl_uuid = "abc12345-jsonl-uuid-0000-000000000001";
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, model, provider,
+            "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
                 input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
                 cost_cents, cost_confidence)
             VALUES (?1, 'sess-dedup', 'assistant', '2024-03-27T00:00:00+00:00', 'claude-opus-4-6',
@@ -714,7 +714,7 @@ mod tests {
         // Verify OTEL data overwrote estimated data on the JSONL UUID
         let (cost, confidence, input_tokens): (f64, String, i64) = conn
             .query_row(
-                "SELECT cost_cents, cost_confidence, input_tokens FROM messages WHERE uuid = ?1",
+                "SELECT cost_cents, cost_confidence, input_tokens FROM messages WHERE id = ?1",
                 params![jsonl_uuid],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -814,7 +814,7 @@ mod tests {
 
         // Create a session with git context (as hooks would)
         conn.execute(
-            "INSERT INTO sessions (session_id, provider, repo_id, git_branch, workspace_root)
+            "INSERT INTO sessions (id, provider, repo_id, git_branch, workspace_root)
             VALUES ('sess-git', 'claude_code', 'github.com/user/repo', 'feature/otel', '/home/user/repo')",
             [],
         )

@@ -13,10 +13,11 @@ import {
   fetchRegisteredProviders,
   fetchSessionDetail,
   fetchSessionHealth,
-  fetchSessionMessages,
+  fetchSessionMessagesWithRoles,
   fetchSessionTags,
 } from "@/lib/api";
 import { fmtCost, fmtDate, fmtNum, formatModelName, repoName } from "@/lib/format";
+import type { MessagesResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function healthVariant(state: string): "default" | "warning" | "success" {
@@ -27,21 +28,13 @@ function healthVariant(state: string): "default" | "warning" | "success" {
 
 const MESSAGE_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
 const MESSAGE_PAGE_SIZE = 50;
-type MessageSortColumn = "timestamp" | "provider" | "model" | "tokens" | "cost";
+type MessageSortColumn = "timestamp" | "provider" | "model" | "repo_id" | "git_branch" | "tokens" | "cost";
 
 function compactTools(tools: string[] | undefined, max = 2): string {
   const values = (tools ?? []).filter(Boolean);
   if (values.length === 0) return "--";
   if (values.length <= max) return values.join(", ");
   return `${values.slice(0, max).join(", ")} +${values.length - max}`;
-}
-
-function sourceLabel(confidence: string | undefined): string {
-  const value = (confidence ?? "estimated").toLowerCase();
-  if (value === "otel_exact") return "OTEL exact";
-  if (value === "exact" || value === "exact_cost") return "exact";
-  if (value === "estimated_unknown_model") return "estimated (model)";
-  return value;
 }
 
 function SortableHead({
@@ -91,9 +84,21 @@ export function SessionDetailPage() {
     enabled: Boolean(sessionId),
   });
 
-  const messagesQuery = useQuery({
-    queryKey: ["session-messages", sessionId],
-    queryFn: ({ signal }) => fetchSessionMessages(sessionId ?? "", signal),
+  const messagesQuery = useQuery<MessagesResponse>({
+    queryKey: ["session-messages", sessionId, sortBy, sortAsc, messageOffset],
+    queryFn: ({ signal }) =>
+      fetchSessionMessagesWithRoles(
+        sessionId ?? "",
+        "assistant",
+        {
+          limit: MESSAGE_PAGE_SIZE,
+          offset: messageOffset,
+          sort_by: sortBy,
+          sort_asc: sortAsc,
+        },
+        signal,
+      ),
+    placeholderData: (previousData) => previousData,
     enabled: Boolean(sessionId),
   });
 
@@ -115,39 +120,20 @@ export function SessionDetailPage() {
     staleTime: 60_000,
   });
 
-  const messages = messagesQuery.data ?? [];
-  const assistantMessages = messages;
+  const messagePage = messagesQuery.data?.messages ?? [];
+  const messageTotalCount = messagesQuery.data?.total_count ?? 0;
   const providers = providersQuery.data ?? [];
-  const sortedMessages = [...messages];
-  sortedMessages.sort((left, right) => {
-    let compare = 0;
-    if (sortBy === "timestamp") {
-      compare = left.timestamp.localeCompare(right.timestamp);
-    } else if (sortBy === "provider") {
-      const leftProvider = providers.find((entry) => entry.name === left.provider)?.display_name ?? left.provider;
-      const rightProvider = providers.find((entry) => entry.name === right.provider)?.display_name ?? right.provider;
-      compare = leftProvider.localeCompare(rightProvider);
-    } else if (sortBy === "model") {
-      compare = formatModelName(left.model ?? "").localeCompare(formatModelName(right.model ?? ""));
-    } else if (sortBy === "tokens") {
-      const leftTokens = (left.input_tokens ?? 0) + (left.output_tokens ?? 0);
-      const rightTokens = (right.input_tokens ?? 0) + (right.output_tokens ?? 0);
-      compare = leftTokens - rightTokens;
-    } else if (sortBy === "cost") {
-      compare = (left.cost_cents ?? 0) - (right.cost_cents ?? 0);
-    }
-    return sortAsc ? compare : -compare;
-  });
 
   useEffect(() => {
     setMessageOffset(0);
   }, [sortBy, sortAsc, sessionId]);
 
   useEffect(() => {
-    if (messageOffset >= sortedMessages.length && messageOffset > 0) {
-      setMessageOffset(Math.max(0, sortedMessages.length - MESSAGE_PAGE_SIZE));
+    if (messageOffset >= messageTotalCount && messageOffset > 0) {
+      const previousPageOffset = Math.max(0, Math.floor((messageTotalCount - 1) / MESSAGE_PAGE_SIZE) * MESSAGE_PAGE_SIZE);
+      setMessageOffset(previousPageOffset);
     }
-  }, [messageOffset, sortedMessages.length]);
+  }, [messageOffset, messageTotalCount]);
 
   if (!sessionId) {
     return <ErrorState error={new Error("Session ID is missing in route")} />;
@@ -211,17 +197,14 @@ export function SessionDetailPage() {
   const health = healthQuery.data;
   const vitals = Object.entries(health?.vitals ?? {}).filter(([, vital]) => vital != null);
 
-  let tokenTotal = 0;
-  let costTotalCents = 0;
-  for (const message of assistantMessages) {
-    tokenTotal += (message.input_tokens ?? 0) + (message.output_tokens ?? 0);
-    costTotalCents += message.cost_cents ?? 0;
-  }
+  const tokenTotal = (sessionDetail.input_tokens ?? 0) + (sessionDetail.output_tokens ?? 0);
+  const costTotalCents = sessionDetail.cost_cents ?? 0;
 
+  const curveMessages = [...messagePage].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const sessionCurve = [];
   let cumulativeCostCents = 0;
-  for (let index = 0; index < assistantMessages.length; index += 1) {
-    const message = assistantMessages[index];
+  for (let index = 0; index < curveMessages.length; index += 1) {
+    const message = curveMessages[index];
     cumulativeCostCents += message.cost_cents ?? 0;
     sessionCurve.push({
       label: `#${index + 1}`,
@@ -230,43 +213,21 @@ export function SessionDetailPage() {
     });
   }
 
-  const paginatedMessages = sortedMessages.slice(messageOffset, messageOffset + MESSAGE_PAGE_SIZE);
-  const hasMoreMessages = messageOffset + paginatedMessages.length < sortedMessages.length;
-  const messageNumberById = new Map<string, number>();
-  for (let index = 0; index < assistantMessages.length; index += 1) {
-    const uuid = assistantMessages[index].uuid;
-    if (uuid) {
-      messageNumberById.set(uuid, index + 1);
-    }
-  }
-
-  const overviewRepoIds =
-    sessionDetail.repo_ids?.filter((repo) => repo && repo !== "unknown") ??
-    [];
-  const overviewRepoPrimary =
-    overviewRepoIds[0] ??
-    sessionDetail.repo_id ??
-    messages.find((message) => message.repo_id && message.repo_id !== "unknown")?.repo_id ??
-    null;
-  const overviewRepoCount = sessionDetail.repo_count ?? overviewRepoIds.length;
+  const paginatedMessages = messagePage;
+  const hasMoreMessages = messageOffset + paginatedMessages.length < messageTotalCount;
+  const overviewRepos = sessionDetail.repo_ids ?? [];
+  const overviewRepoPrimary = overviewRepos[0] ?? null;
   const overviewRepoLabel =
-    overviewRepoCount > 1
-      ? `${repoName(overviewRepoPrimary)} +${overviewRepoCount - 1}`
+    overviewRepos.length > 1
+      ? `${repoName(overviewRepoPrimary)} +${overviewRepos.length - 1}`
       : repoName(overviewRepoPrimary);
 
-  const overviewBranches =
-    sessionDetail.git_branches?.filter((branch) => branch && branch !== "") ??
-    [];
-  const rawOverviewBranch =
-    overviewBranches[0] ??
-    sessionDetail.git_branch ??
-    messages.find((message) => message.git_branch && message.git_branch !== "")?.git_branch ??
-    null;
+  const overviewBranches = sessionDetail.git_branches ?? [];
+  const rawOverviewBranch = overviewBranches[0] ?? null;
   const overviewBranchPrimary = rawOverviewBranch?.replace(/^refs\/heads\//, "") ?? "--";
-  const overviewBranchCount = sessionDetail.git_branch_count ?? overviewBranches.length;
   const overviewBranchLabel =
-    overviewBranchCount > 1
-      ? `${overviewBranchPrimary} +${overviewBranchCount - 1}`
+    overviewBranches.length > 1
+      ? `${overviewBranchPrimary} +${overviewBranches.length - 1}`
       : overviewBranchPrimary;
   const overviewName = sessionDetail.title || "--";
 
@@ -278,6 +239,8 @@ export function SessionDetailPage() {
     setSortBy(column);
     setSortAsc(false);
   };
+  const showProviderColumn =
+    new Set(paginatedMessages.map((message) => message.provider).filter(Boolean)).size > 1;
 
   return (
     <div className="space-y-5">
@@ -304,7 +267,7 @@ export function SessionDetailPage() {
               Tokens: <span className="font-semibold text-foreground">{fmtNum(tokenTotal)}</span>
             </p>
             <p>
-              Messages: <span className="font-semibold text-foreground">{fmtNum(assistantMessages.length)}</span>
+              Messages: <span className="font-semibold text-foreground">{fmtNum(sessionDetail.message_count)}</span>
             </p>
             <p>
               Repo: <span className="font-semibold text-foreground">{overviewRepoLabel}</span>
@@ -350,7 +313,7 @@ export function SessionDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Session Length vs Cost</CardTitle>
+          <CardTitle>Message Page Length vs Cost</CardTitle>
         </CardHeader>
         <CardContent>
           {sessionCurve.length === 0 ? (
@@ -413,12 +376,16 @@ export function SessionDetailPage() {
             <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>#</TableHead>
                   <SortableHead label="Time" column="timestamp" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
-                  <SortableHead label="Agent" column="provider" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <TableHead className="w-12">#</TableHead>
+                  {showProviderColumn ? (
+                    <SortableHead label="Agent" column="provider" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  ) : null}
                   <SortableHead label="Model" column="model" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <SortableHead label="Repo" column="repo_id" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
+                  <SortableHead label="Branch" column="git_branch" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} />
                   <TableHead>Tools</TableHead>
-                  <TableHead>Source</TableHead>
+                  <TableHead>Tags</TableHead>
                   <SortableHead label="Tokens" column="tokens" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
                   <SortableHead label="Cost" column="cost" sortBy={sortBy} sortAsc={sortAsc} onSort={onSort} right />
                 </TableRow>
@@ -427,28 +394,37 @@ export function SessionDetailPage() {
                 {paginatedMessages.map((message, index) => {
                   const providerDisplay = providers.find((entry) => entry.name === message.provider)?.display_name ?? message.provider;
                   const rawModel = message.model ?? "";
-                  const number = message.uuid ? messageNumberById.get(message.uuid) : undefined;
+                  const number = messageOffset + index + 1;
+                  const repoLabel = repoName(message.repo_id);
+                  const branchLabel = message.git_branch?.replace(/^refs\/heads\//, "") || "--";
+                  const tagLabel = (message.tags ?? [])
+                    .filter((tag) => tag.key !== "tool")
+                    .map((tag) => `${tag.key}:${tag.value}`)
+                    .slice(0, 2)
+                    .join(", ");
+                  const estimated =
+                    (message.cost_confidence ?? "estimated") !== "otel_exact" &&
+                    (message.cost_confidence ?? "estimated") !== "exact" &&
+                    (message.cost_confidence ?? "estimated") !== "exact_cost";
                   return (
-                    <TableRow key={message.uuid ?? `${message.timestamp}-${messageOffset + index}`}>
-                      <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap`}>{number != null ? `#${number}` : "--"}</TableCell>
+                    <TableRow key={message.id ?? `${message.timestamp}-${messageOffset + index}`}>
                       <TableCell className={MESSAGE_CELL_CLASS}>{fmtDate(message.timestamp)}</TableCell>
-                      <TableCell className={MESSAGE_CELL_CLASS}>{providerDisplay}</TableCell>
+                      <TableCell className={`${MESSAGE_CELL_CLASS} w-12 whitespace-nowrap`}>#{number}</TableCell>
+                      {showProviderColumn ? <TableCell className={MESSAGE_CELL_CLASS}>{providerDisplay}</TableCell> : null}
                       <TableCell className={MESSAGE_CELL_CLASS} title={rawModel}>
                         {formatModelName(rawModel)}
                       </TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS} title={message.repo_id ?? ""}>{repoLabel}</TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS} title={branchLabel}>{branchLabel}</TableCell>
                       <TableCell className={MESSAGE_CELL_CLASS} title={(message.tools ?? []).join(", ")}>
                         {compactTools(message.tools)}
                       </TableCell>
-                      <TableCell className={MESSAGE_CELL_CLASS}>
-                        <Badge variant={message.cost_confidence === "otel_exact" ? "success" : "outline"}>
-                          {sourceLabel(message.cost_confidence)}
-                        </Badge>
-                      </TableCell>
+                      <TableCell className={MESSAGE_CELL_CLASS} title={tagLabel}>{tagLabel || "--"}</TableCell>
                       <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap text-right`}>
                         {fmtNum((message.input_tokens ?? 0) + (message.output_tokens ?? 0))}
                       </TableCell>
                       <TableCell className={`${MESSAGE_CELL_CLASS} whitespace-nowrap text-right`}>
-                        {fmtCost((message.cost_cents ?? 0) / 100)}
+                        {(estimated ? "~" : "") + fmtCost((message.cost_cents ?? 0) / 100)}
                       </TableCell>
                     </TableRow>
                   );
@@ -458,7 +434,7 @@ export function SessionDetailPage() {
           </div>
           <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
             <p>
-              Showing {paginatedMessages.length === 0 ? 0 : messageOffset + 1}-{messageOffset + paginatedMessages.length} of {fmtNum(sortedMessages.length)}
+              Showing {paginatedMessages.length === 0 ? 0 : messageOffset + 1}-{messageOffset + paginatedMessages.length} of {fmtNum(messageTotalCount)}
             </p>
             <div className="flex gap-2">
               <Button

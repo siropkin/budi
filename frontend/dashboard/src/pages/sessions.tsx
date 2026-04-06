@@ -152,11 +152,8 @@ export function SessionsPage() {
             </TableHeader>
             <TableBody>
               {sessions.map((session) => {
-                const rawModel = session.model ?? "";
-                const modelList = rawModel
-                  .split(",")
-                  .map((model) => model.trim())
-                  .filter(Boolean);
+                const modelList = session.models ?? [];
+                const rawModel = modelList.join(", ");
                 const modelSummary =
                   modelList.length > 0
                     ? `${formatModelName(modelList[0])}${modelList.length > 1 ? ` +${modelList.length - 1}` : ""}`
@@ -165,26 +162,26 @@ export function SessionsPage() {
                 const providerDisplay = providers.find((entry) => entry.name === session.provider)?.display_name ?? session.provider;
                 const duration = fmtDurationMs(session.duration_ms);
                 const tokenCount = (session.input_tokens ?? 0) + (session.output_tokens ?? 0);
-                const branch = session.git_branch?.replace(/^refs\/heads\//, "") || "--";
-                const repoCount = session.repo_count ?? 0;
-                const branchCount = session.git_branch_count ?? 0;
+                const repoIds = session.repo_ids ?? [];
+                const gitBranches = session.git_branches ?? [];
+                const primaryRepo = repoIds[0] ?? null;
+                const primaryBranch = gitBranches[0] ?? null;
+                const branch = primaryBranch?.replace(/^refs\/heads\//, "") || "--";
                 const repoLabel =
-                  repoCount > 1
-                    ? `${repoName(session.repo_id)} +${repoCount - 1}`
-                    : repoName(session.repo_id);
-                const branchLabel = branchCount > 1 ? `${branch} +${branchCount - 1}` : branch;
+                  repoIds.length > 1 ? `${repoName(primaryRepo)} +${repoIds.length - 1}` : repoName(primaryRepo);
+                const branchLabel = gitBranches.length > 1 ? `${branch} +${gitBranches.length - 1}` : branch;
 
                 return (
                   <TableRow
-                    key={session.session_id}
+                    key={session.id}
                     role="link"
                     tabIndex={0}
                     className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => navigate(`/sessions/${encodeURIComponent(session.session_id)}`)}
+                    onClick={() => navigate(`/sessions/${encodeURIComponent(session.id)}`)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        navigate(`/sessions/${encodeURIComponent(session.session_id)}`);
+                        navigate(`/sessions/${encodeURIComponent(session.id)}`);
                       }
                     }}
                   >
@@ -193,7 +190,7 @@ export function SessionsPage() {
                     <TableCell className={SESSION_CELL_CLASS}>{duration}</TableCell>
                     {multiProvider ? <TableCell className={SESSION_CELL_CLASS}>{providerDisplay}</TableCell> : null}
                     <TableCell className={SESSION_CELL_CLASS} title={rawModel}>{modelSummary}</TableCell>
-                    <TableCell className={SESSION_CELL_CLASS} title={session.repo_id ?? ""}>{repoLabel}</TableCell>
+                    <TableCell className={SESSION_CELL_CLASS} title={primaryRepo ?? ""}>{repoLabel}</TableCell>
                     <TableCell className={SESSION_CELL_CLASS} title={branch}>{branchLabel}</TableCell>
                     <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtNum(tokenCount)}</TableCell>
                     <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtCost((session.cost_cents ?? 0) / 100)}</TableCell>

@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// Result of running schema repair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -128,6 +128,9 @@ fn run_version_migrations(conn: &Connection) -> Result<()> {
     if current_version(conn) == 18 {
         migrate_v18_to_v19(conn)?;
     }
+    if current_version(conn) == 19 {
+        migrate_v19_to_v20(conn)?;
+    }
     Ok(())
 }
 
@@ -150,7 +153,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS messages (
-            uuid                   TEXT PRIMARY KEY,
+            id                     TEXT PRIMARY KEY,
             session_id             TEXT,
             role                   TEXT NOT NULL,
             timestamp              TEXT NOT NULL,
@@ -171,11 +174,11 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS tags (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_uuid TEXT NOT NULL,
+            message_id   TEXT NOT NULL,
             key          TEXT NOT NULL,
             value        TEXT NOT NULL,
-            UNIQUE(message_uuid, key, value),
-            FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+            UNIQUE(message_id, key, value),
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS sync_state (
@@ -202,7 +205,7 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS sessions (
-            session_id         TEXT PRIMARY KEY,
+            id                 TEXT PRIMARY KEY,
             provider           TEXT NOT NULL DEFAULT 'claude_code',
             started_at         TEXT,
             ended_at           TEXT,
@@ -486,29 +489,52 @@ fn migrate_v15_to_v16(conn: &Connection) -> Result<()> {
 /// (`cursor-*`) so future syncs rebuild clean data using canonical UUID IDs.
 fn migrate_v16_to_v17(conn: &Connection) -> Result<()> {
     tracing::info!("Migrating schema v16 → v17: purging legacy Cursor artifacts");
+    let message_id_col = if table_exists(conn, "messages")? && has_column(conn, "messages", "id")? {
+        "id"
+    } else {
+        "uuid"
+    };
+    let tags_message_col = if table_exists(conn, "tags")? && has_column(conn, "tags", "message_id")?
+    {
+        "message_id"
+    } else {
+        "message_uuid"
+    };
+    let sessions_id_col = if table_exists(conn, "sessions")? && has_column(conn, "sessions", "id")?
+    {
+        "id"
+    } else {
+        "session_id"
+    };
 
     let deleted_tags = conn.execute(
-        "DELETE FROM tags
-         WHERE message_uuid IN (
-            SELECT uuid
+        &format!(
+            "DELETE FROM tags
+         WHERE {tags_message_col} IN (
+            SELECT {message_id_col}
             FROM messages
             WHERE provider = 'cursor'
-              AND (uuid LIKE 'cursor-%' OR session_id LIKE 'cursor-synth-%')
-         )",
+              AND ({message_id_col} LIKE 'cursor-%' OR session_id LIKE 'cursor-synth-%')
+         )"
+        ),
         [],
     )?;
 
     let deleted_messages = conn.execute(
-        "DELETE FROM messages
+        &format!(
+            "DELETE FROM messages
          WHERE provider = 'cursor'
-           AND (uuid LIKE 'cursor-%' OR session_id LIKE 'cursor-synth-%')",
+           AND ({message_id_col} LIKE 'cursor-%' OR session_id LIKE 'cursor-synth-%')"
+        ),
         [],
     )?;
 
     let deleted_sessions = conn.execute(
-        "DELETE FROM sessions
+        &format!(
+            "DELETE FROM sessions
          WHERE provider = 'cursor'
-           AND session_id LIKE 'cursor-synth-%'",
+           AND {sessions_id_col} LIKE 'cursor-synth-%'"
+        ),
         [],
     )?;
 
@@ -604,6 +630,46 @@ fn migrate_v18_to_v19(conn: &Connection) -> Result<()> {
     create_indexes(conn)?;
 
     conn.pragma_update(None, "user_version", 19u32)?;
+    Ok(())
+}
+
+/// Incremental migration from v19 to v20: normalize core identifier column names
+/// across messages/sessions/tags.
+fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
+    tracing::info!(
+        "Migrating schema v19 → v20: renaming messages.uuid→id, sessions.session_id→id, tags.message_uuid→message_id"
+    );
+
+    if table_exists(conn, "messages")?
+        && has_column(conn, "messages", "uuid")?
+        && !has_column(conn, "messages", "id")?
+    {
+        conn.execute_batch("ALTER TABLE messages RENAME COLUMN uuid TO id;")?;
+    }
+
+    if table_exists(conn, "sessions")?
+        && has_column(conn, "sessions", "session_id")?
+        && !has_column(conn, "sessions", "id")?
+    {
+        conn.execute_batch("ALTER TABLE sessions RENAME COLUMN session_id TO id;")?;
+    }
+
+    if table_exists(conn, "tags")?
+        && has_column(conn, "tags", "message_uuid")?
+        && !has_column(conn, "tags", "message_id")?
+    {
+        conn.execute_batch("ALTER TABLE tags RENAME COLUMN message_uuid TO message_id;")?;
+    }
+
+    conn.execute_batch(
+        "
+        DROP INDEX IF EXISTS idx_tags_message;
+        DROP INDEX IF EXISTS idx_tags_msg_key_val;
+        DROP INDEX IF EXISTS idx_sessions_session_id;
+        ",
+    )?;
+    create_indexes(conn)?;
+    conn.pragma_update(None, "user_version", 20u32)?;
     Ok(())
 }
 
@@ -717,6 +783,11 @@ fn backfill_otel_event_links(conn: &Connection) -> Result<()> {
     };
 
     let mut linked_count = 0usize;
+    let message_id_col = if table_exists(conn, "messages")? && has_column(conn, "messages", "id")? {
+        "id"
+    } else {
+        "uuid"
+    };
     for (id, session_id, timestamp, raw_json) in &rows {
         let (timestamp_nano_from_raw, model_from_raw, cost_usd_reported) =
             extract_otel_snapshot_fields(raw_json.as_deref());
@@ -732,14 +803,14 @@ fn backfill_otel_event_links(conn: &Connection) -> Result<()> {
             let ts_lo = (event_ts - chrono::Duration::seconds(1)).to_rfc3339();
             let ts_hi = (event_ts + chrono::Duration::seconds(1)).to_rfc3339();
             let candidates: Vec<(String, String, Option<String>, Option<f64>)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT uuid, timestamp, model, cost_cents
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {message_id_col}, timestamp, model, cost_cents
                      FROM messages
                      WHERE session_id = ?1
                        AND role = 'assistant'
                        AND cost_confidence = 'otel_exact'
-                       AND timestamp BETWEEN ?2 AND ?3",
-                )?;
+                       AND timestamp BETWEEN ?2 AND ?3"
+                ))?;
                 stmt.query_map(rusqlite::params![sid, ts_lo, ts_hi], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })?
@@ -792,10 +863,16 @@ fn backfill_otel_event_links(conn: &Connection) -> Result<()> {
 }
 
 fn normalize_session_ids(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare(
+    let sessions_id_col = if table_exists(conn, "sessions")? && has_column(conn, "sessions", "id")?
+    {
+        "id"
+    } else {
+        "session_id"
+    };
+    let mut stmt = conn.prepare(&format!(
         "SELECT DISTINCT session_id
          FROM (
-            SELECT session_id FROM sessions
+            SELECT {sessions_id_col} AS session_id FROM sessions
             UNION ALL
             SELECT session_id FROM messages
             UNION ALL
@@ -803,8 +880,8 @@ fn normalize_session_ids(conn: &Connection) -> Result<()> {
             UNION ALL
             SELECT session_id FROM otel_events
          )
-         WHERE session_id IS NOT NULL",
-    )?;
+         WHERE session_id IS NOT NULL"
+    ))?;
 
     let all_ids: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
@@ -840,13 +917,20 @@ fn normalize_single_session_id(conn: &Connection, old_id: &str, new_id: &str) ->
         return Ok(());
     }
 
+    let sessions_id_col = if table_exists(conn, "sessions")? && has_column(conn, "sessions", "id")?
+    {
+        "id"
+    } else {
+        "session_id"
+    };
+
     let old_session_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+        &format!("SELECT EXISTS(SELECT 1 FROM sessions WHERE {sessions_id_col} = ?1)"),
         [old_id],
         |r| r.get(0),
     )?;
     let new_session_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+        &format!("SELECT EXISTS(SELECT 1 FROM sessions WHERE {sessions_id_col} = ?1)"),
         [new_id],
         |r| r.get(0),
     )?;
@@ -854,10 +938,13 @@ fn normalize_single_session_id(conn: &Connection, old_id: &str, new_id: &str) ->
     if old_session_exists {
         if new_session_exists {
             merge_session_row(conn, old_id, new_id)?;
-            conn.execute("DELETE FROM sessions WHERE session_id = ?1", [old_id])?;
+            conn.execute(
+                &format!("DELETE FROM sessions WHERE {sessions_id_col} = ?1"),
+                [old_id],
+            )?;
         } else {
             conn.execute(
-                "UPDATE sessions SET session_id = ?1 WHERE session_id = ?2",
+                &format!("UPDATE sessions SET {sessions_id_col} = ?1 WHERE {sessions_id_col} = ?2"),
                 rusqlite::params![new_id, old_id],
             )?;
         }
@@ -880,33 +967,60 @@ fn normalize_single_session_id(conn: &Connection, old_id: &str, new_id: &str) ->
 }
 
 fn merge_session_row(conn: &Connection, old_id: &str, new_id: &str) -> Result<()> {
+    let sessions_id_col = if table_exists(conn, "sessions")? && has_column(conn, "sessions", "id")?
+    {
+        "id"
+    } else {
+        "session_id"
+    };
     conn.execute(
-        "UPDATE sessions SET
-            provider = COALESCE(NULLIF(provider, ''), (SELECT provider FROM sessions WHERE session_id = ?2), 'claude_code'),
-            started_at = COALESCE(started_at, (SELECT started_at FROM sessions WHERE session_id = ?2)),
-            ended_at = COALESCE(ended_at, (SELECT ended_at FROM sessions WHERE session_id = ?2)),
-            duration_ms = COALESCE(duration_ms, (SELECT duration_ms FROM sessions WHERE session_id = ?2)),
-            composer_mode = COALESCE(NULLIF(composer_mode, ''), (SELECT composer_mode FROM sessions WHERE session_id = ?2)),
-            permission_mode = COALESCE(NULLIF(permission_mode, ''), (SELECT permission_mode FROM sessions WHERE session_id = ?2)),
-            user_email = COALESCE(NULLIF(user_email, ''), (SELECT user_email FROM sessions WHERE session_id = ?2)),
-            workspace_root = COALESCE(NULLIF(workspace_root, ''), (SELECT workspace_root FROM sessions WHERE session_id = ?2)),
-            end_reason = COALESCE(NULLIF(end_reason, ''), (SELECT end_reason FROM sessions WHERE session_id = ?2)),
-            prompt_category = COALESCE(NULLIF(prompt_category, ''), (SELECT prompt_category FROM sessions WHERE session_id = ?2)),
-            model = COALESCE(NULLIF(model, ''), (SELECT model FROM sessions WHERE session_id = ?2)),
-            raw_json = COALESCE(NULLIF(raw_json, ''), (SELECT raw_json FROM sessions WHERE session_id = ?2)),
+        &format!(
+            "UPDATE sessions SET
+            provider = COALESCE(NULLIF(provider, ''), (SELECT provider FROM sessions WHERE {sessions_id_col} = ?2), 'claude_code'),
+            started_at = COALESCE(started_at, (SELECT started_at FROM sessions WHERE {sessions_id_col} = ?2)),
+            ended_at = COALESCE(ended_at, (SELECT ended_at FROM sessions WHERE {sessions_id_col} = ?2)),
+            duration_ms = COALESCE(duration_ms, (SELECT duration_ms FROM sessions WHERE {sessions_id_col} = ?2)),
+            composer_mode = COALESCE(NULLIF(composer_mode, ''), (SELECT composer_mode FROM sessions WHERE {sessions_id_col} = ?2)),
+            permission_mode = COALESCE(NULLIF(permission_mode, ''), (SELECT permission_mode FROM sessions WHERE {sessions_id_col} = ?2)),
+            user_email = COALESCE(NULLIF(user_email, ''), (SELECT user_email FROM sessions WHERE {sessions_id_col} = ?2)),
+            workspace_root = COALESCE(NULLIF(workspace_root, ''), (SELECT workspace_root FROM sessions WHERE {sessions_id_col} = ?2)),
+            end_reason = COALESCE(NULLIF(end_reason, ''), (SELECT end_reason FROM sessions WHERE {sessions_id_col} = ?2)),
+            prompt_category = COALESCE(NULLIF(prompt_category, ''), (SELECT prompt_category FROM sessions WHERE {sessions_id_col} = ?2)),
+            model = COALESCE(NULLIF(model, ''), (SELECT model FROM sessions WHERE {sessions_id_col} = ?2)),
+            raw_json = COALESCE(NULLIF(raw_json, ''), (SELECT raw_json FROM sessions WHERE {sessions_id_col} = ?2)),
             repo_id = COALESCE(
                 NULLIF(NULLIF(repo_id, ''), 'unknown'),
-                NULLIF(NULLIF((SELECT repo_id FROM sessions WHERE session_id = ?2), ''), 'unknown')
+                NULLIF(NULLIF((SELECT repo_id FROM sessions WHERE {sessions_id_col} = ?2), ''), 'unknown')
             ),
-            git_branch = COALESCE(NULLIF(git_branch, ''), (SELECT git_branch FROM sessions WHERE session_id = ?2)),
-            title = COALESCE(NULLIF(title, ''), (SELECT title FROM sessions WHERE session_id = ?2))
-         WHERE session_id = ?1",
+            git_branch = COALESCE(NULLIF(git_branch, ''), (SELECT git_branch FROM sessions WHERE {sessions_id_col} = ?2)),
+            title = COALESCE(NULLIF(title, ''), (SELECT title FROM sessions WHERE {sessions_id_col} = ?2))
+         WHERE {sessions_id_col} = ?1"
+        ),
         rusqlite::params![new_id, old_id],
     )?;
     Ok(())
 }
 
 fn create_indexes(conn: &Connection) -> Result<()> {
+    let sessions_id_col = if table_exists(conn, "sessions")? && has_column(conn, "sessions", "id")?
+    {
+        "id"
+    } else {
+        "session_id"
+    };
+    let messages_id_col = if table_exists(conn, "messages")? && has_column(conn, "messages", "id")?
+    {
+        "id"
+    } else {
+        "uuid"
+    };
+    let tags_message_col = if table_exists(conn, "tags")? && has_column(conn, "tags", "message_id")?
+    {
+        "message_id"
+    } else {
+        "message_uuid"
+    };
+
     conn.execute_batch(
         "
         -- messages
@@ -921,8 +1035,6 @@ fn create_indexes(conn: &Connection) -> Result<()> {
 
         -- tags
         CREATE INDEX IF NOT EXISTS idx_tags_key_value ON tags(key, value);
-        CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_uuid);
-        CREATE INDEX IF NOT EXISTS idx_tags_msg_key_val ON tags(message_uuid, key, value);
 
         -- messages (covering indexes for cost queries)
         CREATE INDEX IF NOT EXISTS idx_messages_ts_cost ON messages(timestamp, cost_cents);
@@ -937,7 +1049,6 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_request_id ON messages(request_id) WHERE request_id IS NOT NULL;
 
         -- sessions
-        CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 
@@ -962,6 +1073,15 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    conn.execute_batch(&format!(
+        "
+        CREATE INDEX IF NOT EXISTS idx_tags_message ON tags({tags_message_col});
+        CREATE INDEX IF NOT EXISTS idx_tags_msg_key_val ON tags({tags_message_col}, key, value);
+        CREATE INDEX IF NOT EXISTS idx_sessions_id ON sessions({sessions_id_col});
+        CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions({sessions_id_col});
+        "
+    ))?;
+
     if table_exists(conn, "hook_events")? {
         if has_column(conn, "hook_events", "message_id")? {
             conn.execute_batch(
@@ -984,6 +1104,15 @@ fn create_indexes(conn: &Connection) -> Result<()> {
                 "CREATE INDEX IF NOT EXISTS idx_otel_events_message_ts ON otel_events(message_uuid, timestamp);",
             )?;
         }
+    }
+
+    if table_exists(conn, "messages")? && table_exists(conn, "tags")? {
+        conn.execute_batch(&format!(
+            "
+            CREATE INDEX IF NOT EXISTS idx_message_tags_pair ON tags({tags_message_col}, key, value);
+            CREATE INDEX IF NOT EXISTS idx_messages_primary_id ON messages({messages_id_col});
+            "
+        ))?;
     }
 
     Ok(())
@@ -1036,9 +1165,31 @@ fn reconcile_schema(conn: &Connection) -> Result<Vec<String>> {
     if ensure_column(conn, "messages", "request_id", "request_id TEXT")? {
         added_columns.push("messages.request_id".to_string());
     }
+    if table_exists(conn, "messages")?
+        && has_column(conn, "messages", "uuid")?
+        && !has_column(conn, "messages", "id")?
+    {
+        conn.execute_batch("ALTER TABLE messages RENAME COLUMN uuid TO id;")?;
+        added_columns.push("messages.id".to_string());
+    }
 
     if ensure_column(conn, "sessions", "title", "title TEXT")? {
         added_columns.push("sessions.title".to_string());
+    }
+    if table_exists(conn, "sessions")?
+        && has_column(conn, "sessions", "session_id")?
+        && !has_column(conn, "sessions", "id")?
+    {
+        conn.execute_batch("ALTER TABLE sessions RENAME COLUMN session_id TO id;")?;
+        added_columns.push("sessions.id".to_string());
+    }
+
+    if table_exists(conn, "tags")?
+        && has_column(conn, "tags", "message_uuid")?
+        && !has_column(conn, "tags", "message_id")?
+    {
+        conn.execute_batch("ALTER TABLE tags RENAME COLUMN message_uuid TO message_id;")?;
+        added_columns.push("tags.message_id".to_string());
     }
 
     if ensure_column(conn, "hook_events", "mcp_server", "mcp_server TEXT")? {
@@ -1455,7 +1606,7 @@ mod tests {
         // Orphaned tags for a1 should be cleaned up
         let tag_count: i64 = conn
             .query_row(
-                "SELECT count(*) FROM tags WHERE message_uuid = 'a1'",
+                "SELECT count(*) FROM tags WHERE message_id = 'a1'",
                 [],
                 |r| r.get(0),
             )
@@ -1477,7 +1628,7 @@ mod tests {
         conn.execute_batch(
             "
             CREATE TABLE sessions_new (
-                session_id         TEXT PRIMARY KEY,
+                id                 TEXT PRIMARY KEY,
                 provider           TEXT NOT NULL DEFAULT 'claude_code',
                 started_at         TEXT,
                 ended_at           TEXT,
@@ -1494,12 +1645,12 @@ mod tests {
                 git_branch         TEXT
             );
             INSERT INTO sessions_new (
-                session_id, provider, started_at, ended_at, duration_ms,
+                id, provider, started_at, ended_at, duration_ms,
                 composer_mode, permission_mode, user_email, workspace_root, end_reason,
                 prompt_category, model, raw_json, repo_id, git_branch
             )
             SELECT
-                session_id, provider, started_at, ended_at, duration_ms,
+                id, provider, started_at, ended_at, duration_ms,
                 composer_mode, permission_mode, user_email, workspace_root, end_reason,
                 prompt_category, model, raw_json, repo_id, git_branch
             FROM sessions;
@@ -1530,7 +1681,7 @@ mod tests {
         conn.execute_batch(
             "
             CREATE TABLE sessions_new (
-                session_id         TEXT PRIMARY KEY,
+                id                 TEXT PRIMARY KEY,
                 provider           TEXT NOT NULL DEFAULT 'claude_code',
                 started_at         TEXT,
                 ended_at           TEXT,
@@ -1547,12 +1698,12 @@ mod tests {
                 git_branch         TEXT
             );
             INSERT INTO sessions_new (
-                session_id, provider, started_at, ended_at, duration_ms,
+                id, provider, started_at, ended_at, duration_ms,
                 composer_mode, permission_mode, user_email, workspace_root, end_reason,
                 prompt_category, model, raw_json, repo_id, git_branch
             )
             SELECT
-                session_id, provider, started_at, ended_at, duration_ms,
+                id, provider, started_at, ended_at, duration_ms,
                 composer_mode, permission_mode, user_email, workspace_root, end_reason,
                 prompt_category, model, raw_json, repo_id, git_branch
             FROM sessions;
@@ -1584,12 +1735,12 @@ mod tests {
         let new_id = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
 
         conn.execute(
-            "INSERT INTO sessions (session_id, provider, started_at) VALUES (?1, 'cursor', '2026-03-31T16:43:25+00:00')",
+            "INSERT INTO sessions (id, provider, started_at) VALUES (?1, 'cursor', '2026-03-31T16:43:25+00:00')",
             [old_id],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, provider)
              VALUES ('m1', ?1, 'assistant', '2026-03-31T16:43:25+00:00', 'cursor')",
             [old_id],
         )
@@ -1612,14 +1763,14 @@ mod tests {
 
         let old_exists: bool = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
                 [old_id],
                 |r| r.get(0),
             )
             .unwrap();
         let new_exists: bool = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
                 [new_id],
                 |r| r.get(0),
             )
@@ -1663,19 +1814,19 @@ mod tests {
         let new_id = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
 
         conn.execute(
-            "INSERT INTO sessions (session_id, provider, started_at, repo_id, git_branch)
+            "INSERT INTO sessions (id, provider, started_at, repo_id, git_branch)
              VALUES (?1, 'cursor', '2026-03-31T16:43:25+00:00', 'github.com/acme/repo', 'main')",
             [old_id],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, provider, started_at, title)
+            "INSERT INTO sessions (id, provider, started_at, title)
              VALUES (?1, 'cursor', '2026-03-31T16:43:00+00:00', 'Already normalized row')",
             [new_id],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, provider)
              VALUES ('m1', ?1, 'assistant', '2026-03-31T16:43:25+00:00', 'cursor')",
             [old_id],
         )
@@ -1685,7 +1836,7 @@ mod tests {
 
         let sessions_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE session_id IN (?1, ?2)",
+                "SELECT COUNT(*) FROM sessions WHERE id IN (?1, ?2)",
                 rusqlite::params![old_id, new_id],
                 |r| r.get(0),
             )
@@ -1694,7 +1845,7 @@ mod tests {
 
         let (repo_id, git_branch, title): (Option<String>, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT repo_id, git_branch, title FROM sessions WHERE session_id = ?1",
+                "SELECT repo_id, git_branch, title FROM sessions WHERE id = ?1",
                 [new_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -1704,11 +1855,9 @@ mod tests {
         assert_eq!(title.as_deref(), Some("Already normalized row"));
 
         let msg_sid: String = conn
-            .query_row(
-                "SELECT session_id FROM messages WHERE uuid = 'm1'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT session_id FROM messages WHERE id = 'm1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(msg_sid, new_id);
     }
@@ -1720,38 +1869,38 @@ mod tests {
         conn.pragma_update(None, "user_version", 16u32).unwrap();
 
         conn.execute(
-            "INSERT INTO sessions (session_id, provider, started_at)
+            "INSERT INTO sessions (id, provider, started_at)
              VALUES ('cursor-synth-1774974046000', 'cursor', '2026-03-31T10:00:00+00:00')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, provider, started_at)
+            "INSERT INTO sessions (id, provider, started_at)
              VALUES ('d99dfe22-d05c-4c78-8698-015d06e5dabb', 'cursor', '2026-03-31T10:00:00+00:00')",
             [],
         )
         .unwrap();
 
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, provider)
              VALUES ('cursor-api-legacy', 'cursor-synth-1774974046000', 'assistant', '2026-03-31T10:01:00+00:00', 'cursor')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, provider)
              VALUES ('clean-uuid', 'd99dfe22-d05c-4c78-8698-015d06e5dabb', 'assistant', '2026-03-31T10:02:00+00:00', 'cursor')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO tags (message_uuid, key, value)
+            "INSERT INTO tags (message_id, key, value)
              VALUES ('cursor-api-legacy', 'provider', 'cursor')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO tags (message_uuid, key, value)
+            "INSERT INTO tags (message_id, key, value)
              VALUES ('clean-uuid', 'provider', 'cursor')",
             [],
         )
@@ -1780,7 +1929,7 @@ mod tests {
 
         let legacy_msg_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM messages WHERE uuid = 'cursor-api-legacy'",
+                "SELECT COUNT(*) FROM messages WHERE id = 'cursor-api-legacy'",
                 [],
                 |r| r.get(0),
             )
@@ -1792,7 +1941,7 @@ mod tests {
 
         let clean_msg_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM messages WHERE uuid = 'clean-uuid'",
+                "SELECT COUNT(*) FROM messages WHERE id = 'clean-uuid'",
                 [],
                 |r| r.get(0),
             )
@@ -1804,7 +1953,7 @@ mod tests {
 
         let synth_session_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE session_id LIKE 'cursor-synth-%'",
+                "SELECT COUNT(*) FROM sessions WHERE id LIKE 'cursor-synth-%'",
                 [],
                 |r| r.get(0),
             )
@@ -1816,7 +1965,7 @@ mod tests {
 
         let legacy_tag_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM tags WHERE message_uuid = 'cursor-api-legacy'",
+                "SELECT COUNT(*) FROM tags WHERE message_id = 'cursor-api-legacy'",
                 [],
                 |r| r.get(0),
             )
@@ -1825,7 +1974,7 @@ mod tests {
 
         let kept_tag_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM tags WHERE message_uuid = 'clean-uuid'",
+                "SELECT COUNT(*) FROM tags WHERE message_id = 'clean-uuid'",
                 [],
                 |r| r.get(0),
             )
@@ -1965,13 +2114,13 @@ mod tests {
         migrate(&conn).unwrap();
 
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, model, request_id, cost_confidence, cost_cents, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, model, request_id, cost_confidence, cost_cents, provider)
              VALUES ('m-link', 'sess-link', 'assistant', '2026-03-25T00:00:01Z', 'claude-opus-4-6', 'msg_123', 'otel_exact', 7.5, 'claude_code')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO tags (message_uuid, key, value)
+            "INSERT INTO tags (message_id, key, value)
              VALUES ('m-link', 'tool_use_id', 'toolu_456')",
             [],
         )
@@ -2065,5 +2214,84 @@ mod tests {
         assert_eq!(otel_message_id.as_deref(), Some("m-link"));
         assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(cost_cents_computed, Some(7.5));
+    }
+
+    #[test]
+    fn migrate_v19_to_v20_renames_identifier_columns_and_preserves_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            ALTER TABLE messages RENAME COLUMN id TO uuid;
+            ALTER TABLE sessions RENAME COLUMN id TO session_id;
+            ALTER TABLE tags RENAME COLUMN message_id TO message_uuid;
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 19u32).unwrap();
+
+        conn.execute(
+            "INSERT INTO sessions (session_id, provider, started_at)
+             VALUES ('sess-v19', 'claude_code', '2026-04-01T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider, cost_confidence, cost_cents)
+             VALUES ('msg-v19', 'sess-v19', 'assistant', '2026-04-01T10:00:01Z', 'claude_code', 'estimated', 1.25)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (message_uuid, key, value)
+             VALUES ('msg-v19', 'ticket_id', 'ABC-123')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        conn.execute("SELECT id FROM messages LIMIT 0", [])
+            .expect("messages.id should exist");
+        conn.execute("SELECT id FROM sessions LIMIT 0", [])
+            .expect("sessions.id should exist");
+        conn.execute("SELECT message_id FROM tags LIMIT 0", [])
+            .expect("tags.message_id should exist");
+
+        let has_legacy_messages_uuid = conn.prepare("SELECT uuid FROM messages LIMIT 0").is_ok();
+        let has_legacy_sessions_session_id = conn
+            .prepare("SELECT session_id FROM sessions LIMIT 0")
+            .is_ok();
+        let has_legacy_tags_message_uuid = conn
+            .prepare("SELECT message_uuid FROM tags LIMIT 0")
+            .is_ok();
+        assert!(!has_legacy_messages_uuid);
+        assert!(!has_legacy_sessions_session_id);
+        assert!(!has_legacy_tags_message_uuid);
+
+        let kept_message_id: String = conn
+            .query_row("SELECT id FROM messages WHERE id = 'msg-v19'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let kept_session_id: String = conn
+            .query_row("SELECT id FROM sessions WHERE id = 'sess-v19'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let kept_tag_message_id: String = conn
+            .query_row(
+                "SELECT message_id FROM tags WHERE key = 'ticket_id' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept_message_id, "msg-v19");
+        assert_eq!(kept_session_id, "sess-v19");
+        assert_eq!(kept_tag_message_id, "msg-v19");
     }
 }

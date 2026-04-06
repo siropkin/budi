@@ -157,7 +157,7 @@ fn cost_cents_baked_at_ingest() {
     // Verify cost_cents was baked in: 1M input * $5/M + 100K output * $25/M = $5 + $2.50 = $7.50 = 750 cents
     let cost_cents: f64 = conn
         .query_row(
-            "SELECT cost_cents FROM messages WHERE uuid = 'cost-test-1'",
+            "SELECT cost_cents FROM messages WHERE id = 'cost-test-1'",
             [],
             |r| r.get(0),
         )
@@ -1160,6 +1160,55 @@ fn session_list_returns_sessions() {
 }
 
 #[test]
+fn session_list_uses_structured_models_array() {
+    let mut conn = test_db();
+    let mut m1 = assistant_msg("sess-models-1", "sess-models", 2.0);
+    m1.model = Some("claude-opus-4-6".to_string());
+    m1.repo_id = Some("github.com/acme/repo-a".to_string());
+    m1.git_branch = Some("feature/AAA-1".to_string());
+    m1.timestamp = "2026-03-25T00:00:01Z".parse().unwrap();
+    let mut m2 = assistant_msg("sess-models-2", "sess-models", 3.0);
+    m2.model = Some("claude-sonnet-4-6".to_string());
+    m2.repo_id = Some("github.com/acme/repo-b".to_string());
+    m2.git_branch = Some("refs/heads/feature/BBB-2".to_string());
+    m2.timestamp = "2026-03-25T00:00:02Z".parse().unwrap();
+    ingest_messages(&mut conn, &[m1, m2], None).unwrap();
+
+    let result = session_list(
+        &conn,
+        &SessionListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .unwrap();
+    let entry = result
+        .sessions
+        .into_iter()
+        .find(|s| s.id == "sess-models")
+        .expect("session row should exist");
+    assert_eq!(entry.models.len(), 2);
+    assert!(entry.models.contains(&"claude-opus-4-6".to_string()));
+    assert!(entry.models.contains(&"claude-sonnet-4-6".to_string()));
+    assert_eq!(
+        entry.repo_ids,
+        vec![
+            "github.com/acme/repo-b".to_string(),
+            "github.com/acme/repo-a".to_string()
+        ]
+    );
+    assert_eq!(
+        entry.git_branches,
+        vec!["feature/BBB-2".to_string(), "feature/AAA-1".to_string()]
+    );
+}
+
+#[test]
 fn session_detail_returns_row_for_message_only_session() {
     let mut conn = test_db();
     ingest_messages(&mut conn, &sample_messages(), None).unwrap();
@@ -1167,7 +1216,7 @@ fn session_detail_returns_row_for_message_only_session() {
     let detail = session_detail(&conn, "sess-abc")
         .unwrap()
         .expect("session should exist");
-    assert_eq!(detail.session_id, "sess-abc");
+    assert_eq!(detail.id, "sess-abc");
     assert!(detail.message_count >= 1);
     assert!(detail.cost_cents >= 0.0);
 }
@@ -1177,7 +1226,7 @@ fn session_detail_uses_session_title_when_available() {
     let mut conn = test_db();
     ingest_messages(&mut conn, &sample_messages(), None).unwrap();
     conn.execute(
-        "INSERT OR REPLACE INTO sessions (session_id, provider, title)
+        "INSERT OR REPLACE INTO sessions (id, provider, title)
          VALUES ('sess-abc', 'claude_code', 'Fix flaky test')",
         [],
     )
@@ -1204,10 +1253,10 @@ fn session_detail_tracks_multi_repo_and_branch() {
     let detail = session_detail(&conn, "sess-multi")
         .unwrap()
         .expect("session should exist");
-    assert_eq!(detail.repo_count, Some(2));
-    assert_eq!(detail.git_branch_count, Some(2));
-    assert_eq!(detail.repo_ids.as_ref().map(|v| v.len()), Some(2));
-    assert_eq!(detail.git_branches.as_ref().map(|v| v.len()), Some(2));
+    assert_eq!(detail.repo_ids.len(), 2);
+    assert_eq!(detail.git_branches.len(), 2);
+    assert_eq!(detail.repo_ids[0], "github.com/acme/repo-b");
+    assert_eq!(detail.git_branches[0], "feature/BBB-2");
 }
 
 #[test]
@@ -1515,7 +1564,7 @@ fn session_messages_returns_assistant_only() {
 
     let result = session_messages(&conn, "sess-abc").unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].uuid, "a1");
+    assert_eq!(result[0].id, "a1");
     assert_eq!(result[0].role, "assistant");
 }
 
@@ -1560,6 +1609,108 @@ fn session_messages_roles_all_returns_user_and_assistant_with_tools() {
     assert_eq!(rows[1].role, "assistant");
     assert_eq!(rows[1].request_id.as_deref(), Some("req-assistant"));
     assert_eq!(rows[1].tools, vec!["Read".to_string()]);
+}
+
+#[test]
+fn session_message_list_paginates_and_includes_message_context() {
+    let mut conn = test_db();
+    let user = ParsedMessage {
+        uuid: "sm-page-user".to_string(),
+        session_id: Some("sess-page".to_string()),
+        timestamp: "2026-03-25T00:00:00Z".parse().unwrap(),
+        role: "user".to_string(),
+        request_id: Some("req-user".to_string()),
+        ..Default::default()
+    };
+    let mut a1 = assistant_msg("sm-page-a1", "sess-page", 1.0);
+    a1.timestamp = "2026-03-25T00:00:01Z".parse().unwrap();
+    a1.repo_id = Some("github.com/acme/repo-a".to_string());
+    a1.git_branch = Some("refs/heads/feature/A".to_string());
+    let mut a2 = assistant_msg("sm-page-a2", "sess-page", 2.0);
+    a2.timestamp = "2026-03-25T00:00:02Z".parse().unwrap();
+    a2.repo_id = Some("github.com/acme/repo-b".to_string());
+    a2.git_branch = Some("feature/B".to_string());
+    let mut a3 = assistant_msg("sm-page-a3", "sess-page", 3.0);
+    a3.timestamp = "2026-03-25T00:00:03Z".parse().unwrap();
+    a3.repo_id = Some("github.com/acme/repo-c".to_string());
+    a3.git_branch = Some("feature/C".to_string());
+
+    let tags = vec![
+        vec![],
+        vec![
+            Tag {
+                key: "tool".to_string(),
+                value: "Read".to_string(),
+            },
+            Tag {
+                key: "ticket_id".to_string(),
+                value: "ABC-1".to_string(),
+            },
+            Tag {
+                key: "tool_use_id".to_string(),
+                value: "toolu_1".to_string(),
+            },
+        ],
+        vec![
+            Tag {
+                key: "tool".to_string(),
+                value: "Edit".to_string(),
+            },
+            Tag {
+                key: "ticket_id".to_string(),
+                value: "ABC-2".to_string(),
+            },
+        ],
+        vec![Tag {
+            key: "ticket_id".to_string(),
+            value: "ABC-3".to_string(),
+        }],
+    ];
+    ingest_messages(&mut conn, &[user, a1, a2, a3], Some(&tags)).unwrap();
+
+    let page = session_message_list(
+        &conn,
+        "sess-page",
+        &SessionMessageListParams {
+            roles: SessionMessageRoles::Assistant,
+            sort_by: Some("timestamp"),
+            sort_asc: true,
+            limit: 2,
+            offset: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(page.total_count, 3);
+    assert_eq!(page.messages.len(), 2);
+    assert_eq!(page.messages[0].id, "sm-page-a2");
+    assert_eq!(
+        page.messages[0].repo_id.as_deref(),
+        Some("github.com/acme/repo-b")
+    );
+    assert_eq!(page.messages[0].git_branch.as_deref(), Some("feature/B"));
+    assert_eq!(page.messages[0].tools, vec!["Edit".to_string()]);
+    assert!(
+        page.messages[0]
+            .tags
+            .iter()
+            .any(|t| t.key == "ticket_id" && t.value == "ABC-2")
+    );
+    assert!(page.messages[0].tags.iter().all(|t| t.key != "tool_use_id"));
+
+    let all_roles = session_message_list(
+        &conn,
+        "sess-page",
+        &SessionMessageListParams {
+            roles: SessionMessageRoles::All,
+            sort_by: Some("timestamp"),
+            sort_asc: true,
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(all_roles.total_count, 4);
+    assert_eq!(all_roles.messages[0].role, "user");
 }
 
 #[test]
@@ -1751,18 +1902,18 @@ fn session_hook_events_support_filters_and_include_raw() {
 fn message_detail_returns_linked_hook_and_otel_sets() {
     let conn = test_db();
     conn.execute(
-        "INSERT INTO messages (uuid, session_id, role, timestamp, model, request_id, provider, cost_confidence, cost_cents)
+        "INSERT INTO messages (id, session_id, role, timestamp, model, request_id, provider, cost_confidence, cost_cents)
          VALUES ('msg-detail-1', 'sess-detail', 'assistant', '2026-03-25T00:00:01Z', 'claude-opus-4-6', 'req-1', 'claude_code', 'otel_exact', 7.5)",
         [],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO tags (message_uuid, key, value) VALUES ('msg-detail-1', 'tool', 'Read')",
+        "INSERT INTO tags (message_id, key, value) VALUES ('msg-detail-1', 'tool', 'Read')",
         [],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO tags (message_uuid, key, value) VALUES ('msg-detail-1', 'tool_use_id', 'toolu_1')",
+        "INSERT INTO tags (message_id, key, value) VALUES ('msg-detail-1', 'tool_use_id', 'toolu_1')",
         [],
     )
     .unwrap();
@@ -1790,7 +1941,7 @@ fn message_detail_returns_linked_hook_and_otel_sets() {
     .unwrap();
 
     let detail = message_detail(&conn, "msg-detail-1").unwrap().unwrap();
-    assert_eq!(detail.message.uuid, "msg-detail-1");
+    assert_eq!(detail.message.id, "msg-detail-1");
     assert_eq!(detail.tools, vec!["Read".to_string()]);
     assert_eq!(detail.hook_events.len(), 1);
     assert_eq!(detail.otel_events.len(), 1);
@@ -1984,7 +2135,7 @@ fn insert_health_hook_event(
 fn health_green_stable_session() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2003,7 +2154,7 @@ fn health_green_stable_session() {
 fn health_context_drag_yellow() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2023,7 +2174,7 @@ fn health_context_drag_yellow() {
 fn health_context_drag_red() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2043,7 +2194,7 @@ fn health_context_drag_red() {
 fn health_cache_efficiency_red() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2060,7 +2211,7 @@ fn health_cache_efficiency_red() {
 fn health_cost_acceleration_yellow() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2088,9 +2239,10 @@ fn health_cost_acceleration_yellow() {
 fn health_cost_acceleration_suppressed_for_short_turn_sessions() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut msgs: Vec<ParsedMessage> = (0..3)
         .map(|i| {
@@ -2118,7 +2270,7 @@ fn health_cost_acceleration_suppressed_for_short_turn_sessions() {
 fn health_cache_uses_recent_model_run() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2140,7 +2292,7 @@ fn health_cache_uses_recent_model_run() {
 fn health_thrashing_ignores_busy_successful_turn() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
     let msgs: Vec<ParsedMessage> = (0..6)
@@ -2183,7 +2335,7 @@ fn health_thrashing_ignores_busy_successful_turn() {
 fn health_thrashing_detects_retry_loop() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
     let msgs: Vec<ParsedMessage> = (0..6)
@@ -2210,7 +2362,7 @@ fn health_thrashing_detects_retry_loop() {
 fn health_context_drag_resets_after_compact() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2231,9 +2383,10 @@ fn health_context_drag_resets_after_compact() {
 fn health_cursor_tips_use_plain_actions() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut msgs: Vec<ParsedMessage> = (0..5)
         .map(|i| {
@@ -2261,7 +2414,7 @@ fn health_cursor_tips_use_plain_actions() {
 fn health_suppressed_few_messages() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2282,11 +2435,11 @@ fn health_suppressed_few_messages() {
 fn health_auto_selects_latest_session() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('old', 'claude_code', '2026-03-10')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('old', 'claude_code', '2026-03-10')",
         [],
     ).unwrap();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('new', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('new', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2303,7 +2456,7 @@ fn health_auto_selects_latest_session() {
 fn health_does_not_alias_prefixed_session_id() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('d99dfe22-d05c-4c78-8698-015d06e5dabb', 'cursor', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('d99dfe22-d05c-4c78-8698-015d06e5dabb', 'cursor', '2026-03-14')",
         [],
     )
     .unwrap();
@@ -2333,11 +2486,11 @@ fn health_does_not_alias_prefixed_session_id() {
 fn health_batch_returns_all_sessions() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s2', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s2', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2361,7 +2514,7 @@ fn health_batch_returns_all_sessions() {
 fn health_batch_matches_detail_thresholds() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2384,7 +2537,7 @@ fn health_batch_matches_detail_thresholds() {
 fn health_green_when_only_thrashing_computable() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2421,7 +2574,7 @@ fn health_green_when_only_thrashing_computable() {
 fn health_cache_efficiency_yellow() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2441,7 +2594,7 @@ fn health_cache_efficiency_yellow() {
 fn health_cost_acceleration_red() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2484,7 +2637,7 @@ fn health_cost_acceleration_red() {
 fn health_cost_acceleration_reply_fallback() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2513,7 +2666,7 @@ fn health_cost_acceleration_reply_fallback() {
 fn health_thrashing_yellow() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
     let msgs: Vec<ParsedMessage> = (0..6)
@@ -2543,7 +2696,7 @@ fn health_thrashing_yellow() {
 fn health_claude_code_context_drag_mentions_compact() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2571,9 +2724,10 @@ fn health_claude_code_context_drag_mentions_compact() {
 fn health_cursor_context_drag_no_compact() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut msgs: Vec<ParsedMessage> = (0..5)
         .map(|i| {
@@ -2609,9 +2763,10 @@ fn health_cursor_context_drag_no_compact() {
 fn health_unknown_provider_gets_neutral_tips() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'windsurf', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'windsurf', '2026-03-14')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut msgs: Vec<ParsedMessage> = (0..5)
         .map(|i| {
@@ -2654,7 +2809,7 @@ fn health_unknown_provider_gets_neutral_tips() {
 fn health_cost_acceleration_yellow_tip_uses_metric_label() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
         [],
     ).unwrap();
 
@@ -2694,7 +2849,7 @@ fn health_cache_efficiency_red_cursor_vs_claude() {
     for (provider, should_mention_clear) in [("claude_code", true), ("cursor", false)] {
         let mut conn = test_db();
         conn.execute(
-            &format!("INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', '{provider}', '2026-03-14')"),
+            &format!("INSERT INTO sessions (id, provider, started_at) VALUES ('s1', '{provider}', '2026-03-14')"),
             [],
         ).unwrap();
 
@@ -2741,9 +2896,10 @@ fn health_cache_efficiency_red_cursor_vs_claude() {
 fn health_cursor_multi_reply_session_not_false_red() {
     let mut conn = test_db();
     conn.execute(
-        "INSERT INTO sessions (session_id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'cursor', '2026-03-14')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     // Cursor session: 2 user turns, each triggers 4 assistant messages.
     // First turn: 4 messages at 3¢ each = 12¢ per turn

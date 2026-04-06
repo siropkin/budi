@@ -144,7 +144,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
         Some(s) => s.to_string(),
         None => conn
             .query_row(
-                "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1",
+                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
@@ -153,7 +153,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
 
     let provider_str: String = conn
         .query_row(
-            "SELECT COALESCE(provider, 'claude_code') FROM sessions WHERE session_id = ?1",
+            "SELECT COALESCE(provider, 'claude_code') FROM sessions WHERE id = ?1",
             params![sid],
             |row| row.get(0),
         )

@@ -102,36 +102,30 @@ export interface ToolRow {
 }
 
 export interface SessionRow {
-  session_id: string;
+  id: string;
   provider: string;
   title: string | null;
   started_at: string;
   ended_at: string | null;
   duration_ms: number | null;
-  model: string;
-  repo_id: string | null;
-  git_branch: string | null;
-  repo_count?: number | null;
-  git_branch_count?: number | null;
+  models: string[];
+  repo_ids: string[];
+  git_branches: string[];
   input_tokens: number;
   output_tokens: number;
   cost_cents: number;
 }
 
 export interface SessionDetailRow {
-  session_id: string;
+  id: string;
   provider: string;
   title: string | null;
   started_at: string | null;
   ended_at: string | null;
   duration_ms: number | null;
-  model: string | null;
-  repo_id: string | null;
-  git_branch: string | null;
-  repo_count?: number | null;
-  git_branch_count?: number | null;
-  repo_ids?: string[] | null;
-  git_branches?: string[] | null;
+  models: string[];
+  repo_ids: string[];
+  git_branches: string[];
   input_tokens: number;
   output_tokens: number;
   cost_cents: number;
@@ -144,7 +138,7 @@ export interface SessionsResponse {
 }
 
 export interface MessageRow {
-  uuid?: string;
+  id?: string;
   session_id?: string | null;
   role?: string;
   timestamp: string;
@@ -158,6 +152,7 @@ export interface MessageRow {
   git_branch?: string | null;
   request_id?: string | null;
   tools?: string[];
+  tags?: SessionTag[];
 }
 
 export interface SessionTag {
@@ -248,4 +243,9 @@ export interface OtelEventRow {
   cost_cents_computed?: number | null;
   processed: boolean;
   raw_json?: string | null;
+}
+
+export interface MessagesResponse {
+  messages: MessageRow[];
+  total_count: number;
 }

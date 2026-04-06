@@ -89,6 +89,7 @@ const VALID_MESSAGE_SORT_BY: &[&str] = &[
 
 const VALID_SESSION_SORT_BY: &[&str] = &[
     "started_at",
+    "title",
     "duration",
     "cost",
     "model",
@@ -576,14 +577,10 @@ pub async fn analytics_sessions(
             },
         )?;
 
-        let sids: Vec<&str> = paginated
-            .sessions
-            .iter()
-            .map(|s| s.session_id.as_str())
-            .collect();
+        let sids: Vec<&str> = paginated.sessions.iter().map(|s| s.id.as_str()).collect();
         if let Ok(health_map) = analytics::session_health_batch(&conn, &sids) {
             for session in &mut paginated.sessions {
-                session.health_state = health_map.get(&session.session_id).cloned();
+                session.health_state = health_map.get(&session.id).cloned();
             }
         }
 
@@ -636,17 +633,36 @@ pub async fn analytics_session_tags(
 pub async fn analytics_session_messages(
     Path(session_id): Path<String>,
     Query(params): Query<SessionMessagesQueryParams>,
-) -> Result<Json<Vec<analytics::MessageRow>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
     let roles = match params.roles.as_deref() {
         None => analytics::SessionMessageRoles::Assistant,
         Some(raw) => raw
             .parse::<analytics::SessionMessageRoles>()
             .map_err(bad_request)?,
     };
+    if let Some(ref sort) = params.sort_by
+        && !VALID_MESSAGE_SORT_BY.contains(&sort.as_str())
+    {
+        return Err(bad_request(format!(
+            "invalid sort_by '{}'; valid values: {}",
+            sort,
+            VALID_MESSAGE_SORT_BY.join(", ")
+        )));
+    }
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_messages_with_roles(&conn, &session_id, roles)
+        analytics::session_message_list(
+            &conn,
+            &session_id,
+            &analytics::SessionMessageListParams {
+                roles,
+                sort_by: params.sort_by.as_deref(),
+                sort_asc: params.sort_asc.unwrap_or(false),
+                limit: params.limit.unwrap_or(50).min(200),
+                offset: params.offset.unwrap_or(0),
+            },
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -657,6 +673,10 @@ pub async fn analytics_session_messages(
 #[derive(serde::Deserialize)]
 pub struct SessionMessagesQueryParams {
     pub roles: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_asc: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]

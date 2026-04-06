@@ -10,6 +10,7 @@ import type {
   InstallIntegrationsRequest,
   IntegrationsHealth,
   MessageRow,
+  MessagesResponse,
   ModelRow,
   OtelEventRow,
   ProjectRow,
@@ -149,16 +150,31 @@ export async function fetchSessions(
 }
 
 export async function fetchSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRow[]> {
-  return fetchSessionMessagesWithRoles(sessionId, "assistant", signal);
+  const response = await fetchSessionMessagesWithRoles(sessionId, "assistant", {}, signal);
+  return response.messages;
+}
+
+export interface SessionMessagesQuery {
+  limit?: number;
+  offset?: number;
+  sort_by?: string;
+  sort_asc?: boolean;
 }
 
 export async function fetchSessionMessagesWithRoles(
   sessionId: string,
   roles: "assistant" | "all",
+  query: SessionMessagesQuery = {},
   signal?: AbortSignal,
-): Promise<MessageRow[]> {
-  return fetchJson<MessageRow[]>(
-    `/analytics/sessions/${encodeURIComponent(sessionId)}/messages?roles=${encodeURIComponent(roles)}`,
+): Promise<MessagesResponse> {
+  const params = new URLSearchParams();
+  params.set("roles", roles);
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.offset != null) params.set("offset", String(query.offset));
+  if (query.sort_by) params.set("sort_by", query.sort_by);
+  if (query.sort_asc != null) params.set("sort_asc", String(query.sort_asc));
+  return fetchJson<MessagesResponse>(
+    `/analytics/sessions/${encodeURIComponent(sessionId)}/messages?${params.toString()}`,
     signal ? { signal } : undefined,
   );
 }

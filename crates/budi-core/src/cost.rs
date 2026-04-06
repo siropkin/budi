@@ -143,7 +143,7 @@ mod tests {
         let conn = setup_db();
         // 1M input * $5/M = $5.00, 100K output * $25/M = $2.50, total = $7.50 = 750 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
              VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, ?4, ?5, ?6)",
             params!["msg1", 1_000_000i64, 100_000i64, 0i64, 0i64, 750.0],
         ).unwrap();
@@ -158,7 +158,7 @@ mod tests {
         let conn = setup_db();
         // total = 0.30 + 0.75 + 0.75 + 0.15 = $1.95 = 195 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
              VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6-20260321', ?2, ?3, ?4, ?5, ?6)",
             params!["msg1", 100_000i64, 50_000i64, 200_000i64, 500_000i64, 195.0],
         ).unwrap();
@@ -177,13 +177,13 @@ mod tests {
         let conn = setup_db();
         // 1M input * $3/M = $3.00 = 300 cents each
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
              VALUES ('old', 'assistant', '2026-03-01T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
              VALUES ('new', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0)",
             [],
         )
@@ -200,19 +200,19 @@ mod tests {
         let conn = setup_db();
         // Opus 4.6: 100K input * $5/M = $0.50 = 50 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
              VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 100000, 0, 50.0)",
             [],
         ).unwrap();
         // Haiku 4.5: 100K input * $1/M = $0.10 = 10 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
              VALUES ('m2', 'assistant', '2026-03-21T00:00:00Z', 'claude-haiku-4-5-20251001', 100000, 0, 10.0)",
             [],
         ).unwrap();
         // Sonnet 4.6: 100K input * $3/M = $0.30 = 30 cents
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
              VALUES ('m3', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 100000, 0, 30.0)",
             [],
         ).unwrap();
@@ -235,7 +235,7 @@ mod tests {
         let total_dollars = input_cost + cache_write_cost;
         let total_cents = total_dollars * 100.0;
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
              VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 14873, 0, ?1)",
             params![total_cents],
         ).unwrap();
@@ -293,7 +293,7 @@ mod tests {
             expected_total_cents += cost_cents;
 
             conn.execute(
-                "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
                  VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![*prefix, *model, *inp as i64, *out as i64, *cw as i64, *cr as i64, cost_cents],
             ).unwrap();
@@ -347,7 +347,7 @@ mod tests {
         let conn = setup_db();
         let cost_cents = correct * 100.0;
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
              VALUES ('test', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 16267, 9985, ?1)",
             params![cost_cents],
         ).unwrap();
@@ -376,13 +376,13 @@ mod tests {
         // If stored as integer: 0 or 1 cent (up to 100% error)
         // If stored as f64: 0.5 cents exactly
         conn.execute(
-            "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
              VALUES ('half', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 0, 0, 0.5)",
             [],
         ).unwrap();
         let stored: f64 = conn
             .query_row(
-                "SELECT cost_cents FROM messages WHERE uuid = 'half'",
+                "SELECT cost_cents FROM messages WHERE id = 'half'",
                 [],
                 |r| r.get(0),
             )
@@ -403,7 +403,7 @@ mod tests {
         // After fix: each stored as 0.0915 cents → total $0.09 (rounded at display)
         for i in 0..100 {
             conn.execute(
-                "INSERT INTO messages (uuid, role, timestamp, model, input_tokens, output_tokens, cost_cents)
+                "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
                  VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 36, ?2)",
                 params![format!("msg{}", i), 0.0915],
             ).unwrap();

@@ -249,7 +249,7 @@ pub fn resolve_hook_message_link(
     if let Some(request_id) = message_request_id.map(str::trim).filter(|s| !s.is_empty()) {
         let linked_by_request: Option<String> = conn
             .query_row(
-                "SELECT uuid
+                "SELECT id
                  FROM messages
                  WHERE session_id = ?1 AND request_id = ?2
                  ORDER BY timestamp DESC
@@ -266,9 +266,9 @@ pub fn resolve_hook_message_link(
     if let Some(tool_id) = tool_use_id.map(str::trim).filter(|s| !s.is_empty()) {
         let linked_by_tool: Option<String> = conn
             .query_row(
-                "SELECT m.uuid
+                "SELECT m.id
                  FROM messages m
-                 JOIN tags t ON t.message_uuid = m.uuid
+                 JOIN tags t ON t.message_id = m.id
                  WHERE m.session_id = ?1
                    AND t.key = 'tool_use_id'
                    AND t.value = ?2
@@ -366,7 +366,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
     // Ensure a session row exists regardless of which event arrives first.
     // Cursor often sends post_tool_use before (or instead of) session_start.
     conn.execute(
-        "INSERT OR IGNORE INTO sessions (session_id, provider, started_at, workspace_root, repo_id, git_branch)
+        "INSERT OR IGNORE INTO sessions (id, provider, started_at, workspace_root, repo_id, git_branch)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             sid,
@@ -391,7 +391,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     raw_json = ?8,
                     repo_id = COALESCE(?9, NULLIF(NULLIF(repo_id, ''), 'unknown')),
                     git_branch = COALESCE(?10, NULLIF(git_branch, ''))
-                WHERE session_id = ?1",
+                WHERE id = ?1",
                 params![
                     sid,
                     event.timestamp.to_rfc3339(),
@@ -416,7 +416,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     user_email = COALESCE(?6, NULLIF(user_email, '')),
                     repo_id = COALESCE(?7, NULLIF(NULLIF(repo_id, ''), 'unknown')),
                     git_branch = COALESCE(?8, NULLIF(git_branch, ''))
-                WHERE session_id = ?1",
+                WHERE id = ?1",
                 params![
                     sid,
                     event.timestamp.to_rfc3339(),
@@ -438,7 +438,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     workspace_root = COALESCE(NULLIF(workspace_root, ''), ?5),
                     repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?6),
                     git_branch = COALESCE(NULLIF(git_branch, ''), ?7)
-                 WHERE session_id = ?1",
+                 WHERE id = ?1",
                 params![
                     sid,
                     event.timestamp.to_rfc3339(),
@@ -460,7 +460,7 @@ pub fn update_session_category(conn: &Connection, event: &HookEvent, category: &
     if let Some(ref sid) = event.session_id {
         conn.execute(
             "UPDATE sessions SET prompt_category = ?2
-             WHERE session_id = ?1 AND prompt_category IS NULL",
+             WHERE id = ?1 AND prompt_category IS NULL",
             params![sid, category],
         )?;
     }
@@ -1150,7 +1150,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::migration::migrate(&conn).unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, request_id, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, request_id, provider)
              VALUES ('m-req', 'sess-1', 'assistant', '2026-03-25T00:00:01Z', 'msg_123', 'claude_code')",
             [],
         )
@@ -1168,13 +1168,13 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::migration::migrate(&conn).unwrap();
         conn.execute(
-            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+            "INSERT INTO messages (id, session_id, role, timestamp, provider)
              VALUES ('m-tool', 'sess-2', 'assistant', '2026-03-25T00:00:02Z', 'claude_code')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO tags (message_uuid, key, value)
+            "INSERT INTO tags (message_id, key, value)
              VALUES ('m-tool', 'tool_use_id', 'toolu_456')",
             [],
         )
@@ -1406,7 +1406,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE sessions (
-                session_id TEXT PRIMARY KEY,
+                id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL DEFAULT 'claude_code',
                 started_at TEXT, ended_at TEXT, duration_ms INTEGER,
                 composer_mode TEXT, permission_mode TEXT, user_email TEXT,
@@ -1446,7 +1446,7 @@ mod tests {
         // Verify session created
         let mode: String = conn
             .query_row(
-                "SELECT permission_mode FROM sessions WHERE session_id = 'sess-1'",
+                "SELECT permission_mode FROM sessions WHERE id = 'sess-1'",
                 [],
                 |r| r.get(0),
             )
@@ -1465,7 +1465,7 @@ mod tests {
 
         let (reason, dur): (String, i64) = conn
             .query_row(
-                "SELECT end_reason, duration_ms FROM sessions WHERE session_id = 'sess-1'",
+                "SELECT end_reason, duration_ms FROM sessions WHERE id = 'sess-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )

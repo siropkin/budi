@@ -50,14 +50,14 @@ Sources (JSONL files, OTEL spans, Cursor API, Hooks)
 
 Enricher order is critical - each depends on prior enrichers. Do not reorder.
 
-### Database (SQLite, WAL mode, schema v15)
+### Database (SQLite, WAL mode, schema v20)
 
 Six tables, four data entities + two supporting:
-- **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: uuid, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
-- **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation from hooks
+- **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
+- **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation from hooks. Primary key field: id
 - **hook_events** - Raw event log for tool stats and MCP tracking. One row per hook event
 - **otel_events** - Raw OpenTelemetry event storage for debugging/audit
-- **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) with FK to messages
+- **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync
 
 ### Cost sources
@@ -91,7 +91,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API, auth from state.vscdb)
-- `crates/budi-core/src/migration.rs` - Schema v15, all migration paths
+- `crates/budi-core/src/migration.rs` - Schema v20, all migration paths
 - `crates/budi-core/src/config.rs` - BudiConfig, StatuslineConfig, TagsConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server, ~38 routes

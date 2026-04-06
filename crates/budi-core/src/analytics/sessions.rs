@@ -46,7 +46,7 @@ pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
     let sessions_total: u64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
     let sessions_orphaned: u64 = conn.query_row(
         "SELECT COUNT(*) FROM sessions s
-         WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.session_id)",
+         WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)",
         [],
         |r| r.get(0),
     )?;
@@ -92,24 +92,17 @@ pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
 /// Session list entry for the Sessions page.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionListEntry {
-    pub session_id: String,
+    #[serde(alias = "session_id")]
+    pub id: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub duration_ms: Option<i64>,
     pub message_count: u64,
     pub cost_cents: f64,
-    pub model: Option<String>,
+    pub models: Vec<String>,
     pub provider: String,
-    pub repo_id: Option<String>,
-    pub git_branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_count: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_branch_count: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_ids: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_branches: Option<Vec<String>>,
+    pub repo_ids: Vec<String>,
+    pub git_branches: Vec<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,6 +127,19 @@ pub struct SessionListParams<'a> {
     pub sort_asc: bool,
     pub limit: usize,
     pub offset: usize,
+}
+
+fn parse_models_csv(raw: Option<String>) -> Vec<String> {
+    parse_string_list_csv(raw)
+}
+
+fn parse_string_list_csv(raw: Option<String>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| m.to_string())
+        .collect()
 }
 
 /// Query sessions with cost aggregated from messages.
@@ -172,7 +178,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
         "WITH session_agg AS (
              SELECT m.session_id
              FROM messages m
-             LEFT JOIN sessions s ON s.session_id = m.session_id
+             LEFT JOIN sessions s ON s.id = m.session_id
              {where_clause}
              AND m.session_id IS NOT NULL
              GROUP BY m.session_id
@@ -211,7 +217,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                 format!("sa.title {dir}")
             }
         }
-        "model" => format!("sa.models_by_cost {dir}"),
+        "model" => format!("sa.models_csv {dir}"),
         "provider" => format!("sa.provider {dir}"),
         "repo_id" => {
             if p.sort_asc {
@@ -242,7 +248,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                          WHERE m2.session_id = m.session_id AND m2.role = 'assistant'
                            AND m2.model IS NOT NULL AND m2.model != '' AND SUBSTR(m2.model, 1, 1) != '<'
                          GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
-                     ) sub) as models_by_cost,
+                     ) sub) as models_csv,
                     COALESCE(MAX(m.provider), 'claude_code') as provider,
                     COALESCE(
                         (
@@ -259,6 +265,17 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                         ),
                         MAX(s.repo_id)
                     ) as repo_id,
+                    (SELECT GROUP_CONCAT(sub.repo_id, ',') FROM (
+                         SELECT m2.repo_id
+                         FROM messages m2
+                         WHERE m2.session_id = m.session_id
+                           AND m2.role = 'assistant'
+                           AND m2.repo_id IS NOT NULL
+                           AND m2.repo_id != ''
+                           AND m2.repo_id != 'unknown'
+                         GROUP BY m2.repo_id
+                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                     ) sub) as repo_ids_csv,
                     COALESCE(
                         (
                             SELECT branch_value
@@ -282,28 +299,20 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                         ),
                         MAX(s.git_branch)
                     ) as git_branch,
-                    (
-                        SELECT COUNT(DISTINCT m2.repo_id)
-                        FROM messages m2
-                        WHERE m2.session_id = m.session_id
-                          AND m2.role = 'assistant'
-                          AND m2.repo_id IS NOT NULL
-                          AND m2.repo_id != ''
-                          AND m2.repo_id != 'unknown'
-                    ) as repo_count,
-                    (
-                        SELECT COUNT(DISTINCT
-                            CASE
-                                WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
-                                ELSE m2.git_branch
-                            END
-                        )
-                        FROM messages m2
-                        WHERE m2.session_id = m.session_id
-                          AND m2.role = 'assistant'
-                          AND m2.git_branch IS NOT NULL
-                          AND m2.git_branch != ''
-                    ) as git_branch_count,
+                    (SELECT GROUP_CONCAT(sub.branch_value, ',') FROM (
+                         SELECT
+                             CASE
+                                 WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
+                                 ELSE m2.git_branch
+                             END as branch_value
+                         FROM messages m2
+                         WHERE m2.session_id = m.session_id
+                           AND m2.role = 'assistant'
+                           AND m2.git_branch IS NOT NULL
+                           AND m2.git_branch != ''
+                         GROUP BY branch_value
+                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, branch_value ASC
+                     ) sub) as git_branches_csv,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
                     COALESCE(s.duration_ms,
@@ -311,15 +320,15 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
                     ) as duration_ms,
                     s.title
              FROM messages m
-             LEFT JOIN sessions s ON s.session_id = m.session_id
+             LEFT JOIN sessions s ON s.id = m.session_id
              {where_clause}
              AND m.session_id IS NOT NULL
              GROUP BY m.session_id
          )
          SELECT COUNT(*) OVER() as total,
                 sa.session_id, sa.started_at, sa.ended_at, sa.duration_ms,
-                sa.msg_count, sa.cost, sa.models_by_cost, sa.provider, sa.repo_id, sa.git_branch,
-                sa.repo_count, sa.git_branch_count, sa.inp, sa.outp, sa.title
+                sa.msg_count, sa.cost, sa.models_csv, sa.provider,
+                sa.repo_ids_csv, sa.git_branches_csv, sa.inp, sa.outp, sa.title
          FROM session_agg sa
          ORDER BY {order_expr}
          LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -329,24 +338,20 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
     let sessions: Vec<SessionListEntry> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(SessionListEntry {
-                session_id: row.get(1)?,
+                id: row.get(1)?,
                 started_at: row.get(2)?,
                 ended_at: row.get(3)?,
                 duration_ms: row.get(4)?,
                 message_count: row.get(5)?,
                 cost_cents: row.get(6)?,
-                model: row.get(7)?,
+                models: parse_models_csv(row.get(7)?),
                 provider: row.get::<_, String>(8)?,
-                repo_id: row.get(9)?,
-                git_branch: row.get(10)?,
-                repo_count: row.get(11)?,
-                git_branch_count: row.get(12)?,
-                repo_ids: None,
-                git_branches: None,
-                input_tokens: row.get(13)?,
-                output_tokens: row.get(14)?,
+                repo_ids: parse_string_list_csv(row.get(9)?),
+                git_branches: parse_string_list_csv(row.get(10)?),
+                input_tokens: row.get(11)?,
+                output_tokens: row.get(12)?,
                 health_state: None,
-                title: row.get(15)?,
+                title: row.get(13)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -373,14 +378,14 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                             ELSE NULL
                         END
                     ) as duration_ms,
-                    COUNT(m.uuid) as msg_count,
+                    COUNT(m.id) as msg_count,
                     COALESCE(SUM(m.cost_cents), 0.0) as cost,
                     (SELECT GROUP_CONCAT(sub.model, ',') FROM (
                          SELECT m2.model FROM messages m2
                          WHERE m2.session_id = sid.session_id AND m2.role = 'assistant'
                            AND m2.model IS NOT NULL AND m2.model != '' AND SUBSTR(m2.model, 1, 1) != '<'
                          GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
-                     ) sub) as models_by_cost,
+                     ) sub) as models_csv,
                     COALESCE(MAX(m.provider), MAX(s.provider), 'claude_code') as provider,
                     COALESCE(
                         (
@@ -397,6 +402,17 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                         ),
                         MAX(s.repo_id)
                     ) as repo_id,
+                    (SELECT GROUP_CONCAT(sub.repo_id, ',') FROM (
+                         SELECT m2.repo_id
+                         FROM messages m2
+                         WHERE m2.session_id = sid.session_id
+                           AND m2.role = 'assistant'
+                           AND m2.repo_id IS NOT NULL
+                           AND m2.repo_id != ''
+                           AND m2.repo_id != 'unknown'
+                         GROUP BY m2.repo_id
+                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                     ) sub) as repo_ids_csv,
                     COALESCE(
                         (
                             SELECT branch_value
@@ -420,117 +436,56 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                         ),
                         MAX(s.git_branch)
                     ) as git_branch,
-                    (
-                        SELECT COUNT(DISTINCT m2.repo_id)
-                        FROM messages m2
-                        WHERE m2.session_id = sid.session_id
-                          AND m2.role = 'assistant'
-                          AND m2.repo_id IS NOT NULL
-                          AND m2.repo_id != ''
-                          AND m2.repo_id != 'unknown'
-                    ) as repo_count,
-                    (
-                        SELECT COUNT(DISTINCT
-                            CASE
-                                WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
-                                ELSE m2.git_branch
-                            END
-                        )
-                        FROM messages m2
-                        WHERE m2.session_id = sid.session_id
-                          AND m2.role = 'assistant'
-                          AND m2.git_branch IS NOT NULL
-                          AND m2.git_branch != ''
-                    ) as git_branch_count,
+                    (SELECT GROUP_CONCAT(sub.branch_value, ',') FROM (
+                         SELECT
+                             CASE
+                                 WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
+                                 ELSE m2.git_branch
+                             END as branch_value
+                         FROM messages m2
+                         WHERE m2.session_id = sid.session_id
+                           AND m2.role = 'assistant'
+                           AND m2.git_branch IS NOT NULL
+                           AND m2.git_branch != ''
+                         GROUP BY branch_value
+                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, branch_value ASC
+                     ) sub) as git_branches_csv,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
                     MAX(s.title) as title
              FROM (SELECT ?1 AS session_id) sid
-             LEFT JOIN sessions s ON s.session_id = sid.session_id
+             LEFT JOIN sessions s ON s.id = sid.session_id
              LEFT JOIN messages m ON m.session_id = sid.session_id AND m.role = 'assistant'
              GROUP BY sid.session_id
-             HAVING COUNT(m.uuid) > 0 OR MAX(s.session_id) IS NOT NULL
+             HAVING COUNT(m.id) > 0 OR MAX(s.id) IS NOT NULL
          )
          SELECT session_id, started_at, ended_at, duration_ms, msg_count, cost,
-                models_by_cost, provider, repo_id, git_branch, repo_count, git_branch_count,
+                models_csv, provider, repo_ids_csv, git_branches_csv,
                 inp, outp, title
          FROM session_agg",
         params![session_id],
         |row| {
             Ok(SessionListEntry {
-                session_id: row.get(0)?,
+                id: row.get(0)?,
                 started_at: row.get(1)?,
                 ended_at: row.get(2)?,
                 duration_ms: row.get(3)?,
                 message_count: row.get(4)?,
                 cost_cents: row.get(5)?,
-                model: row.get(6)?,
+                models: parse_models_csv(row.get(6)?),
                 provider: row.get(7)?,
-                repo_id: row.get(8)?,
-                git_branch: row.get(9)?,
-                repo_count: row.get(10)?,
-                git_branch_count: row.get(11)?,
-                repo_ids: None,
-                git_branches: None,
-                input_tokens: row.get(12)?,
-                output_tokens: row.get(13)?,
+                repo_ids: parse_string_list_csv(row.get(8)?),
+                git_branches: parse_string_list_csv(row.get(9)?),
+                input_tokens: row.get(10)?,
+                output_tokens: row.get(11)?,
                 health_state: None,
-                title: row.get(14)?,
+                title: row.get(12)?,
             })
         },
     );
 
     match row {
-        Ok(mut entry) => {
-            let mut repo_stmt = conn.prepare(
-                "SELECT m.repo_id
-                 FROM messages m
-                 WHERE m.session_id = ?1
-                   AND m.role = 'assistant'
-                   AND m.repo_id IS NOT NULL
-                   AND m.repo_id != ''
-                   AND m.repo_id != 'unknown'
-                 GROUP BY m.repo_id
-                 ORDER BY SUM(m.cost_cents) DESC, COUNT(*) DESC, m.repo_id ASC",
-            )?;
-            let repo_ids: Vec<String> = repo_stmt
-                .query_map(params![session_id], |row| row.get::<_, String>(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            if !repo_ids.is_empty() {
-                entry.repo_count = Some(repo_ids.len() as u64);
-                entry.repo_ids = Some(repo_ids);
-            }
-
-            let mut branch_stmt = conn.prepare(
-                "SELECT branch_value FROM (
-                    SELECT
-                        CASE
-                            WHEN m.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m.git_branch, 12)
-                            ELSE m.git_branch
-                        END as branch_value,
-                        SUM(m.cost_cents) as branch_cost,
-                        COUNT(*) as branch_count
-                    FROM messages m
-                    WHERE m.session_id = ?1
-                      AND m.role = 'assistant'
-                      AND m.git_branch IS NOT NULL
-                      AND m.git_branch != ''
-                    GROUP BY branch_value
-                    ORDER BY branch_cost DESC, branch_count DESC, branch_value ASC
-                )",
-            )?;
-            let git_branches: Vec<String> = branch_stmt
-                .query_map(params![session_id], |row| row.get::<_, String>(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            if !git_branches.is_empty() {
-                entry.git_branch_count = Some(git_branches.len() as u64);
-                entry.git_branches = Some(git_branches);
-            }
-
-            Ok(Some(entry))
-        }
+        Ok(entry) => Ok(Some(entry)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -633,7 +588,7 @@ fn message_tools(conn: &Connection, message_uuid: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT value
          FROM tags
-         WHERE message_uuid = ?1
+         WHERE message_id = ?1
            AND key = 'tool'
          ORDER BY value ASC",
     )?;
@@ -644,12 +599,46 @@ fn message_tools(conn: &Connection, message_uuid: &str) -> Result<Vec<String>> {
     Ok(tools)
 }
 
+fn message_tags(conn: &Connection, message_id: &str) -> Result<Vec<super::SessionTag>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT key, value
+         FROM tags
+         WHERE message_id = ?1
+           AND key NOT IN ('tool_use_id')
+         ORDER BY key, value",
+    )?;
+    let tags = stmt
+        .query_map(params![message_id], |row| {
+            Ok(super::SessionTag {
+                key: row.get(0)?,
+                value: row.get(1)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(tags)
+}
+
+fn enrich_message_rows(
+    conn: &Connection,
+    rows: &mut [MessageRow],
+    include_tags: bool,
+) -> Result<()> {
+    for row in rows {
+        row.tools = message_tools(conn, &row.id)?;
+        if include_tags {
+            row.tags = message_tags(conn, &row.id)?;
+        }
+    }
+    Ok(())
+}
+
 /// Get distinct tags for a session.
 pub fn session_tags(conn: &Connection, session_id: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT t.key, t.value
          FROM tags t
-         JOIN messages m ON t.message_uuid = m.uuid
+         JOIN messages m ON t.message_id = m.id
          WHERE m.session_id = ?1
            AND t.key NOT IN ('repo', 'branch', 'dominant_tool', 'tool_use_id', 'provider', 'model', 'cost_confidence')
          ORDER BY key, value",
@@ -674,7 +663,7 @@ pub fn session_messages_with_roles(
     roles: SessionMessageRoles,
 ) -> Result<Vec<MessageRow>> {
     let mut sql = String::from(
-        "SELECT uuid, timestamp, role, model,
+        "SELECT id, timestamp, role, model,
                 COALESCE(provider, 'claude_code'),
                 repo_id,
                 input_tokens, output_tokens,
@@ -695,7 +684,7 @@ pub fn session_messages_with_roles(
     let mut rows: Vec<MessageRow> = stmt
         .query_map(params![session_id], |row| {
             Ok(MessageRow {
-                uuid: row.get(0)?,
+                id: row.get(0)?,
                 session_id: Some(session_id.to_string()),
                 timestamp: row.get(1)?,
                 role: row.get(2)?,
@@ -711,16 +700,116 @@ pub fn session_messages_with_roles(
                 git_branch: row.get(12)?,
                 request_id: row.get(13)?,
                 tools: Vec::new(),
+                tags: Vec::new(),
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
 
-    for row in &mut rows {
-        row.tools = message_tools(conn, &row.uuid)?;
-    }
+    enrich_message_rows(conn, &mut rows, true)?;
 
     Ok(rows)
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionMessageListParams<'a> {
+    pub roles: SessionMessageRoles,
+    pub sort_by: Option<&'a str>,
+    pub sort_asc: bool,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+pub fn session_message_list(
+    conn: &Connection,
+    session_id: &str,
+    p: &SessionMessageListParams<'_>,
+) -> Result<super::PaginatedMessages> {
+    let mut conditions = vec!["session_id = ?1".to_string()];
+    if p.roles == SessionMessageRoles::Assistant {
+        conditions.push("role = 'assistant'".to_string());
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    let dir = if p.sort_asc { "ASC" } else { "DESC" };
+    let order_expr = match p.sort_by.unwrap_or("timestamp") {
+        "provider" => format!("provider {dir}"),
+        "model" => {
+            if p.sort_asc {
+                format!("(model IS NULL OR model = '') ASC, model {dir}")
+            } else {
+                format!("model {dir}")
+            }
+        }
+        "tokens" => format!("(input_tokens + output_tokens) {dir}"),
+        "cost" => format!("COALESCE(cost_cents, 0.0) {dir}"),
+        "repo_id" => {
+            if p.sort_asc {
+                format!("(repo_id IS NULL OR repo_id = '') ASC, repo_id {dir}")
+            } else {
+                format!("repo_id {dir}")
+            }
+        }
+        "git_branch" | "branch" => {
+            if p.sort_asc {
+                format!("(git_branch IS NULL OR git_branch = '') ASC, git_branch {dir}")
+            } else {
+                format!("git_branch {dir}")
+            }
+        }
+        _ => format!("timestamp {dir}"),
+    };
+
+    let count_sql = format!("SELECT COUNT(*) FROM messages {where_clause}");
+    let total_count: u64 = conn.query_row(&count_sql, params![session_id], |row| row.get(0))?;
+
+    let sql = format!(
+        "SELECT id, timestamp, role, model,
+                COALESCE(provider, 'claude_code'),
+                repo_id,
+                input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens,
+                COALESCE(cost_cents, 0.0),
+                COALESCE(cost_confidence, 'estimated'),
+                git_branch,
+                request_id
+         FROM messages
+         {where_clause}
+         ORDER BY {order_expr}
+         LIMIT ?2 OFFSET ?3"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows: Vec<MessageRow> = stmt
+        .query_map(params![session_id, p.limit.min(200), p.offset], |row| {
+            Ok(MessageRow {
+                id: row.get(0)?,
+                session_id: Some(session_id.to_string()),
+                timestamp: row.get(1)?,
+                role: row.get(2)?,
+                model: row.get(3)?,
+                provider: row.get(4)?,
+                repo_id: row.get(5)?,
+                input_tokens: row.get(6)?,
+                output_tokens: row.get(7)?,
+                cache_creation_tokens: row.get(8)?,
+                cache_read_tokens: row.get(9)?,
+                cost_cents: row.get(10)?,
+                cost_confidence: row.get(11)?,
+                git_branch: row.get(12)?,
+                request_id: row.get(13)?,
+                tools: Vec::new(),
+                tags: Vec::new(),
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    enrich_message_rows(conn, &mut rows, true)?;
+
+    Ok(super::PaginatedMessages {
+        messages: rows,
+        total_count,
+    })
 }
 
 pub fn session_hook_events(
@@ -847,9 +936,9 @@ pub fn session_otel_events(
     Ok(rows)
 }
 
-pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<MessageDetail>> {
+pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<MessageDetail>> {
     let message_result = conn.query_row(
-        "SELECT uuid, session_id, timestamp, role, model,
+        "SELECT id, session_id, timestamp, role, model,
                 COALESCE(provider, 'claude_code'),
                 repo_id,
                 input_tokens, output_tokens,
@@ -859,11 +948,11 @@ pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<Me
                 git_branch,
                 request_id
          FROM messages
-         WHERE uuid = ?1",
-        params![message_uuid],
+         WHERE id = ?1",
+        params![message_id],
         |row| {
             Ok(MessageRow {
-                uuid: row.get(0)?,
+                id: row.get(0)?,
                 session_id: row.get(1)?,
                 timestamp: row.get(2)?,
                 role: row.get(3)?,
@@ -879,6 +968,7 @@ pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<Me
                 git_branch: row.get(13)?,
                 request_id: row.get(14)?,
                 tools: Vec::new(),
+                tags: Vec::new(),
             })
         },
     );
@@ -888,25 +978,9 @@ pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<Me
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    message.tools = message_tools(conn, message_uuid)?;
-
-    let tags: Vec<super::SessionTag> = {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT key, value
-             FROM tags
-             WHERE message_uuid = ?1
-               AND key NOT IN ('tool_use_id')
-             ORDER BY key, value",
-        )?;
-        stmt.query_map(params![message_uuid], |row| {
-            Ok(super::SessionTag {
-                key: row.get(0)?,
-                value: row.get(1)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect()
-    };
+    message.tools = message_tools(conn, message_id)?;
+    let tags = message_tags(conn, message_id)?;
+    message.tags = tags.clone();
 
     let hook_events: Vec<SessionHookEventRow> = {
         let mut stmt = conn.prepare(
@@ -918,7 +992,7 @@ pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<Me
              WHERE message_id = ?1
              ORDER BY timestamp ASC, id ASC",
         )?;
-        stmt.query_map(params![message_uuid], |row| {
+        stmt.query_map(params![message_id], |row| {
             Ok(SessionHookEventRow {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
@@ -948,7 +1022,7 @@ pub fn message_detail(conn: &Connection, message_uuid: &str) -> Result<Option<Me
              WHERE message_id = ?1
              ORDER BY timestamp ASC, id ASC",
         )?;
-        stmt.query_map(params![message_uuid], |row| {
+        stmt.query_map(params![message_id], |row| {
             let processed: i64 = row.get(9)?;
             Ok(OtelEventRow {
                 id: row.get(0)?,

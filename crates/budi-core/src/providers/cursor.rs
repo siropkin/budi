@@ -863,12 +863,12 @@ fn run_cursor_repairs(conn: &mut Connection) {
     // of the earliest hook. Use MIN(hook_events.timestamp) as the true start.
     let _ = conn.execute(
         "UPDATE sessions SET started_at = (
-            SELECT MIN(h.timestamp) FROM hook_events h WHERE h.session_id = sessions.session_id
+            SELECT MIN(h.timestamp) FROM hook_events h WHERE h.session_id = sessions.id
          )
          WHERE provider = 'cursor'
            AND EXISTS (
              SELECT 1 FROM hook_events h
-             WHERE h.session_id = sessions.session_id AND h.timestamp < sessions.started_at
+             WHERE h.session_id = sessions.id AND h.timestamp < sessions.started_at
            )",
         [],
     );
@@ -888,15 +888,15 @@ fn run_cursor_repairs(conn: &mut Connection) {
     // missing cwd/branch) — propagate from the now-correct session row.
     let _ = conn.execute(
         "UPDATE messages SET
-            cwd = COALESCE(cwd, (SELECT workspace_root FROM sessions WHERE session_id = messages.session_id)),
-            repo_id = (SELECT COALESCE(repo_id, 'unknown') FROM sessions WHERE session_id = messages.session_id),
-            git_branch = COALESCE(git_branch, (SELECT git_branch FROM sessions WHERE session_id = messages.session_id))
+            cwd = COALESCE(cwd, (SELECT workspace_root FROM sessions WHERE id = messages.session_id)),
+            repo_id = (SELECT COALESCE(repo_id, 'unknown') FROM sessions WHERE id = messages.session_id),
+            git_branch = COALESCE(git_branch, (SELECT git_branch FROM sessions WHERE id = messages.session_id))
          WHERE provider = 'cursor'
            AND session_id IS NOT NULL
            AND (repo_id IS NULL OR repo_id = 'unknown')
            AND EXISTS (
              SELECT 1 FROM sessions s
-             WHERE s.session_id = messages.session_id AND s.repo_id IS NOT NULL AND s.repo_id != 'unknown'
+             WHERE s.id = messages.session_id AND s.repo_id IS NOT NULL AND s.repo_id != 'unknown'
            )",
         [],
     );
@@ -926,7 +926,7 @@ fn repair_cursor_sessions_from_composer_headers(conn: &mut Connection) {
                 workspace_root = COALESCE(NULLIF(workspace_root, ''), ?4),
                 repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?5),
                 git_branch = COALESCE(NULLIF(git_branch, ''), ?6)
-             WHERE session_id = ?1 AND provider = 'cursor'",
+             WHERE id = ?1 AND provider = 'cursor'",
             params![
                 s.session_id,
                 start_iso,
@@ -1002,7 +1002,7 @@ fn repair_cursor_workspace_metadata(conn: &mut Connection) {
                     workspace_root = COALESCE(NULLIF(workspace_root, ''), ?2),
                     repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?3),
                     git_branch = COALESCE(NULLIF(git_branch, ''), ?4)
-                 WHERE session_id = ?1 AND provider = 'cursor'",
+                 WHERE id = ?1 AND provider = 'cursor'",
                 params![sid, workspace_root, repo_id, git_branch],
             );
         }
@@ -1014,7 +1014,7 @@ fn repair_cursor_workspace_metadata(conn: &mut Connection) {
 fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext]) -> usize {
     let orphans: Vec<(String, String)> = {
         let mut stmt = match conn.prepare(
-            "SELECT uuid, timestamp FROM messages
+            "SELECT id, timestamp FROM messages
              WHERE provider = 'cursor' AND session_id IS NULL AND role = 'assistant'
              LIMIT 5000",
         ) {
@@ -1043,7 +1043,7 @@ fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext
              cwd = COALESCE(NULLIF(cwd, ''), ?2),
              repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?3),
              git_branch = COALESCE(NULLIF(git_branch, ''), ?4)
-             WHERE uuid = ?5",
+             WHERE id = ?5",
         ) {
             Ok(s) => s,
             Err(_) => return 0,

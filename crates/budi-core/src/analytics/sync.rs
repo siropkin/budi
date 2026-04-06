@@ -114,14 +114,14 @@ fn sync_with_max_age(
     let repaired_from_session = conn
         .execute(
             "UPDATE messages SET git_branch = (
-            SELECT s.git_branch FROM sessions s WHERE s.session_id = messages.session_id
+            SELECT s.git_branch FROM sessions s WHERE s.id = messages.session_id
          )
          WHERE git_branch IS NULL
            AND session_id IS NOT NULL
            AND timestamp >= datetime('now', '-30 days')
            AND EXISTS (
              SELECT 1 FROM sessions s
-             WHERE s.session_id = messages.session_id
+             WHERE s.id = messages.session_id
                AND s.git_branch IS NOT NULL AND s.git_branch != ''
            )",
             [],
@@ -182,14 +182,14 @@ fn sync_with_max_age(
 fn backfill_ticket_tags(conn: &mut Connection) -> usize {
     let rows: Vec<(String, String)> = {
         let mut stmt = match conn.prepare(
-            "SELECT m.uuid, m.git_branch
+            "SELECT m.id, m.git_branch
              FROM messages m
              WHERE m.role = 'assistant'
                AND m.git_branch IS NOT NULL AND m.git_branch != ''
                AND m.timestamp >= datetime('now', '-90 days')
                AND NOT EXISTS (
                  SELECT 1 FROM tags t
-                 WHERE t.message_uuid = m.uuid AND t.key = 'ticket_id'
+                 WHERE t.message_id = m.id AND t.key = 'ticket_id'
                )
              LIMIT 10000",
         ) {
@@ -217,14 +217,14 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
     for (uuid, branch) in &rows {
         if let Some(ticket) = crate::pipeline::extract_ticket_id(branch) {
             if let Err(e) = tx.execute(
-                "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_id', ?2)",
+                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'ticket_id', ?2)",
                 rusqlite::params![uuid, ticket],
             ) {
                 tracing::warn!("backfill_ticket_tags: ticket_id insert failed for {uuid}: {e}");
             }
             if let Some(dash) = ticket.find('-')
                 && let Err(e) = tx.execute(
-                    "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, 'ticket_prefix', ?2)",
+                    "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'ticket_prefix', ?2)",
                     rusqlite::params![uuid, &ticket[..dash]],
                 )
             {
@@ -256,7 +256,7 @@ fn cleanup_legacy_auto_tags(conn: &mut Connection) -> usize {
 fn backfill_session_titles(conn: &mut Connection) -> usize {
     let rows: Vec<(String, String)> = {
         let mut stmt = match conn.prepare(
-            "SELECT session_id, provider FROM sessions
+            "SELECT id, provider FROM sessions
              WHERE (title IS NULL OR title = '')
                AND started_at >= datetime('now', '-30 days')",
         ) {
@@ -307,7 +307,7 @@ fn backfill_session_titles(conn: &mut Connection) -> usize {
     for (sid, title) in &titles {
         if tx
             .execute(
-                "UPDATE sessions SET title = ?2 WHERE session_id = ?1 AND (title IS NULL OR title = '')",
+                "UPDATE sessions SET title = ?2 WHERE id = ?1 AND (title IS NULL OR title = '')",
                 rusqlite::params![sid, title],
             )
             .is_ok()

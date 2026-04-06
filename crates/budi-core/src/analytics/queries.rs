@@ -269,7 +269,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         param_values.push(format!("%{escaped}%"));
         let idx = param_values.len();
         conditions.push(format!(
-            "(messages.model LIKE ?{idx} ESCAPE '\\' OR messages.repo_id LIKE ?{idx} ESCAPE '\\' OR messages.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(messages.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\' OR EXISTS (SELECT 1 FROM tags WHERE tags.message_uuid = messages.uuid AND tags.key = 'ticket_id' AND tags.value LIKE ?{idx} ESCAPE '\\'))"
+            "(messages.model LIKE ?{idx} ESCAPE '\\' OR messages.repo_id LIKE ?{idx} ESCAPE '\\' OR messages.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(messages.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\' OR EXISTS (SELECT 1 FROM tags WHERE tags.message_id = messages.id AND tags.key = 'ticket_id' AND tags.value LIKE ?{idx} ESCAPE '\\'))"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -311,7 +311,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     };
 
     let sql = format!(
-        "SELECT messages.uuid, messages.session_id, messages.timestamp, messages.role, messages.model,
+        "SELECT messages.id, messages.session_id, messages.timestamp, messages.role, messages.model,
                 COALESCE(messages.provider, 'claude_code'),
                 COALESCE(messages.repo_id, s.repo_id),
                 messages.input_tokens, messages.output_tokens,
@@ -320,7 +320,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 COALESCE(messages.cost_confidence, 'estimated'),
                 COALESCE(messages.git_branch, s.git_branch)
          FROM messages
-         LEFT JOIN sessions s ON s.session_id = messages.session_id
+         LEFT JOIN sessions s ON s.id = messages.session_id
          {}
          ORDER BY {order_expr}
          LIMIT {} OFFSET {}",
@@ -331,7 +331,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let count_sql = format!(
         "SELECT COUNT(*)
          FROM messages
-         LEFT JOIN sessions s ON s.session_id = messages.session_id
+         LEFT JOIN sessions s ON s.id = messages.session_id
          {where_clause}"
     );
     let total_count: u64 = conn.query_row(&count_sql, param_refs.as_slice(), |row| row.get(0))?;
@@ -340,7 +340,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let messages: Vec<MessageRow> = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(MessageRow {
-                uuid: row.get(0)?,
+                id: row.get(0)?,
                 session_id: row.get(1)?,
                 timestamp: row.get(2)?,
                 role: row.get(3)?,
@@ -356,6 +356,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 git_branch: row.get(13)?,
                 request_id: None,
                 tools: Vec::new(),
+                tags: Vec::new(),
             })
         })?
         .filter_map(|r| r.ok())
@@ -834,7 +835,7 @@ pub fn tag_stats(
              WHERE m.role = 'assistant' {date_filter}
                AND NOT EXISTS (
                  SELECT 1 FROM tags t2
-                 WHERE t2.message_uuid = m.uuid AND t2.key = ?1
+                 WHERE t2.message_id = m.id AND t2.key = ?1
                )"
         )
     } else {
@@ -851,17 +852,17 @@ pub fn tag_stats(
     let sql = if tag_key.is_some() {
         format!(
             "WITH msg_val_counts AS (
-                 SELECT message_uuid, COUNT(*) as n_values
+                 SELECT message_id, COUNT(*) as n_values
                  FROM tags
                  WHERE key = ?1
-                 GROUP BY message_uuid
+                 GROUP BY message_id
              )
              SELECT t.key, t.value,
                     COUNT(DISTINCT m.session_id) as session_count,
                     COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) as total_cost_cents
              FROM tags t
-             JOIN msg_val_counts mvc ON mvc.message_uuid = t.message_uuid
-             JOIN messages m ON t.message_uuid = m.uuid
+             JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+             JOIN messages m ON t.message_id = m.id
              {where_clause}
              GROUP BY t.key, t.value
              {untagged_union}
@@ -874,7 +875,7 @@ pub fn tag_stats(
                     COUNT(DISTINCT m.session_id) as session_count,
                     COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
              FROM tags t
-             JOIN messages m ON t.message_uuid = m.uuid
+             JOIN messages m ON t.message_id = m.id
              {where_clause}
              GROUP BY t.key, t.value
              ORDER BY total_cost_cents DESC

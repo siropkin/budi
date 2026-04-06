@@ -149,7 +149,8 @@ pub struct Tag {
 /// A single message row for the messages list endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MessageRow {
-    pub uuid: String,
+    #[serde(alias = "uuid")]
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub timestamp: String,
@@ -168,6 +169,8 @@ pub struct MessageRow {
     pub request_id: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<SessionTag>,
 }
 
 /// Ingest a batch of parsed messages into the database.
@@ -216,7 +219,7 @@ pub fn ingest_messages_with_sync(
             let ts_hi = (msg.timestamp + chrono::Duration::seconds(1)).to_rfc3339();
             let otel_uuid: Option<String> = tx
                 .query_row(
-                    "SELECT uuid FROM messages
+                    "SELECT id FROM messages
                     WHERE session_id = ?1
                        AND model = ?2
                        AND role = 'assistant'
@@ -236,7 +239,7 @@ pub fn ingest_messages_with_sync(
                         git_branch = COALESCE(NULLIF(git_branch, ''), ?3),
                         repo_id = COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), ?4),
                         request_id = COALESCE(request_id, ?5)
-                     WHERE uuid = ?6",
+                     WHERE id = ?6",
                     params![
                         msg.parent_uuid,
                         msg.cwd,
@@ -250,7 +253,7 @@ pub fn ingest_messages_with_sync(
                 if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
                     for tag in msg_tags {
                         tx.execute(
-                            "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
                             params![otel_id, tag.key, tag.value],
                         )?;
                     }
@@ -269,7 +272,7 @@ pub fn ingest_messages_with_sync(
         if let Some(ref request_id) = msg.request_id {
             let existing: Option<(String, i64)> = tx
                 .query_row(
-                    "SELECT uuid, output_tokens FROM messages WHERE request_id = ?1 AND (?2 IS NULL OR session_id = ?2) LIMIT 1",
+                    "SELECT id, output_tokens FROM messages WHERE request_id = ?1 AND (?2 IS NULL OR session_id = ?2) LIMIT 1",
                     params![request_id, normalized_session_id.as_deref()],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
@@ -282,7 +285,7 @@ pub fn ingest_messages_with_sync(
                         "UPDATE messages SET
                             output_tokens = ?1,
                             cost_cents = ?2
-                         WHERE uuid = ?3",
+                         WHERE id = ?3",
                         params![msg.output_tokens as i64, cost_cents, existing_uuid,],
                     )?;
                 }
@@ -290,7 +293,7 @@ pub fn ingest_messages_with_sync(
                 if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
                     for tag in msg_tags {
                         tx.execute(
-                            "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
                             params![existing_uuid, tag.key, tag.value],
                         )?;
                     }
@@ -302,7 +305,7 @@ pub fn ingest_messages_with_sync(
 
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
-             (uuid, session_id, role, timestamp, model,
+             (id, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               cwd, repo_id, provider,
               cost_cents,
@@ -335,7 +338,7 @@ pub fn ingest_messages_with_sync(
             if let Some(msg_tags) = tags.and_then(|t| t.get(i)) {
                 for tag in msg_tags {
                     tx.execute(
-                        "INSERT OR IGNORE INTO tags (message_uuid, key, value) VALUES (?1, ?2, ?3)",
+                        "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
                         params![msg.uuid, tag.key, tag.value],
                     )?;
                 }
@@ -367,14 +370,14 @@ pub fn ingest_messages_with_sync(
         }
         for (sid, provider) in &seen_sessions {
             tx.execute(
-                "INSERT OR IGNORE INTO sessions (session_id, provider) VALUES (?1, ?2)",
+                "INSERT OR IGNORE INTO sessions (id, provider) VALUES (?1, ?2)",
                 params![sid, provider],
             )?;
         }
         for (sid, category) in &session_categories {
             tx.execute(
                 "UPDATE sessions SET prompt_category = ?2
-                 WHERE session_id = ?1 AND (prompt_category IS NULL OR prompt_category = '')",
+                 WHERE id = ?1 AND (prompt_category IS NULL OR prompt_category = '')",
                 params![sid, category],
             )?;
         }
@@ -408,7 +411,7 @@ fn relink_unlinked_events_for_message(conn: &Connection, message_id: &str) -> Re
         .query_row(
             "SELECT session_id, request_id, timestamp, role, cost_confidence, model, cost_cents
              FROM messages
-             WHERE uuid = ?1",
+             WHERE id = ?1",
             params![message_id],
             |row| {
                 Ok((
@@ -456,7 +459,7 @@ fn relink_unlinked_events_for_message(conn: &Connection, message_id: &str) -> Re
     let mut tool_stmt = conn.prepare(
         "SELECT DISTINCT value
          FROM tags
-         WHERE message_uuid = ?1
+         WHERE message_id = ?1
            AND key = 'tool_use_id'
            AND TRIM(value) <> ''",
     )?;
