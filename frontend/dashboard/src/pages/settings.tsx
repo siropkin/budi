@@ -16,6 +16,7 @@ import {
   postSyncRecent,
   postSyncReset,
 } from "@/lib/api";
+import type { RepairResponse } from "@/lib/types";
 import { fmtDate, fmtNum, fmtSyncTime, formatPath } from "@/lib/format";
 
 const INTEGRATIONS = [
@@ -126,7 +127,7 @@ export function SettingsPage() {
     onError: (error, _variables, ctx) => finishOperationError(ctx, error),
   });
 
-  const repairMutation = useMutation<Record<string, unknown>, Error, void, MutationToastCtx>({
+  const repairMutation = useMutation<RepairResponse, Error, void, MutationToastCtx>({
     mutationFn: postRepair,
     onMutate: () => beginOperationToast("Database repair started..."),
     onSuccess: async (result, _variables, ctx) => {
