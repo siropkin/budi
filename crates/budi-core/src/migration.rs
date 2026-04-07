@@ -21,6 +21,7 @@ pub struct RepairReport {
     pub to_version: u32,
     pub migrated: bool,
     pub added_columns: Vec<String>,
+    pub added_indexes: Vec<String>,
 }
 
 /// Check the current schema version without migrating.
@@ -61,13 +62,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 pub fn repair(conn: &Connection) -> Result<RepairReport> {
     let from_version = current_version(conn);
     run_version_migrations(conn)?;
-    let added_columns = reconcile_schema(conn)?;
+    let reconcile = reconcile_schema(conn)?;
     let to_version = current_version(conn);
     Ok(RepairReport {
         from_version,
         to_version,
         migrated: from_version < to_version,
-        added_columns,
+        added_columns: reconcile.added_columns,
+        added_indexes: reconcile.added_indexes,
     })
 }
 
@@ -1151,7 +1153,99 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_decl: &str
 /// This can happen if an old migration partially applied or a table was rebuilt by
 /// external tooling while `user_version` remained current. We only add missing
 /// columns and recreate indexes; we do not drop or rewrite user data.
-fn reconcile_schema(conn: &Connection) -> Result<Vec<String>> {
+struct SchemaReconcileReport {
+    added_columns: Vec<String>,
+    added_indexes: Vec<String>,
+}
+
+fn index_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?1)",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
+fn expected_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
+    let mut indexes = vec![
+        "idx_messages_session".to_string(),
+        "idx_messages_timestamp".to_string(),
+        "idx_messages_session_ts".to_string(),
+        "idx_messages_repo".to_string(),
+        "idx_messages_provider".to_string(),
+        "idx_messages_parent".to_string(),
+        "idx_messages_branch".to_string(),
+        "idx_messages_role".to_string(),
+        "idx_tags_key_value".to_string(),
+        "idx_messages_ts_cost".to_string(),
+        "idx_messages_role_ts_cost".to_string(),
+        "idx_messages_role_branch_cost".to_string(),
+        "idx_messages_role_branch_ts".to_string(),
+        "idx_messages_role_cwd".to_string(),
+        "idx_messages_session_role".to_string(),
+        "idx_messages_cwd_role".to_string(),
+        "idx_messages_session_role_cost".to_string(),
+        "idx_messages_dedup".to_string(),
+        "idx_messages_request_id".to_string(),
+        "idx_sessions_provider".to_string(),
+        "idx_sessions_started".to_string(),
+        "idx_hook_events_session".to_string(),
+        "idx_hook_events_timestamp".to_string(),
+        "idx_hook_events_event".to_string(),
+        "idx_hook_events_provider".to_string(),
+        "idx_hook_events_event_timestamp".to_string(),
+        "idx_hook_events_event_tool".to_string(),
+        "idx_hook_events_event_session".to_string(),
+        "idx_hook_events_mcp_server".to_string(),
+        "idx_hook_events_event_tool_provider".to_string(),
+        "idx_hook_events_event_mcp".to_string(),
+        "idx_hook_events_event_session_ts".to_string(),
+        "idx_hook_events_tool_use_id_partial".to_string(),
+        "idx_hook_events_message_request_id_partial".to_string(),
+        "idx_otel_events_session".to_string(),
+        "idx_otel_events_timestamp".to_string(),
+        "idx_tags_message".to_string(),
+        "idx_tags_msg_key_val".to_string(),
+        "idx_sessions_id".to_string(),
+        "idx_sessions_session_id".to_string(),
+    ];
+
+    if table_exists(conn, "hook_events")? {
+        if has_column(conn, "hook_events", "message_id")? {
+            indexes.push("idx_hook_events_message_id_ts".to_string());
+        } else if has_column(conn, "hook_events", "message_uuid")? {
+            indexes.push("idx_hook_events_message_ts".to_string());
+        }
+    }
+
+    if table_exists(conn, "otel_events")? {
+        if has_column(conn, "otel_events", "message_id")? {
+            indexes.push("idx_otel_events_message_id_ts".to_string());
+        } else if has_column(conn, "otel_events", "message_uuid")? {
+            indexes.push("idx_otel_events_message_ts".to_string());
+        }
+    }
+
+    if table_exists(conn, "messages")? && table_exists(conn, "tags")? {
+        indexes.push("idx_message_tags_pair".to_string());
+        indexes.push("idx_messages_primary_id".to_string());
+    }
+
+    Ok(indexes)
+}
+
+fn missing_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for index in expected_reconcile_indexes(conn)? {
+        if !index_exists(conn, &index)? {
+            missing.push(index);
+        }
+    }
+    Ok(missing)
+}
+
+fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
     let mut added_columns: Vec<String> = Vec::new();
 
     if ensure_column(
@@ -1265,13 +1359,18 @@ fn reconcile_schema(conn: &Connection) -> Result<Vec<String>> {
         added_columns.push("otel_events.cost_cents_computed".to_string());
     }
 
+    let added_indexes = missing_reconcile_indexes(conn)?;
+
     // Index creation is idempotent and also heals drift where indexes were dropped.
     create_indexes(conn)?;
 
-    if !added_columns.is_empty() {
+    if !added_columns.is_empty() || !added_indexes.is_empty() {
         tracing::info!("Schema reconcile completed");
     }
-    Ok(added_columns)
+    Ok(SchemaReconcileReport {
+        added_columns,
+        added_indexes,
+    })
 }
 
 #[cfg(test)]
@@ -1723,6 +1822,41 @@ mod tests {
             report.added_columns.contains(&"sessions.title".to_string()),
             "repair should report sessions.title addition"
         );
+    }
+
+    #[test]
+    fn repair_reports_index_only_drift() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute_batch("DROP INDEX IF EXISTS idx_messages_session;")
+            .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+
+        let report = repair(&conn).unwrap();
+
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+        assert!(!report.migrated);
+        assert!(
+            report.added_columns.is_empty(),
+            "index-only drift should not report column additions"
+        );
+        assert!(
+            report
+                .added_indexes
+                .contains(&"idx_messages_session".to_string()),
+            "repair should report recreated index"
+        );
+
+        let index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_messages_session')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists, "repair should recreate missing index");
     }
 
     #[test]

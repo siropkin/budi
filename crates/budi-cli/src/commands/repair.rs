@@ -31,6 +31,15 @@ pub fn cmd_repair() -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
+    let added_indexes: Vec<String> = result
+        .get("added_indexes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
 
     if migrated {
         println!("Migrated database v{from} -> v{to}.");
@@ -39,9 +48,18 @@ pub fn cmd_repair() -> Result<()> {
     }
 
     if repaired {
-        println!("Repaired schema drift by adding missing columns:");
-        for col in &added_columns {
-            println!("  - {col}");
+        println!("Repaired schema drift:");
+        if !added_columns.is_empty() {
+            println!("Added missing columns:");
+            for col in &added_columns {
+                println!("  - {col}");
+            }
+        }
+        if !added_indexes.is_empty() {
+            println!("Recreated missing indexes:");
+            for idx in &added_indexes {
+                println!("  - {idx}");
+            }
         }
     } else {
         println!("No schema drift detected.");
