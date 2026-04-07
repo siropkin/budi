@@ -1860,6 +1860,198 @@ mod tests {
     }
 
     #[test]
+    fn migrate_v13_to_v14_renames_conversation_id_and_backfills_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        // Create v13 schema with `conversation_id` in sessions and hook_events
+        conn.execute_batch(
+            "
+            CREATE TABLE messages (
+                uuid TEXT PRIMARY KEY, session_id TEXT, role TEXT NOT NULL,
+                timestamp TEXT NOT NULL, model TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT, repo_id TEXT, provider TEXT DEFAULT 'claude_code', cost_cents REAL,
+                parent_uuid TEXT, git_branch TEXT, cost_confidence TEXT DEFAULT 'estimated',
+                request_id TEXT
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, message_uuid TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                UNIQUE(message_uuid, key, value),
+                FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+            );
+            CREATE TABLE sync_state (file_path TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL DEFAULT 0, last_synced TEXT NOT NULL);
+            CREATE TABLE sessions (
+                conversation_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'claude_code',
+                started_at TEXT, ended_at TEXT, duration_ms INTEGER, composer_mode TEXT,
+                permission_mode TEXT, user_email TEXT, workspace_root TEXT, end_reason TEXT,
+                prompt_category TEXT, model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
+            );
+            CREATE TABLE hook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, event TEXT NOT NULL,
+                conversation_id TEXT, timestamp TEXT NOT NULL, model TEXT, tool_name TEXT,
+                tool_duration_ms INTEGER, tool_call_count INTEGER, raw_json TEXT, mcp_server TEXT
+            );
+            CREATE TABLE otel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT NOT NULL, session_id TEXT,
+                timestamp TEXT NOT NULL, raw_json TEXT, processed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX idx_messages_dedup ON messages(session_id, model, role, cost_confidence, timestamp);
+            CREATE INDEX idx_messages_request_id ON messages(request_id) WHERE request_id IS NOT NULL;
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 13u32).unwrap();
+
+        // Insert seed data with conversation_id columns
+        conn.execute(
+            "INSERT INTO sessions (conversation_id, provider, started_at)
+             VALUES ('sess-a', 'claude_code', '2026-03-25T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hook_events (provider, event, conversation_id, timestamp)
+             VALUES ('claude_code', 'session_start', 'sess-a', '2026-03-25T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Message with session_id that has no matching session row (triggers backfill)
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, role, timestamp, provider)
+             VALUES ('m1', 'sess-orphan', 'assistant', '2026-03-25T00:01:00Z', 'claude_code')",
+            [],
+        )
+        .unwrap();
+
+        assert!(needs_migration(&conn));
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        // Verify conversation_id was renamed to session_id in sessions
+        conn.execute("SELECT id FROM sessions LIMIT 0", [])
+            .expect("sessions should have id column after full migration");
+
+        // Verify conversation_id was renamed to session_id in hook_events
+        conn.execute("SELECT session_id FROM hook_events LIMIT 0", [])
+            .expect("hook_events.session_id should exist");
+
+        // Verify original data is preserved
+        let session_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = 'sess-a')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(session_exists, "original session should be preserved");
+
+        let hook_session: String = conn
+            .query_row(
+                "SELECT session_id FROM hook_events LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hook_session, "sess-a");
+
+        // Verify backfill created a stub session for the orphan message
+        let orphan_session_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = 'sess-orphan')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            orphan_session_exists,
+            "backfill should create stub session for orphan message"
+        );
+    }
+
+    /// Regression test for issue #4: verify that migrating from v13 runs all
+    /// subsequent migration steps (v14 through SCHEMA_VERSION) rather than
+    /// jumping directly to SCHEMA_VERSION from v13→v14.
+    ///
+    /// If `migrate_v13_to_v14` incorrectly set `user_version = SCHEMA_VERSION`,
+    /// later migrations (v14→v15 title column, v15→v16 normalization, etc.)
+    /// would be silently skipped.
+    #[test]
+    fn migrate_from_v13_applies_all_subsequent_steps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE messages (
+                uuid TEXT PRIMARY KEY, session_id TEXT, role TEXT NOT NULL,
+                timestamp TEXT NOT NULL, model TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT, repo_id TEXT, provider TEXT DEFAULT 'claude_code', cost_cents REAL,
+                parent_uuid TEXT, git_branch TEXT, cost_confidence TEXT DEFAULT 'estimated',
+                request_id TEXT
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, message_uuid TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                UNIQUE(message_uuid, key, value),
+                FOREIGN KEY (message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+            );
+            CREATE TABLE sync_state (file_path TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL DEFAULT 0, last_synced TEXT NOT NULL);
+            CREATE TABLE sessions (
+                conversation_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'claude_code',
+                started_at TEXT, ended_at TEXT, duration_ms INTEGER, composer_mode TEXT,
+                permission_mode TEXT, user_email TEXT, workspace_root TEXT, end_reason TEXT,
+                prompt_category TEXT, model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
+            );
+            CREATE TABLE hook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, event TEXT NOT NULL,
+                conversation_id TEXT, timestamp TEXT NOT NULL, model TEXT, tool_name TEXT,
+                tool_duration_ms INTEGER, tool_call_count INTEGER, raw_json TEXT, mcp_server TEXT
+            );
+            CREATE TABLE otel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT NOT NULL, session_id TEXT,
+                timestamp TEXT NOT NULL, raw_json TEXT, processed INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.pragma_update(None, "user_version", 13u32).unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        // v14: conversation_id → session_id rename (verified via backfill indexes)
+        conn.execute("SELECT session_id FROM hook_events LIMIT 0", [])
+            .expect("v14 should rename hook_events.conversation_id → session_id");
+
+        // v15: title column on sessions
+        conn.execute("SELECT title FROM sessions LIMIT 0", [])
+            .expect("v15 should add sessions.title");
+
+        // v18: linkage columns on hook_events
+        conn.execute("SELECT message_id FROM hook_events LIMIT 0", [])
+            .expect("v18 should add hook_events.message_id");
+        conn.execute("SELECT tool_use_id FROM hook_events LIMIT 0", [])
+            .expect("v18 should add hook_events.tool_use_id");
+
+        // v18: linkage columns on otel_events
+        conn.execute("SELECT message_id FROM otel_events LIMIT 0", [])
+            .expect("v18/v19 should add otel_events.message_id");
+        conn.execute("SELECT model FROM otel_events LIMIT 0", [])
+            .expect("v18 should add otel_events.model");
+
+        // v20: identifier column renames
+        conn.execute("SELECT id FROM messages LIMIT 0", [])
+            .expect("v20 should rename messages.uuid → id");
+        conn.execute("SELECT id FROM sessions LIMIT 0", [])
+            .expect("v20 should rename sessions.session_id → id");
+        conn.execute("SELECT message_id FROM tags LIMIT 0", [])
+            .expect("v20 should rename tags.message_uuid → message_id");
+    }
+
+    #[test]
     fn migrate_v15_to_v16_normalizes_prefixed_cursor_session_ids() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
