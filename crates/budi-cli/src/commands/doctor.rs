@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use budi_core::config;
 
-use crate::daemon::{daemon_health, ensure_daemon_running};
+use crate::daemon::{daemon_health, ensure_daemon_running, resolve_daemon_binary};
 
 pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let repo_root = super::try_resolve_repo_root(repo_root);
@@ -45,19 +45,27 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         println!("  {green}\u{2713}{reset} config: using defaults");
     }
 
-    // Check that budi-daemon binary exists on PATH and version matches CLI.
+    // Check daemon binary resolution using the same strategy as runtime startup.
     let cli_version = env!("CARGO_PKG_VERSION");
-    let daemon_output = std::process::Command::new("budi-daemon")
+    let daemon_bin = match resolve_daemon_binary() {
+        Ok(path) => path,
+        Err(e) => {
+            issues.push(format!("Could not resolve daemon binary: {e}"));
+            PathBuf::from("budi-daemon")
+        }
+    };
+    let daemon_output = std::process::Command::new(&daemon_bin)
         .arg("--version")
         .output()
         .ok()
         .filter(|o| o.status.success());
     let daemon_bin_found = daemon_output.is_some();
-    doctor_check("budi-daemon binary", daemon_bin_found, None);
+    doctor_check("budi-daemon binary", daemon_bin_found, Some(&daemon_bin));
     if !daemon_bin_found {
-        issues.push(
-            "budi-daemon binary not found on PATH — copy it alongside budi or add to PATH".into(),
-        );
+        issues.push(format!(
+            "budi-daemon binary was not executable at '{}' — copy it alongside budi, set BUDI_DAEMON_BIN, or add it to PATH",
+            daemon_bin.display()
+        ));
     }
 
     let daemon_version = daemon_output.map(|o| {
@@ -70,17 +78,26 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     });
     match daemon_version {
         Some(ref dv) if dv == cli_version => {
-            println!("  {green}\u{2713}{reset} version: v{cli_version} (CLI and daemon match)");
+            println!(
+                "  {green}\u{2713}{reset} version: v{cli_version} (CLI and daemon match; checked via {})",
+                daemon_bin.display()
+            );
         }
         Some(ref dv) => {
             let yellow = super::ansi("\x1b[33m");
-            println!("  {yellow}!{reset} version: CLI v{cli_version} != daemon v{dv}");
+            println!(
+                "  {yellow}!{reset} version: CLI v{cli_version} != daemon v{dv} (checked via {})",
+                daemon_bin.display()
+            );
             issues.push(format!(
                 "Version mismatch: CLI v{cli_version} but daemon v{dv}. Run `budi update` or reinstall."
             ));
         }
         None if daemon_bin_found => {
-            println!("  {dim}-{reset} version: v{cli_version} (could not read daemon version)");
+            println!(
+                "  {dim}-{reset} version: v{cli_version} (could not read daemon version via {})",
+                daemon_bin.display()
+            );
         }
         None => {} // Already reported as missing binary
     }
@@ -122,9 +139,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
                         Ok(conn) => {
                             let pragma = integrity_check_pragma(deep);
                             let mode = integrity_check_mode_label(deep);
-                            match conn.query_row(pragma, [], |row| {
-                                row.get::<_, String>(0)
-                            }) {
+                            match conn.query_row(pragma, [], |row| row.get::<_, String>(0)) {
                                 Ok(ref result) if result == "ok" => {
                                     println!(
                                         "  {green}\u{2713}{reset} database integrity ({mode}): ok"
@@ -367,9 +382,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     if !claude_ok || (cursor_dir_exists && !cursor_ok) {
         let hook_log_hint = hook_log_path_hint();
         println!();
-        println!(
-            "  {dim}Tip: hook delivery failures are logged to {hook_log_hint}{reset}"
-        );
+        println!("  {dim}Tip: hook delivery failures are logged to {hook_log_hint}{reset}");
     }
 
     // Check MCP server configuration in Claude Code settings

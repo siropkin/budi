@@ -454,16 +454,84 @@ fn spawn_daemon_process(
     Ok(())
 }
 
-fn resolve_daemon_binary() -> Result<std::path::PathBuf> {
-    if let Ok(path) = std::env::var("BUDI_DAEMON_BIN") {
-        return Ok(std::path::PathBuf::from(path));
+pub(crate) fn resolve_daemon_binary() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("BUDI_DAEMON_BIN") {
+        return Ok(PathBuf::from(path));
     }
     let current = std::env::current_exe().context("Failed to resolve current executable")?;
-    if let Some(parent) = current.parent() {
-        let sibling = parent.join("budi-daemon");
+    Ok(resolve_daemon_binary_from(None, Some(&current)))
+}
+
+fn resolve_daemon_binary_from(
+    env_override: Option<PathBuf>,
+    current_exe: Option<&Path>,
+) -> PathBuf {
+    if let Some(path) = env_override {
+        return path;
+    }
+    if let Some(current) = current_exe
+        && let Some(parent) = current.parent()
+    {
+        let sibling = parent.join(daemon_binary_name());
         if sibling.exists() {
-            return Ok(sibling);
+            return sibling;
         }
     }
-    Ok(std::path::PathBuf::from("budi-daemon"))
+    PathBuf::from(daemon_binary_name())
+}
+
+fn daemon_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "budi-daemon.exe"
+    } else {
+        "budi-daemon"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{daemon_binary_name, resolve_daemon_binary_from};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        std::env::temp_dir().join(format!("budi-cli-{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn resolve_daemon_binary_uses_env_override_first() {
+        let override_path = PathBuf::from("/tmp/custom-budi-daemon");
+        let resolved = resolve_daemon_binary_from(
+            Some(override_path.clone()),
+            Some(Path::new("/ignored/budi")),
+        );
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn resolve_daemon_binary_prefers_sibling_binary_when_present() {
+        let test_dir = unique_temp_dir("daemon-sibling");
+        fs::create_dir_all(&test_dir).expect("create test dir");
+
+        let current_exe = test_dir.join("budi");
+        let sibling_daemon = test_dir.join(daemon_binary_name());
+        fs::write(&sibling_daemon, b"binary").expect("create sibling daemon");
+
+        let resolved = resolve_daemon_binary_from(None, Some(&current_exe));
+        assert_eq!(resolved, sibling_daemon);
+
+        fs::remove_dir_all(&test_dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn resolve_daemon_binary_falls_back_to_path_binary_name() {
+        let resolved =
+            resolve_daemon_binary_from(None, Some(Path::new("/tmp/no-sibling-dir/budi")));
+        assert_eq!(resolved, PathBuf::from(daemon_binary_name()));
+    }
 }
