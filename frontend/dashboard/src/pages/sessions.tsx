@@ -1,16 +1,19 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowUp, Download } from "lucide-react";
+import { toast } from "sonner";
 import { AnalyticsFilterBar } from "@/components/analytics-filter-bar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ErrorState, LoadingState } from "@/components/state";
-import { fetchRegisteredProviders, fetchSessions } from "@/lib/api";
+import { fetchAllSessions, fetchRegisteredProviders, fetchSessions } from "@/lib/api";
+import { buildExportFilename, type CsvColumn, downloadCsv, toCsv } from "@/lib/csv";
 import { fmtCost, fmtDate, fmtDurationMs, fmtNum, formatModelName, repoName } from "@/lib/format";
 import { useDashboardFilters } from "@/lib/period";
+import type { SessionRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const LIMIT = 50;
@@ -110,6 +113,40 @@ export function SessionsPage() {
   const totalCount = sessionsQuery.data.total_count;
   const multiProvider = providers.length > 1;
 
+  const exportingRef = useRef(false);
+
+  const SESSION_CSV_COLUMNS: CsvColumn<SessionRow>[] = useMemo(
+    () => [
+      { header: "Time", value: (s) => s.started_at },
+      { header: "Title", value: (s) => s.title },
+      { header: "Duration (ms)", value: (s) => s.duration_ms },
+      { header: "Agent", value: (s) => s.provider },
+      { header: "Model", value: (s) => (s.models ?? []).join(", ") },
+      { header: "Repo", value: (s) => (s.repo_ids ?? [])[0] },
+      { header: "Branch", value: (s) => (s.git_branches ?? [])[0]?.replace(/^refs\/heads\//, "") },
+      { header: "Input Tokens", value: (s) => s.input_tokens },
+      { header: "Output Tokens", value: (s) => s.output_tokens },
+      { header: "Cost ($)", value: (s) => ((s.cost_cents ?? 0) / 100).toFixed(4) },
+    ],
+    [],
+  );
+
+  const handleExportCsv = useCallback(async () => {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    const toastId = toast.loading("Exporting sessions...");
+    try {
+      const allSessions = await fetchAllSessions(filters, search.trim() || undefined);
+      const csv = toCsv(allSessions, SESSION_CSV_COLUMNS);
+      downloadCsv(csv, buildExportFilename("sessions", filters));
+      toast.success(`Exported ${allSessions.length} sessions`, { id: toastId });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Export failed", { id: toastId });
+    } finally {
+      exportingRef.current = false;
+    }
+  }, [filters, search, SESSION_CSV_COLUMNS]);
+
   const onSort = (column: SortColumn) => {
     if (column === sortBy) {
       setSortAsc((previous) => !previous);
@@ -129,8 +166,12 @@ export function SessionsPage() {
     <div className="space-y-5">
       <AnalyticsFilterBar />
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Sessions</CardTitle>
+          <Button type="button" variant="outline" size="sm" onClick={handleExportCsv} disabled={sessions.length === 0}>
+            <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            Export CSV
+          </Button>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1">

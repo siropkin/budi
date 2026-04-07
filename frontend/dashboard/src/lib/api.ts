@@ -176,6 +176,52 @@ export async function fetchSessions(
   );
 }
 
+const EXPORT_PAGE_SIZE = 200;
+
+export async function fetchAllSessions(
+  filters: DashboardFilters,
+  search?: string,
+  signal?: AbortSignal,
+): Promise<SessionsResponse["sessions"]> {
+  const all: SessionsResponse["sessions"] = [];
+  let offset = 0;
+
+  for (;;) {
+    const page = await fetchSessions(
+      filters,
+      { limit: EXPORT_PAGE_SIZE, offset, search, sort_by: "started_at", sort_asc: false },
+      signal,
+    );
+    all.push(...page.sessions);
+    if (all.length >= page.total_count || page.sessions.length < EXPORT_PAGE_SIZE) break;
+    offset += EXPORT_PAGE_SIZE;
+  }
+
+  return all;
+}
+
+export async function fetchAllSessionMessages(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<MessagesResponse["messages"]> {
+  const all: MessagesResponse["messages"] = [];
+  let offset = 0;
+
+  for (;;) {
+    const page = await fetchSessionMessagesWithRoles(
+      sessionId,
+      "assistant",
+      { limit: EXPORT_PAGE_SIZE, offset, sort_by: "timestamp", sort_asc: true },
+      signal,
+    );
+    all.push(...page.messages);
+    if (all.length >= page.total_count || page.messages.length < EXPORT_PAGE_SIZE) break;
+    offset += EXPORT_PAGE_SIZE;
+  }
+
+  return all;
+}
+
 export async function fetchFilterOptions(signal?: AbortSignal): Promise<FilterOptionsResponse> {
   return fetchJson<FilterOptionsResponse>("/analytics/filter-options", signal ? { signal } : undefined);
 }
