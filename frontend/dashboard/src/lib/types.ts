@@ -237,6 +237,15 @@ export interface IntegrationsHealth {
   };
 }
 
+export interface RepairResponse {
+  from_version: number;
+  to_version: number;
+  migrated: boolean;
+  repaired: boolean;
+  added_columns: string[];
+  added_indexes: string[];
+}
+
 export interface InstallIntegrationsRequest {
   components: string[];
   statusline_preset?: string;

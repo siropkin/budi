@@ -129,8 +129,15 @@ export function SettingsPage() {
   const repairMutation = useMutation<Record<string, unknown>, Error, void, MutationToastCtx>({
     mutationFn: postRepair,
     onMutate: () => beginOperationToast("Database repair started..."),
-    onSuccess: async (_result, _variables, ctx) => {
-      finishOperationSuccess(ctx, "Database repair completed");
+    onSuccess: async (result, _variables, ctx) => {
+      const parts: string[] = [];
+      if (result.migrated) parts.push(`migrated v${String(result.from_version)} → v${String(result.to_version)}`);
+      const cols = (result.added_columns as string[] | undefined) ?? [];
+      const idxs = (result.added_indexes as string[] | undefined) ?? [];
+      if (cols.length > 0) parts.push(`${cols.length} column${cols.length > 1 ? "s" : ""} added`);
+      if (idxs.length > 0) parts.push(`${idxs.length} index${idxs.length > 1 ? "es" : ""} added`);
+      const detail = parts.length > 0 ? parts.join(", ") : "no changes needed";
+      finishOperationSuccess(ctx, `Database repair completed: ${detail}`);
       await refreshSchemaAndSettings();
     },
     onError: (error, _variables, ctx) => finishOperationError(ctx, error),
@@ -261,9 +268,10 @@ export function SettingsPage() {
             <SettingRow label="Size" value={database.size_mb != null ? `${database.size_mb} MB` : "--"} />
             <SettingRow label="Records" value={database.records != null ? fmtNum(database.records) : "--"} />
             <SettingRow label="First Record" value={database.first_record ? fmtDate(database.first_record) : "--"} />
-            <details className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-              <summary className="cursor-pointer select-none font-medium">Advanced</summary>
-              <div className="mt-3 flex flex-wrap gap-2">
+            <SettingRow
+              label="Repair"
+              value="Reconcile schema drift (add missing columns/indexes)"
+              action={
                 <Button
                   variant="secondary"
                   size="sm"
@@ -276,6 +284,11 @@ export function SettingsPage() {
                 >
                   Repair DB
                 </Button>
+              }
+            />
+            <details className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer select-none font-medium">Advanced</summary>
+              <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   variant="secondary"
                   size="sm"
