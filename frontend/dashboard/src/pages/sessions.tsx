@@ -91,28 +91,6 @@ export function SessionsPage() {
     placeholderData: (previousData) => previousData,
   });
 
-  const hasMore = useMemo(() => {
-    if (!sessionsQuery.data) return false;
-    return offset + sessionsQuery.data.sessions.length < sessionsQuery.data.total_count;
-  }, [offset, sessionsQuery.data]);
-
-  if (providersQuery.isPending || sessionsQuery.isPending) {
-    return <LoadingState />;
-  }
-
-  if (providersQuery.error) {
-    return <ErrorState error={providersQuery.error} onRetry={() => providersQuery.refetch()} />;
-  }
-
-  if (sessionsQuery.error) {
-    return <ErrorState error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} />;
-  }
-
-  const providers = providersQuery.data;
-  const sessions = sessionsQuery.data.sessions;
-  const totalCount = sessionsQuery.data.total_count;
-  const multiProvider = providers.length > 1;
-
   const exportingRef = useRef(false);
 
   const SESSION_CSV_COLUMNS: CsvColumn<SessionRow>[] = useMemo(
@@ -146,6 +124,28 @@ export function SessionsPage() {
       exportingRef.current = false;
     }
   }, [filters, search, SESSION_CSV_COLUMNS]);
+
+  const hasMore = useMemo(() => {
+    if (!sessionsQuery.data) return false;
+    return offset + sessionsQuery.data.sessions.length < sessionsQuery.data.total_count;
+  }, [offset, sessionsQuery.data]);
+
+  if (providersQuery.isPending || sessionsQuery.isPending) {
+    return <LoadingState />;
+  }
+
+  if (providersQuery.error) {
+    return <ErrorState error={providersQuery.error} onRetry={() => providersQuery.refetch()} />;
+  }
+
+  if (sessionsQuery.error) {
+    return <ErrorState error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} />;
+  }
+
+  const providers = providersQuery.data;
+  const sessions = sessionsQuery.data.sessions;
+  const totalCount = sessionsQuery.data.total_count;
+  const multiProvider = providers.length > 1;
 
   const onSort = (column: SortColumn) => {
     if (column === sortBy) {

@@ -145,6 +145,44 @@ export function SessionDetailPage() {
   const messageTotalCount = messagesQuery.data?.total_count ?? 0;
   const providers = providersQuery.data ?? [];
 
+  const exportingRef = useRef(false);
+
+  const MESSAGE_CSV_COLUMNS: CsvColumn<MessageRow>[] = useMemo(
+    () => [
+      { header: "Time", value: (m) => m.timestamp },
+      { header: "#", value: (m) => m.assistant_sequence },
+      { header: "Agent", value: (m) => m.provider },
+      { header: "Model", value: (m) => m.model },
+      { header: "Repo", value: (m) => m.repo_id },
+      { header: "Branch", value: (m) => m.git_branch?.replace(/^refs\/heads\//, "") },
+      { header: "Tools", value: (m) => (m.tools ?? []).join(", ") },
+      { header: "Tags", value: (m) => (m.tags ?? []).map((t) => `${t.key}:${t.value}`).join(", ") },
+      { header: "Input Tokens", value: (m) => m.input_tokens },
+      { header: "Output Tokens", value: (m) => m.output_tokens },
+      { header: "Cost ($)", value: (m) => ((m.cost_cents ?? 0) / 100).toFixed(4) },
+      { header: "Cost Confidence", value: (m) => m.cost_confidence },
+    ],
+    [],
+  );
+
+  const handleExportMessages = useCallback(async () => {
+    if (exportingRef.current || !sessionId) return;
+    exportingRef.current = true;
+    const toastId = toast.loading("Exporting messages...");
+    try {
+      const allMessages = await fetchAllSessionMessages(sessionId);
+      const csv = toCsv(allMessages, MESSAGE_CSV_COLUMNS);
+      const safeTitle = (detailQuery.data?.title ?? "session").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+      const date = new Date().toISOString().slice(0, 10);
+      downloadCsv(csv, `messages_${safeTitle}_${date}.csv`);
+      toast.success(`Exported ${allMessages.length} messages`, { id: toastId });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Export failed", { id: toastId });
+    } finally {
+      exportingRef.current = false;
+    }
+  }, [sessionId, detailQuery.data?.title, MESSAGE_CSV_COLUMNS]);
+
   useEffect(() => {
     setMessageOffset(0);
   }, [sortBy, sortAsc, sessionId]);
@@ -249,44 +287,6 @@ export function SessionDetailPage() {
       ? `${overviewBranchPrimary} +${overviewBranches.length - 1}`
       : overviewBranchPrimary;
   const overviewName = sessionDetail.title || "--";
-
-  const exportingRef = useRef(false);
-
-  const MESSAGE_CSV_COLUMNS: CsvColumn<MessageRow>[] = useMemo(
-    () => [
-      { header: "Time", value: (m) => m.timestamp },
-      { header: "#", value: (m) => m.assistant_sequence },
-      { header: "Agent", value: (m) => m.provider },
-      { header: "Model", value: (m) => m.model },
-      { header: "Repo", value: (m) => m.repo_id },
-      { header: "Branch", value: (m) => m.git_branch?.replace(/^refs\/heads\//, "") },
-      { header: "Tools", value: (m) => (m.tools ?? []).join(", ") },
-      { header: "Tags", value: (m) => (m.tags ?? []).map((t) => `${t.key}:${t.value}`).join(", ") },
-      { header: "Input Tokens", value: (m) => m.input_tokens },
-      { header: "Output Tokens", value: (m) => m.output_tokens },
-      { header: "Cost ($)", value: (m) => ((m.cost_cents ?? 0) / 100).toFixed(4) },
-      { header: "Cost Confidence", value: (m) => m.cost_confidence },
-    ],
-    [],
-  );
-
-  const handleExportMessages = useCallback(async () => {
-    if (exportingRef.current || !sessionId) return;
-    exportingRef.current = true;
-    const toastId = toast.loading("Exporting messages...");
-    try {
-      const allMessages = await fetchAllSessionMessages(sessionId);
-      const csv = toCsv(allMessages, MESSAGE_CSV_COLUMNS);
-      const safeTitle = (sessionDetail?.title ?? "session").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
-      const date = new Date().toISOString().slice(0, 10);
-      downloadCsv(csv, `messages_${safeTitle}_${date}.csv`);
-      toast.success(`Exported ${allMessages.length} messages`, { id: toastId });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Export failed", { id: toastId });
-    } finally {
-      exportingRef.current = false;
-    }
-  }, [sessionId, sessionDetail?.title, MESSAGE_CSV_COLUMNS]);
 
   const onSort = (column: MessageSortColumn) => {
     if (column === sortBy) {
