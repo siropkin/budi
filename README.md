@@ -221,6 +221,7 @@ budi integrations list        # show what is installed vs available
 budi integrations install ... # install integrations later
 budi open                     # open web dashboard
 budi doctor                   # check health: daemon, database, config
+budi doctor --deep            # run full SQLite integrity_check (slower)
 budi stats                    # usage summary with cost breakdown
 budi stats --models           # model usage breakdown
 budi stats --projects         # repos ranked by cost

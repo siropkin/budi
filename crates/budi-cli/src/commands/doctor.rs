@@ -5,7 +5,7 @@ use budi_core::config;
 
 use crate::daemon::{daemon_health, ensure_daemon_running};
 
-pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
+pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let repo_root = super::try_resolve_repo_root(repo_root);
 
     let config = match &repo_root {
@@ -120,20 +120,26 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
                     // Integrity check: verify DB is not corrupted
                     match budi_core::analytics::open_db(&db_path) {
                         Ok(conn) => {
-                            match conn.query_row("PRAGMA integrity_check", [], |row| {
+                            let pragma = integrity_check_pragma(deep);
+                            let mode = integrity_check_mode_label(deep);
+                            match conn.query_row(pragma, [], |row| {
                                 row.get::<_, String>(0)
                             }) {
                                 Ok(ref result) if result == "ok" => {
-                                    println!("  {green}\u{2713}{reset} database integrity: ok");
+                                    println!(
+                                        "  {green}\u{2713}{reset} database integrity ({mode}): ok"
+                                    );
                                 }
                                 Ok(result) => {
-                                    println!("  {red}\u{2717}{reset} database integrity: {result}");
+                                    println!(
+                                        "  {red}\u{2717}{reset} database integrity ({mode}): {result}"
+                                    );
                                     issues
                                         .push(format!("Database integrity check failed: {result}"));
                                 }
                                 Err(e) => {
                                     println!(
-                                        "  {red}\u{2717}{reset} database integrity: could not check ({e})"
+                                        "  {red}\u{2717}{reset} database integrity ({mode}): could not check ({e})"
                                     );
                                     issues.push(format!("Database integrity check error: {e}"));
                                 }
@@ -525,6 +531,22 @@ fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
     }
 }
 
+fn integrity_check_pragma(deep: bool) -> &'static str {
+    if deep {
+        "PRAGMA integrity_check"
+    } else {
+        "PRAGMA quick_check"
+    }
+}
+
+fn integrity_check_mode_label(deep: bool) -> &'static str {
+    if deep {
+        "integrity_check"
+    } else {
+        "quick_check"
+    }
+}
+
 /// Check if OTEL env vars are correctly configured in Claude Code settings.
 fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
     let Ok(raw) = std::fs::read_to_string(settings_path) else {
@@ -615,4 +637,21 @@ fn check_available_disk_mb(path: &Path) -> Option<u64> {
     let line = stdout.lines().nth(1)?;
     let available_kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
     Some(available_kb / 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integrity_check_uses_quick_check_by_default() {
+        assert_eq!(integrity_check_pragma(false), "PRAGMA quick_check");
+        assert_eq!(integrity_check_mode_label(false), "quick_check");
+    }
+
+    #[test]
+    fn integrity_check_uses_full_check_in_deep_mode() {
+        assert_eq!(integrity_check_pragma(true), "PRAGMA integrity_check");
+        assert_eq!(integrity_check_mode_label(true), "integrity_check");
+    }
 }

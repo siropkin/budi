@@ -60,6 +60,9 @@ enum Commands {
     },
     /// Check health: daemon, database, config
     Doctor {
+        /// Run full SQLite integrity_check (slower). Default uses quick_check.
+        #[arg(long, default_value_t = false)]
+        deep: bool,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
@@ -266,7 +269,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Doctor { repo_root } => commands::doctor::cmd_doctor(repo_root),
+        Commands::Doctor { deep, repo_root } => commands::doctor::cmd_doctor(repo_root, deep),
         Commands::Stats {
             period,
             projects,
@@ -382,5 +385,14 @@ mod tests {
         assert!(lower.contains("stats"));
         assert!(lower.contains("sync"));
         assert!(lower.contains("repair"));
+    }
+
+    #[test]
+    fn cli_parses_doctor_deep_flag() {
+        let cli = Cli::try_parse_from(["budi", "doctor", "--deep"]).expect("doctor --deep parses");
+        match cli.command {
+            Commands::Doctor { deep, .. } => assert!(deep),
+            _ => panic!("expected doctor command"),
+        }
     }
 }
