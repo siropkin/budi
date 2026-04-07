@@ -1948,11 +1948,9 @@ mod tests {
         assert!(session_exists, "original session should be preserved");
 
         let hook_session: String = conn
-            .query_row(
-                "SELECT session_id FROM hook_events LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT session_id FROM hook_events LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(hook_session, "sess-a");
 
