@@ -18,6 +18,7 @@ import type {
   ProjectRow,
   ProviderStats,
   RegisteredProvider,
+  RepairResponse,
   SessionHookEventRow,
   SchemaVersion,
   SessionDetailRow,
@@ -378,7 +379,7 @@ export async function postMigrate() {
 }
 
 export async function postRepair() {
-  return fetchJson<Record<string, unknown>>("/admin/repair", {
+  return fetchJson<RepairResponse>("/admin/repair", {
     method: "POST",
   });
 }
