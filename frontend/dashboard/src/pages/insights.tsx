@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { AnalyticsFilterBar } from "@/components/analytics-filter-bar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CostBarChart, CountBarChart, SessionCurveChart } from "@/components/charts";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchInsights } from "@/lib/api";
 import { fmtCost, fmtNum } from "@/lib/format";
-import { usePeriod } from "@/lib/period";
+import { useDashboardFilters } from "@/lib/period";
 
 const CONFIDENCE_LABELS: Record<string, string> = {
   otel_exact: "OTEL Exact",
@@ -34,10 +35,10 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
 }
 
 export function InsightsPage() {
-  const { period } = usePeriod();
+  const { filters } = useDashboardFilters();
   const insightsQuery = useQuery({
-    queryKey: ["insights", period.preset],
-    queryFn: ({ signal }) => fetchInsights(period, signal),
+    queryKey: ["insights", filters],
+    queryFn: ({ signal }) => fetchInsights(filters, signal),
   });
 
   if (insightsQuery.isPending) {
@@ -90,6 +91,7 @@ export function InsightsPage() {
 
   return (
     <div className="space-y-5">
+      <AnalyticsFilterBar />
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>

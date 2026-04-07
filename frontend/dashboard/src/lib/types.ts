@@ -1,7 +1,24 @@
-export type DateRangePreset = "today" | "last_7_days" | "last_30_days" | "all";
+export type DateRangePreset = "today" | "last_7_days" | "last_30_days" | "all" | "custom";
 
 export interface DateRangeSelection {
   preset: DateRangePreset;
+  from?: string;
+  to?: string;
+}
+
+export interface DashboardFilters {
+  period: DateRangeSelection;
+  agents: string[];
+  models: string[];
+  projects: string[];
+  branches: string[];
+}
+
+export interface FilterOptionsResponse {
+  agents: string[];
+  models: string[];
+  projects: string[];
+  branches: string[];
 }
 
 export interface RegisteredProvider {

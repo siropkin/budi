@@ -25,9 +25,43 @@ impl Drop for BusyFlagGuard {
 }
 
 #[derive(serde::Deserialize)]
+pub struct DimensionParams {
+    #[serde(alias = "agent", alias = "providers")]
+    pub agents: Option<String>,
+    #[serde(alias = "model")]
+    pub models: Option<String>,
+    #[serde(alias = "project", alias = "repo", alias = "repo_id")]
+    pub projects: Option<String>,
+    #[serde(alias = "branch")]
+    pub branches: Option<String>,
+}
+
+fn parse_filter_values(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn parse_dimension_filters(params: &DimensionParams) -> analytics::DimensionFilters {
+    analytics::DimensionFilters {
+        agents: parse_filter_values(params.agents.as_deref()),
+        models: parse_filter_values(params.models.as_deref()),
+        projects: parse_filter_values(params.projects.as_deref()),
+        branches: parse_filter_values(params.branches.as_deref()),
+    }
+    .normalize()
+}
+
+#[derive(serde::Deserialize)]
 pub struct DateRangeParams {
     pub since: Option<String>,
     pub until: Option<String>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 #[derive(serde::Deserialize)]
@@ -42,19 +76,23 @@ pub struct SummaryParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub provider: Option<String>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 pub async fn analytics_summary(
     Query(params): Query<SummaryParams>,
 ) -> Result<Json<analytics::UsageSummary>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::usage_summary_filtered(
+        analytics::usage_summary_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
             params.provider.as_deref(),
+            &filters,
         )
     })
     .await
@@ -142,19 +180,23 @@ pub struct ListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 pub async fn analytics_projects(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::repo_usage(
+        analytics::repo_usage_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             limit,
         )
     })
@@ -169,13 +211,15 @@ pub async fn analytics_models(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::model_usage(
+        analytics::model_usage_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             limit,
         )
     })
@@ -190,13 +234,15 @@ pub async fn analytics_branches(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::branch_cost(
+        analytics::branch_cost_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             limit,
         )
     })
@@ -210,14 +256,16 @@ pub async fn analytics_branches(
 pub async fn analytics_cost(
     Query(params): Query<SummaryParams>,
 ) -> Result<Json<cost::CostEstimate>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        cost::estimate_cost_filtered(
+        cost::estimate_cost_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
             params.provider.as_deref(),
+            &filters,
         )
     })
     .await
@@ -233,6 +281,8 @@ pub struct ActivityChartParams {
     pub until: Option<String>,
     pub granularity: Option<String>,
     pub tz_offset: Option<i32>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 pub async fn analytics_activity(
@@ -247,13 +297,15 @@ pub async fn analytics_activity(
         )));
     }
     let tz_offset = params.tz_offset.unwrap_or(0);
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::activity_chart(
+        analytics::activity_chart_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             &granularity,
             tz_offset,
         )
@@ -267,10 +319,16 @@ pub async fn analytics_activity(
 pub async fn analytics_providers(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::ProviderStats>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::provider_stats(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::provider_stats_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -406,20 +464,24 @@ pub struct TagParams {
     pub until: Option<String>,
     pub key: Option<String>,
     pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 pub async fn analytics_tags(
     Query(params): Query<TagParams>,
 ) -> Result<Json<Vec<analytics::TagCost>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::tag_stats(
+        analytics::tag_stats_with_filters(
             &conn,
             params.key.as_deref(),
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             limit,
         )
     })
@@ -485,10 +547,16 @@ pub async fn analytics_schema_version()
 pub async fn analytics_cache_efficiency(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<analytics::CacheEfficiency>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::cache_efficiency(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::cache_efficiency_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -499,10 +567,16 @@ pub async fn analytics_cache_efficiency(
 pub async fn analytics_session_cost_curve(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::SessionCostBucket>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_cost_curve(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::session_cost_curve_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -513,10 +587,16 @@ pub async fn analytics_session_cost_curve(
 pub async fn analytics_cost_confidence(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::CostConfidenceStat>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::cost_confidence_stats(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::cost_confidence_stats_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -527,10 +607,43 @@ pub async fn analytics_cost_confidence(
 pub async fn analytics_subagent_cost(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::SubagentCostStat>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::subagent_cost_stats(&conn, params.since.as_deref(), params.until.as_deref())
+        analytics::subagent_cost_stats_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct FilterOptionsParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<usize>,
+}
+
+pub async fn analytics_filter_options(
+    Query(params): Query<FilterOptionsParams>,
+) -> Result<Json<analytics::FilterOptions>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = params.limit.unwrap_or(200).min(1000);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::filter_options(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            limit,
+        )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -547,6 +660,8 @@ pub struct SessionsQueryParams {
     pub sort_asc: Option<bool>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 pub async fn analytics_sessions(
@@ -561,10 +676,11 @@ pub async fn analytics_sessions(
             VALID_SESSION_SORT_BY.join(", ")
         )));
     }
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        let mut paginated = analytics::session_list(
+        let mut paginated = analytics::session_list_with_filters(
             &conn,
             &analytics::SessionListParams {
                 since: params.since.as_deref(),
@@ -575,6 +691,7 @@ pub async fn analytics_sessions(
                 limit: params.limit.unwrap_or(50).min(200),
                 offset: params.offset.unwrap_or(0),
             },
+            &filters,
         )?;
 
         let sids: Vec<&str> = paginated.sessions.iter().map(|s| s.id.as_str()).collect();
@@ -888,13 +1005,15 @@ pub async fn analytics_session_audit()
 pub async fn analytics_tools(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        budi_core::hooks::query_tool_stats(
+        budi_core::hooks::query_tool_stats_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             params.limit.unwrap_or(20).min(200),
         )
     })
@@ -908,13 +1027,15 @@ pub async fn analytics_tools(
 pub async fn analytics_mcp(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        budi_core::hooks::query_mcp_stats(
+        budi_core::hooks::query_mcp_stats_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
+            &filters,
             params.limit.unwrap_or(20).min(200),
         )
     })

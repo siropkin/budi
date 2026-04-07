@@ -485,6 +485,33 @@ fn repo_usage_multi_repo_single_session_is_message_attributed() {
     assert_eq!(repo_b.message_count, 1);
 }
 
+#[test]
+fn repo_usage_with_dimension_filters() {
+    let mut conn = test_db();
+    let mut m1 = assistant_msg("repo-filter-1", "sess-repo-filter", 4.0);
+    m1.provider = "claude_code".to_string();
+    m1.model = Some("claude-sonnet-4-6".to_string());
+    m1.repo_id = Some("github.com/acme/repo-a".to_string());
+    m1.git_branch = Some("refs/heads/main".to_string());
+    let mut m2 = assistant_msg("repo-filter-2", "sess-repo-filter", 9.0);
+    m2.provider = "cursor".to_string();
+    m2.model = Some("gpt-5.4".to_string());
+    m2.repo_id = Some("github.com/acme/repo-b".to_string());
+    m2.git_branch = Some("refs/heads/feature/x".to_string());
+    ingest_messages(&mut conn, &[m1, m2], None).unwrap();
+
+    let filters = DimensionFilters {
+        agents: vec!["cursor".to_string()],
+        models: vec!["gpt-5.4".to_string()],
+        projects: vec!["github.com/acme/repo-b".to_string()],
+        branches: vec!["feature/x".to_string()],
+    };
+    let rows = repo_usage_with_filters(&conn, None, None, &filters, 20).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].repo_id, "github.com/acme/repo-b");
+    assert!((rows[0].cost_cents - 9.0).abs() < 0.01);
+}
+
 fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
     vec![
         ParsedMessage {
@@ -1285,6 +1312,49 @@ fn session_list_uses_structured_models_array() {
         entry.git_branches,
         vec!["feature/BBB-2".to_string(), "feature/AAA-1".to_string()]
     );
+}
+
+#[test]
+fn session_list_with_dimension_filters() {
+    let mut conn = test_db();
+    let mut keep = assistant_msg("session-filter-keep", "sess-keep", 6.0);
+    keep.provider = "cursor".to_string();
+    keep.model = Some("gpt-5.4".to_string());
+    keep.repo_id = Some("github.com/acme/repo-b".to_string());
+    keep.git_branch = Some("refs/heads/feature/ship".to_string());
+    keep.timestamp = "2026-03-26T00:00:01Z".parse().unwrap();
+    let mut skip = assistant_msg("session-filter-skip", "sess-skip", 3.0);
+    skip.provider = "claude_code".to_string();
+    skip.model = Some("claude-sonnet-4-6".to_string());
+    skip.repo_id = Some("github.com/acme/repo-a".to_string());
+    skip.git_branch = Some("refs/heads/main".to_string());
+    skip.timestamp = "2026-03-26T00:00:02Z".parse().unwrap();
+    ingest_messages(&mut conn, &[keep, skip], None).unwrap();
+
+    let filters = DimensionFilters {
+        agents: vec!["cursor".to_string()],
+        models: vec!["gpt-5.4".to_string()],
+        projects: vec!["github.com/acme/repo-b".to_string()],
+        branches: vec!["feature/ship".to_string()],
+    };
+    let result = session_list_with_filters(
+        &conn,
+        &SessionListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: Some("started_at"),
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+        &filters,
+    )
+    .unwrap();
+
+    assert_eq!(result.total_count, 1);
+    assert_eq!(result.sessions.len(), 1);
+    assert_eq!(result.sessions[0].id, "sess-keep");
 }
 
 #[test]

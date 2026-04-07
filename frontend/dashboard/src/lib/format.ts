@@ -10,6 +10,17 @@ function addDays(date: Date, days: number): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 }
 
+function parseDateOnly(value: string): Date | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const parsed = new Date(year, month, day);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
 export function periodLabel(period: DateRangeSelection): string {
   switch (period.preset) {
     case "today":
@@ -20,6 +31,8 @@ export function periodLabel(period: DateRangeSelection): string {
       return "Last 30 days";
     case "all":
       return "All";
+    case "custom":
+      return "Custom";
     default:
       return "Today";
   }
@@ -39,6 +52,16 @@ export function periodRange(period: DateRangeSelection): { since?: string; until
       return { since: toIso(addDays(today, -29)), until: toIso(addDays(today, 1)) };
     case "all":
       return {};
+    case "custom": {
+      const parsedFrom = period.from ? parseDateOnly(period.from) : null;
+      const parsedTo = period.to ? parseDateOnly(period.to) : null;
+      if (!parsedFrom || !parsedTo) {
+        return { since: toIso(today), until: toIso(addDays(today, 1)) };
+      }
+      const start = parsedFrom <= parsedTo ? parsedFrom : parsedTo;
+      const end = parsedFrom <= parsedTo ? parsedTo : parsedFrom;
+      return { since: toIso(startOfDay(start)), until: toIso(addDays(startOfDay(end), 1)) };
+    }
     default:
       return { since: toIso(today), until: toIso(addDays(today, 1)) };
   }

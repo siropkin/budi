@@ -1,15 +1,6 @@
-import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { PeriodProvider, usePeriod } from "@/lib/period";
-import type { DateRangePreset } from "@/lib/types";
+import { NavLink, Outlet } from "react-router-dom";
+import { DashboardFiltersProvider } from "@/lib/period";
 import { cn } from "@/lib/utils";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-
-const QUICK_PRESETS: Array<{ value: DateRangePreset; label: string }> = [
-  { value: "today", label: "Today" },
-  { value: "last_7_days", label: "Last 7 days" },
-  { value: "last_30_days", label: "Last 30 days" },
-  { value: "all", label: "All" },
-];
 
 const NAV_ITEMS = [
   { to: "/", label: "Overview", end: true },
@@ -18,38 +9,7 @@ const NAV_ITEMS = [
   { to: "/settings", label: "Settings" },
 ];
 
-function PeriodSelector({ hidden }: { hidden: boolean }) {
-  const { period, setPreset } = usePeriod();
-
-  if (hidden) return null;
-
-  return (
-    <Select
-      value={period.preset}
-      onValueChange={(value) => {
-        const preset = value as DateRangePreset;
-        setPreset(preset);
-      }}
-    >
-      <SelectTrigger aria-label="Date range preset" className="h-9 w-[170px]">
-        <SelectValue placeholder="Select range" />
-      </SelectTrigger>
-      <SelectContent align="end">
-        {QUICK_PRESETS.map((item) => (
-          <SelectItem key={item.value} value={item.value}>
-            {item.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
-
 function ShellBody() {
-  const location = useLocation();
-  const periodHidden = location.pathname.startsWith("/settings");
-  const inSessionDetail = /^\/sessions\/.+/.test(location.pathname);
-
   return (
     <div className="mx-auto min-h-screen w-full max-w-7xl px-4 pb-10 pt-6 md:px-6">
       <header className="mb-6 rounded-lg border bg-card px-4 py-4 md:px-6">
@@ -74,13 +34,10 @@ function ShellBody() {
                     )
                   }
                 >
-                  {item.to === "/sessions" && inSessionDetail ? "↑ Sessions" : item.label}
+                  {item.label}
                 </NavLink>
               ))}
             </nav>
-          </div>
-          <div className="lg:ml-4">
-            <PeriodSelector hidden={periodHidden} />
           </div>
         </div>
       </header>
@@ -93,8 +50,8 @@ function ShellBody() {
 
 export function AppLayout() {
   return (
-    <PeriodProvider>
+    <DashboardFiltersProvider>
       <ShellBody />
-    </PeriodProvider>
+    </DashboardFiltersProvider>
   );
 }

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +29,12 @@ function healthVariant(state: string): "default" | "warning" | "success" {
 const MESSAGE_CELL_CLASS = "align-top text-sm text-foreground whitespace-normal break-words";
 const MESSAGE_PAGE_SIZE = 50;
 type MessageSortColumn = "timestamp" | "provider" | "model" | "repo_id" | "git_branch" | "tokens" | "cost";
+const HEALTH_VITAL_ORDER: Array<{ key: string; label: string }> = [
+  { key: "context_drag", label: "Context growth" },
+  { key: "cache_efficiency", label: "Cache reuse" },
+  { key: "cost_acceleration", label: "Cost acceleration" },
+  { key: "thrashing", label: "Retry loops" },
+];
 
 function compactTools(tools: string[] | undefined, max = 2): string {
   const values = (tools ?? []).filter(Boolean);
@@ -73,6 +79,7 @@ function SortableHead({
 
 export function SessionDetailPage() {
   const params = useParams<{ sessionId: string }>();
+  const navigate = useNavigate();
   const sessionId = params.sessionId;
   const [sortBy, setSortBy] = useState<MessageSortColumn>("timestamp");
   const [sortAsc, setSortAsc] = useState(false);
@@ -195,7 +202,7 @@ export function SessionDetailPage() {
 
   const tags = tagsQuery.data ?? [];
   const health = healthQuery.data;
-  const vitals = Object.entries(health?.vitals ?? {}).filter(([, vital]) => vital != null);
+  const healthVitals = (health?.vitals ?? {}) as Record<string, { state: string; label: string } | undefined>;
 
   const tokenTotal = (sessionDetail.input_tokens ?? 0) + (sessionDetail.output_tokens ?? 0);
   const costTotalCents = sessionDetail.cost_cents ?? 0;
@@ -244,10 +251,16 @@ export function SessionDetailPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
+      <div className="rounded-lg border bg-card px-4 py-4 md:px-6">
+        <Button type="button" variant="ghost" size="sm" className="mb-3 h-8 px-2 text-muted-foreground" onClick={() => navigate("/sessions")}>
+          <ArrowLeft className="mr-1.5 h-4 w-4" aria-hidden="true" />
+          Back to Sessions
+        </Button>
+        <div className="space-y-1">
           <h2 className="text-xl font-semibold tracking-tight text-foreground">{overviewName}</h2>
-          <p className="font-mono text-xs text-muted-foreground">{decodeURIComponent(sessionId)}</p>
+          <p className="text-xs text-muted-foreground">
+            Session ID: <span className="font-mono">{decodeURIComponent(sessionId)}</span>
+          </p>
         </div>
       </div>
 
@@ -257,9 +270,6 @@ export function SessionDetailPage() {
             <CardTitle>Overview</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1 text-sm">
-            <p>
-              Session: <span className="font-semibold text-foreground">{overviewName}</span>
-            </p>
             <p>
               Cost: <span className="font-semibold text-primary">{fmtCost(costTotalCents / 100)}</span>
             </p>
@@ -280,18 +290,24 @@ export function SessionDetailPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Health Vitals</CardTitle>
+            <CardTitle>Session Health</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-2">
-            {vitals.map(([key, vital]) => (
-              <div key={key} className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
-                <span className="text-sm text-muted-foreground">{key.replace(/_/g, " ")}</span>
-                <Badge variant={healthVariant(vital.state)}>{vital.label}</Badge>
-              </div>
-            ))}
-            {vitals.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No session-health vitals available.</p>
-            ) : null}
+            {HEALTH_VITAL_ORDER.map((vitalMeta) => {
+              const vital = healthVitals[vitalMeta.key];
+              return (
+                <div key={vitalMeta.key} className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
+                  <span className="text-sm text-muted-foreground">{vitalMeta.label}</span>
+                  {vital ? (
+                    <Badge variant={healthVariant(vital.state)}>{vital.label}</Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-muted text-muted-foreground">
+                      No data
+                    </Badge>
+                  )}
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
       </div>

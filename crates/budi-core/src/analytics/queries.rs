@@ -3,8 +3,41 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::HashSet;
 
 use super::MessageRow;
+
+pub const UNTAGGED_DIMENSION: &str = "(untagged)";
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DimensionFilters {
+    #[serde(default)]
+    pub agents: Vec<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+}
+
+impl DimensionFilters {
+    pub fn normalize(mut self) -> Self {
+        self.agents = normalize_values(&self.agents);
+        self.models = normalize_values(&self.models);
+        self.projects = normalize_values(&self.projects);
+        self.branches = normalize_branches(&self.branches);
+        self
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FilterOptions {
+    pub agents: Vec<String>,
+    pub models: Vec<String>,
+    pub projects: Vec<String>,
+    pub branches: Vec<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,6 +61,7 @@ fn is_valid_timestamp(s: &str) -> bool {
 /// Build a parameterized date filter clause and its bind values.
 /// Returns (clause_str, params_vec) where clause_str uses ?N placeholders.
 /// Invalid timestamps are silently skipped (treated as None).
+#[cfg(test)]
 fn date_filter(since: Option<&str>, until: Option<&str>, keyword: &str) -> (String, Vec<String>) {
     let mut conditions = Vec::new();
     let mut param_values = Vec::new();
@@ -57,43 +91,90 @@ fn date_filter(since: Option<&str>, until: Option<&str>, keyword: &str) -> (Stri
     }
 }
 
-/// Build a parameterized filter clause that includes optional date range and provider.
-fn date_provider_filter(
-    since: Option<&str>,
-    until: Option<&str>,
-    provider: Option<&str>,
-    keyword: &str,
-) -> (String, Vec<String>) {
-    let mut conditions = Vec::new();
-    let mut param_values = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        } else {
-            tracing::warn!("date_provider_filter: invalid 'since' timestamp ignored: {s}");
+fn normalize_values(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_string();
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
         }
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
+    out
+}
+
+fn normalize_branches(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let without_ref = trimmed.strip_prefix("refs/heads/").unwrap_or(trimmed);
+        let normalized = if without_ref.is_empty() {
+            UNTAGGED_DIMENSION.to_string()
         } else {
-            tracing::warn!("date_provider_filter: invalid 'until' timestamp ignored: {u}");
+            without_ref.to_string()
+        };
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
         }
     }
-    if let Some(p) = provider {
-        param_values.push(p.to_string());
-        conditions.push(format!("provider = ?{}", param_values.len()));
+    out
+}
+
+fn append_in_condition(
+    conditions: &mut Vec<String>,
+    param_values: &mut Vec<String>,
+    expression: &str,
+    values: &[String],
+) {
+    if values.is_empty() {
+        return;
     }
-    if conditions.is_empty() {
-        (String::new(), param_values)
-    } else {
-        (
-            format!("{} {}", keyword, conditions.join(" AND ")),
-            param_values,
-        )
+
+    let mut placeholders = Vec::with_capacity(values.len());
+    for value in values {
+        param_values.push(value.clone());
+        placeholders.push(format!("?{}", param_values.len()));
     }
+    conditions.push(format!("{expression} IN ({})", placeholders.join(", ")));
+}
+
+fn normalized_model_expr(expr: &str) -> String {
+    format!(
+        "CASE WHEN {expr} IS NULL OR {expr} = '' OR SUBSTR({expr}, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE {expr} END"
+    )
+}
+
+fn normalized_project_expr(expr: &str) -> String {
+    format!("COALESCE(NULLIF(NULLIF({expr}, ''), 'unknown'), '{UNTAGGED_DIMENSION}')")
+}
+
+fn normalized_branch_expr(expr: &str) -> String {
+    format!(
+        "COALESCE(NULLIF(CASE WHEN COALESCE({expr}, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE({expr}, ''), 12) ELSE COALESCE({expr}, '') END, ''), '{UNTAGGED_DIMENSION}')"
+    )
+}
+
+fn apply_dimension_filters(
+    conditions: &mut Vec<String>,
+    param_values: &mut Vec<String>,
+    filters: &DimensionFilters,
+    provider_expr: &str,
+    model_expr: &str,
+    project_expr: &str,
+    branch_expr: &str,
+) {
+    append_in_condition(conditions, param_values, provider_expr, &filters.agents);
+    append_in_condition(conditions, param_values, model_expr, &filters.models);
+    append_in_condition(conditions, param_values, project_expr, &filters.projects);
+    append_in_condition(conditions, param_values, branch_expr, &filters.branches);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +257,59 @@ pub fn usage_summary_filtered(
     until: Option<&str>,
     provider: Option<&str>,
 ) -> Result<UsageSummary> {
-    let (where_clause, params) = date_provider_filter(since, until, provider, "WHERE");
+    let filters = DimensionFilters::default();
+    usage_summary_with_filters(conn, since, until, provider, &filters)
+}
+
+pub fn usage_summary_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<UsageSummary> {
+    let mut conditions = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            params.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", params.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            params.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", params.len()));
+        }
+    }
+    if let Some(p) = provider {
+        params.push(p.to_string());
+        conditions.push(format!(
+            "COALESCE(provider, 'claude_code') = ?{}",
+            params.len()
+        ));
+    }
+
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -390,19 +523,42 @@ pub fn repo_usage(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<RepoUsage>> {
-    // Build parameterized date filter. Limit param index starts after date params.
-    // Single-query approach: COALESCE NULL repo_id into "(untagged)"
+    let filters = DimensionFilters::default();
+    repo_usage_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn repo_usage_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<RepoUsage>> {
+    // Build parameterized date + dimension filters.
     let mut conditions = vec!["role = 'assistant'".to_string()];
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = since {
-        param_values.push(Box::new(s.to_string()));
+        param_values.push(s.to_string());
         conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
     if let Some(u) = until {
-        param_values.push(Box::new(u.to_string()));
+        param_values.push(u.to_string());
         conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
-    param_values.push(Box::new(limit as i64));
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+
+    param_values.push(limit.to_string());
     let limit_idx = param_values.len();
 
     let sql = format!(
@@ -421,8 +577,10 @@ pub fn repo_usage(
         limit_idx
     );
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|b| b.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows: Vec<RepoUsage> = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -477,8 +635,46 @@ pub fn activity_chart(
     granularity: &str,
     tz_offset_min: i32,
 ) -> Result<Vec<ActivityBucket>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+    let filters = DimensionFilters::default();
+    activity_chart_with_filters(conn, since, until, &filters, granularity, tz_offset_min)
+}
+
+pub fn activity_chart_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    granularity: &str,
+    tz_offset_min: i32,
+) -> Result<Vec<ActivityBucket>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        }
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
@@ -506,19 +702,12 @@ pub fn activity_chart(
         _ => format!("date({})", tz_adjust),
     };
 
-    // Add role = 'assistant' to the WHERE clause
-    let role_clause = if where_clause.is_empty() {
-        "WHERE role = 'assistant'"
-    } else {
-        "AND role = 'assistant'"
-    };
-
     let sql = format!(
         "SELECT {group_expr} as bucket, COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp,
                 COALESCE(SUM(cost_cents), 0.0) as cost
-         FROM messages {where_clause} {role_clause}
+         FROM messages {where_clause}
          GROUP BY bucket
          ORDER BY bucket",
     );
@@ -573,6 +762,17 @@ pub fn branch_cost(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<BranchCost>> {
+    let filters = DimensionFilters::default();
+    branch_cost_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn branch_cost_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<BranchCost>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     let mut idx = 0usize;
@@ -587,6 +787,18 @@ pub fn branch_cost(
         conditions.push(format!("timestamp < ?{idx}"));
         param_values.push(u.to_string());
     }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
 
@@ -762,16 +974,28 @@ pub fn tag_stats(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TagCost>> {
+    let filters = DimensionFilters::default();
+    tag_stats_with_filters(conn, tag_key, since, until, &filters, limit)
+}
+
+pub fn tag_stats_with_filters(
+    conn: &Connection,
+    tag_key: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<TagCost>> {
     // Repo/branch attribution must come from message columns, not tag fanout.
     // This guarantees one message contributes its full cost to its real repo/branch,
     // even if a message carries extra tags with the same key.
     if let Some(key) = tag_key {
         match key {
             "repo" | "repo_id" => {
-                return tag_stats_repo_from_messages(conn, key, since, until, limit);
+                return tag_stats_repo_from_messages(conn, key, since, until, filters, limit);
             }
             "branch" | "git_branch" => {
-                return tag_stats_branch_from_messages(conn, key, since, until, limit);
+                return tag_stats_branch_from_messages(conn, key, since, until, filters, limit);
             }
             _ => {}
         }
@@ -798,6 +1022,18 @@ pub fn tag_stats(
         param_values.push(u.to_string());
         where_parts.push(format!("m.timestamp < ?{idx}"));
     }
+    let model_expr = normalized_model_expr("m.model");
+    let project_expr = normalized_project_expr("m.repo_id");
+    let branch_expr = normalized_branch_expr("m.git_branch");
+    apply_dimension_filters(
+        &mut where_parts,
+        &mut param_values,
+        filters,
+        "COALESCE(m.provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
 
@@ -909,6 +1145,7 @@ fn tag_stats_repo_from_messages(
     key_label: &str,
     since: Option<&str>,
     until: Option<&str>,
+    filters: &DimensionFilters,
     limit: usize,
 ) -> Result<Vec<TagCost>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
@@ -925,6 +1162,18 @@ fn tag_stats_repo_from_messages(
         conditions.push(format!("timestamp < ?{idx}"));
         param_values.push(u.to_string());
     }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
 
@@ -965,6 +1214,7 @@ fn tag_stats_branch_from_messages(
     key_label: &str,
     since: Option<&str>,
     until: Option<&str>,
+    filters: &DimensionFilters,
     limit: usize,
 ) -> Result<Vec<TagCost>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
@@ -981,6 +1231,18 @@ fn tag_stats_branch_from_messages(
         conditions.push(format!("timestamp < ?{idx}"));
         param_values.push(u.to_string());
     }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
 
@@ -1049,8 +1311,44 @@ pub fn model_usage(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ModelUsage>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let mut param_values: Vec<String> = date_params;
+    let filters = DimensionFilters::default();
+    model_usage_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn model_usage_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<ModelUsage>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        }
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -1070,16 +1368,10 @@ pub fn model_usage(
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cost_cents), 0.0)
          FROM messages
-         {} {} role = 'assistant'
+         {where_clause}
          GROUP BY m, p
          ORDER BY 8 DESC
          LIMIT ?{limit_idx}",
-        where_clause,
-        if where_clause.is_empty() {
-            "WHERE"
-        } else {
-            "AND"
-        }
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -1266,17 +1558,47 @@ pub fn provider_stats(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<ProviderStats>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+    let filters = DimensionFilters::default();
+    provider_stats_with_filters(conn, since, until, &filters)
+}
+
+pub fn provider_stats_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<Vec<ProviderStats>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        }
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
-
-    let role_filter = if where_clause.is_empty() {
-        "WHERE role = 'assistant'"
-    } else {
-        "AND role = 'assistant'"
-    };
     let sql = format!(
         "SELECT provider as p,
                 COUNT(*) as msgs,
@@ -1285,9 +1607,9 @@ pub fn provider_stats(
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cost_cents), 0.0)
-         FROM messages {} {}
+         FROM messages {}
          GROUP BY p ORDER BY msgs DESC",
-        where_clause, role_filter
+        where_clause
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -1361,17 +1683,47 @@ pub fn cache_efficiency(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<CacheEfficiency> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+    let filters = DimensionFilters::default();
+    cache_efficiency_with_filters(conn, since, until, &filters)
+}
+
+pub fn cache_efficiency_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<CacheEfficiency> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        }
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
-
-    let role_filter = if where_clause.is_empty() {
-        "WHERE role = 'assistant'"
-    } else {
-        "AND role = 'assistant'"
-    };
 
     let sql = format!(
         "SELECT COALESCE(SUM(input_tokens), 0),
@@ -1379,7 +1731,7 @@ pub fn cache_efficiency(
                 COALESCE(SUM(cache_creation_tokens), 0),
                 provider,
                 COALESCE(model, 'unknown')
-         FROM messages {where_clause} {role_filter}
+         FROM messages {where_clause}
          GROUP BY provider, COALESCE(model, 'unknown')",
     );
 
@@ -1451,6 +1803,16 @@ pub fn session_cost_curve(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<SessionCostBucket>> {
+    let filters = DimensionFilters::default();
+    session_cost_curve_with_filters(conn, since, until, &filters)
+}
+
+pub fn session_cost_curve_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<Vec<SessionCostBucket>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = since {
@@ -1461,6 +1823,18 @@ pub fn session_cost_curve(
         param_values.push(u.to_string());
         conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
@@ -1530,23 +1904,53 @@ pub fn cost_confidence_stats(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<CostConfidenceStat>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+    let filters = DimensionFilters::default();
+    cost_confidence_stats_with_filters(conn, since, until, &filters)
+}
+
+pub fn cost_confidence_stats_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<Vec<CostConfidenceStat>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        }
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
-
-    let role_filter = if where_clause.is_empty() {
-        "WHERE role = 'assistant'"
-    } else {
-        "AND role = 'assistant'"
-    };
 
     let sql = format!(
         "SELECT COALESCE(cost_confidence, 'estimated') as conf,
                 COUNT(*) as cnt,
                 COALESCE(SUM(cost_cents), 0.0) as cost
-         FROM messages {where_clause} {role_filter}
+         FROM messages {where_clause}
          GROUP BY conf
          ORDER BY cost DESC",
     );
@@ -1586,17 +1990,47 @@ pub fn subagent_cost_stats(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<SubagentCostStat>> {
-    let (where_clause, date_params) = date_filter(since, until, "WHERE");
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = date_params
+    let filters = DimensionFilters::default();
+    subagent_cost_stats_with_filters(conn, since, until, &filters)
+}
+
+pub fn subagent_cost_stats_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<Vec<SubagentCostStat>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut param_values = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            param_values.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", param_values.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            param_values.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", param_values.len()));
+        }
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
-
-    let role_filter = if where_clause.is_empty() {
-        "WHERE role = 'assistant'"
-    } else {
-        "AND role = 'assistant'"
-    };
 
     let sql = format!(
         "SELECT CASE WHEN parent_uuid IS NOT NULL THEN 'subagent' ELSE 'main' END as category,
@@ -1604,7 +2038,7 @@ pub fn subagent_cost_stats(
                 COALESCE(SUM(cost_cents), 0.0) as cost,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp
-         FROM messages {where_clause} {role_filter}
+         FROM messages {where_clause}
          GROUP BY category
          ORDER BY cost DESC",
     );
@@ -1624,4 +2058,94 @@ pub fn subagent_cost_stats(
         .collect();
 
     Ok(rows)
+}
+
+pub fn filter_options(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<FilterOptions> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut params: Vec<String> = Vec::new();
+    if let Some(s) = since {
+        if is_valid_timestamp(s) {
+            params.push(s.to_string());
+            conditions.push(format!("timestamp >= ?{}", params.len()));
+        }
+    }
+    if let Some(u) = until {
+        if is_valid_timestamp(u) {
+            params.push(u.to_string());
+            conditions.push(format!("timestamp < ?{}", params.len()));
+        }
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    fn distinct_values(
+        conn: &Connection,
+        sql: &str,
+        params: &[String],
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut all_params = params.to_vec();
+        all_params.push(limit.to_string());
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = all_params
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    let agents_sql = format!(
+        "SELECT COALESCE(provider, 'claude_code') as value
+         FROM messages
+         {where_clause}
+         GROUP BY value
+         ORDER BY COUNT(*) DESC, value ASC
+         LIMIT ?{}",
+        params.len() + 1
+    );
+    let models_sql = format!(
+        "SELECT {} as value
+         FROM messages
+         {where_clause}
+         GROUP BY value
+         ORDER BY COUNT(*) DESC, value ASC
+         LIMIT ?{}",
+        normalized_model_expr("model"),
+        params.len() + 1
+    );
+    let projects_sql = format!(
+        "SELECT {} as value
+         FROM messages
+         {where_clause}
+         GROUP BY value
+         ORDER BY COUNT(*) DESC, value ASC
+         LIMIT ?{}",
+        normalized_project_expr("repo_id"),
+        params.len() + 1
+    );
+    let branches_sql = format!(
+        "SELECT {} as value
+         FROM messages
+         {where_clause}
+         GROUP BY value
+         ORDER BY COUNT(*) DESC, value ASC
+         LIMIT ?{}",
+        normalized_branch_expr("git_branch"),
+        params.len() + 1
+    );
+
+    Ok(FilterOptions {
+        agents: distinct_values(conn, &agents_sql, &params, limit)?,
+        models: distinct_values(conn, &models_sql, &params, limit)?,
+        projects: distinct_values(conn, &projects_sql, &params, limit)?,
+        branches: distinct_values(conn, &branches_sql, &params, limit)?,
+    })
 }

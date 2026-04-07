@@ -5,8 +5,10 @@ import type {
   CacheEfficiency,
   ConfidenceCostRow,
   CostSummary,
+  DashboardFilters,
   DateRangeSelection,
   DaemonHealth,
+  FilterOptionsResponse,
   InstallIntegrationsRequest,
   IntegrationsHealth,
   MessageRow,
@@ -60,36 +62,60 @@ function withPeriod(
   return search ? `${path}?${search}` : path;
 }
 
+function withFilters(
+  path: string,
+  filters: DashboardFilters,
+  extra: Record<string, string | number | boolean | undefined> = {},
+): string {
+  const params = new URLSearchParams();
+  const range = periodRange(filters.period);
+
+  if (range.since) params.set("since", range.since);
+  if (range.until) params.set("until", range.until);
+  if (filters.agents.length > 0) params.set("agents", filters.agents.join(","));
+  if (filters.models.length > 0) params.set("models", filters.models.join(","));
+  if (filters.projects.length > 0) params.set("projects", filters.projects.join(","));
+  if (filters.branches.length > 0) params.set("branches", filters.branches.join(","));
+
+  for (const [key, value] of Object.entries(extra)) {
+    if (value == null) continue;
+    params.set(key, String(value));
+  }
+
+  const search = params.toString();
+  return search ? `${path}?${search}` : path;
+}
+
 export async function fetchRegisteredProviders(signal?: AbortSignal): Promise<RegisteredProvider[]> {
   return fetchJson<RegisteredProvider[]>("/admin/providers", signal ? { signal } : undefined);
 }
 
-export async function fetchOverview(period: DateRangeSelection, signal?: AbortSignal) {
+export async function fetchOverview(filters: DashboardFilters, signal?: AbortSignal) {
   const tzOffset = -new Date().getTimezoneOffset();
 
   const [summary, cost, projects, models, activity, providers, branches, tickets, activities] = await Promise.all([
-    fetchJson<Summary>(withPeriod("/analytics/summary", period), signal ? { signal } : undefined),
-    fetchJson<CostSummary>(withPeriod("/analytics/cost", period), signal ? { signal } : undefined),
-    fetchJson<ProjectRow[]>(withPeriod("/analytics/projects", period, { limit: 15 }), signal ? { signal } : undefined),
-    fetchJson<ModelRow[]>(withPeriod("/analytics/models", period, { limit: 15 }), signal ? { signal } : undefined),
+    fetchJson<Summary>(withFilters("/analytics/summary", filters), signal ? { signal } : undefined),
+    fetchJson<CostSummary>(withFilters("/analytics/cost", filters), signal ? { signal } : undefined),
+    fetchJson<ProjectRow[]>(withFilters("/analytics/projects", filters, { limit: 15 }), signal ? { signal } : undefined),
+    fetchJson<ModelRow[]>(withFilters("/analytics/models", filters, { limit: 15 }), signal ? { signal } : undefined),
     fetchJson<ActivityRow[]>(
-      withPeriod("/analytics/activity", period, {
-        granularity: granularityForPeriod(period),
+      withFilters("/analytics/activity", filters, {
+        granularity: granularityForPeriod(filters.period),
         tz_offset: tzOffset,
       }),
       signal ? { signal } : undefined,
     ),
-    fetchJson<ProviderStats[]>(withPeriod("/analytics/providers", period), signal ? { signal } : undefined),
-    fetchJson<BranchRow[]>(withPeriod("/analytics/branches", period, { limit: 15 }), signal ? { signal } : undefined),
+    fetchJson<ProviderStats[]>(withFilters("/analytics/providers", filters), signal ? { signal } : undefined),
+    fetchJson<BranchRow[]>(withFilters("/analytics/branches", filters, { limit: 15 }), signal ? { signal } : undefined),
     fetchJson<TagCostRow[]>(
-      withPeriod("/analytics/tags", period, {
+      withFilters("/analytics/tags", filters, {
         key: "ticket_id",
         limit: 15,
       }),
       signal ? { signal } : undefined,
     ),
     fetchJson<TagCostRow[]>(
-      withPeriod("/analytics/tags", period, {
+      withFilters("/analytics/tags", filters, {
         key: "activity",
         limit: 15,
       }),
@@ -110,21 +136,21 @@ export async function fetchOverview(period: DateRangeSelection, signal?: AbortSi
   };
 }
 
-export async function fetchInsights(period: DateRangeSelection, signal?: AbortSignal) {
+export async function fetchInsights(filters: DashboardFilters, signal?: AbortSignal) {
   const [cacheEff, sessionCurve, confidence, subagent, speedTags, tools, mcp] = await Promise.all([
-    fetchJson<CacheEfficiency>(withPeriod("/analytics/cache-efficiency", period), signal ? { signal } : undefined),
-    fetchJson<SessionCurveRow[]>(withPeriod("/analytics/session-cost-curve", period), signal ? { signal } : undefined),
-    fetchJson<ConfidenceCostRow[]>(withPeriod("/analytics/cost-confidence", period), signal ? { signal } : undefined),
-    fetchJson<SubagentCostRow[]>(withPeriod("/analytics/subagent-cost", period), signal ? { signal } : undefined),
+    fetchJson<CacheEfficiency>(withFilters("/analytics/cache-efficiency", filters), signal ? { signal } : undefined),
+    fetchJson<SessionCurveRow[]>(withFilters("/analytics/session-cost-curve", filters), signal ? { signal } : undefined),
+    fetchJson<ConfidenceCostRow[]>(withFilters("/analytics/cost-confidence", filters), signal ? { signal } : undefined),
+    fetchJson<SubagentCostRow[]>(withFilters("/analytics/subagent-cost", filters), signal ? { signal } : undefined),
     fetchJson<TagCostRow[]>(
-      withPeriod("/analytics/tags", period, {
+      withFilters("/analytics/tags", filters, {
         key: "speed",
         limit: 10,
       }),
       signal ? { signal } : undefined,
     ),
-    fetchJson<ToolRow[]>(withPeriod("/analytics/tools", period, { limit: 15 }), signal ? { signal } : undefined),
-    fetchJson<ToolRow[]>(withPeriod("/analytics/mcp", period, { limit: 15 }), signal ? { signal } : undefined),
+    fetchJson<ToolRow[]>(withFilters("/analytics/tools", filters, { limit: 15 }), signal ? { signal } : undefined),
+    fetchJson<ToolRow[]>(withFilters("/analytics/mcp", filters, { limit: 15 }), signal ? { signal } : undefined),
   ]);
 
   return { cacheEff, sessionCurve, confidence, subagent, speedTags, tools, mcp };
@@ -139,14 +165,18 @@ export interface SessionsQuery {
 }
 
 export async function fetchSessions(
-  period: DateRangeSelection,
+  filters: DashboardFilters,
   query: SessionsQuery,
   signal?: AbortSignal,
 ): Promise<SessionsResponse> {
   return fetchJson<SessionsResponse>(
-    withPeriod("/analytics/sessions", period, query as Record<string, string | number | boolean | undefined>),
+    withFilters("/analytics/sessions", filters, query as Record<string, string | number | boolean | undefined>),
     signal ? { signal } : undefined,
   );
+}
+
+export async function fetchFilterOptions(filters: DashboardFilters, signal?: AbortSignal): Promise<FilterOptionsResponse> {
+  return fetchJson<FilterOptionsResponse>(withPeriod("/analytics/filter-options", filters.period, { limit: 250 }), signal ? { signal } : undefined);
 }
 
 export async function fetchSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRow[]> {

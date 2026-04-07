@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
+use crate::analytics::{DimensionFilters, UNTAGGED_DIMENSION};
+
 /// A parsed hook event, ready for insertion into `hook_events`.
 #[derive(Debug)]
 pub struct HookEvent {
@@ -763,11 +765,44 @@ pub struct SessionMeta {
     pub git_branch: Option<String>,
 }
 
+fn push_in_clause(
+    conditions: &mut Vec<String>,
+    param_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+    idx: &mut usize,
+    expression: &str,
+    values: &[String],
+) {
+    let mut placeholders = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        placeholders.push(format!("?{}", *idx));
+        param_values.push(Box::new(trimmed.to_string()));
+        *idx += 1;
+    }
+    if !placeholders.is_empty() {
+        conditions.push(format!("{expression} IN ({})", placeholders.join(", ")));
+    }
+}
+
 /// Query tool usage stats from hook_events.
 pub fn query_tool_stats(
     conn: &Connection,
     since: Option<&str>,
     until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ToolStats>> {
+    let filters = DimensionFilters::default();
+    query_tool_stats_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn query_tool_stats_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
     limit: usize,
 ) -> Result<Vec<ToolStats>> {
     let mut conditions = vec![
@@ -788,6 +823,55 @@ pub fn query_tool_stats(
         param_values.push(Box::new(u.to_string()));
         idx += 1;
     }
+
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        "COALESCE(provider, 'claude_code')",
+        &filters.agents,
+    );
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        &format!(
+            "CASE WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE model END"
+        ),
+        &filters.models,
+    );
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        &format!("COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}')"),
+        &filters.projects,
+    );
+    let branch_values = filters
+        .branches
+        .iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            let normalized = trimmed
+                .strip_prefix("refs/heads/")
+                .unwrap_or(trimmed)
+                .to_string();
+            if normalized.is_empty() {
+                UNTAGGED_DIMENSION.to_string()
+            } else {
+                normalized
+            }
+        })
+        .collect::<Vec<_>>();
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        &format!(
+            "COALESCE(NULLIF(CASE WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(git_branch, ''), 12) ELSE COALESCE(git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
+        ),
+        &branch_values,
+    );
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
@@ -841,6 +925,17 @@ pub fn query_mcp_stats(
     until: Option<&str>,
     limit: usize,
 ) -> Result<Vec<McpStats>> {
+    let filters = DimensionFilters::default();
+    query_mcp_stats_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn query_mcp_stats_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<McpStats>> {
     let mut conditions = vec!["mcp_server IS NOT NULL".to_string()];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
@@ -855,6 +950,55 @@ pub fn query_mcp_stats(
         param_values.push(Box::new(u.to_string()));
         idx += 1;
     }
+
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        "COALESCE(provider, 'claude_code')",
+        &filters.agents,
+    );
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        &format!(
+            "CASE WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE model END"
+        ),
+        &filters.models,
+    );
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        &format!("COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}')"),
+        &filters.projects,
+    );
+    let branch_values = filters
+        .branches
+        .iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            let normalized = trimmed
+                .strip_prefix("refs/heads/")
+                .unwrap_or(trimmed)
+                .to_string();
+            if normalized.is_empty() {
+                UNTAGGED_DIMENSION.to_string()
+            } else {
+                normalized
+            }
+        })
+        .collect::<Vec<_>>();
+    push_in_clause(
+        &mut conditions,
+        &mut param_values,
+        &mut idx,
+        &format!(
+            "COALESCE(NULLIF(CASE WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(git_branch, ''), 12) ELSE COALESCE(git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
+        ),
+        &branch_values,
+    );
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 

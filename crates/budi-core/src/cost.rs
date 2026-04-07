@@ -3,6 +3,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+use crate::analytics::{DimensionFilters, UNTAGGED_DIMENSION};
+
 /// Estimated cost breakdown.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CostEstimate {
@@ -21,6 +23,17 @@ pub fn estimate_cost_filtered(
     until: Option<&str>,
     provider: Option<&str>,
 ) -> Result<CostEstimate> {
+    let filters = DimensionFilters::default();
+    estimate_cost_with_filters(conn, since, until, provider, &filters)
+}
+
+pub fn estimate_cost_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<CostEstimate> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = since {
@@ -33,7 +46,87 @@ pub fn estimate_cost_filtered(
     }
     if let Some(p) = provider {
         param_values.push(p.to_string());
-        conditions.push(format!("provider = ?{}", param_values.len()));
+        conditions.push(format!(
+            "COALESCE(provider, 'claude_code') = ?{}",
+            param_values.len()
+        ));
+    }
+    if !filters.agents.is_empty() {
+        let placeholders: Vec<String> = filters
+            .agents
+            .iter()
+            .filter(|v| !v.trim().is_empty())
+            .map(|value| {
+                param_values.push(value.trim().to_string());
+                format!("?{}", param_values.len())
+            })
+            .collect();
+        if !placeholders.is_empty() {
+            conditions.push(format!(
+                "COALESCE(provider, 'claude_code') IN ({})",
+                placeholders.join(", ")
+            ));
+        }
+    }
+    if !filters.models.is_empty() {
+        let placeholders: Vec<String> = filters
+            .models
+            .iter()
+            .filter(|v| !v.trim().is_empty())
+            .map(|value| {
+                param_values.push(value.trim().to_string());
+                format!("?{}", param_values.len())
+            })
+            .collect();
+        if !placeholders.is_empty() {
+            conditions.push(format!(
+                "CASE WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE model END IN ({})",
+                placeholders.join(", ")
+            ));
+        }
+    }
+    if !filters.projects.is_empty() {
+        let placeholders: Vec<String> = filters
+            .projects
+            .iter()
+            .filter(|v| !v.trim().is_empty())
+            .map(|value| {
+                param_values.push(value.trim().to_string());
+                format!("?{}", param_values.len())
+            })
+            .collect();
+        if !placeholders.is_empty() {
+            conditions.push(format!(
+                "COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}') IN ({})",
+                placeholders.join(", ")
+            ));
+        }
+    }
+    if !filters.branches.is_empty() {
+        let placeholders: Vec<String> = filters
+            .branches
+            .iter()
+            .filter(|v| !v.trim().is_empty())
+            .map(|value| {
+                let normalized = value
+                    .trim()
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value.trim())
+                    .to_string();
+                param_values.push(if normalized.is_empty() {
+                    UNTAGGED_DIMENSION.to_string()
+                } else {
+                    normalized
+                });
+                format!("?{}", param_values.len())
+            })
+            .collect();
+        if !placeholders.is_empty() {
+            conditions.push(format!(
+                "COALESCE(NULLIF(CASE WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(git_branch, ''), 12) ELSE COALESCE(git_branch, '') END, ''), '{UNTAGGED_DIMENSION}') IN ({})",
+                placeholders.join(", ")
+            ));
+        }
     }
     debug_assert!(
         !conditions.is_empty(),

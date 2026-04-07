@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { AnalyticsFilterBar } from "@/components/analytics-filter-bar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { CostBarChart } from "@/components/charts";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchOverview, fetchRegisteredProviders } from "@/lib/api";
 import { fmtCost, fmtNum, formatModelName, granularityForPeriod, repoName } from "@/lib/format";
-import { usePeriod } from "@/lib/period";
+import { useDashboardFilters } from "@/lib/period";
 
 const MAX_BAR_ROWS = 10;
 
@@ -28,7 +29,7 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
 }
 
 export function OverviewPage() {
-  const { period } = usePeriod();
+  const { filters } = useDashboardFilters();
 
   const providersQuery = useQuery({
     queryKey: ["registered-providers"],
@@ -37,9 +38,9 @@ export function OverviewPage() {
   });
 
   const overviewQuery = useQuery({
-    queryKey: ["overview", period.preset],
-    queryFn: ({ signal }) => fetchOverview(period, signal),
-    refetchInterval: period.preset === "today" ? 30_000 : false,
+    queryKey: ["overview", filters],
+    queryFn: ({ signal }) => fetchOverview(filters, signal),
+    refetchInterval: filters.period.preset === "today" ? 30_000 : false,
   });
 
   if (providersQuery.isPending || overviewQuery.isPending) {
@@ -126,10 +127,11 @@ export function OverviewPage() {
     output_tokens: entry.output_tokens,
   }));
 
-  const granularity = granularityForPeriod(period);
+  const granularity = granularityForPeriod(filters.period);
 
   return (
     <div className="space-y-5">
+      <AnalyticsFilterBar />
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardHeader>

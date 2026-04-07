@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use super::MessageRow;
+use super::{DimensionFilters, MessageRow, UNTAGGED_DIMENSION};
 
 // ---------------------------------------------------------------------------
 // Session Audit
@@ -142,8 +142,87 @@ fn parse_string_list_csv(raw: Option<String>) -> Vec<String> {
         .collect()
 }
 
+fn append_in_condition(
+    conditions: &mut Vec<String>,
+    param_values: &mut Vec<String>,
+    expression: &str,
+    values: &[String],
+) {
+    let mut placeholders = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        param_values.push(trimmed.to_string());
+        placeholders.push(format!("?{}", param_values.len()));
+    }
+    if !placeholders.is_empty() {
+        conditions.push(format!("{expression} IN ({})", placeholders.join(", ")));
+    }
+}
+
+fn apply_session_dimension_filters(
+    conditions: &mut Vec<String>,
+    param_values: &mut Vec<String>,
+    filters: &DimensionFilters,
+) {
+    append_in_condition(
+        conditions,
+        param_values,
+        "COALESCE(m.provider, 'claude_code')",
+        &filters.agents,
+    );
+    append_in_condition(
+        conditions,
+        param_values,
+        &format!(
+            "CASE WHEN m.model IS NULL OR m.model = '' OR SUBSTR(m.model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE m.model END"
+        ),
+        &filters.models,
+    );
+    append_in_condition(
+        conditions,
+        param_values,
+        &format!(
+            "COALESCE(NULLIF(NULLIF(COALESCE(m.repo_id, s.repo_id), ''), 'unknown'), '{UNTAGGED_DIMENSION}')"
+        ),
+        &filters.projects,
+    );
+    let normalized_branches = filters
+        .branches
+        .iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            let normalized = trimmed.strip_prefix("refs/heads/").unwrap_or(trimmed);
+            if normalized.is_empty() {
+                UNTAGGED_DIMENSION.to_string()
+            } else {
+                normalized.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    append_in_condition(
+        conditions,
+        param_values,
+        &format!(
+            "COALESCE(NULLIF(CASE WHEN COALESCE(m.git_branch, s.git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(m.git_branch, s.git_branch, ''), 12) ELSE COALESCE(m.git_branch, s.git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
+        ),
+        &normalized_branches,
+    );
+}
+
 /// Query sessions with cost aggregated from messages.
 pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<PaginatedSessions> {
+    let filters = DimensionFilters::default();
+    session_list_with_filters(conn, p, &filters)
+}
+
+pub fn session_list_with_filters(
+    conn: &Connection,
+    p: &SessionListParams,
+    filters: &DimensionFilters,
+) -> Result<PaginatedSessions> {
     let mut conditions = vec!["m.role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = p.since {
@@ -167,6 +246,7 @@ pub fn session_list(conn: &Connection, p: &SessionListParams) -> Result<Paginate
             "(m.model LIKE ?{idx} ESCAPE '\\' OR m.repo_id LIKE ?{idx} ESCAPE '\\' OR m.provider LIKE ?{idx} ESCAPE '\\' OR COALESCE(m.git_branch, s.git_branch) LIKE ?{idx} ESCAPE '\\' OR s.title LIKE ?{idx} ESCAPE '\\')"
         ));
     }
+    apply_session_dimension_filters(&mut conditions, &mut param_values, filters);
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     // Count total matching sessions using only the filter params (no limit/offset)
