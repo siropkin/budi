@@ -44,8 +44,8 @@ function SortableHead({
         variant="ghost"
         size="sm"
         className={cn(
-          "h-8 px-1 text-primary-foreground/80 hover:bg-primary/80 hover:text-primary-foreground focus-visible:ring-primary-foreground/70",
-          isActive && "bg-primary/80 text-primary-foreground",
+          "h-8 px-1 text-muted-foreground hover:bg-transparent hover:text-foreground focus-visible:ring-ring",
+          isActive && "text-primary",
           right && "ml-auto",
         )}
         onClick={() => onSort(column)}
