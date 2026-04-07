@@ -345,12 +345,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
             println!("  {dim}-{reset} hooks: Cursor hooks missing or misconfigured");
         }
     } else {
-        let hook_log_hint = hook_debug_log_hint();
+        let hook_log_hint = hook_log_path_hint();
         println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
         println!(
             "    Run `budi integrations install --with claude-code-hooks --with cursor-hooks`"
         );
-        println!("    Tip: set BUDI_HOOK_DEBUG=1 to log hook failures to {hook_log_hint}");
+        println!("    Tip: hook delivery failures are logged to {hook_log_hint}");
         issues.push(
             "No hooks installed. Run `budi integrations install --with claude-code-hooks --with cursor-hooks`."
                 .into(),
@@ -359,10 +359,10 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>) -> Result<()> {
 
     // Print hook debug hint if any hook-related issues were found
     if !claude_ok || (cursor_dir_exists && !cursor_ok) {
-        let hook_log_hint = hook_debug_log_hint();
+        let hook_log_hint = hook_log_path_hint();
         println!();
         println!(
-            "  {dim}Tip: set BUDI_HOOK_DEBUG=1 to log hook delivery failures to {hook_log_hint}{reset}"
+            "  {dim}Tip: hook delivery failures are logged to {hook_log_hint}{reset}"
         );
     }
 
@@ -572,7 +572,7 @@ fn check_mcp_config(settings_path: &str) -> bool {
         .is_some_and(|c| c.contains("budi"))
 }
 
-fn hook_debug_log_hint() -> String {
+fn hook_log_path_hint() -> String {
     budi_core::config::budi_home_dir()
         .map(|p| p.join("hook-debug.log").display().to_string())
         .unwrap_or_else(|_| "<budi-home>/hook-debug.log".to_string())

@@ -521,6 +521,7 @@ Windows equivalent:
 1. Run `budi doctor` — it validates hook installation
 2. Make sure you restarted Claude Code / Cursor after `budi init`
 3. Re-install: `budi init` (safe to run multiple times)
+4. Check hook delivery errors in `<budi-home>/hook-debug.log` (usually `~/.local/share/budi/hook-debug.log`)
 
 **Status line not showing:**
 1. Restart Claude Code after `budi init`
