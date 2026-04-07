@@ -138,6 +138,7 @@ export function CostBarChart({
 export interface CountBarDatum {
   label: string;
   value: number;
+  sublabel?: string;
 }
 
 export function CountBarChart({
@@ -192,13 +193,18 @@ export function CountBarChart({
           content={
             <ChartTooltipContent
               indicator="dot"
-              formatter={(value, name) => (
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">{name}</span>
-                  <span className="font-medium tabular-nums text-foreground">
-                    {fmtNum(Number(value))}
-                    {valueLabel ? ` ${valueLabel}` : ""}
-                  </span>
+              formatter={(value, name, item) => (
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground">{name}</span>
+                    <span className="font-medium tabular-nums text-foreground">
+                      {fmtNum(Number(value))}
+                      {valueLabel ? ` ${valueLabel}` : ""}
+                    </span>
+                  </div>
+                  {item.payload?.sublabel && (
+                    <span className="text-xs text-muted-foreground">{item.payload.sublabel}</span>
+                  )}
                 </div>
               )}
             />

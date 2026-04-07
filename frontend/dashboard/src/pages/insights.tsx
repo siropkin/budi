@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CostBarChart, CountBarChart, SessionCurveChart } from "@/components/charts";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchInsights } from "@/lib/api";
-import { fmtCost, fmtNum } from "@/lib/format";
+import { fmtCost, fmtDurationMs, fmtNum } from "@/lib/format";
 import { useDashboardFilters } from "@/lib/period";
 
 const CONFIDENCE_LABELS: Record<string, string> = {
@@ -12,7 +12,16 @@ const CONFIDENCE_LABELS: Record<string, string> = {
   exact: "Exact",
   exact_cost: "Exact Cost",
   estimated: "Estimated",
+  estimated_unknown_model: "Estimated (Unknown Model)",
+  "n/a": "Not Available",
 };
+
+function confidenceLabel(raw: string): string {
+  if (raw in CONFIDENCE_LABELS) return CONFIDENCE_LABELS[raw];
+  return raw
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 function mcpName(raw: string): string {
   const normalized = raw.replace(/^mcp__/, "");
@@ -51,10 +60,12 @@ export function InsightsPage() {
 
   const data = insightsQuery.data;
 
-  const confidenceRows = data.confidence.map((row) => ({
-    label: CONFIDENCE_LABELS[row.confidence] ?? row.confidence,
-    cost_cents: row.cost_cents,
-  }));
+  const confidenceRows = data.confidence
+    .filter((row) => row.cost_cents > 0)
+    .map((row) => ({
+      label: confidenceLabel(row.confidence),
+      cost_cents: row.cost_cents,
+    }));
 
   const sessionCurveRows = data.sessionCurve.map((row) => ({
     label: `${row.bucket} msgs`,
@@ -82,11 +93,13 @@ export function InsightsPage() {
   const toolsRows = data.tools.map((row) => ({
     label: row.tool_name,
     value: row.call_count,
+    sublabel: row.avg_duration_ms != null ? `Avg: ${fmtDurationMs(row.avg_duration_ms)}` : undefined,
   }));
 
   const mcpRows = data.mcp.map((row) => ({
     label: mcpName(row.tool_name),
     value: row.call_count,
+    sublabel: row.avg_duration_ms != null ? `Avg: ${fmtDurationMs(row.avg_duration_ms)}` : undefined,
   }));
 
   return (

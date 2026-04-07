@@ -121,7 +121,10 @@ export interface SubagentCostRow {
 export interface ToolRow {
   tool_name: string;
   call_count: number;
-  cost_cents?: number;
+  avg_duration_ms?: number | null;
+  total_duration_ms?: number | null;
+  provider?: string;
+  mcp_server?: string;
 }
 
 export interface SessionRow {
