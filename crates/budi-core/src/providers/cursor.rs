@@ -595,7 +595,7 @@ fn load_session_contexts(conn: &Connection) -> Vec<SessionContext> {
     // Only load sessions from the last 30 days to avoid stale attribution.
     // Without this filter, API events could match sessions from months ago.
     let mut stmt = match conn.prepare(
-        "SELECT session_id, started_at, ended_at, workspace_root, repo_id, git_branch
+        "SELECT id, started_at, ended_at, workspace_root, repo_id, git_branch
          FROM sessions WHERE provider = 'cursor'
            AND started_at >= datetime('now', '-30 days')
          ORDER BY started_at ASC",
