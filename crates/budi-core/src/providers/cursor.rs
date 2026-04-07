@@ -1268,9 +1268,7 @@ fn parse_cursor_line(
         .or_else(|| request_id.clone().filter(|id| !id.is_empty()))
         .unwrap_or_else(|| deterministic_cursor_message_uuid(&msg_session_id, line_index, line));
     let msg_cwd = entry.cwd.or_else(|| cwd.map(|s| s.to_string()));
-    let git_branch = msg_cwd
-        .as_deref()
-        .and_then(|dir| resolve_git_branch_from_head(dir));
+    let git_branch = msg_cwd.as_deref().and_then(resolve_git_branch_from_head);
 
     let mut tool_names: Vec<String> = entry
         .tool_calls

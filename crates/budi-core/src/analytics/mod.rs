@@ -439,16 +439,18 @@ pub fn ingest_messages_with_sync(
     Ok(count)
 }
 
+type MessageRelinkRow = (
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<f64>,
+);
+
 fn relink_unlinked_events_for_message(conn: &Connection, message_id: &str) -> Result<()> {
-    let row: Option<(
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<f64>,
-    )> = conn
+    let row: Option<MessageRelinkRow> = conn
         .query_row(
             "SELECT session_id, request_id, timestamp, role, cost_confidence, model, cost_cents
              FROM messages

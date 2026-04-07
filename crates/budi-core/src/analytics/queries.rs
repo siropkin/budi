@@ -271,17 +271,17 @@ pub fn usage_summary_with_filters(
     let mut conditions = Vec::new();
     let mut params: Vec<String> = Vec::new();
 
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            params.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", params.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        params.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", params.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            params.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", params.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        params.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", params.len()));
     }
     if let Some(p) = provider {
         params.push(p.to_string());
@@ -650,17 +650,17 @@ pub fn activity_chart_with_filters(
 ) -> Result<Vec<ActivityBucket>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
@@ -1325,17 +1325,17 @@ pub fn model_usage_with_filters(
 ) -> Result<Vec<ModelUsage>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
@@ -1571,17 +1571,17 @@ pub fn provider_stats_with_filters(
 ) -> Result<Vec<ProviderStats>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
@@ -1696,17 +1696,17 @@ pub fn cache_efficiency_with_filters(
 ) -> Result<CacheEfficiency> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
@@ -1917,17 +1917,17 @@ pub fn cost_confidence_stats_with_filters(
 ) -> Result<Vec<CostConfidenceStat>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
@@ -2003,17 +2003,17 @@ pub fn subagent_cost_stats_with_filters(
 ) -> Result<Vec<SubagentCostStat>> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            param_values.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", param_values.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            param_values.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", param_values.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
     }
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
@@ -2069,17 +2069,17 @@ pub fn filter_options(
 ) -> Result<FilterOptions> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut params: Vec<String> = Vec::new();
-    if let Some(s) = since {
-        if is_valid_timestamp(s) {
-            params.push(s.to_string());
-            conditions.push(format!("timestamp >= ?{}", params.len()));
-        }
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        params.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", params.len()));
     }
-    if let Some(u) = until {
-        if is_valid_timestamp(u) {
-            params.push(u.to_string());
-            conditions.push(format!("timestamp < ?{}", params.len()));
-        }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        params.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", params.len()));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
