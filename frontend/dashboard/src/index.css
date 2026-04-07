@@ -37,3 +37,8 @@
 body {
   @apply min-h-screen bg-background text-foreground antialiased;
 }
+
+/* Radix popper wrappers don't enforce a stack level; keep popovers/selects above cards/tables. */
+[data-radix-popper-content-wrapper] {
+  z-index: 1200 !important;
+}

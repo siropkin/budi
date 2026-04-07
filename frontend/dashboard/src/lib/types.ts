@@ -102,6 +102,12 @@ export interface SessionCurveRow {
   total_cost_cents: number;
 }
 
+export interface SessionMessageCurvePoint {
+  assistant_sequence: number;
+  tokens: number;
+  cumulative_cost_cents: number;
+}
+
 export interface ConfidenceCostRow {
   confidence: string;
   cost_cents: number;
@@ -168,6 +174,7 @@ export interface MessageRow {
   repo_id?: string | null;
   git_branch?: string | null;
   request_id?: string | null;
+  assistant_sequence?: number;
   tools?: string[];
   tags?: SessionTag[];
 }

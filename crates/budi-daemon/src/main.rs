@@ -128,6 +128,10 @@ fn build_router(app_state: AppState) -> Router {
             get(a::analytics_session_messages),
         )
         .route(
+            "/analytics/sessions/{session_id}/curve",
+            get(a::analytics_session_message_curve),
+        )
+        .route(
             "/analytics/sessions/{session_id}/hook-events",
             get(a::analytics_session_hook_events),
         )

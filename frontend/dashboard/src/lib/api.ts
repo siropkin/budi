@@ -23,6 +23,7 @@ import type {
   SessionDetailRow,
   SessionCurveRow,
   SessionHealth,
+  SessionMessageCurvePoint,
   SessionsResponse,
   SessionTag,
   SubagentCostRow,
@@ -175,13 +176,20 @@ export async function fetchSessions(
   );
 }
 
-export async function fetchFilterOptions(filters: DashboardFilters, signal?: AbortSignal): Promise<FilterOptionsResponse> {
-  return fetchJson<FilterOptionsResponse>(withPeriod("/analytics/filter-options", filters.period, { limit: 250 }), signal ? { signal } : undefined);
+export async function fetchFilterOptions(signal?: AbortSignal): Promise<FilterOptionsResponse> {
+  return fetchJson<FilterOptionsResponse>("/analytics/filter-options", signal ? { signal } : undefined);
 }
 
 export async function fetchSessionMessages(sessionId: string, signal?: AbortSignal): Promise<MessageRow[]> {
   const response = await fetchSessionMessagesWithRoles(sessionId, "assistant", {}, signal);
   return response.messages;
+}
+
+export async function fetchSessionMessageCurve(sessionId: string, signal?: AbortSignal): Promise<SessionMessageCurvePoint[]> {
+  return fetchJson<SessionMessageCurvePoint[]>(
+    `/analytics/sessions/${encodeURIComponent(sessionId)}/curve`,
+    signal ? { signal } : undefined,
+  );
 }
 
 export interface SessionMessagesQuery {

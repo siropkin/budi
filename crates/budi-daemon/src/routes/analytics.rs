@@ -626,24 +626,17 @@ pub async fn analytics_subagent_cost(
 
 #[derive(serde::Deserialize)]
 pub struct FilterOptionsParams {
-    pub since: Option<String>,
-    pub until: Option<String>,
     pub limit: Option<usize>,
 }
 
 pub async fn analytics_filter_options(
     Query(params): Query<FilterOptionsParams>,
 ) -> Result<Json<analytics::FilterOptions>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(200).min(1000);
+    let limit = params.limit.map(|value| value.min(5000));
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::filter_options(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            limit,
-        )
+        analytics::filter_options(&conn, None, None, limit)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
@@ -780,6 +773,20 @@ pub async fn analytics_session_messages(
                 offset: params.offset.unwrap_or(0),
             },
         )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    Ok(Json(result))
+}
+
+pub async fn analytics_session_message_curve(
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<analytics::SessionMessageCurvePoint>>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::session_message_curve(&conn, &session_id)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

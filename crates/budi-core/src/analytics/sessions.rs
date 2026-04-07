@@ -779,6 +779,7 @@ pub fn session_messages_with_roles(
                 cost_confidence: row.get(11)?,
                 git_branch: row.get(12)?,
                 request_id: row.get(13)?,
+                assistant_sequence: None,
                 tools: Vec::new(),
                 tags: Vec::new(),
             })
@@ -805,55 +806,62 @@ pub fn session_message_list(
     session_id: &str,
     p: &SessionMessageListParams<'_>,
 ) -> Result<super::PaginatedMessages> {
-    let mut conditions = vec!["session_id = ?1".to_string()];
+    let mut conditions = vec!["m.session_id = ?1".to_string()];
     if p.roles == SessionMessageRoles::Assistant {
-        conditions.push("role = 'assistant'".to_string());
+        conditions.push("m.role = 'assistant'".to_string());
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     let dir = if p.sort_asc { "ASC" } else { "DESC" };
     let order_expr = match p.sort_by.unwrap_or("timestamp") {
-        "provider" => format!("provider {dir}"),
+        "provider" => format!("m.provider {dir}"),
         "model" => {
             if p.sort_asc {
-                format!("(model IS NULL OR model = '') ASC, model {dir}")
+                format!("(m.model IS NULL OR m.model = '') ASC, m.model {dir}")
             } else {
-                format!("model {dir}")
+                format!("m.model {dir}")
             }
         }
-        "tokens" => format!("(input_tokens + output_tokens) {dir}"),
-        "cost" => format!("COALESCE(cost_cents, 0.0) {dir}"),
+        "tokens" => format!("(m.input_tokens + m.output_tokens) {dir}"),
+        "cost" => format!("COALESCE(m.cost_cents, 0.0) {dir}"),
         "repo_id" => {
             if p.sort_asc {
-                format!("(repo_id IS NULL OR repo_id = '') ASC, repo_id {dir}")
+                format!("(m.repo_id IS NULL OR m.repo_id = '') ASC, m.repo_id {dir}")
             } else {
-                format!("repo_id {dir}")
+                format!("m.repo_id {dir}")
             }
         }
         "git_branch" | "branch" => {
             if p.sort_asc {
-                format!("(git_branch IS NULL OR git_branch = '') ASC, git_branch {dir}")
+                format!("(m.git_branch IS NULL OR m.git_branch = '') ASC, m.git_branch {dir}")
             } else {
-                format!("git_branch {dir}")
+                format!("m.git_branch {dir}")
             }
         }
-        _ => format!("timestamp {dir}"),
+        _ => format!("m.timestamp {dir}"),
     };
 
-    let count_sql = format!("SELECT COUNT(*) FROM messages {where_clause}");
+    let count_sql = format!("SELECT COUNT(*) FROM messages m {where_clause}");
     let total_count: u64 = conn.query_row(&count_sql, params![session_id], |row| row.get(0))?;
 
     let sql = format!(
-        "SELECT id, timestamp, role, model,
-                COALESCE(provider, 'claude_code'),
-                repo_id,
-                input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0),
-                COALESCE(cost_confidence, 'estimated'),
-                git_branch,
-                request_id
-         FROM messages
+        "WITH assistant_sequence AS (
+             SELECT id, ROW_NUMBER() OVER (ORDER BY timestamp ASC, id ASC) as assistant_sequence
+             FROM messages
+             WHERE session_id = ?1 AND role = 'assistant'
+         )
+         SELECT m.id, m.timestamp, m.role, m.model,
+                COALESCE(m.provider, 'claude_code'),
+                m.repo_id,
+                m.input_tokens, m.output_tokens,
+                m.cache_creation_tokens, m.cache_read_tokens,
+                COALESCE(m.cost_cents, 0.0),
+                COALESCE(m.cost_confidence, 'estimated'),
+                m.git_branch,
+                m.request_id,
+                seq.assistant_sequence
+         FROM messages m
+         LEFT JOIN assistant_sequence seq ON seq.id = m.id
          {where_clause}
          ORDER BY {order_expr}
          LIMIT ?2 OFFSET ?3"
@@ -878,6 +886,7 @@ pub fn session_message_list(
                 cost_confidence: row.get(11)?,
                 git_branch: row.get(12)?,
                 request_id: row.get(13)?,
+                assistant_sequence: row.get::<_, Option<u64>>(14)?,
                 tools: Vec::new(),
                 tags: Vec::new(),
             })
@@ -890,6 +899,49 @@ pub fn session_message_list(
         messages: rows,
         total_count,
     })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionMessageCurvePoint {
+    pub assistant_sequence: u64,
+    pub tokens: u64,
+    pub cumulative_cost_cents: f64,
+}
+
+pub fn session_message_curve(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SessionMessageCurvePoint>> {
+    let mut stmt = conn.prepare(
+        "WITH ordered AS (
+             SELECT id,
+                    ROW_NUMBER() OVER (ORDER BY timestamp ASC, id ASC) as assistant_sequence,
+                    (input_tokens + output_tokens) as tokens,
+                    COALESCE(cost_cents, 0.0) as cost_cents
+             FROM messages
+             WHERE session_id = ?1 AND role = 'assistant'
+         )
+         SELECT assistant_sequence,
+                tokens,
+                SUM(cost_cents) OVER (
+                    ORDER BY assistant_sequence
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) as cumulative_cost_cents
+         FROM ordered
+         ORDER BY assistant_sequence ASC",
+    )?;
+
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            Ok(SessionMessageCurvePoint {
+                assistant_sequence: row.get(0)?,
+                tokens: row.get(1)?,
+                cumulative_cost_cents: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 pub fn session_hook_events(
@@ -1047,6 +1099,7 @@ pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<Mess
                 cost_confidence: row.get(12)?,
                 git_branch: row.get(13)?,
                 request_id: row.get(14)?,
+                assistant_sequence: None,
                 tools: Vec::new(),
                 tags: Vec::new(),
             })

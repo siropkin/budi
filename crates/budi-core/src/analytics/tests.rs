@@ -512,6 +512,73 @@ fn repo_usage_with_dimension_filters() {
     assert!((rows[0].cost_cents - 9.0).abs() < 0.01);
 }
 
+#[test]
+fn filter_options_are_normalized_and_match_dimension_filters() {
+    let mut conn = test_db();
+
+    let mut m1 = assistant_msg("fo-1", "sess-fo", 2.0);
+    m1.provider = "claude_code".to_string();
+    m1.model = Some("claude-sonnet-4-6".to_string());
+    m1.repo_id = Some("github.com/acme/repo-a".to_string());
+    m1.git_branch = Some("refs/heads/main".to_string());
+
+    let mut m2 = assistant_msg("fo-2", "sess-fo", 3.0);
+    m2.provider = "cursor".to_string();
+    m2.model = Some("<synthetic>".to_string());
+    m2.repo_id = Some("unknown".to_string());
+    m2.git_branch = Some("".to_string());
+
+    let mut m3 = assistant_msg("fo-3", "sess-fo", 5.0);
+    m3.provider = "codex".to_string();
+    m3.model = None;
+    m3.repo_id = None;
+    m3.git_branch = None;
+
+    ingest_messages(&mut conn, &[m1, m2, m3], None).unwrap();
+
+    let options = filter_options(&conn, None, None, None).unwrap();
+    assert!(options.agents.contains(&"claude_code".to_string()));
+    assert!(options.agents.contains(&"cursor".to_string()));
+    assert!(options.agents.contains(&"codex".to_string()));
+    assert!(options.models.contains(&"claude-sonnet-4-6".to_string()));
+    assert!(options.models.contains(&"(untagged)".to_string()));
+    assert!(
+        options
+            .projects
+            .contains(&"github.com/acme/repo-a".to_string())
+    );
+    assert!(options.projects.contains(&"(untagged)".to_string()));
+    assert!(options.branches.contains(&"main".to_string()));
+    assert!(options.branches.contains(&"(untagged)".to_string()));
+
+    let filters = DimensionFilters {
+        agents: vec!["cursor".to_string()],
+        models: vec!["(untagged)".to_string()],
+        projects: vec!["(untagged)".to_string()],
+        branches: vec!["(untagged)".to_string()],
+    };
+    let summary = usage_summary_with_filters(&conn, None, None, None, &filters).unwrap();
+    assert_eq!(summary.total_assistant_messages, 1);
+}
+
+#[test]
+fn filter_options_limit_is_optional_and_respected_when_set() {
+    let mut conn = test_db();
+    let mut m1 = assistant_msg("fo-limit-1", "sess-fo-limit", 1.0);
+    m1.provider = "claude_code".to_string();
+    let mut m2 = assistant_msg("fo-limit-2", "sess-fo-limit", 1.0);
+    m2.provider = "cursor".to_string();
+    let mut m3 = assistant_msg("fo-limit-3", "sess-fo-limit", 1.0);
+    m3.provider = "codex".to_string();
+    ingest_messages(&mut conn, &[m1, m2, m3], None).unwrap();
+
+    let unlimited = filter_options(&conn, None, None, None).unwrap();
+    assert_eq!(unlimited.agents.len(), 3);
+
+    let limited = filter_options(&conn, None, None, Some(1)).unwrap();
+    assert_eq!(limited.agents.len(), 1);
+}
+
 fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
     vec![
         ParsedMessage {
@@ -1832,6 +1899,8 @@ fn session_message_list_paginates_and_includes_message_context() {
     assert_eq!(page.total_count, 3);
     assert_eq!(page.messages.len(), 2);
     assert_eq!(page.messages[0].id, "sm-page-a2");
+    assert_eq!(page.messages[0].assistant_sequence, Some(2));
+    assert_eq!(page.messages[1].assistant_sequence, Some(3));
     assert_eq!(
         page.messages[0].repo_id.as_deref(),
         Some("github.com/acme/repo-b")
@@ -1860,6 +1929,81 @@ fn session_message_list_paginates_and_includes_message_context() {
     .unwrap();
     assert_eq!(all_roles.total_count, 4);
     assert_eq!(all_roles.messages[0].role, "user");
+    assert_eq!(all_roles.messages[0].assistant_sequence, None);
+}
+
+#[test]
+fn session_message_list_keeps_canonical_assistant_sequence_across_sorts() {
+    let mut conn = test_db();
+
+    let mut m1 = assistant_msg("sm-sort-a1", "sess-sort", 9.0);
+    m1.timestamp = "2026-03-25T00:00:01Z".parse().unwrap();
+    let mut m2 = assistant_msg("sm-sort-a2", "sess-sort", 1.0);
+    m2.timestamp = "2026-03-25T00:00:02Z".parse().unwrap();
+    let mut m3 = assistant_msg("sm-sort-a3", "sess-sort", 5.0);
+    m3.timestamp = "2026-03-25T00:00:03Z".parse().unwrap();
+    ingest_messages(&mut conn, &[m1, m2, m3], None).unwrap();
+
+    let by_cost = session_message_list(
+        &conn,
+        "sess-sort",
+        &SessionMessageListParams {
+            roles: SessionMessageRoles::Assistant,
+            sort_by: Some("cost"),
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        by_cost
+            .messages
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>(),
+        vec!["sm-sort-a1", "sm-sort-a3", "sm-sort-a2"]
+    );
+    assert_eq!(
+        by_cost
+            .messages
+            .iter()
+            .map(|m| m.assistant_sequence)
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(3), Some(2)]
+    );
+}
+
+#[test]
+fn session_message_curve_uses_full_session_canonical_order() {
+    let mut conn = test_db();
+
+    let mut m1 = assistant_msg("sm-curve-a1", "sess-curve", 2.0);
+    m1.timestamp = "2026-03-25T00:00:01Z".parse().unwrap();
+    m1.input_tokens = 10;
+    m1.output_tokens = 5;
+    let mut m2 = assistant_msg("sm-curve-a2", "sess-curve", 3.0);
+    m2.timestamp = "2026-03-25T00:00:02Z".parse().unwrap();
+    m2.input_tokens = 20;
+    m2.output_tokens = 10;
+    let mut m3 = assistant_msg("sm-curve-a3", "sess-curve", 4.0);
+    m3.timestamp = "2026-03-25T00:00:03Z".parse().unwrap();
+    m3.input_tokens = 7;
+    m3.output_tokens = 8;
+    ingest_messages(&mut conn, &[m1, m2, m3], None).unwrap();
+
+    let curve = session_message_curve(&conn, "sess-curve").unwrap();
+    assert_eq!(curve.len(), 3);
+    assert_eq!(curve[0].assistant_sequence, 1);
+    assert_eq!(curve[1].assistant_sequence, 2);
+    assert_eq!(curve[2].assistant_sequence, 3);
+    assert_eq!(curve[0].tokens, 15);
+    assert_eq!(curve[1].tokens, 30);
+    assert_eq!(curve[2].tokens, 15);
+    assert!((curve[0].cumulative_cost_cents - 2.0).abs() < 0.01);
+    assert!((curve[1].cumulative_cost_cents - 5.0).abs() < 0.01);
+    assert!((curve[2].cumulative_cost_cents - 9.0).abs() < 0.01);
 }
 
 #[test]

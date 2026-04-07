@@ -206,6 +206,8 @@ pub struct MessageRow {
     pub git_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_sequence: Option<u64>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]

@@ -20,6 +20,11 @@ const STORAGE_KEY = "budi_dashboard_filters_v1";
 
 const QUICK_PRESETS: DateRangePreset[] = ["today", "last_7_days", "last_30_days", "all", "custom"];
 
+function normalizeSelectablePreset(preset: DateRangePreset): DateRangePreset {
+  // "all" was removed from the date-range UI; migrate legacy stored values.
+  return preset === "all" ? "last_30_days" : preset;
+}
+
 function validPreset(value: unknown): value is DateRangePreset {
   return typeof value === "string" && QUICK_PRESETS.includes(value as DateRangePreset);
 }
@@ -32,15 +37,16 @@ function normalizePeriod(value: unknown): DateRangeSelection | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<DateRangeSelection>;
   if (!validPreset(candidate.preset)) return null;
+  const preset = normalizeSelectablePreset(candidate.preset);
 
-  if (candidate.preset === "custom") {
+  if (preset === "custom") {
     if (!validDateOnly(candidate.from) || !validDateOnly(candidate.to)) {
       return null;
     }
     return { preset: "custom", from: candidate.from, to: candidate.to };
   }
 
-  return { preset: candidate.preset };
+  return { preset };
 }
 
 function normalizeList(values: unknown): string[] {
@@ -79,7 +85,7 @@ function legacyPeriodRange(value: string | null): DateRangeSelection | null {
     case "month":
       return { preset: "last_30_days" };
     case "all":
-      return { preset: "all" };
+      return { preset: "last_30_days" };
     default:
       return null;
   }
@@ -145,14 +151,15 @@ export function DashboardFiltersProvider({ children }: { children: React.ReactNo
 
   const setPreset = (preset: DateRangePreset) => {
     setFilters((current) => {
+      const normalizedPreset = normalizeSelectablePreset(preset);
       const nextPeriod =
-        preset === "custom"
+        normalizedPreset === "custom"
           ? {
-              preset,
+              preset: normalizedPreset,
               from: current.period.preset === "custom" ? current.period.from ?? todayDateOnly() : todayDateOnly(),
               to: current.period.preset === "custom" ? current.period.to ?? todayDateOnly() : todayDateOnly(),
             }
-          : { preset };
+          : { preset: normalizedPreset };
       const nextFilters = { ...current, period: nextPeriod };
       persistFilters(nextFilters);
       return nextFilters;

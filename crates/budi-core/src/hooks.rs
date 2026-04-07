@@ -806,20 +806,20 @@ pub fn query_tool_stats_with_filters(
     limit: usize,
 ) -> Result<Vec<ToolStats>> {
     let mut conditions = vec![
-        "event = 'post_tool_use'".to_string(),
-        "tool_name IS NOT NULL".to_string(),
-        "tool_name NOT LIKE 'mcp_%'".to_string(),
+        "he.event = 'post_tool_use'".to_string(),
+        "he.tool_name IS NOT NULL".to_string(),
+        "he.tool_name NOT LIKE 'mcp_%'".to_string(),
     ];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
     if let Some(s) = since {
-        conditions.push(format!("timestamp >= ?{idx}"));
+        conditions.push(format!("he.timestamp >= ?{idx}"));
         param_values.push(Box::new(s.to_string()));
         idx += 1;
     }
     if let Some(u) = until {
-        conditions.push(format!("timestamp < ?{idx}"));
+        conditions.push(format!("he.timestamp < ?{idx}"));
         param_values.push(Box::new(u.to_string()));
         idx += 1;
     }
@@ -828,7 +828,7 @@ pub fn query_tool_stats_with_filters(
         &mut conditions,
         &mut param_values,
         &mut idx,
-        "COALESCE(provider, 'claude_code')",
+        "COALESCE(he.provider, 'claude_code')",
         &filters.agents,
     );
     push_in_clause(
@@ -836,7 +836,7 @@ pub fn query_tool_stats_with_filters(
         &mut param_values,
         &mut idx,
         &format!(
-            "CASE WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE model END"
+            "CASE WHEN m.model IS NULL OR m.model = '' OR SUBSTR(m.model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE m.model END"
         ),
         &filters.models,
     );
@@ -844,7 +844,7 @@ pub fn query_tool_stats_with_filters(
         &mut conditions,
         &mut param_values,
         &mut idx,
-        &format!("COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}')"),
+        &format!("COALESCE(NULLIF(NULLIF(m.repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}')"),
         &filters.projects,
     );
     let branch_values = filters
@@ -868,7 +868,7 @@ pub fn query_tool_stats_with_filters(
         &mut param_values,
         &mut idx,
         &format!(
-            "COALESCE(NULLIF(CASE WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(git_branch, ''), 12) ELSE COALESCE(git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
+            "COALESCE(NULLIF(CASE WHEN COALESCE(m.git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(m.git_branch, ''), 12) ELSE COALESCE(m.git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
         ),
         &branch_values,
     );
@@ -876,12 +876,15 @@ pub fn query_tool_stats_with_filters(
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     let sql = format!(
-        "SELECT tool_name, provider, COUNT(*) as call_count,
-                AVG(tool_duration_ms) as avg_duration_ms,
-                SUM(tool_duration_ms) as total_duration_ms
-         FROM hook_events
+        "SELECT he.tool_name,
+                COALESCE(he.provider, 'claude_code') as provider,
+                COUNT(*) as call_count,
+                AVG(he.tool_duration_ms) as avg_duration_ms,
+                SUM(he.tool_duration_ms) as total_duration_ms
+         FROM hook_events he
+         LEFT JOIN messages m ON m.id = he.message_id
          {where_clause}
-         GROUP BY tool_name, provider
+         GROUP BY he.tool_name, COALESCE(he.provider, 'claude_code')
          ORDER BY call_count DESC
          LIMIT ?{idx}",
     );
@@ -936,17 +939,17 @@ pub fn query_mcp_stats_with_filters(
     filters: &DimensionFilters,
     limit: usize,
 ) -> Result<Vec<McpStats>> {
-    let mut conditions = vec!["mcp_server IS NOT NULL".to_string()];
+    let mut conditions = vec!["he.mcp_server IS NOT NULL".to_string()];
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
     if let Some(s) = since {
-        conditions.push(format!("timestamp >= ?{idx}"));
+        conditions.push(format!("he.timestamp >= ?{idx}"));
         param_values.push(Box::new(s.to_string()));
         idx += 1;
     }
     if let Some(u) = until {
-        conditions.push(format!("timestamp < ?{idx}"));
+        conditions.push(format!("he.timestamp < ?{idx}"));
         param_values.push(Box::new(u.to_string()));
         idx += 1;
     }
@@ -955,7 +958,7 @@ pub fn query_mcp_stats_with_filters(
         &mut conditions,
         &mut param_values,
         &mut idx,
-        "COALESCE(provider, 'claude_code')",
+        "COALESCE(he.provider, 'claude_code')",
         &filters.agents,
     );
     push_in_clause(
@@ -963,7 +966,7 @@ pub fn query_mcp_stats_with_filters(
         &mut param_values,
         &mut idx,
         &format!(
-            "CASE WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE model END"
+            "CASE WHEN m.model IS NULL OR m.model = '' OR SUBSTR(m.model, 1, 1) = '<' THEN '{UNTAGGED_DIMENSION}' ELSE m.model END"
         ),
         &filters.models,
     );
@@ -971,7 +974,7 @@ pub fn query_mcp_stats_with_filters(
         &mut conditions,
         &mut param_values,
         &mut idx,
-        &format!("COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}')"),
+        &format!("COALESCE(NULLIF(NULLIF(m.repo_id, ''), 'unknown'), '{UNTAGGED_DIMENSION}')"),
         &filters.projects,
     );
     let branch_values = filters
@@ -995,7 +998,7 @@ pub fn query_mcp_stats_with_filters(
         &mut param_values,
         &mut idx,
         &format!(
-            "COALESCE(NULLIF(CASE WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(git_branch, ''), 12) ELSE COALESCE(git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
+            "COALESCE(NULLIF(CASE WHEN COALESCE(m.git_branch, '') LIKE 'refs/heads/%' THEN SUBSTR(COALESCE(m.git_branch, ''), 12) ELSE COALESCE(m.git_branch, '') END, ''), '{UNTAGGED_DIMENSION}')"
         ),
         &branch_values,
     );
@@ -1003,12 +1006,13 @@ pub fn query_mcp_stats_with_filters(
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     let sql = format!(
-        "SELECT tool_name, mcp_server, COUNT(*) as call_count,
-                AVG(tool_duration_ms) as avg_duration_ms,
-                SUM(tool_duration_ms) as total_duration_ms
-         FROM hook_events
+        "SELECT he.tool_name, he.mcp_server, COUNT(*) as call_count,
+                AVG(he.tool_duration_ms) as avg_duration_ms,
+                SUM(he.tool_duration_ms) as total_duration_ms
+         FROM hook_events he
+         LEFT JOIN messages m ON m.id = he.message_id
          {where_clause}
-         GROUP BY tool_name, mcp_server
+         GROUP BY he.tool_name, he.mcp_server
          ORDER BY call_count DESC
          LIMIT ?{idx}",
     );
@@ -1659,5 +1663,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tool_and_mcp_filters_support_branch_via_linked_messages() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp, provider, model, repo_id, git_branch, cost_confidence)
+             VALUES ('msg-branch-1', 'sess-branch-1', 'assistant', '2026-03-25T00:00:01Z', 'claude_code', 'claude-sonnet-4-6', 'github.com/acme/repo', 'feature/ship-1', 'exact')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO hook_events (provider, event, session_id, timestamp, tool_name, tool_duration_ms, message_id)
+             VALUES ('claude_code', 'post_tool_use', 'sess-branch-1', '2026-03-25T00:00:02Z', 'Read', 25, 'msg-branch-1')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO hook_events (provider, event, session_id, timestamp, tool_name, mcp_server, tool_duration_ms, message_id)
+             VALUES ('claude_code', 'post_tool_use', 'sess-branch-1', '2026-03-25T00:00:03Z', 'mcp__memory__search', 'memory', 30, 'msg-branch-1')",
+            [],
+        )
+        .unwrap();
+
+        let branch_filters = DimensionFilters {
+            agents: vec![],
+            models: vec![],
+            projects: vec![],
+            branches: vec!["feature/ship-1".to_string()],
+        };
+
+        let tool_rows = query_tool_stats_with_filters(&conn, None, None, &branch_filters, 20)
+            .expect("tool query should not fail with branch filter");
+        assert_eq!(tool_rows.len(), 1);
+        assert_eq!(tool_rows[0].tool_name, "Read");
+
+        let mcp_rows = query_mcp_stats_with_filters(&conn, None, None, &branch_filters, 20)
+            .expect("mcp query should not fail with branch filter");
+        assert_eq!(mcp_rows.len(), 1);
+        assert_eq!(mcp_rows[0].mcp_server, "memory");
+
+        let mismatch_filters = DimensionFilters {
+            agents: vec![],
+            models: vec![],
+            projects: vec![],
+            branches: vec!["feature/other".to_string()],
+        };
+        let empty_tool_rows =
+            query_tool_stats_with_filters(&conn, None, None, &mismatch_filters, 20).unwrap();
+        let empty_mcp_rows =
+            query_mcp_stats_with_filters(&conn, None, None, &mismatch_filters, 20).unwrap();
+        assert!(empty_tool_rows.is_empty());
+        assert!(empty_mcp_rows.is_empty());
     }
 }

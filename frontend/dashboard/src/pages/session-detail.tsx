@@ -13,6 +13,7 @@ import {
   fetchRegisteredProviders,
   fetchSessionDetail,
   fetchSessionHealth,
+  fetchSessionMessageCurve,
   fetchSessionMessagesWithRoles,
   fetchSessionTags,
 } from "@/lib/api";
@@ -121,6 +122,12 @@ export function SessionDetailPage() {
     enabled: Boolean(sessionId),
   });
 
+  const messageCurveQuery = useQuery({
+    queryKey: ["session-message-curve", sessionId],
+    queryFn: ({ signal }) => fetchSessionMessageCurve(sessionId ?? "", signal),
+    enabled: Boolean(sessionId),
+  });
+
   const providersQuery = useQuery({
     queryKey: ["registered-providers"],
     queryFn: ({ signal }) => fetchRegisteredProviders(signal),
@@ -150,6 +157,7 @@ export function SessionDetailPage() {
     messagesQuery.isPending ||
     tagsQuery.isPending ||
     healthQuery.isPending ||
+    messageCurveQuery.isPending ||
     providersQuery.isPending ||
     detailQuery.isPending
   ) {
@@ -191,6 +199,10 @@ export function SessionDetailPage() {
     return <ErrorState error={healthQuery.error} onRetry={() => healthQuery.refetch()} />;
   }
 
+  if (messageCurveQuery.error) {
+    return <ErrorState error={messageCurveQuery.error} onRetry={() => messageCurveQuery.refetch()} />;
+  }
+
   if (providersQuery.error) {
     return <ErrorState error={providersQuery.error} onRetry={() => providersQuery.refetch()} />;
   }
@@ -207,18 +219,11 @@ export function SessionDetailPage() {
   const tokenTotal = (sessionDetail.input_tokens ?? 0) + (sessionDetail.output_tokens ?? 0);
   const costTotalCents = sessionDetail.cost_cents ?? 0;
 
-  const curveMessages = [...messagePage].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  const sessionCurve = [];
-  let cumulativeCostCents = 0;
-  for (let index = 0; index < curveMessages.length; index += 1) {
-    const message = curveMessages[index];
-    cumulativeCostCents += message.cost_cents ?? 0;
-    sessionCurve.push({
-      label: `#${index + 1}`,
-      tokens: (message.input_tokens ?? 0) + (message.output_tokens ?? 0),
-      cumulative_cost_cents: cumulativeCostCents,
-    });
-  }
+  const sessionCurve = (messageCurveQuery.data ?? []).map((point) => ({
+    label: `#${point.assistant_sequence}`,
+    tokens: point.tokens,
+    cumulative_cost_cents: point.cumulative_cost_cents,
+  }));
 
   const paginatedMessages = messagePage;
   const hasMoreMessages = messageOffset + paginatedMessages.length < messageTotalCount;
@@ -329,7 +334,7 @@ export function SessionDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Message Page Length vs Cost</CardTitle>
+          <CardTitle>Session Length vs Cost</CardTitle>
         </CardHeader>
         <CardContent>
           {sessionCurve.length === 0 ? (
@@ -410,7 +415,7 @@ export function SessionDetailPage() {
                 {paginatedMessages.map((message, index) => {
                   const providerDisplay = providers.find((entry) => entry.name === message.provider)?.display_name ?? message.provider;
                   const rawModel = message.model ?? "";
-                  const number = messageOffset + index + 1;
+                  const number = message.assistant_sequence ?? messageOffset + index + 1;
                   const repoLabel = repoName(message.repo_id);
                   const branchLabel = message.git_branch?.replace(/^refs\/heads\//, "") || "--";
                   const tagLabel = (message.tags ?? [])

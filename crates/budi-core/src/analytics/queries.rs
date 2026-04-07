@@ -488,6 +488,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 cost_confidence: row.get(12)?,
                 git_branch: row.get(13)?,
                 request_id: None,
+                assistant_sequence: None,
                 tools: Vec::new(),
                 tags: Vec::new(),
             })
@@ -2064,7 +2065,7 @@ pub fn filter_options(
     conn: &Connection,
     since: Option<&str>,
     until: Option<&str>,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<FilterOptions> {
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut params: Vec<String> = Vec::new();
@@ -2086,10 +2087,12 @@ pub fn filter_options(
         conn: &Connection,
         sql: &str,
         params: &[String],
-        limit: usize,
+        limit: Option<usize>,
     ) -> Result<Vec<String>> {
         let mut all_params = params.to_vec();
-        all_params.push(limit.to_string());
+        if let Some(value) = limit {
+            all_params.push(value.to_string());
+        }
         let param_refs: Vec<&dyn rusqlite::types::ToSql> = all_params
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -2102,14 +2105,19 @@ pub fn filter_options(
         Ok(rows)
     }
 
+    let limit_clause = if limit.is_some() {
+        format!("LIMIT ?{}", params.len() + 1)
+    } else {
+        String::new()
+    };
+
     let agents_sql = format!(
         "SELECT COALESCE(provider, 'claude_code') as value
          FROM messages
          {where_clause}
          GROUP BY value
          ORDER BY COUNT(*) DESC, value ASC
-         LIMIT ?{}",
-        params.len() + 1
+         {limit_clause}",
     );
     let models_sql = format!(
         "SELECT {} as value
@@ -2117,9 +2125,8 @@ pub fn filter_options(
          {where_clause}
          GROUP BY value
          ORDER BY COUNT(*) DESC, value ASC
-         LIMIT ?{}",
+         {limit_clause}",
         normalized_model_expr("model"),
-        params.len() + 1
     );
     let projects_sql = format!(
         "SELECT {} as value
@@ -2127,9 +2134,8 @@ pub fn filter_options(
          {where_clause}
          GROUP BY value
          ORDER BY COUNT(*) DESC, value ASC
-         LIMIT ?{}",
+         {limit_clause}",
         normalized_project_expr("repo_id"),
-        params.len() + 1
     );
     let branches_sql = format!(
         "SELECT {} as value
@@ -2137,9 +2143,8 @@ pub fn filter_options(
          {where_clause}
          GROUP BY value
          ORDER BY COUNT(*) DESC, value ASC
-         LIMIT ?{}",
+         {limit_clause}",
         normalized_branch_expr("git_branch"),
-        params.len() + 1
     );
 
     Ok(FilterOptions {
