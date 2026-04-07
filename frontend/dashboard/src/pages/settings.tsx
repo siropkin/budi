@@ -269,10 +269,9 @@ export function SettingsPage() {
             <SettingRow label="Size" value={database.size_mb != null ? `${database.size_mb} MB` : "--"} />
             <SettingRow label="Records" value={database.records != null ? fmtNum(database.records) : "--"} />
             <SettingRow label="First Record" value={database.first_record ? fmtDate(database.first_record) : "--"} />
-            <SettingRow
-              label="Repair"
-              value="Reconcile schema drift (add missing columns/indexes)"
-              action={
+            <details className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer select-none font-medium">Advanced</summary>
+              <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -285,11 +284,6 @@ export function SettingsPage() {
                 >
                   Repair DB
                 </Button>
-              }
-            />
-            <details className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-              <summary className="cursor-pointer select-none font-medium">Advanced</summary>
-              <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   variant="secondary"
                   size="sm"
