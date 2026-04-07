@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import { AnalyticsFilterBar } from "@/components/analytics-filter-bar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchAllSessions, fetchRegisteredProviders, fetchSessions } from "@/lib/api";
@@ -157,11 +156,6 @@ export function SessionsPage() {
     setSortAsc(false);
   };
 
-  const onSearchChange: React.ChangeEventHandler<HTMLInputElement> = (event) => {
-    setSearch(event.target.value);
-    setOffset(0);
-  };
-
   return (
     <div className="space-y-5">
       <AnalyticsFilterBar />
@@ -174,13 +168,6 @@ export function SessionsPage() {
           </Button>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-1">
-            <label htmlFor="session-search" className="sr-only">
-              Search sessions
-            </label>
-            <Input id="session-search" placeholder="Search sessions..." value={search} onChange={onSearchChange} />
-          </div>
-
           <div className="overflow-hidden rounded-md border border-border bg-background p-1">
             <Table className="table-fixed">
               <TableHeader>
