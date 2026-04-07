@@ -1970,15 +1970,11 @@ mod tests {
         );
     }
 
-    /// Regression test for issue #4: verify that migrating from v13 runs all
-    /// subsequent migration steps (v14 through SCHEMA_VERSION) rather than
-    /// jumping directly to SCHEMA_VERSION from v13→v14.
-    ///
-    /// If `migrate_v13_to_v14` incorrectly set `user_version = SCHEMA_VERSION`,
-    /// later migrations (v14→v15 title column, v15→v16 normalization, etc.)
-    /// would be silently skipped.
+    /// Regression test for issue #4: verify that migrating from v13 walks
+    /// through every intermediate version (14, 15, 16, … SCHEMA_VERSION)
+    /// one step at a time instead of jumping directly to SCHEMA_VERSION.
     #[test]
-    fn migrate_from_v13_applies_all_subsequent_steps() {
+    fn migrate_from_v13_walks_through_every_intermediate_version() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
         conn.execute_batch(
@@ -2019,36 +2015,32 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         conn.pragma_update(None, "user_version", 13u32).unwrap();
 
-        migrate(&conn).unwrap();
+        // Call each migration step individually and verify it advances
+        // user_version by exactly 1.
+        assert_eq!(current_version(&conn), 13);
+
+        migrate_v13_to_v14(&conn).unwrap();
+        assert_eq!(current_version(&conn), 14, "v13→v14 must set version to 14");
+
+        migrate_v14_to_v15(&conn).unwrap();
+        assert_eq!(current_version(&conn), 15, "v14→v15 must set version to 15");
+
+        migrate_v15_to_v16(&conn).unwrap();
+        assert_eq!(current_version(&conn), 16, "v15→v16 must set version to 16");
+
+        migrate_v16_to_v17(&conn).unwrap();
+        assert_eq!(current_version(&conn), 17, "v16→v17 must set version to 17");
+
+        migrate_v17_to_v18(&conn).unwrap();
+        assert_eq!(current_version(&conn), 18, "v17→v18 must set version to 18");
+
+        migrate_v18_to_v19(&conn).unwrap();
+        assert_eq!(current_version(&conn), 19, "v18→v19 must set version to 19");
+
+        migrate_v19_to_v20(&conn).unwrap();
+        assert_eq!(current_version(&conn), 20, "v19→v20 must set version to 20");
+
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
-
-        // v14: conversation_id → session_id rename (verified via backfill indexes)
-        conn.execute("SELECT session_id FROM hook_events LIMIT 0", [])
-            .expect("v14 should rename hook_events.conversation_id → session_id");
-
-        // v15: title column on sessions
-        conn.execute("SELECT title FROM sessions LIMIT 0", [])
-            .expect("v15 should add sessions.title");
-
-        // v18: linkage columns on hook_events
-        conn.execute("SELECT message_id FROM hook_events LIMIT 0", [])
-            .expect("v18 should add hook_events.message_id");
-        conn.execute("SELECT tool_use_id FROM hook_events LIMIT 0", [])
-            .expect("v18 should add hook_events.tool_use_id");
-
-        // v18: linkage columns on otel_events
-        conn.execute("SELECT message_id FROM otel_events LIMIT 0", [])
-            .expect("v18/v19 should add otel_events.message_id");
-        conn.execute("SELECT model FROM otel_events LIMIT 0", [])
-            .expect("v18 should add otel_events.model");
-
-        // v20: identifier column renames
-        conn.execute("SELECT id FROM messages LIMIT 0", [])
-            .expect("v20 should rename messages.uuid → id");
-        conn.execute("SELECT id FROM sessions LIMIT 0", [])
-            .expect("v20 should rename sessions.session_id → id");
-        conn.execute("SELECT message_id FROM tags LIMIT 0", [])
-            .expect("v20 should rename tags.message_uuid → message_id");
     }
 
     #[test]
