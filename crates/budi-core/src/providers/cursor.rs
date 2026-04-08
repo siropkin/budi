@@ -2056,7 +2056,7 @@ mod tests {
         let page1: Vec<Value> = (1101..=1200).rev().map(usage_event_json).collect();
         let page2: Vec<Value> = (1001..=1100).rev().map(usage_event_json).collect();
         let page3: Vec<Value> = (901..=1000).rev().map(usage_event_json).collect();
-        let pages = vec![page1, page2, page3];
+        let pages = [page1, page2, page3];
 
         let fetched = fetch_usage_events_with_page_loader(Some(1000), false, |page| {
             Ok(pages
@@ -2076,7 +2076,7 @@ mod tests {
     fn quick_sync_without_watermark_stays_on_page_one() {
         let page1: Vec<Value> = (1101..=1200).rev().map(usage_event_json).collect();
         let page2: Vec<Value> = (1001..=1100).rev().map(usage_event_json).collect();
-        let pages = vec![page1, page2];
+        let pages = [page1, page2];
 
         let fetched = fetch_usage_events_with_page_loader(None, false, |page| {
             Ok(pages
