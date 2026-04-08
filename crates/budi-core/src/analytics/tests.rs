@@ -1987,10 +1987,12 @@ fn session_message_curve_uses_full_session_canonical_order() {
     m2.timestamp = "2026-03-25T00:00:02Z".parse().unwrap();
     m2.input_tokens = 20;
     m2.output_tokens = 10;
+    m2.cache_read_tokens = 4;
     let mut m3 = assistant_msg("sm-curve-a3", "sess-curve", 4.0);
     m3.timestamp = "2026-03-25T00:00:03Z".parse().unwrap();
     m3.input_tokens = 7;
     m3.output_tokens = 8;
+    m3.cache_creation_tokens = 2;
     ingest_messages(&mut conn, &[m1, m2, m3], None).unwrap();
 
     let curve = session_message_curve(&conn, "sess-curve").unwrap();
@@ -1998,8 +2000,17 @@ fn session_message_curve_uses_full_session_canonical_order() {
     assert_eq!(curve[0].assistant_sequence, 1);
     assert_eq!(curve[1].assistant_sequence, 2);
     assert_eq!(curve[2].assistant_sequence, 3);
+    assert_eq!(curve[0].input_tokens, 10);
+    assert_eq!(curve[0].output_tokens, 5);
+    assert_eq!(curve[0].cache_tokens, 0);
     assert_eq!(curve[0].tokens, 15);
+    assert_eq!(curve[1].input_tokens, 20);
+    assert_eq!(curve[1].output_tokens, 10);
+    assert_eq!(curve[1].cache_tokens, 4);
     assert_eq!(curve[1].tokens, 30);
+    assert_eq!(curve[2].input_tokens, 7);
+    assert_eq!(curve[2].output_tokens, 8);
+    assert_eq!(curve[2].cache_tokens, 2);
     assert_eq!(curve[2].tokens, 15);
     assert!((curve[0].cumulative_cost_cents - 2.0).abs() < 0.01);
     assert!((curve[1].cumulative_cost_cents - 5.0).abs() < 0.01);

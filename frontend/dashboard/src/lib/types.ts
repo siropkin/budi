@@ -104,6 +104,9 @@ export interface SessionCurveRow {
 
 export interface SessionMessageCurvePoint {
   assistant_sequence: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_tokens: number;
   tokens: number;
   cumulative_cost_cents: number;
 }

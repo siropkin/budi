@@ -266,9 +266,12 @@ export function SessionDetailPage() {
 
   const sessionCurve = (messageCurveQuery.data ?? []).map((point) => ({
     label: `#${point.assistant_sequence}`,
-    tokens: point.tokens,
+    input_tokens: point.input_tokens,
+    output_tokens: point.output_tokens,
+    cache_tokens: point.cache_tokens,
     cumulative_cost_cents: point.cumulative_cost_cents,
   }));
+  const hasCacheTokens = sessionCurve.some((point) => point.cache_tokens > 0);
 
   const paginatedMessages = messagePage;
   const hasMoreMessages = messageOffset + paginatedMessages.length < messageTotalCount;
@@ -387,13 +390,21 @@ export function SessionDetailPage() {
           ) : (
             <ChartContainer
               config={{
-                tokens: {
-                  label: "Tokens/message",
+                input_tokens: {
+                  label: "Input tokens/message",
+                  color: "hsl(var(--chart-1))",
+                },
+                output_tokens: {
+                  label: "Output tokens/message",
                   color: "hsl(var(--chart-2))",
+                },
+                cache_tokens: {
+                  label: "Cache tokens/message",
+                  color: "hsl(var(--chart-3))",
                 },
                 cumulative_cost_cents: {
                   label: "Cumulative cost",
-                  color: "hsl(var(--chart-1))",
+                  color: "hsl(var(--chart-5))",
                 },
               }}
             >
@@ -425,11 +436,33 @@ export function SessionDetailPage() {
                   }
                 />
                 <ChartLegend content={<ChartLegendContent />} />
-                <Bar yAxisId="left" dataKey="tokens" fill="var(--color-tokens)" maxBarSize={22} radius={[4, 4, 0, 0]} />
+                <Bar yAxisId="left" dataKey="input_tokens" stackId="session-tokens" fill="var(--color-input_tokens)" maxBarSize={22} radius={[0, 0, 0, 0]} />
+                <Bar
+                  yAxisId="left"
+                  dataKey="output_tokens"
+                  stackId="session-tokens"
+                  fill="var(--color-output_tokens)"
+                  maxBarSize={22}
+                  radius={[4, 4, 0, 0]}
+                />
+                {hasCacheTokens ? (
+                  <Line
+                    yAxisId="left"
+                    type="monotone"
+                    dataKey="cache_tokens"
+                    stroke="var(--color-cache_tokens)"
+                    strokeWidth={2}
+                    strokeDasharray="4 4"
+                    dot={false}
+                  />
+                ) : null}
                 <Line yAxisId="right" type="monotone" dataKey="cumulative_cost_cents" stroke="var(--color-cumulative_cost_cents)" strokeWidth={2} dot={false} />
               </ComposedChart>
             </ChartContainer>
           )}
+          {!hasCacheTokens && sessionCurve.length > 0 ? (
+            <p className="mt-2 text-xs text-muted-foreground">No cache tokens were recorded in this session.</p>
+          ) : null}
         </CardContent>
       </Card>
 
