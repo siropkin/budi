@@ -355,67 +355,55 @@ fn parse_usage_event(ev: &Value) -> Option<CursorUsageEvent> {
     })
 }
 
-/// Fetch usage events from Cursor's API with pagination.
-/// `since_ms`: only return events newer than this timestamp.
-/// `paginate_all`: when true, fetches all pages; when false, fetches only page 1.
-fn fetch_usage_events(
-    auth: &CursorAuth,
+/// Extract usage-event timestamp in milliseconds from raw API JSON.
+fn usage_event_timestamp_ms(ev: &Value) -> Option<i64> {
+    ev.get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&ts| ts > 0)
+}
+
+struct UsageFetchResult {
+    events: Vec<CursorUsageEvent>,
+    pages_fetched: u32,
+}
+
+fn fetch_usage_events_with_page_loader<F>(
     since_ms: Option<i64>,
     paginate_all: bool,
-) -> Result<Vec<CursorUsageEvent>> {
-    let cookie = format!(
-        "WorkosCursorSessionToken={}%3A%3A{}",
-        auth.user_id, auth.jwt
-    );
-
+    mut load_page: F,
+) -> Result<UsageFetchResult>
+where
+    F: FnMut(u32) -> Result<Vec<Value>>,
+{
     let since = since_ms.unwrap_or(0);
     let mut all_events: Vec<CursorUsageEvent> = Vec::new();
-    // Keep API probes bounded so sync does not look "stuck" when Cursor's
-    // endpoint is slow/unreachable. We fall back to local transcript files.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(3)))
-        .timeout_global(Some(Duration::from_secs(8)))
-        .build()
-        .into();
 
-    // API returns 100 events per page, newest first. Page 1 is default (no param needed).
-    let max_pages: u32 = if paginate_all { 200 } else { 1 };
+    // API returns 100 events per page, newest first. In quick mode we still
+    // paginate when a watermark exists, until we cross that watermark.
+    let should_paginate = paginate_all || since_ms.is_some();
+    let max_pages: u32 = if should_paginate { 200 } else { 1 };
+    let mut pages_fetched = 0;
 
     for page in 1..=max_pages {
-        let body_json = if page == 1 {
-            serde_json::json!({})
-        } else {
-            serde_json::json!({"page": page})
-        };
-
-        let mut response = agent
-            .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
-            .header("Cookie", &cookie)
-            .header("Origin", "https://cursor.com")
-            .header("Referer", "https://cursor.com/dashboard")
-            .send_json(body_json)
-            .with_context(|| format!("Cursor Usage API request failed (page {page})"))?;
-
-        let body: Value = response.body_mut().read_json()?;
-
-        let events_arr = body
-            .get("usageEventsDisplay")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
+        let events_arr = load_page(page)?;
         if events_arr.is_empty() {
             break;
         }
+        pages_fetched = page;
 
         // Track whether all events on this page were older than watermark.
+        // Use raw timestamps so malformed events do not force an early stop.
         let mut all_below_watermark = true;
 
         for ev in &events_arr {
+            if usage_event_timestamp_ms(ev).is_some_and(|ts| ts > since) {
+                all_below_watermark = false;
+            }
+
             if let Some(parsed) = parse_usage_event(ev)
                 && parsed.timestamp_ms > since
             {
-                all_below_watermark = false;
                 all_events.push(parsed);
             }
         }
@@ -438,10 +426,57 @@ fn fetch_usage_events(
         }
     }
 
-    // Sort by timestamp ascending
     all_events.sort_by_key(|e| e.timestamp_ms);
+    Ok(UsageFetchResult {
+        events: all_events,
+        pages_fetched,
+    })
+}
 
-    Ok(all_events)
+/// Fetch usage events from Cursor's API with pagination.
+/// `since_ms`: only return events newer than this timestamp.
+/// `paginate_all`: when true, fetches all pages; when false, quick-sync mode.
+fn fetch_usage_events(
+    auth: &CursorAuth,
+    since_ms: Option<i64>,
+    paginate_all: bool,
+) -> Result<UsageFetchResult> {
+    let cookie = format!(
+        "WorkosCursorSessionToken={}%3A%3A{}",
+        auth.user_id, auth.jwt
+    );
+
+    // Keep API probes bounded so sync does not look "stuck" when Cursor's
+    // endpoint is slow/unreachable. We fall back to local transcript files.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_global(Some(Duration::from_secs(8)))
+        .build()
+        .into();
+
+    fetch_usage_events_with_page_loader(since_ms, paginate_all, |page| {
+        let body_json = if page == 1 {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"page": page})
+        };
+
+        let mut response = agent
+            .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+            .header("Cookie", &cookie)
+            .header("Origin", "https://cursor.com")
+            .header("Referer", "https://cursor.com/dashboard")
+            .send_json(body_json)
+            .with_context(|| format!("Cursor Usage API request failed (page {page})"))?;
+
+        let body: Value = response.body_mut().read_json()?;
+
+        Ok(body
+            .get("usageEventsDisplay")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    })
 }
 
 /// Find the session whose time range contains `ts_ms`, using strict containment
@@ -780,7 +815,8 @@ fn usage_events_to_messages(
 }
 
 /// Sync from Cursor's Usage API (exact per-request tokens and cost).
-/// `max_age_days`: Some(N) for quick sync (page 1 only), None for full history (all pages).
+/// `max_age_days`: Some(N) for quick sync (paginate until prior watermark),
+/// None for full history (all pages).
 fn sync_from_usage_api(
     conn: &mut Connection,
     pipeline: &mut crate::pipeline::Pipeline,
@@ -808,12 +844,12 @@ fn sync_from_usage_api(
             if ts > 0 { Some(ts) } else { None }
         });
 
-    // Quick sync (max_age_days=Some): fetch page 1 only (100 most recent events).
+    // Quick sync (max_age_days=Some): fetch pages until crossing prior watermark.
     // Full history (max_age_days=None): paginate all pages back to watermark.
     let paginate_all = max_age_days.is_none();
 
-    let events = match fetch_usage_events(&auth, watermark, paginate_all) {
-        Ok(e) => e,
+    let fetched = match fetch_usage_events(&auth, watermark, paginate_all) {
+        Ok(result) => result,
         Err(e) => {
             // API can be unavailable transiently (network/VPN/outage). Fall back
             // to local transcript files so Cursor sessions still appear.
@@ -824,12 +860,23 @@ fn sync_from_usage_api(
         }
     };
 
-    if events.is_empty() {
-        return Some(Ok((0, 0, Vec::new())));
+    let api_calls = fetched.pages_fetched.max(1) as usize;
+    let mut warnings = Vec::new();
+    if fetched.pages_fetched > 1 {
+        let diagnostic = format!(
+            "Cursor Usage API returned {} pages in one sync tick (watermark catch-up active)",
+            fetched.pages_fetched
+        );
+        tracing::info!("{diagnostic}");
+        warnings.push(diagnostic);
+    }
+
+    if fetched.events.is_empty() {
+        return Some(Ok((0, 0, warnings)));
     }
 
     let sessions = load_session_contexts(conn);
-    let mut messages = usage_events_to_messages(&events, &sessions);
+    let mut messages = usage_events_to_messages(&fetched.events, &sessions);
     let tags = pipeline.process(&mut messages);
     let count = match analytics::ingest_messages(conn, &messages, Some(&tags)) {
         Ok(c) => c,
@@ -837,16 +884,14 @@ fn sync_from_usage_api(
     };
 
     // Update watermark to latest event timestamp.
-    if let Some(newest_ts) = events.iter().map(|e| e.timestamp_ms).max() {
-        let _ = analytics::set_sync_offset(conn, watermark_key, newest_ts as usize);
+    if let Some(newest_ts) = fetched.events.iter().map(|e| e.timestamp_ms).max() {
+        match analytics::set_sync_offset(conn, watermark_key, newest_ts as usize) {
+            Ok(()) => {}
+            Err(e) => return Some(Err(e)),
+        }
     }
 
-    let api_calls = if paginate_all {
-        events.len().div_ceil(100).max(1)
-    } else {
-        1
-    };
-    Some(Ok((api_calls, count, Vec::new())))
+    Some(Ok((api_calls, count, warnings)))
 }
 
 /// Session repair and backfill that runs on every sync regardless of auth status.
@@ -1989,5 +2034,61 @@ mod tests {
         // cost_cents is None so CostEnricher will estimate
         assert_eq!(msgs[0].cost_cents, None);
         assert_eq!(msgs[0].cost_confidence, "estimated");
+    }
+
+    fn usage_event_json(ts_ms: i64) -> Value {
+        serde_json::json!({
+            "timestamp": ts_ms.to_string(),
+            "model": "composer-2-fast",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 0,
+                "totalCents": 0.2
+            }
+        })
+    }
+
+    #[test]
+    fn quick_sync_paginates_until_existing_watermark() {
+        // 200 new events after watermark=1000, spread across two full pages.
+        let page1: Vec<Value> = (1101..=1200).rev().map(usage_event_json).collect();
+        let page2: Vec<Value> = (1001..=1100).rev().map(usage_event_json).collect();
+        let page3: Vec<Value> = (901..=1000).rev().map(usage_event_json).collect();
+        let pages = vec![page1, page2, page3];
+
+        let fetched = fetch_usage_events_with_page_loader(Some(1000), false, |page| {
+            Ok(pages
+                .get((page.saturating_sub(1)) as usize)
+                .cloned()
+                .unwrap_or_default())
+        })
+        .unwrap();
+
+        assert_eq!(fetched.pages_fetched, 3);
+        assert_eq!(fetched.events.len(), 200);
+        assert_eq!(fetched.events.first().map(|e| e.timestamp_ms), Some(1001));
+        assert_eq!(fetched.events.last().map(|e| e.timestamp_ms), Some(1200));
+    }
+
+    #[test]
+    fn quick_sync_without_watermark_stays_on_page_one() {
+        let page1: Vec<Value> = (1101..=1200).rev().map(usage_event_json).collect();
+        let page2: Vec<Value> = (1001..=1100).rev().map(usage_event_json).collect();
+        let pages = vec![page1, page2];
+
+        let fetched = fetch_usage_events_with_page_loader(None, false, |page| {
+            Ok(pages
+                .get((page.saturating_sub(1)) as usize)
+                .cloned()
+                .unwrap_or_default())
+        })
+        .unwrap();
+
+        assert_eq!(fetched.pages_fetched, 1);
+        assert_eq!(fetched.events.len(), 100);
+        assert_eq!(fetched.events.first().map(|e| e.timestamp_ms), Some(1101));
+        assert_eq!(fetched.events.last().map(|e| e.timestamp_ms), Some(1200));
     }
 }
