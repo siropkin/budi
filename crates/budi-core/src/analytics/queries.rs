@@ -2,12 +2,28 @@
 //! tags, models, providers, cache efficiency, cost curves, and statusline stats.
 
 use anyhow::Result;
+use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use rusqlite::Connection;
 use std::collections::HashSet;
 
 use super::MessageRow;
 
 pub const UNTAGGED_DIMENSION: &str = "(untagged)";
+const ROLLUPS_HOURLY_TABLE: &str = "message_rollups_hourly";
+const ROLLUPS_DAILY_TABLE: &str = "message_rollups_daily";
+
+#[derive(Debug, Clone, Copy)]
+enum RollupLevel {
+    Hourly,
+    Daily,
+}
+
+#[derive(Debug, Clone)]
+struct RollupWindow {
+    level: RollupLevel,
+    since: Option<String>,
+    until: Option<String>,
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DimensionFilters {
@@ -177,6 +193,115 @@ fn apply_dimension_filters(
     append_in_condition(conditions, param_values, branch_expr, &filters.branches);
 }
 
+fn rollups_available(conn: &Connection) -> bool {
+    let hourly_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1)",
+            [ROLLUPS_HOURLY_TABLE],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    let daily_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1)",
+            [ROLLUPS_DAILY_TABLE],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    hourly_exists && daily_exists
+}
+
+fn parse_timestamp_boundary_utc(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(day) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return day
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+    None
+}
+
+fn is_day_aligned(ts: DateTime<Utc>) -> bool {
+    ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0
+}
+
+fn is_hour_aligned(ts: DateTime<Utc>) -> bool {
+    ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0
+}
+
+fn choose_rollup_window(
+    since: Option<&str>,
+    until: Option<&str>,
+    prefer_daily: bool,
+) -> Option<RollupWindow> {
+    let since_ts = since.and_then(parse_timestamp_boundary_utc);
+    let until_ts = until.and_then(parse_timestamp_boundary_utc);
+
+    if since.is_some() && since_ts.is_none() {
+        return None;
+    }
+    if until.is_some() && until_ts.is_none() {
+        return None;
+    }
+    if let (Some(s), Some(u)) = (since_ts, until_ts)
+        && s >= u
+    {
+        return None;
+    }
+
+    let day_aligned = since_ts.is_none_or(is_day_aligned) && until_ts.is_none_or(is_day_aligned);
+    if prefer_daily && day_aligned {
+        return Some(RollupWindow {
+            level: RollupLevel::Daily,
+            since: since_ts.map(|ts| ts.format("%Y-%m-%d").to_string()),
+            until: until_ts.map(|ts| ts.format("%Y-%m-%d").to_string()),
+        });
+    }
+
+    let hour_aligned = since_ts.is_none_or(is_hour_aligned) && until_ts.is_none_or(is_hour_aligned);
+    if hour_aligned {
+        return Some(RollupWindow {
+            level: RollupLevel::Hourly,
+            since: since_ts.map(|ts| ts.format("%Y-%m-%dT%H:00:00Z").to_string()),
+            until: until_ts.map(|ts| ts.format("%Y-%m-%dT%H:00:00Z").to_string()),
+        });
+    }
+
+    None
+}
+
+fn rollup_table(level: RollupLevel) -> &'static str {
+    match level {
+        RollupLevel::Hourly => ROLLUPS_HOURLY_TABLE,
+        RollupLevel::Daily => ROLLUPS_DAILY_TABLE,
+    }
+}
+
+fn rollup_time_column(level: RollupLevel) -> &'static str {
+    match level {
+        RollupLevel::Hourly => "bucket_start",
+        RollupLevel::Daily => "bucket_day",
+    }
+}
+
+fn append_rollup_time_filters(
+    conditions: &mut Vec<String>,
+    params: &mut Vec<String>,
+    window: &RollupWindow,
+) {
+    let time_col = rollup_time_column(window.level);
+    if let Some(s) = &window.since {
+        params.push(s.clone());
+        conditions.push(format!("{time_col} >= ?{}", params.len()));
+    }
+    if let Some(u) = &window.until {
+        params.push(u.clone());
+        conditions.push(format!("{time_col} < ?{}", params.len()));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Usage Summary
 // ---------------------------------------------------------------------------
@@ -261,6 +386,82 @@ pub fn usage_summary_filtered(
     usage_summary_with_filters(conn, since, until, provider, &filters)
 }
 
+fn usage_summary_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    provider: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<UsageSummary> {
+    let mut conditions = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, window);
+
+    if let Some(p) = provider {
+        params.push(p.to_string());
+        conditions.push(format!("provider = ?{}", params.len()));
+    }
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "provider",
+        "model",
+        "repo_id",
+        "git_branch",
+    );
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT
+            COALESCE(SUM(message_count), 0),
+            COALESCE(SUM(CASE WHEN role = 'user' THEN message_count ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN role = 'assistant' THEN message_count ELSE 0 END), 0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0)
+         FROM {} {where_clause}",
+        rollup_table(window.level)
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let (
+        total_messages,
+        total_user_messages,
+        total_assistant_messages,
+        total_input,
+        total_output,
+        total_cache_create,
+        total_cache_read,
+    ): (u64, u64, u64, u64, u64, u64, u64) = conn.query_row(&sql, param_refs.as_slice(), |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+        ))
+    })?;
+
+    Ok(UsageSummary {
+        total_messages,
+        total_user_messages,
+        total_assistant_messages,
+        total_input_tokens: total_input,
+        total_output_tokens: total_output,
+        total_cache_creation_tokens: total_cache_create,
+        total_cache_read_tokens: total_cache_read,
+    })
+}
+
 pub fn usage_summary_with_filters(
     conn: &Connection,
     since: Option<&str>,
@@ -268,6 +469,12 @@ pub fn usage_summary_with_filters(
     provider: Option<&str>,
     filters: &DimensionFilters,
 ) -> Result<UsageSummary> {
+    if rollups_available(conn)
+        && let Some(window) = choose_rollup_window(since, until, true)
+    {
+        return usage_summary_from_rollups(conn, &window, provider, filters);
+    }
+
     let mut conditions = Vec::new();
     let mut params: Vec<String> = Vec::new();
 
@@ -528,6 +735,81 @@ pub fn repo_usage(
     repo_usage_with_filters(conn, since, until, &filters, limit)
 }
 
+fn repo_usage_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<RepoUsage>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, window);
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "provider",
+        "model",
+        "repo_id",
+        "git_branch",
+    );
+    params.push(limit.to_string());
+    let limit_idx = params.len();
+    let repo_expr = normalized_project_expr("m.repo_id");
+    let sql = format!(
+        "WITH ranked AS (
+             SELECT repo_id as repo,
+                    COALESCE(SUM(message_count), 0) as cnt,
+                    COALESCE(SUM(input_tokens), 0) as inp,
+                    COALESCE(SUM(output_tokens), 0) as outp,
+                    COALESCE(SUM(cost_cents), 0.0) as cost
+             FROM {}
+             WHERE {}
+             GROUP BY repo
+             ORDER BY cost DESC
+             LIMIT ?{limit_idx}
+         )
+         SELECT ranked.repo,
+                COALESCE(
+                    (
+                        SELECT MIN(m.cwd)
+                        FROM messages m
+                        WHERE m.role = 'assistant'
+                          AND {repo_expr} = ranked.repo
+                    ),
+                    '(untagged)'
+                ) as display_path,
+                ranked.cnt,
+                ranked.inp,
+                ranked.outp,
+                ranked.cost
+         FROM ranked
+         ORDER BY ranked.cost DESC",
+        rollup_table(window.level),
+        conditions.join(" AND ")
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<RepoUsage> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(RepoUsage {
+                repo_id: row.get(0)?,
+                display_path: row.get(1)?,
+                message_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cost_cents: row.get(5)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 pub fn repo_usage_with_filters(
     conn: &Connection,
     since: Option<&str>,
@@ -535,6 +817,12 @@ pub fn repo_usage_with_filters(
     filters: &DimensionFilters,
     limit: usize,
 ) -> Result<Vec<RepoUsage>> {
+    if rollups_available(conn)
+        && let Some(window) = choose_rollup_window(since, until, true)
+    {
+        return repo_usage_from_rollups(conn, &window, filters, limit);
+    }
+
     // Build parameterized date + dimension filters.
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
@@ -640,6 +928,87 @@ pub fn activity_chart(
     activity_chart_with_filters(conn, since, until, &filters, granularity, tz_offset_min)
 }
 
+fn activity_chart_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    filters: &DimensionFilters,
+    granularity: &str,
+    tz_offset_min: i32,
+) -> Result<Vec<ActivityBucket>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, window);
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "provider",
+        "model",
+        "repo_id",
+        "git_branch",
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let time_col = rollup_time_column(window.level);
+
+    let group_expr = match window.level {
+        RollupLevel::Daily => match granularity {
+            "month" => format!("strftime('%Y-%m', {time_col})"),
+            _ => time_col.to_string(),
+        },
+        RollupLevel::Hourly => {
+            let hours = tz_offset_min / 60;
+            let mins = (tz_offset_min % 60).abs();
+            let sign = if tz_offset_min >= 0 { "+" } else { "-" };
+            let tz_adjust = if tz_offset_min != 0 {
+                format!(
+                    "datetime({time_col}, '{}{:02}:{:02}')",
+                    sign,
+                    hours.abs(),
+                    mins
+                )
+            } else {
+                time_col.to_string()
+            };
+            match granularity {
+                "hour" => format!("strftime('%H:00', {})", tz_adjust),
+                "month" => format!("strftime('%Y-%m', {})", tz_adjust),
+                _ => format!("date({})", tz_adjust),
+            }
+        }
+    };
+
+    let sql = format!(
+        "SELECT {group_expr} as bucket,
+                COALESCE(SUM(message_count), 0) as cnt,
+                COALESCE(SUM(input_tokens), 0) as inp,
+                COALESCE(SUM(output_tokens), 0) as outp,
+                COALESCE(SUM(cost_cents), 0.0) as cost
+         FROM {} {where_clause}
+         GROUP BY bucket
+         ORDER BY bucket",
+        rollup_table(window.level)
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(ActivityBucket {
+                label: row.get(0)?,
+                message_count: row.get(1)?,
+                tool_call_count: 0,
+                input_tokens: row.get(2)?,
+                output_tokens: row.get(3)?,
+                cost_cents: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 pub fn activity_chart_with_filters(
     conn: &Connection,
     since: Option<&str>,
@@ -648,6 +1017,13 @@ pub fn activity_chart_with_filters(
     granularity: &str,
     tz_offset_min: i32,
 ) -> Result<Vec<ActivityBucket>> {
+    if rollups_available(conn) {
+        let prefer_daily = tz_offset_min == 0 && granularity != "hour";
+        if let Some(window) = choose_rollup_window(since, until, prefer_daily) {
+            return activity_chart_from_rollups(conn, &window, filters, granularity, tz_offset_min);
+        }
+    }
+
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
     if let Some(s) = since
@@ -1316,6 +1692,67 @@ pub fn model_usage(
     model_usage_with_filters(conn, since, until, &filters, limit)
 }
 
+fn model_usage_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<ModelUsage>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, window);
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "provider",
+        "model",
+        "repo_id",
+        "git_branch",
+    );
+    params.push(limit.to_string());
+    let limit_idx = params.len();
+    let sql = format!(
+        "SELECT model as m,
+                provider as p,
+                COALESCE(SUM(message_count), 0) as cnt,
+                COALESCE(SUM(input_tokens), 0) as total_input,
+                COALESCE(SUM(output_tokens), 0) as total_output,
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
+         FROM {}
+         WHERE {}
+         GROUP BY m, p
+         ORDER BY 8 DESC
+         LIMIT ?{limit_idx}",
+        rollup_table(window.level),
+        conditions.join(" AND ")
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<ModelUsage> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(ModelUsage {
+                model: row.get(0)?,
+                provider: row.get(1)?,
+                message_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cost_cents: row.get(7)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 pub fn model_usage_with_filters(
     conn: &Connection,
     since: Option<&str>,
@@ -1323,6 +1760,12 @@ pub fn model_usage_with_filters(
     filters: &DimensionFilters,
     limit: usize,
 ) -> Result<Vec<ModelUsage>> {
+    if rollups_available(conn)
+        && let Some(window) = choose_rollup_window(since, until, true)
+    {
+        return model_usage_from_rollups(conn, &window, filters, limit);
+    }
+
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values: Vec<String> = Vec::new();
     if let Some(s) = since
@@ -1436,6 +1879,29 @@ pub struct StatuslineParams {
     pub project_dir: Option<String>,
 }
 
+fn assistant_cost_since_from_rollups(conn: &Connection, since: &str) -> Option<f64> {
+    if !rollups_available(conn) {
+        return None;
+    }
+    let window = choose_rollup_window(Some(since), None, false)?;
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, &window);
+    let sql = format!(
+        "SELECT COALESCE(SUM(cost_cents), 0.0)
+         FROM {}
+         WHERE {}",
+        rollup_table(window.level),
+        conditions.join(" AND ")
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    conn.query_row(&sql, param_refs.as_slice(), |r| r.get::<_, f64>(0))
+        .ok()
+}
+
 /// Compute cost stats for today/week/month, suitable for the CLI status line.
 /// Optionally computes session/branch/project costs when params are provided.
 pub fn statusline_stats(
@@ -1446,12 +1912,15 @@ pub fn statusline_stats(
     params: &StatuslineParams,
 ) -> Result<StatuslineStats> {
     fn cost_since(conn: &Connection, since: &str) -> f64 {
-        conn.query_row(
-            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE timestamp >= ?1 AND role = 'assistant'",
-            [since],
-            |r| r.get::<_, f64>(0),
-        )
-        .unwrap_or(0.0)
+        assistant_cost_since_from_rollups(conn, since)
+            .unwrap_or_else(|| {
+                conn.query_row(
+                    "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE timestamp >= ?1 AND role = 'assistant'",
+                    [since],
+                    |r| r.get::<_, f64>(0),
+                )
+                .unwrap_or(0.0)
+            })
             / 100.0
     }
 
@@ -1563,12 +2032,95 @@ pub fn provider_stats(
     provider_stats_with_filters(conn, since, until, &filters)
 }
 
+fn provider_stats_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    filters: &DimensionFilters,
+) -> Result<Vec<ProviderStats>> {
+    let mut conditions = vec!["role = 'assistant'".to_string()];
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, window);
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "provider",
+        "model",
+        "repo_id",
+        "git_branch",
+    );
+    let sql = format!(
+        "SELECT provider as p,
+                COALESCE(SUM(message_count), 0) as msgs,
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
+         FROM {}
+         WHERE {}
+         GROUP BY p
+         ORDER BY msgs DESC",
+        rollup_table(window.level),
+        conditions.join(" AND ")
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, u64>(5)?,
+                row.get::<_, f64>(6)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+
+    let providers = crate::provider::all_providers();
+    let mut result = Vec::new();
+    for (prov, messages, input, output, cache_create, cache_read, sum_cost_cents) in rows {
+        let display_name = providers
+            .iter()
+            .find(|p| p.name() == prov)
+            .map(|p| p.display_name().to_string())
+            .unwrap_or_else(|| prov.clone());
+        let estimated_cost = sum_cost_cents.round() / 100.0;
+        result.push(ProviderStats {
+            provider: prov,
+            display_name,
+            message_count: messages,
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: cache_create,
+            cache_read_tokens: cache_read,
+            estimated_cost,
+            total_cost_cents: sum_cost_cents,
+        });
+    }
+    Ok(result)
+}
+
 pub fn provider_stats_with_filters(
     conn: &Connection,
     since: Option<&str>,
     until: Option<&str>,
     filters: &DimensionFilters,
 ) -> Result<Vec<ProviderStats>> {
+    if rollups_available(conn)
+        && let Some(window) = choose_rollup_window(since, until, true)
+    {
+        return provider_stats_from_rollups(conn, &window, filters);
+    }
+
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut param_values = Vec::new();
     if let Some(s) = since
@@ -2067,6 +2619,12 @@ pub fn filter_options(
     until: Option<&str>,
     limit: Option<usize>,
 ) -> Result<FilterOptions> {
+    if rollups_available(conn)
+        && let Some(window) = choose_rollup_window(since, until, true)
+    {
+        return filter_options_from_rollups(conn, &window, limit);
+    }
+
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut params: Vec<String> = Vec::new();
     if let Some(s) = since
@@ -2152,5 +2710,54 @@ pub fn filter_options(
         models: distinct_values(conn, &models_sql, &params, limit)?,
         projects: distinct_values(conn, &projects_sql, &params, limit)?,
         branches: distinct_values(conn, &branches_sql, &params, limit)?,
+    })
+}
+
+fn filter_options_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    limit: Option<usize>,
+) -> Result<FilterOptions> {
+    fn distinct_rollup_values(
+        conn: &Connection,
+        window: &RollupWindow,
+        value_col: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<String>> {
+        let mut conditions = vec!["role = 'assistant'".to_string()];
+        let mut params: Vec<String> = Vec::new();
+        append_rollup_time_filters(&mut conditions, &mut params, window);
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
+        let mut limit_clause = String::new();
+        if let Some(limit_value) = limit {
+            params.push(limit_value.to_string());
+            limit_clause = format!("LIMIT ?{}", params.len());
+        }
+        let sql = format!(
+            "SELECT {value_col} as value
+             FROM {}
+             {where_clause}
+             GROUP BY value
+             ORDER BY SUM(message_count) DESC, value ASC
+             {limit_clause}",
+            rollup_table(window.level)
+        );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    Ok(FilterOptions {
+        agents: distinct_rollup_values(conn, window, "provider", limit)?,
+        models: distinct_rollup_values(conn, window, "model", limit)?,
+        projects: distinct_rollup_values(conn, window, "repo_id", limit)?,
+        branches: distinct_rollup_values(conn, window, "git_branch", limit)?,
     })
 }

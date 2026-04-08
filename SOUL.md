@@ -44,13 +44,13 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 Sources (JSONL files, OTEL spans, Cursor API, Hooks)
   -> Providers discover + parse -> ParsedMessage structs
   -> Pipeline: HookEnricher -> IdentityEnricher -> GitEnricher -> CostEnricher -> TagEnricher
-  -> SQLite (messages + tags tables)
+  -> SQLite (messages + tags + derived rollup tables)
   -> Dashboard / CLI stats / Statusline
 ```
 
 Enricher order is critical - each depends on prior enrichers. Do not reorder.
 
-### Database (SQLite, WAL mode, schema v20)
+### Database (SQLite, WAL mode, schema v21)
 
 Six tables, four data entities + two supporting:
 - **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
@@ -59,6 +59,8 @@ Six tables, four data entities + two supporting:
 - **otel_events** - Raw OpenTelemetry event storage for debugging/audit
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync
+- **message_rollups_hourly** - Derived hourly aggregates (provider/model/repo/branch/role dimensions) for low-latency analytics reads
+- **message_rollups_daily** - Derived daily aggregates for coarse-grained summaries and filter option scans
 
 ### Cost sources
 
@@ -73,6 +75,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 ### Key concepts
 
 - **cost_confidence**: determines `~` prefix in dashboard for non-exact costs
+- **Source of truth vs derived**: `messages` remains canonical; rollup tables are derived caches maintained incrementally via SQLite triggers during ingest/update/delete
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
 - **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
