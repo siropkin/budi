@@ -3,6 +3,7 @@ pub mod config;
 pub mod cost;
 pub mod hooks;
 pub mod identity;
+pub mod integrations;
 pub mod jsonl;
 pub mod migration;
 pub mod otel;

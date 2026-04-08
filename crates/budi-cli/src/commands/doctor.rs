@@ -467,66 +467,34 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     Ok(())
 }
 
-use super::{CC_HOOK_EVENTS, CURSOR_HOOK_EVENTS};
-
-/// Validate Claude Code hooks: check all expected events have a budi hook entry.
-/// Returns (ok, missing_events) — ok is true only when all events are correctly configured.
-fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
+/// Read and parse a JSON file, returning parsed value or an error description.
+fn read_json_file(path: &str) -> Result<serde_json::Value, Vec<String>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return (false, vec!["file not readable".into()]),
+        Err(_) => return Err(vec!["file not readable".into()]),
     };
-    let settings: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return (false, vec!["invalid JSON".into()]),
-    };
-    let hooks = match settings.get("hooks").and_then(|v| v.as_object()) {
-        Some(h) => h,
-        None => return (false, vec!["no hooks key".into()]),
-    };
-
-    let mut missing = Vec::new();
-    for event in CC_HOOK_EVENTS {
-        let ok = hooks
-            .get(*event)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(super::is_budi_cc_hook_entry))
-            .unwrap_or(false);
-        if !ok {
-            missing.push((*event).to_string());
-        }
+    match serde_json::from_str(&content) {
+        Ok(v) => Ok(v),
+        Err(_) => Err(vec!["invalid JSON".into()]),
     }
-    (missing.is_empty(), missing)
 }
 
-/// Validate Cursor hooks: check all expected events have a budi hook entry.
-/// Returns (ok, missing_events) — ok is true only when all events are correctly configured.
-fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return (false, vec!["file not readable".into()]),
-    };
-    let config: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return (false, vec!["invalid JSON".into()]),
-    };
-    let hooks = match config.get("hooks").and_then(|v| v.as_object()) {
-        Some(h) => h,
-        None => return (false, vec!["no hooks key".into()]),
-    };
-
-    let mut missing = Vec::new();
-    for event in CURSOR_HOOK_EVENTS {
-        let ok = hooks
-            .get(*event)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(super::is_budi_cursor_hook_entry))
-            .unwrap_or(false);
-        if !ok {
-            missing.push((*event).to_string());
-        }
+/// Validate Claude Code hooks from file path.
+/// Returns (ok, missing_events).
+fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
+    match read_json_file(path) {
+        Ok(settings) => budi_core::integrations::validate_cc_hooks(&settings),
+        Err(errs) => (false, errs),
     }
-    (missing.is_empty(), missing)
+}
+
+/// Validate Cursor hooks from file path.
+/// Returns (ok, missing_events).
+fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
+    match read_json_file(path) {
+        Ok(config) => budi_core::integrations::validate_cursor_hooks(&config),
+        Err(errs) => (false, errs),
+    }
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
@@ -560,7 +528,7 @@ fn integrity_check_mode_label(deep: bool) -> &'static str {
     }
 }
 
-/// Check if OTEL env vars are correctly configured in Claude Code settings.
+/// Check if OTEL env vars are correctly configured in Claude Code settings file.
 fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
     let Ok(raw) = std::fs::read_to_string(settings_path) else {
         return false;
@@ -568,30 +536,10 @@ fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
     let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return false;
     };
-    let Some(env) = settings.get("env").and_then(|e| e.as_object()) else {
-        return false;
-    };
-
-    let expected_endpoint = format!("http://127.0.0.1:{}", config.daemon_port);
-    let checks = [
-        ("CLAUDE_CODE_ENABLE_TELEMETRY", Some("1")),
-        (
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            Some(expected_endpoint.as_str()),
-        ),
-        ("OTEL_EXPORTER_OTLP_PROTOCOL", Some("http/json")),
-        ("OTEL_METRICS_EXPORTER", Some("otlp")),
-        ("OTEL_LOGS_EXPORTER", Some("otlp")),
-    ];
-
-    checks.iter().all(|(key, expected_val)| {
-        env.get(*key)
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| expected_val.is_none_or(|exp| v == exp))
-    })
+    budi_core::integrations::check_otel_config(&settings, config.daemon_port)
 }
 
-/// Check if the budi MCP server is configured in Claude Code settings.
+/// Check if the budi MCP server is configured in Claude Code settings file.
 fn check_mcp_config(settings_path: &str) -> bool {
     let Ok(raw) = std::fs::read_to_string(settings_path) else {
         return false;
@@ -599,12 +547,7 @@ fn check_mcp_config(settings_path: &str) -> bool {
     let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return false;
     };
-    settings
-        .get("mcpServers")
-        .and_then(|m| m.get("budi"))
-        .and_then(|b| b.get("command"))
-        .and_then(|c| c.as_str())
-        .is_some_and(|c| c.contains("budi"))
+    budi_core::integrations::check_mcp_config(&settings)
 }
 
 fn hook_log_path_hint() -> String {

@@ -942,61 +942,21 @@ pub fn claude_hooks_installed() -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
     };
-    let Some(hooks) = settings.get("hooks").and_then(|v| v.as_object()) else {
-        return false;
-    };
-    for event in super::CC_HOOK_EVENTS {
-        let ok = hooks
-            .get(*event)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(super::is_budi_cc_hook_entry))
-            .unwrap_or(false);
-        if !ok {
-            return false;
-        }
-    }
-    true
+    budi_core::integrations::validate_cc_hooks(&settings).0
 }
 
 pub fn claude_mcp_installed() -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
     };
-    let Some(budi) = settings.get("mcpServers").and_then(|m| m.get("budi")) else {
-        return false;
-    };
-    budi.get("command")
-        .and_then(|c| c.as_str())
-        .is_some_and(|c| c.contains("budi"))
-        && budi
-            .get("args")
-            .and_then(|a| a.as_array())
-            .is_some_and(|args| args.iter().any(|a| a.as_str() == Some("mcp-serve")))
+    budi_core::integrations::check_mcp_config(&settings)
 }
 
 pub fn claude_otel_installed(config: &config::BudiConfig) -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
     };
-    let Some(env) = settings.get("env").and_then(|e| e.as_object()) else {
-        return false;
-    };
-    let expected_endpoint = format!("http://127.0.0.1:{}", config.daemon_port);
-    let checks = [
-        ("CLAUDE_CODE_ENABLE_TELEMETRY", Some("1")),
-        (
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            Some(expected_endpoint.as_str()),
-        ),
-        ("OTEL_EXPORTER_OTLP_PROTOCOL", Some("http/json")),
-        ("OTEL_METRICS_EXPORTER", Some("otlp")),
-        ("OTEL_LOGS_EXPORTER", Some("otlp")),
-    ];
-    checks.iter().all(|(key, expected_val)| {
-        env.get(*key)
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| expected_val.is_none_or(|exp| v == exp))
-    })
+    budi_core::integrations::check_otel_config(&settings, config.daemon_port)
 }
 
 pub fn cursor_hooks_installed() -> bool {
@@ -1013,20 +973,7 @@ pub fn cursor_hooks_installed() -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    let Some(hooks) = cfg.get("hooks").and_then(|v| v.as_object()) else {
-        return false;
-    };
-    for event in super::CURSOR_HOOK_EVENTS {
-        let ok = hooks
-            .get(*event)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(super::is_budi_cursor_hook_entry))
-            .unwrap_or(false);
-        if !ok {
-            return false;
-        }
-    }
-    true
+    budi_core::integrations::validate_cursor_hooks(&cfg).0
 }
 
 pub fn starship_installed() -> bool {

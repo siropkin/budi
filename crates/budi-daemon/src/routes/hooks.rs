@@ -395,51 +395,7 @@ pub async fn health_integrations()
     use super::analytics::{DatabaseStats, IntegrationPaths, IntegrationsResponse};
 
     let result = tokio::task::spawn_blocking(|| -> IntegrationsResponse {
-        const CC_HOOK_EVENTS: &[&str] = &[
-            "SessionStart",
-            "SessionEnd",
-            "PostToolUse",
-            "SubagentStop",
-            "PreCompact",
-            "Stop",
-            "UserPromptSubmit",
-        ];
-        const CURSOR_HOOK_EVENTS: &[&str] = &[
-            "sessionStart",
-            "sessionEnd",
-            "postToolUse",
-            "subagentStop",
-            "preCompact",
-            "stop",
-            "afterFileEdit",
-            "beforeSubmitPrompt",
-        ];
-
-        let is_budi_cc_hook_entry = |entry: &serde_json::Value| -> bool {
-            entry
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .map(|hooks| {
-                    hooks.iter().any(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(|cmd| {
-                                let trimmed = cmd.trim();
-                                trimmed == "budi hook" || trimmed.starts_with("budi hook ")
-                            })
-                    })
-                })
-                .unwrap_or(false)
-        };
-        let is_budi_cursor_hook_entry = |entry: &serde_json::Value| -> bool {
-            entry
-                .get("command")
-                .and_then(|c| c.as_str())
-                .is_some_and(|cmd| {
-                    let trimmed = cmd.trim();
-                    trimmed == "budi hook" || trimmed.starts_with("budi hook ")
-                })
-        };
+        use budi_core::integrations;
 
         let home = budi_core::config::home_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -453,54 +409,18 @@ pub async fn health_integrations()
 
         let hooks_installed = claude_settings
             .as_ref()
-            .and_then(|s| s.get("hooks").and_then(|h| h.as_object()))
-            .is_some_and(|hooks| {
-                CC_HOOK_EVENTS.iter().all(|event| {
-                    hooks
-                        .get(*event)
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().any(is_budi_cc_hook_entry))
-                        .unwrap_or(false)
-                })
-            });
+            .map(|s| integrations::validate_cc_hooks(s).0)
+            .unwrap_or(false);
 
         let mcp_installed = claude_settings
             .as_ref()
-            .and_then(|s| s.get("mcpServers"))
-            .and_then(|m| m.get("budi"))
-            .is_some_and(|budi| {
-                budi.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|cmd| cmd.contains("budi"))
-                    && budi
-                        .get("args")
-                        .and_then(|a| a.as_array())
-                        .is_some_and(|args| args.iter().any(|a| a.as_str() == Some("mcp-serve")))
-            });
+            .map(|s| integrations::check_mcp_config(s))
+            .unwrap_or(false);
 
         let otel_installed = claude_settings
             .as_ref()
-            .and_then(|s| s.get("env").and_then(|e| e.as_object()))
-            .is_some_and(|env| {
-                let endpoint_ok = env
-                    .get("OTEL_EXPORTER_OTLP_ENDPOINT")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|url| {
-                        let lower = url.to_lowercase();
-                        lower.contains("127.0.0.1") || lower.contains("localhost")
-                    });
-                endpoint_ok
-                    && env
-                        .get("CLAUDE_CODE_ENABLE_TELEMETRY")
-                        .and_then(|v| v.as_str())
-                        == Some("1")
-                    && env
-                        .get("OTEL_EXPORTER_OTLP_PROTOCOL")
-                        .and_then(|v| v.as_str())
-                        == Some("http/json")
-                    && env.get("OTEL_METRICS_EXPORTER").and_then(|v| v.as_str()) == Some("otlp")
-                    && env.get("OTEL_LOGS_EXPORTER").and_then(|v| v.as_str()) == Some("otlp")
-            });
+            .map(|s| integrations::check_otel_config_loose(s))
+            .unwrap_or(false);
 
         let statusline_installed = claude_settings
             .as_ref()
@@ -515,16 +435,8 @@ pub async fn health_integrations()
         let cursor_hooks = std::fs::read_to_string(&cursor_path)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.get("hooks").and_then(|h| h.as_object()).cloned())
-            .is_some_and(|hooks| {
-                CURSOR_HOOK_EVENTS.iter().all(|event| {
-                    hooks
-                        .get(*event)
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().any(is_budi_cursor_hook_entry))
-                        .unwrap_or(false)
-                })
-            });
+            .map(|config| integrations::validate_cursor_hooks(&config).0)
+            .unwrap_or(false);
 
         // Cursor extension
         let cursor_extension = is_cursor_extension_installed(&home);

@@ -20,64 +20,12 @@ pub mod uninstall;
 pub mod update;
 
 // ---------------------------------------------------------------------------
-// Hook event constants — single source of truth for init, doctor, uninstall
+// Hook event constants and detection helpers — re-exported from budi-core
 // ---------------------------------------------------------------------------
 
-/// Claude Code hook events (PascalCase).
-pub const CC_HOOK_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "PostToolUse",
-    "SubagentStop",
-    "PreCompact",
-    "Stop",
-    "UserPromptSubmit",
-];
-
-/// Cursor hook events (camelCase).
-pub const CURSOR_HOOK_EVENTS: &[&str] = &[
-    "sessionStart",
-    "sessionEnd",
-    "postToolUse",
-    "subagentStop",
-    "preCompact",
-    "stop",
-    "afterFileEdit",
-    "beforeSubmitPrompt",
-];
-
-// ---------------------------------------------------------------------------
-// Hook detection helpers — shared by init, doctor, uninstall
-// ---------------------------------------------------------------------------
-
-/// Match any variant of the budi hook command (with or without `|| true` wrapper).
-pub fn is_budi_hook_cmd(cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    trimmed == "budi hook" || trimmed.starts_with("budi hook ")
-}
-
-/// Check if a Claude Code hook entry (nested format) contains a budi hook command.
-pub fn is_budi_cc_hook_entry(entry: &Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(is_budi_hook_cmd)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Check if a Cursor hook entry (flat format) contains a budi hook command.
-pub fn is_budi_cursor_hook_entry(entry: &Value) -> bool {
-    entry
-        .get("command")
-        .and_then(|c| c.as_str())
-        .is_some_and(is_budi_hook_cmd)
-}
+pub use budi_core::integrations::{
+    CC_HOOK_EVENTS, CURSOR_HOOK_EVENTS, is_budi_cc_hook_entry, is_budi_cursor_hook_entry,
+};
 
 // ---------------------------------------------------------------------------
 // JSON file I/O helpers
