@@ -394,6 +394,39 @@ The daemon is the single source of truth — the CLI never opens the database di
 </details>
 
 <details>
+<summary>Privacy & Retention</summary>
+
+budi is local-first, but you can now enforce tighter storage controls for raw payloads and session metadata.
+
+**Privacy mode (`BUDI_PRIVACY_MODE`):**
+
+| Value | Behavior |
+|------|----------|
+| `full` (default) | Store raw values as-is |
+| `hash` | Hash sensitive fields (for example `user_email`, `cwd`, and workspace paths) before storage |
+| `omit` | Do not store sensitive raw/session fields |
+
+**Retention controls:**
+
+| Env var | Default | Scope |
+|--------|---------|-------|
+| `BUDI_RETENTION_RAW_DAYS` | `30` | `hook_events.raw_json`, `otel_events.raw_json`, `sessions.raw_json` |
+| `BUDI_RETENTION_SESSION_METADATA_DAYS` | `90` | `sessions.user_email`, `sessions.workspace_root` |
+
+Use `off` to disable a retention window for a category.
+
+Retention cleanup runs automatically after sync, hook ingestion, and OTEL ingestion.
+
+**At-rest protection (SQLCipher strategy):**
+- Current default uses bundled SQLite (WAL) for broad compatibility and easy installs.
+- If you need encrypted-at-rest local DBs (shared/managed machines), use one of these strategies:
+  - build budi against SQLCipher-enabled SQLite (`libsqlite3-sys` SQLCipher build),
+  - or place the budi data directory on an encrypted volume (FileVault, LUKS, BitLocker).
+- SQLCipher integration is feasible but has tradeoffs (key management UX, packaging complexity, migration path from existing plaintext DBs), so default remains plain SQLite for now.
+
+</details>
+
+<details>
 <summary>Hooks</summary>
 
 Both Claude Code and Cursor support lifecycle hooks that budi uses for real-time event capture. Hooks are installed automatically by `budi init` into `~/.claude/settings.json` and `~/.cursor/hooks.json`. They are non-blocking (`async: true`) and wrapped with `|| true` so that budi can never interfere with your coding agent — even if budi crashes or is uninstalled.

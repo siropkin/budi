@@ -8,6 +8,7 @@ pub mod jsonl;
 pub mod migration;
 pub mod otel;
 pub mod pipeline;
+pub mod privacy;
 pub mod provider;
 pub mod providers;
 pub mod repo_id;

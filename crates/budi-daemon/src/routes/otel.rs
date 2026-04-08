@@ -34,6 +34,9 @@ pub async fn otel_logs_ingest(Json(payload): Json<serde_json::Value>) -> StatusC
                     if n > 0 {
                         tracing::debug!("OTEL: ingested {n} api_request events");
                     }
+                    if let Err(e) = budi_core::privacy::enforce_retention(&conn) {
+                        tracing::warn!("Privacy retention cleanup failed after OTEL ingest: {e}");
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("OTEL ingestion error: {e}");

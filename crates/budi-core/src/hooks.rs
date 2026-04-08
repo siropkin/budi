@@ -290,6 +290,16 @@ pub fn resolve_hook_message_link(
 
 /// Insert a hook event into the `hook_events` table.
 pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
+    let policy = crate::privacy::load_privacy_policy();
+    ingest_hook_event_with_policy(conn, event, &policy)
+}
+
+/// Insert a hook event using an explicit privacy policy.
+pub fn ingest_hook_event_with_policy(
+    conn: &Connection,
+    event: &HookEvent,
+    policy: &crate::privacy::PrivacyPolicy,
+) -> Result<()> {
     if let (Some(session_id), Some(tool_use_id)) =
         (event.session_id.as_deref(), event.tool_use_id.as_deref())
         && event.event == "post_tool_use"
@@ -327,6 +337,7 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(link_confidence);
+    let raw_json = crate::privacy::sanitize_hook_raw_json(&event.raw_json, policy.mode);
 
     conn.execute(
         "INSERT INTO hook_events (
@@ -344,7 +355,7 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
             event.tool_name,
             event.tool_duration_ms,
             event.tool_call_count,
-            event.raw_json,
+            raw_json,
             event.mcp_server,
             message_id,
             event.message_request_id,
@@ -361,9 +372,25 @@ pub fn ingest_hook_event(conn: &Connection, event: &HookEvent) -> Result<()> {
 /// since some providers (e.g. Cursor) may not send session_start at all.
 /// Then applies event-specific updates on top.
 pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
+    let policy = crate::privacy::load_privacy_policy();
+    upsert_session_with_policy(conn, event, &policy)
+}
+
+/// Upsert a session record using an explicit privacy policy.
+pub fn upsert_session_with_policy(
+    conn: &Connection,
+    event: &HookEvent,
+    policy: &crate::privacy::PrivacyPolicy,
+) -> Result<()> {
     let Some(ref sid) = event.session_id else {
         return Ok(()); // No session_id → can't create session
     };
+
+    let workspace_root =
+        crate::privacy::minimize_sensitive_field(event.workspace_root.as_deref(), policy.mode);
+    let user_email =
+        crate::privacy::minimize_sensitive_field(event.user_email.as_deref(), policy.mode);
+    let raw_json = crate::privacy::sanitize_hook_raw_json(&event.raw_json, policy.mode);
 
     // Ensure a session row exists regardless of which event arrives first.
     // Cursor often sends post_tool_use before (or instead of) session_start.
@@ -374,7 +401,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
             sid,
             event.provider,
             event.timestamp.to_rfc3339(),
-            event.workspace_root,
+            workspace_root.as_deref(),
             event.repo_id,
             event.git_branch,
         ],
@@ -399,10 +426,10 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     event.timestamp.to_rfc3339(),
                     event.composer_mode,
                     event.permission_mode,
-                    event.user_email,
-                    event.workspace_root,
+                    user_email,
+                    workspace_root,
                     event.model,
-                    event.raw_json,
+                    raw_json,
                     event.repo_id,
                     event.git_branch,
                 ],
@@ -425,7 +452,7 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     event.duration_ms,
                     event.end_reason,
                     event.model,
-                    event.user_email,
+                    user_email,
                     event.repo_id,
                     event.git_branch,
                 ],
@@ -445,8 +472,8 @@ pub fn upsert_session(conn: &Connection, event: &HookEvent) -> Result<()> {
                     sid,
                     event.timestamp.to_rfc3339(),
                     event.model,
-                    event.user_email,
-                    event.workspace_root,
+                    user_email,
+                    workspace_root,
                     event.repo_id,
                     event.git_branch,
                 ],
@@ -1663,6 +1690,120 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn upsert_session_with_omit_policy_drops_sensitive_storage_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL DEFAULT 'claude_code',
+                started_at TEXT, ended_at TEXT, duration_ms INTEGER,
+                composer_mode TEXT, permission_mode TEXT, user_email TEXT,
+                workspace_root TEXT, end_reason TEXT, prompt_category TEXT,
+                model TEXT, raw_json TEXT, repo_id TEXT, git_branch TEXT
+            );",
+        )
+        .unwrap();
+
+        let event = HookEvent {
+            provider: "claude_code".to_string(),
+            event: "session_start".to_string(),
+            session_id: Some("sess-privacy".to_string()),
+            timestamp: Utc::now(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            duration_ms: None,
+            composer_mode: None,
+            permission_mode: Some("default".to_string()),
+            workspace_root: Some("/Users/alice/repo".to_string()),
+            user_email: Some("alice@example.com".to_string()),
+            end_reason: None,
+            tool_name: None,
+            tool_duration_ms: None,
+            tool_call_count: None,
+            repo_id: Some("github.com/acme/repo".to_string()),
+            git_branch: Some("main".to_string()),
+            mcp_server: None,
+            message_id: None,
+            message_request_id: None,
+            tool_use_id: None,
+            link_confidence: Some(HOOK_LINK_UNLINKED.to_string()),
+            raw_json: r#"{"user_email":"alice@example.com","cwd":"/Users/alice/repo"}"#.to_string(),
+        };
+        let policy = crate::privacy::PrivacyPolicy {
+            mode: crate::privacy::PrivacyMode::Omit,
+            raw_retention_days: None,
+            session_metadata_retention_days: None,
+        };
+
+        upsert_session_with_policy(&conn, &event, &policy).unwrap();
+
+        let (user_email, workspace_root, raw_json): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT user_email, workspace_root, raw_json
+                 FROM sessions WHERE id = 'sess-privacy'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(user_email.is_none());
+        assert!(workspace_root.is_none());
+        assert!(raw_json.is_none());
+    }
+
+    #[test]
+    fn ingest_hook_event_with_hash_policy_sanitizes_raw_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&conn).unwrap();
+
+        let event = HookEvent {
+            provider: "claude_code".to_string(),
+            event: "session_start".to_string(),
+            session_id: Some("sess-privacy-raw".to_string()),
+            timestamp: Utc::now(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            duration_ms: None,
+            composer_mode: None,
+            permission_mode: None,
+            workspace_root: Some("/Users/dev/repo".to_string()),
+            user_email: Some("dev@example.com".to_string()),
+            end_reason: None,
+            tool_name: None,
+            tool_duration_ms: None,
+            tool_call_count: None,
+            repo_id: None,
+            git_branch: None,
+            mcp_server: None,
+            message_id: None,
+            message_request_id: None,
+            tool_use_id: None,
+            link_confidence: Some(HOOK_LINK_UNLINKED.to_string()),
+            raw_json: r#"{"user_email":"dev@example.com","cwd":"/Users/dev/repo"}"#.to_string(),
+        };
+        let policy = crate::privacy::PrivacyPolicy {
+            mode: crate::privacy::PrivacyMode::Hash,
+            raw_retention_days: None,
+            session_metadata_retention_days: None,
+        };
+
+        ingest_hook_event_with_policy(&conn, &event, &policy).unwrap();
+
+        let raw_json: Option<String> = conn
+            .query_row(
+                "SELECT raw_json FROM hook_events WHERE session_id = 'sess-privacy-raw'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let raw_json = raw_json.expect("raw_json should be stored in hash mode");
+        assert!(!raw_json.contains("dev@example.com"));
+        assert!(!raw_json.contains("/Users/dev/repo"));
+        assert!(raw_json.contains("sha256:"));
     }
 
     #[test]
