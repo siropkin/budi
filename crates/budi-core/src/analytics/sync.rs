@@ -1,11 +1,17 @@
 //! Sync pipeline: discovers transcript files across providers and ingests them.
 
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::Result;
 use rusqlite::Connection;
 
-use super::{get_sync_offset, ingest_messages_with_sync, mark_sync_completed, set_sync_offset};
+use super::{
+    Tag, get_sync_offset, ingest_messages_with_sync, mark_sync_completed, set_sync_offset,
+};
+use crate::jsonl::ParsedMessage;
+
+const INGEST_BATCH_SIZE: usize = 1000;
 
 /// Quick sync: only files modified in the last 30 days.
 /// Used by `budi sync` and the daemon's 30s auto-sync.
@@ -32,6 +38,7 @@ fn sync_with_max_age(
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
     let mut total_files = 0;
     let mut total_messages = 0;
+    let mut cursor_file_messages_ingested = 0usize;
     let mut warnings: Vec<String> = Vec::new();
 
     let cutoff = max_age_days
@@ -73,8 +80,8 @@ fn sync_with_max_age(
             let path_str = file_path.display().to_string();
             let offset = get_sync_offset(conn, &path_str)?;
 
-            let content = match std::fs::read_to_string(file_path) {
-                Ok(c) => c,
+            let (content, parse_start_offset) = match read_transcript_tail(file_path, offset) {
+                Ok(slice) => slice,
                 Err(e) => {
                     tracing::warn!("Skipping {}: {e}", file_path.display());
                     warnings.push(format!("Skipped {}: {e}", file_path.display()));
@@ -82,95 +89,102 @@ fn sync_with_max_age(
                 }
             };
 
-            if offset >= content.len() {
+            if content.is_empty() {
                 continue; // Already fully synced.
             }
 
-            let (mut messages, new_offset) = provider.parse_file(file_path, &content, offset)?;
+            // Parse only newly appended content. The parser offset is relative to
+            // this slice, so we add the original file offset back afterward.
+            let (mut messages, relative_offset) = provider.parse_file(file_path, &content, 0)?;
+            let new_offset = parse_start_offset.saturating_add(relative_offset);
             if messages.is_empty() {
                 set_sync_offset(conn, &path_str, new_offset)?;
                 continue;
             }
 
             let tags = pipeline.process(&mut messages);
-            let count = ingest_messages_with_sync(
-                conn,
-                &messages,
-                Some(&tags),
-                Some((&path_str, new_offset)),
-            )?;
+            let count = ingest_in_batches(conn, &messages, &tags, &path_str, new_offset)?;
 
             if count > 0 {
                 total_files += 1;
                 total_messages += count;
+                if provider.name() == "cursor" {
+                    cursor_file_messages_ingested += count;
+                }
             }
         }
     }
 
-    // Repair messages with NULL git_branch from two sources:
-    // 1) The session row itself (populated by hooks or earlier ingestion)
-    // 2) Sibling messages in the same session (e.g., user entries in CC JSONL
-    //    carry gitBranch but assistant entries may not if parsed by older code)
-    let repaired_from_session = conn
-        .execute(
-            "UPDATE messages SET git_branch = (
-            SELECT s.git_branch FROM sessions s WHERE s.id = messages.session_id
-         )
-         WHERE git_branch IS NULL
-           AND session_id IS NOT NULL
-           AND timestamp >= datetime('now', '-30 days')
-           AND EXISTS (
-             SELECT 1 FROM sessions s
-             WHERE s.id = messages.session_id
-               AND s.git_branch IS NOT NULL AND s.git_branch != ''
-           )",
-            [],
-        )
-        .unwrap_or(0);
-    let repaired_from_siblings = conn
-        .execute(
-            "UPDATE messages SET git_branch = (
-            SELECT m2.git_branch FROM messages m2
-            WHERE m2.session_id = messages.session_id
-              AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
-            LIMIT 1
-         )
-         WHERE git_branch IS NULL
-           AND session_id IS NOT NULL
-           AND timestamp >= datetime('now', '-30 days')
-           AND EXISTS (
-             SELECT 1 FROM messages m2
-             WHERE m2.session_id = messages.session_id
-               AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
-           )",
-            [],
-        )
-        .unwrap_or(0);
-    let repaired = repaired_from_session + repaired_from_siblings;
-    if repaired > 0 {
-        tracing::info!(
-            "Repaired git_branch on {repaired} messages ({repaired_from_session} from sessions, {repaired_from_siblings} from siblings)"
-        );
+    if cursor_file_messages_ingested > 0 {
+        crate::providers::cursor::run_cursor_repairs(conn);
     }
 
-    // Backfill ticket_id / ticket_prefix tags for messages that have a
-    // git_branch containing a ticket pattern but no ticket_id tag yet.
-    let tickets_backfilled = backfill_ticket_tags(conn);
-    if tickets_backfilled > 0 {
-        tracing::info!("Backfilled ticket_id tags on {tickets_backfilled} messages");
-    }
+    if total_messages > 0 {
+        // Repair messages with NULL git_branch from two sources:
+        // 1) The session row itself (populated by hooks or earlier ingestion)
+        // 2) Sibling messages in the same session (e.g., user entries in CC JSONL
+        //    carry gitBranch but assistant entries may not if parsed by older code)
+        let repaired_from_session = conn
+            .execute(
+                "UPDATE messages SET git_branch = (
+                SELECT s.git_branch FROM sessions s WHERE s.id = messages.session_id
+             )
+             WHERE git_branch IS NULL
+               AND session_id IS NOT NULL
+               AND timestamp >= datetime('now', '-30 days')
+               AND EXISTS (
+                 SELECT 1 FROM sessions s
+                 WHERE s.id = messages.session_id
+                   AND s.git_branch IS NOT NULL AND s.git_branch != ''
+               )",
+                [],
+            )
+            .unwrap_or(0);
+        let repaired_from_siblings = conn
+            .execute(
+                "UPDATE messages SET git_branch = (
+                SELECT m2.git_branch FROM messages m2
+                WHERE m2.session_id = messages.session_id
+                  AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
+                LIMIT 1
+             )
+             WHERE git_branch IS NULL
+               AND session_id IS NOT NULL
+               AND timestamp >= datetime('now', '-30 days')
+               AND EXISTS (
+                 SELECT 1 FROM messages m2
+                 WHERE m2.session_id = messages.session_id
+                   AND m2.git_branch IS NOT NULL AND m2.git_branch != ''
+               )",
+                [],
+            )
+            .unwrap_or(0);
+        let repaired = repaired_from_session + repaired_from_siblings;
+        if repaired > 0 {
+            tracing::info!(
+                "Repaired git_branch on {repaired} messages ({repaired_from_session} from sessions, {repaired_from_siblings} from siblings)"
+            );
+        }
 
-    let removed_legacy_auto_tags = cleanup_legacy_auto_tags(conn);
-    if removed_legacy_auto_tags > 0 {
-        tracing::info!(
-            "Removed {removed_legacy_auto_tags} legacy auto tags (dominant_tool/repo/branch)"
-        );
-    }
+        // Backfill ticket_id / ticket_prefix tags for messages that have a
+        // git_branch containing a ticket pattern but no ticket_id tag yet.
+        let tickets_backfilled = backfill_ticket_tags(conn);
+        if tickets_backfilled > 0 {
+            tracing::info!("Backfilled ticket_id tags on {tickets_backfilled} messages");
+        }
 
-    // Backfill session titles from provider-specific sources.
-    let titles_backfilled = backfill_session_titles(conn);
-    if titles_backfilled > 0 {
-        tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
+        let removed_legacy_auto_tags = cleanup_legacy_auto_tags(conn);
+        if removed_legacy_auto_tags > 0 {
+            tracing::info!(
+                "Removed {removed_legacy_auto_tags} legacy auto tags (dominant_tool/repo/branch)"
+            );
+        }
+
+        // Backfill session titles from provider-specific sources.
+        let titles_backfilled = backfill_session_titles(conn);
+        if titles_backfilled > 0 {
+            tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
+        }
     }
 
     if let Err(e) = crate::privacy::enforce_retention(conn) {
@@ -179,6 +193,64 @@ fn sync_with_max_age(
 
     mark_sync_completed(conn)?;
     Ok((total_files, total_messages, warnings))
+}
+
+fn ingest_in_batches(
+    conn: &mut Connection,
+    messages: &[ParsedMessage],
+    tags: &[Vec<Tag>],
+    path_str: &str,
+    new_offset: usize,
+) -> Result<usize> {
+    debug_assert_eq!(messages.len(), tags.len());
+    let mut total = 0usize;
+
+    let mut start = 0usize;
+    while start < messages.len() {
+        let end = (start + INGEST_BATCH_SIZE).min(messages.len());
+        let sync_file = if end == messages.len() {
+            Some((path_str, new_offset))
+        } else {
+            None
+        };
+        total += ingest_messages_with_sync(
+            conn,
+            &messages[start..end],
+            Some(&tags[start..end]),
+            sync_file,
+        )?;
+        start = end;
+    }
+
+    Ok(total)
+}
+
+fn read_transcript_tail(
+    file_path: &std::path::Path,
+    stored_offset: usize,
+) -> Result<(String, usize)> {
+    let file_len = std::fs::metadata(file_path)?.len() as usize;
+    let effective_offset = if stored_offset > file_len {
+        tracing::info!(
+            "Transcript shrank, resetting offset for {} (stored={}, len={})",
+            file_path.display(),
+            stored_offset,
+            file_len
+        );
+        0
+    } else {
+        stored_offset
+    };
+
+    if effective_offset == file_len {
+        return Ok((String::new(), effective_offset));
+    }
+
+    let mut file = std::fs::File::open(file_path)?;
+    file.seek(SeekFrom::Start(effective_offset as u64))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok((content, effective_offset))
 }
 
 /// Scan assistant messages with a git_branch but no ticket_id tag,
@@ -492,5 +564,47 @@ fn truncate_title(text: &str, max_len: usize) -> String {
             end -= 1;
         }
         format!("{}…", &clean[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_transcript_tail;
+
+    fn temp_file_path(test_name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "budi-sync-{test_name}-{}-{nanos}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn read_transcript_tail_starts_from_offset() {
+        let path = temp_file_path("offset");
+        std::fs::write(&path, "line1\nline2\n").expect("should write test file");
+
+        let (content, effective_offset) =
+            read_transcript_tail(&path, 6).expect("should read transcript tail");
+        assert_eq!(effective_offset, 6);
+        assert_eq!(content, "line2\n");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_transcript_tail_resets_offset_after_truncate() {
+        let path = temp_file_path("truncate");
+        std::fs::write(&path, "short\n").expect("should write test file");
+
+        let (content, effective_offset) =
+            read_transcript_tail(&path, 100).expect("should read transcript tail");
+        assert_eq!(effective_offset, 0);
+        assert_eq!(content, "short\n");
+
+        let _ = std::fs::remove_file(path);
     }
 }
