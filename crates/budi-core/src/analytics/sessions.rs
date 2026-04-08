@@ -904,6 +904,9 @@ pub fn session_message_list(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionMessageCurvePoint {
     pub assistant_sequence: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_tokens: u64,
     pub tokens: u64,
     pub cumulative_cost_cents: f64,
 }
@@ -916,13 +919,17 @@ pub fn session_message_curve(
         "WITH ordered AS (
              SELECT id,
                     ROW_NUMBER() OVER (ORDER BY timestamp ASC, id ASC) as assistant_sequence,
-                    (input_tokens + output_tokens) as tokens,
+                    COALESCE(input_tokens, 0) as input_tokens,
+                    COALESCE(output_tokens, 0) as output_tokens,
+                    (COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)) as cache_tokens,
                     COALESCE(cost_cents, 0.0) as cost_cents
              FROM messages
              WHERE session_id = ?1 AND role = 'assistant'
          )
          SELECT assistant_sequence,
-                tokens,
+                input_tokens,
+                output_tokens,
+                cache_tokens,
                 SUM(cost_cents) OVER (
                     ORDER BY assistant_sequence
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
@@ -933,10 +940,15 @@ pub fn session_message_curve(
 
     let rows = stmt
         .query_map(params![session_id], |row| {
+            let input_tokens: u64 = row.get(1)?;
+            let output_tokens: u64 = row.get(2)?;
             Ok(SessionMessageCurvePoint {
                 assistant_sequence: row.get(0)?,
-                tokens: row.get(1)?,
-                cumulative_cost_cents: row.get(2)?,
+                input_tokens,
+                output_tokens,
+                cache_tokens: row.get(3)?,
+                tokens: input_tokens + output_tokens,
+                cumulative_cost_cents: row.get(4)?,
             })
         })?
         .filter_map(|r| r.ok())

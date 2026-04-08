@@ -209,8 +209,8 @@ export function OverviewPage() {
                 }
               />
               <ChartLegend content={<ChartLegendContent />} />
-              <Bar dataKey="input_tokens" fill="var(--color-input_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
-              <Bar dataKey="output_tokens" fill="var(--color-output_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="input_tokens" stackId="token-activity" fill="var(--color-input_tokens)" maxBarSize={28} radius={[0, 0, 0, 0]} />
+              <Bar dataKey="output_tokens" stackId="token-activity" fill="var(--color-output_tokens)" maxBarSize={28} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ChartContainer>
         </CardContent>
