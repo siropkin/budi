@@ -384,7 +384,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 
 The daemon is the single source of truth — the CLI never opens the database directly. Realtime hooks/OTEL payloads are written to a durable local queue first, then drained into analytics in bounded retries. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user).
 
-**Data model** — six tables, four data entities + two supporting:
+**Data model** — eight tables, six data entities + two supporting:
 
 | Table | Role |
 |-------|------|
@@ -394,6 +394,10 @@ The daemon is the single source of truth — the CLI never opens the database di
 | **otel_events** | Raw OpenTelemetry event storage for debugging/audit |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
+| **message_rollups_hourly** | Derived hourly aggregates (provider/model/repo/branch/role) for low-latency analytics reads |
+| **message_rollups_daily** | Derived daily aggregates for summary/filter scans |
+
+`messages` remains the source of truth; rollup tables are derived caches maintained incrementally during ingest/update/delete.
 
 </details>
 

@@ -37,6 +37,8 @@ fn schema_creates_tables() {
     assert!(tables.contains(&"hook_events".to_string()));
     assert!(tables.contains(&"messages".to_string()));
     assert!(tables.contains(&"sync_state".to_string()));
+    assert!(tables.contains(&"message_rollups_hourly".to_string()));
+    assert!(tables.contains(&"message_rollups_daily".to_string()));
 }
 
 #[test]
@@ -114,6 +116,177 @@ fn ingest_and_query() {
     assert_eq!(summary.total_assistant_messages, 1);
     assert_eq!(summary.total_input_tokens, 100);
     assert_eq!(summary.total_output_tokens, 50);
+}
+
+#[test]
+fn rollups_track_message_updates_and_deletes() {
+    let mut conn = test_db();
+    let msg = ParsedMessage {
+        uuid: "rollup-msg-1".to_string(),
+        session_id: Some("rollup-sess".to_string()),
+        timestamp: "2026-03-14T18:14:00Z".parse().unwrap(),
+        cwd: Some("/tmp/proj".to_string()),
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_tokens: 10,
+        cache_read_tokens: 20,
+        git_branch: Some("refs/heads/main".to_string()),
+        repo_id: Some("github.com/acme/repo".to_string()),
+        provider: "claude_code".to_string(),
+        cost_cents: Some(2.0),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "estimated".to_string(),
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+    };
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    conn.execute(
+        "UPDATE messages
+         SET output_tokens = 90,
+             cost_cents = 4.5
+         WHERE id = 'rollup-msg-1'",
+        [],
+    )
+    .unwrap();
+
+    let summary =
+        usage_summary_with_filters(&conn, None, None, None, &DimensionFilters::default()).unwrap();
+    assert_eq!(summary.total_output_tokens, 90);
+
+    conn.execute("DELETE FROM messages WHERE id = 'rollup-msg-1'", [])
+        .unwrap();
+    let post_delete =
+        usage_summary_with_filters(&conn, None, None, None, &DimensionFilters::default()).unwrap();
+    assert_eq!(post_delete.total_messages, 0);
+}
+
+#[test]
+fn rollups_are_used_only_for_hour_aligned_ranges() {
+    let mut conn = test_db();
+    let msg = ParsedMessage {
+        uuid: "rollup-range-msg".to_string(),
+        session_id: Some("rollup-range-sess".to_string()),
+        timestamp: "2026-03-14T10:30:00Z".parse().unwrap(),
+        cwd: Some("/tmp/proj".to_string()),
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: Some("main".to_string()),
+        repo_id: Some("repo-a".to_string()),
+        provider: "claude_code".to_string(),
+        cost_cents: Some(1.0),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "estimated".to_string(),
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+    };
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    // Poison the rollup row to detect whether the query path reads rollups.
+    conn.execute(
+        "UPDATE message_rollups_hourly SET message_count = 9, output_tokens = 99
+         WHERE bucket_start = '2026-03-14T10:00:00Z'",
+        [],
+    )
+    .unwrap();
+
+    let aligned = usage_summary_with_filters(
+        &conn,
+        Some("2026-03-14T10:00:00Z"),
+        None,
+        None,
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(aligned.total_messages, 9);
+    assert_eq!(aligned.total_output_tokens, 99);
+
+    let non_aligned = usage_summary_with_filters(
+        &conn,
+        Some("2026-03-14T10:15:00Z"),
+        Some("2026-03-14T11:00:00Z"),
+        None,
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    // Non-hour-aligned range should fall back to raw messages for correctness.
+    assert_eq!(non_aligned.total_messages, 1);
+    assert_eq!(non_aligned.total_output_tokens, 5);
+}
+
+#[test]
+fn rollup_summary_latency_smoke_on_large_dataset() {
+    let mut conn = test_db();
+    let mut messages = Vec::new();
+    for i in 0..5000 {
+        let hour = i % 24;
+        let day = (i % 28) + 1;
+        messages.push(ParsedMessage {
+            uuid: format!("bench-{i}"),
+            session_id: Some(format!("bench-sess-{}", i % 50)),
+            timestamp: format!("2026-03-{day:02}T{hour:02}:00:00Z")
+                .parse()
+                .unwrap(),
+            cwd: Some("/tmp/bench".to_string()),
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            input_tokens: 200,
+            output_tokens: 80,
+            cache_creation_tokens: 20,
+            cache_read_tokens: 40,
+            git_branch: Some("main".to_string()),
+            repo_id: Some("repo-bench".to_string()),
+            provider: "claude_code".to_string(),
+            cost_cents: Some(1.2),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "estimated".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+        });
+    }
+    ingest_messages(&mut conn, &messages, None).unwrap();
+
+    let started = std::time::Instant::now();
+    let summary =
+        usage_summary_with_filters(&conn, None, None, None, &DimensionFilters::default()).unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(summary.total_messages, 5000);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "rollup summary latency smoke exceeded budget: {:?}",
+        elapsed
+    );
 }
 
 #[test]

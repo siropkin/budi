@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// Result of running schema repair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -133,6 +133,9 @@ fn run_version_migrations(conn: &Connection) -> Result<()> {
     if current_version(conn) == 19 {
         migrate_v19_to_v20(conn)?;
     }
+    if current_version(conn) == 20 {
+        migrate_v20_to_v21(conn)?;
+    }
     Ok(())
 }
 
@@ -192,6 +195,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
     )?;
     create_sessions_and_hook_events(conn)?;
     create_otel_events(conn)?;
+    ensure_rollup_schema(conn, false)?;
     create_indexes(conn)?;
     Ok(())
 }
@@ -675,6 +679,607 @@ fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Incremental migration from v20 to v21: add incremental analytics rollup tables.
+fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
+    tracing::info!(
+        "Migrating schema v20 → v21: adding hourly/daily analytics rollups with incremental triggers"
+    );
+    ensure_rollup_schema(conn, true)?;
+    create_indexes(conn)?;
+    conn.pragma_update(None, "user_version", 21u32)?;
+    Ok(())
+}
+
+fn ensure_rollup_schema(conn: &Connection, backfill: bool) -> Result<()> {
+    create_rollup_tables(conn)?;
+    create_rollup_triggers(conn)?;
+    if backfill {
+        backfill_rollup_tables(conn)?;
+    }
+    Ok(())
+}
+
+fn create_rollup_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS message_rollups_hourly (
+            bucket_start           TEXT NOT NULL,
+            role                   TEXT NOT NULL,
+            provider               TEXT NOT NULL,
+            model                  TEXT NOT NULL,
+            repo_id                TEXT NOT NULL,
+            git_branch             TEXT NOT NULL,
+            message_count          INTEGER NOT NULL DEFAULT 0,
+            input_tokens           INTEGER NOT NULL DEFAULT 0,
+            output_tokens          INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
+            cost_cents             REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(bucket_start, role, provider, model, repo_id, git_branch)
+        );
+
+        CREATE TABLE IF NOT EXISTS message_rollups_daily (
+            bucket_day             TEXT NOT NULL,
+            role                   TEXT NOT NULL,
+            provider               TEXT NOT NULL,
+            model                  TEXT NOT NULL,
+            repo_id                TEXT NOT NULL,
+            git_branch             TEXT NOT NULL,
+            message_count          INTEGER NOT NULL DEFAULT 0,
+            input_tokens           INTEGER NOT NULL DEFAULT 0,
+            output_tokens          INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
+            cost_cents             REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(bucket_day, role, provider, model, repo_id, git_branch)
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+fn create_rollup_triggers(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+        DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+        DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+
+        CREATE TRIGGER IF NOT EXISTS trg_messages_rollup_insert
+        AFTER INSERT ON messages
+        BEGIN
+            INSERT INTO message_rollups_hourly (
+                bucket_start, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%dT%H:00:00Z', NEW.timestamp),
+                COALESCE(NULLIF(NEW.role, ''), 'assistant'),
+                COALESCE(NULLIF(NEW.provider, ''), 'claude_code'),
+                CASE
+                    WHEN NEW.model IS NULL OR NEW.model = '' OR SUBSTR(NEW.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE NEW.model
+                END,
+                COALESCE(NULLIF(NULLIF(NEW.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(NEW.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(NEW.git_branch, ''), 12)
+                            ELSE COALESCE(NEW.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                1,
+                COALESCE(NEW.input_tokens, 0),
+                COALESCE(NEW.output_tokens, 0),
+                COALESCE(NEW.cache_creation_tokens, 0),
+                COALESCE(NEW.cache_read_tokens, 0),
+                COALESCE(NEW.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+
+            INSERT INTO message_rollups_daily (
+                bucket_day, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%d', NEW.timestamp),
+                COALESCE(NULLIF(NEW.role, ''), 'assistant'),
+                COALESCE(NULLIF(NEW.provider, ''), 'claude_code'),
+                CASE
+                    WHEN NEW.model IS NULL OR NEW.model = '' OR SUBSTR(NEW.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE NEW.model
+                END,
+                COALESCE(NULLIF(NULLIF(NEW.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(NEW.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(NEW.git_branch, ''), 12)
+                            ELSE COALESCE(NEW.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                1,
+                COALESCE(NEW.input_tokens, 0),
+                COALESCE(NEW.output_tokens, 0),
+                COALESCE(NEW.cache_creation_tokens, 0),
+                COALESCE(NEW.cache_read_tokens, 0),
+                COALESCE(NEW.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_messages_rollup_delete
+        AFTER DELETE ON messages
+        BEGIN
+            INSERT INTO message_rollups_hourly (
+                bucket_start, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp),
+                COALESCE(NULLIF(OLD.role, ''), 'assistant'),
+                COALESCE(NULLIF(OLD.provider, ''), 'claude_code'),
+                CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+                END,
+                COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                -1,
+                -COALESCE(OLD.input_tokens, 0),
+                -COALESCE(OLD.output_tokens, 0),
+                -COALESCE(OLD.cache_creation_tokens, 0),
+                -COALESCE(OLD.cache_read_tokens, 0),
+                -COALESCE(OLD.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+
+            DELETE FROM message_rollups_hourly
+             WHERE bucket_start = strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp)
+               AND role = COALESCE(NULLIF(OLD.role, ''), 'assistant')
+               AND provider = COALESCE(NULLIF(OLD.provider, ''), 'claude_code')
+               AND model = CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+               END
+               AND repo_id = COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)')
+               AND git_branch = COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+               )
+               AND message_count <= 0;
+
+            INSERT INTO message_rollups_daily (
+                bucket_day, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%d', OLD.timestamp),
+                COALESCE(NULLIF(OLD.role, ''), 'assistant'),
+                COALESCE(NULLIF(OLD.provider, ''), 'claude_code'),
+                CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+                END,
+                COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                -1,
+                -COALESCE(OLD.input_tokens, 0),
+                -COALESCE(OLD.output_tokens, 0),
+                -COALESCE(OLD.cache_creation_tokens, 0),
+                -COALESCE(OLD.cache_read_tokens, 0),
+                -COALESCE(OLD.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+
+            DELETE FROM message_rollups_daily
+             WHERE bucket_day = strftime('%Y-%m-%d', OLD.timestamp)
+               AND role = COALESCE(NULLIF(OLD.role, ''), 'assistant')
+               AND provider = COALESCE(NULLIF(OLD.provider, ''), 'claude_code')
+               AND model = CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+               END
+               AND repo_id = COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)')
+               AND git_branch = COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+               )
+               AND message_count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_messages_rollup_update
+        AFTER UPDATE ON messages
+        BEGIN
+            INSERT INTO message_rollups_hourly (
+                bucket_start, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp),
+                COALESCE(NULLIF(OLD.role, ''), 'assistant'),
+                COALESCE(NULLIF(OLD.provider, ''), 'claude_code'),
+                CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+                END,
+                COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                -1,
+                -COALESCE(OLD.input_tokens, 0),
+                -COALESCE(OLD.output_tokens, 0),
+                -COALESCE(OLD.cache_creation_tokens, 0),
+                -COALESCE(OLD.cache_read_tokens, 0),
+                -COALESCE(OLD.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+
+            DELETE FROM message_rollups_hourly
+             WHERE bucket_start = strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp)
+               AND role = COALESCE(NULLIF(OLD.role, ''), 'assistant')
+               AND provider = COALESCE(NULLIF(OLD.provider, ''), 'claude_code')
+               AND model = CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+               END
+               AND repo_id = COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)')
+               AND git_branch = COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+               )
+               AND message_count <= 0;
+
+            INSERT INTO message_rollups_daily (
+                bucket_day, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%d', OLD.timestamp),
+                COALESCE(NULLIF(OLD.role, ''), 'assistant'),
+                COALESCE(NULLIF(OLD.provider, ''), 'claude_code'),
+                CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+                END,
+                COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                -1,
+                -COALESCE(OLD.input_tokens, 0),
+                -COALESCE(OLD.output_tokens, 0),
+                -COALESCE(OLD.cache_creation_tokens, 0),
+                -COALESCE(OLD.cache_read_tokens, 0),
+                -COALESCE(OLD.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+
+            DELETE FROM message_rollups_daily
+             WHERE bucket_day = strftime('%Y-%m-%d', OLD.timestamp)
+               AND role = COALESCE(NULLIF(OLD.role, ''), 'assistant')
+               AND provider = COALESCE(NULLIF(OLD.provider, ''), 'claude_code')
+               AND model = CASE
+                    WHEN OLD.model IS NULL OR OLD.model = '' OR SUBSTR(OLD.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE OLD.model
+               END
+               AND repo_id = COALESCE(NULLIF(NULLIF(OLD.repo_id, ''), 'unknown'), '(untagged)')
+               AND git_branch = COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(OLD.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(OLD.git_branch, ''), 12)
+                            ELSE COALESCE(OLD.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+               )
+               AND message_count <= 0;
+
+            INSERT INTO message_rollups_hourly (
+                bucket_start, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%dT%H:00:00Z', NEW.timestamp),
+                COALESCE(NULLIF(NEW.role, ''), 'assistant'),
+                COALESCE(NULLIF(NEW.provider, ''), 'claude_code'),
+                CASE
+                    WHEN NEW.model IS NULL OR NEW.model = '' OR SUBSTR(NEW.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE NEW.model
+                END,
+                COALESCE(NULLIF(NULLIF(NEW.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(NEW.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(NEW.git_branch, ''), 12)
+                            ELSE COALESCE(NEW.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                1,
+                COALESCE(NEW.input_tokens, 0),
+                COALESCE(NEW.output_tokens, 0),
+                COALESCE(NEW.cache_creation_tokens, 0),
+                COALESCE(NEW.cache_read_tokens, 0),
+                COALESCE(NEW.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+
+            INSERT INTO message_rollups_daily (
+                bucket_day, role, provider, model, repo_id, git_branch,
+                message_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents
+            )
+            VALUES (
+                strftime('%Y-%m-%d', NEW.timestamp),
+                COALESCE(NULLIF(NEW.role, ''), 'assistant'),
+                COALESCE(NULLIF(NEW.provider, ''), 'claude_code'),
+                CASE
+                    WHEN NEW.model IS NULL OR NEW.model = '' OR SUBSTR(NEW.model, 1, 1) = '<'
+                    THEN '(untagged)'
+                    ELSE NEW.model
+                END,
+                COALESCE(NULLIF(NULLIF(NEW.repo_id, ''), 'unknown'), '(untagged)'),
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(NEW.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(NEW.git_branch, ''), 12)
+                            ELSE COALESCE(NEW.git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ),
+                1,
+                COALESCE(NEW.input_tokens, 0),
+                COALESCE(NEW.output_tokens, 0),
+                COALESCE(NEW.cache_creation_tokens, 0),
+                COALESCE(NEW.cache_read_tokens, 0),
+                COALESCE(NEW.cost_cents, 0.0)
+            )
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cost_cents = cost_cents + excluded.cost_cents;
+        END;
+        ",
+    )?;
+    Ok(())
+}
+
+fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        DELETE FROM message_rollups_hourly;
+        DELETE FROM message_rollups_daily;
+
+        WITH normalized AS (
+            SELECT
+                strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS bucket_hour,
+                strftime('%Y-%m-%d', timestamp) AS bucket_day,
+                COALESCE(NULLIF(role, ''), 'assistant') AS role,
+                COALESCE(NULLIF(provider, ''), 'claude_code') AS provider,
+                CASE
+                    WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '(untagged)'
+                    ELSE model
+                END AS model,
+                COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '(untagged)') AS repo_id,
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(git_branch, ''), 12)
+                            ELSE COALESCE(git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ) AS git_branch,
+                COALESCE(input_tokens, 0) AS input_tokens,
+                COALESCE(output_tokens, 0) AS output_tokens,
+                COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
+                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+                COALESCE(cost_cents, 0.0) AS cost_cents
+            FROM messages
+        )
+        INSERT INTO message_rollups_hourly (
+            bucket_start, role, provider, model, repo_id, git_branch,
+            message_count, input_tokens, output_tokens,
+            cache_creation_tokens, cache_read_tokens, cost_cents
+        )
+        SELECT
+            bucket_hour, role, provider, model, repo_id, git_branch,
+            COUNT(*) AS message_count,
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cost_cents), 0.0)
+        FROM normalized
+        GROUP BY bucket_hour, role, provider, model, repo_id, git_branch;
+
+        WITH normalized AS (
+            SELECT
+                strftime('%Y-%m-%d', timestamp) AS bucket_day,
+                COALESCE(NULLIF(role, ''), 'assistant') AS role,
+                COALESCE(NULLIF(provider, ''), 'claude_code') AS provider,
+                CASE
+                    WHEN model IS NULL OR model = '' OR SUBSTR(model, 1, 1) = '<' THEN '(untagged)'
+                    ELSE model
+                END AS model,
+                COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '(untagged)') AS repo_id,
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(git_branch, ''), 12)
+                            ELSE COALESCE(git_branch, '')
+                        END,
+                        ''
+                    ),
+                    '(untagged)'
+                ) AS git_branch,
+                COALESCE(input_tokens, 0) AS input_tokens,
+                COALESCE(output_tokens, 0) AS output_tokens,
+                COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
+                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+                COALESCE(cost_cents, 0.0) AS cost_cents
+            FROM messages
+        )
+        INSERT INTO message_rollups_daily (
+            bucket_day, role, provider, model, repo_id, git_branch,
+            message_count, input_tokens, output_tokens,
+            cache_creation_tokens, cache_read_tokens, cost_cents
+        )
+        SELECT
+            bucket_day, role, provider, model, repo_id, git_branch,
+            COUNT(*) AS message_count,
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_creation_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cost_cents), 0.0)
+        FROM normalized
+        GROUP BY bucket_day, role, provider, model, repo_id, git_branch;
+        ",
+    )?;
+    Ok(())
+}
+
 fn parse_hook_row_ids(raw_json: Option<&str>) -> (Option<String>, Option<String>) {
     let Some(raw) = raw_json else {
         return (None, None);
@@ -1117,6 +1722,24 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         ))?;
     }
 
+    if table_exists(conn, "message_rollups_hourly")? {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_rollups_hourly_bucket ON message_rollups_hourly(bucket_start);
+            CREATE INDEX IF NOT EXISTS idx_rollups_hourly_dims ON message_rollups_hourly(provider, model, repo_id, git_branch, role);
+            ",
+        )?;
+    }
+
+    if table_exists(conn, "message_rollups_daily")? {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_rollups_daily_bucket ON message_rollups_daily(bucket_day);
+            CREATE INDEX IF NOT EXISTS idx_rollups_daily_dims ON message_rollups_daily(provider, model, repo_id, git_branch, role);
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1161,6 +1784,15 @@ struct SchemaReconcileReport {
 fn index_exists(conn: &Connection, name: &str) -> Result<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?1)",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
+fn trigger_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name = ?1)",
         [name],
         |row| row.get(0),
     )?;
@@ -1230,6 +1862,16 @@ fn expected_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
     if table_exists(conn, "messages")? && table_exists(conn, "tags")? {
         indexes.push("idx_message_tags_pair".to_string());
         indexes.push("idx_messages_primary_id".to_string());
+    }
+
+    if table_exists(conn, "message_rollups_hourly")? {
+        indexes.push("idx_rollups_hourly_bucket".to_string());
+        indexes.push("idx_rollups_hourly_dims".to_string());
+    }
+
+    if table_exists(conn, "message_rollups_daily")? {
+        indexes.push("idx_rollups_daily_bucket".to_string());
+        indexes.push("idx_rollups_daily_dims".to_string());
     }
 
     Ok(indexes)
@@ -1357,6 +1999,35 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         "cost_cents_computed REAL",
     )? {
         added_columns.push("otel_events.cost_cents_computed".to_string());
+    }
+
+    let has_hourly_rollups = table_exists(conn, "message_rollups_hourly")?;
+    let has_daily_rollups = table_exists(conn, "message_rollups_daily")?;
+    let has_rollup_insert_trigger = trigger_exists(conn, "trg_messages_rollup_insert")?;
+    let has_rollup_delete_trigger = trigger_exists(conn, "trg_messages_rollup_delete")?;
+    let has_rollup_update_trigger = trigger_exists(conn, "trg_messages_rollup_update")?;
+    let needs_rollup_repair = !has_hourly_rollups
+        || !has_daily_rollups
+        || !has_rollup_insert_trigger
+        || !has_rollup_delete_trigger
+        || !has_rollup_update_trigger;
+    if needs_rollup_repair {
+        ensure_rollup_schema(conn, true)?;
+        if !has_hourly_rollups {
+            added_columns.push("message_rollups_hourly".to_string());
+        }
+        if !has_daily_rollups {
+            added_columns.push("message_rollups_daily".to_string());
+        }
+        if !has_rollup_insert_trigger {
+            added_columns.push("trg_messages_rollup_insert".to_string());
+        }
+        if !has_rollup_delete_trigger {
+            added_columns.push("trg_messages_rollup_delete".to_string());
+        }
+        if !has_rollup_update_trigger {
+            added_columns.push("trg_messages_rollup_update".to_string());
+        }
     }
 
     let added_indexes = missing_reconcile_indexes(conn)?;
@@ -2038,6 +2709,9 @@ mod tests {
         migrate_v19_to_v20(&conn).unwrap();
         assert_eq!(current_version(&conn), 20, "v19→v20 must set version to 20");
 
+        migrate_v20_to_v21(&conn).unwrap();
+        assert_eq!(current_version(&conn), 21, "v20→v21 must set version to 21");
+
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
     }
 
@@ -2609,5 +3283,79 @@ mod tests {
         assert_eq!(kept_message_id, "msg-v19");
         assert_eq!(kept_session_id, "sess-v19");
         assert_eq!(kept_tag_message_id, "msg-v19");
+    }
+
+    #[test]
+    fn migrate_v20_to_v21_builds_rollups_from_existing_messages() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute_batch(
+            "
+            DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+            DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+            DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+            DROP TABLE IF EXISTS message_rollups_hourly;
+            DROP TABLE IF EXISTS message_rollups_daily;
+            ",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 20u32).unwrap();
+
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at)
+             VALUES ('sess-v20', 'claude_code', '2026-04-02T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp, model, provider, repo_id, git_branch, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence)
+             VALUES ('msg-v20', 'sess-v20', 'assistant', '2026-04-02T10:10:00Z', 'claude-sonnet-4-6', 'claude_code', 'github.com/acme/repo', 'refs/heads/main', 100, 40, 0, 0, 1.25, 'estimated')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+
+        let hourly_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_rollups_hourly", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let daily_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_rollups_daily", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(hourly_rows > 0);
+        assert!(daily_rows > 0);
+
+        let assistant_rollup_count: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(message_count), 0) FROM message_rollups_hourly WHERE role = 'assistant'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(assistant_rollup_count, 1);
+    }
+
+    #[test]
+    fn repair_recreates_missing_rollup_triggers() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute_batch("DROP TRIGGER IF EXISTS trg_messages_rollup_update;")
+            .unwrap();
+        assert!(!trigger_exists(&conn, "trg_messages_rollup_update").unwrap());
+
+        let report = repair(&conn).unwrap();
+        assert!(trigger_exists(&conn, "trg_messages_rollup_update").unwrap());
+        assert!(
+            report
+                .added_columns
+                .contains(&"trg_messages_rollup_update".to_string())
+        );
     }
 }
