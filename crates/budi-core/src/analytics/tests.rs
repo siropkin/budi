@@ -2426,6 +2426,37 @@ fn session_tags_filter_internal_linkage_and_redundant_keys() {
 }
 
 #[test]
+fn session_tags_include_explicit_identity_keys() {
+    let mut conn = test_db();
+    let msg = assistant_msg("st-identity-1", "sess-tags-identity", 1.0);
+    let tags = vec![vec![
+        Tag {
+            key: "platform".to_string(),
+            value: "macos".to_string(),
+        },
+        Tag {
+            key: "machine".to_string(),
+            value: "workstation-01".to_string(),
+        },
+        Tag {
+            key: "user".to_string(),
+            value: "local-user".to_string(),
+        },
+        Tag {
+            key: "git_user".to_string(),
+            value: "Alice Dev".to_string(),
+        },
+    ]];
+    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
+
+    let result = session_tags(&conn, "sess-tags-identity").unwrap();
+    assert!(result.contains(&("platform".to_string(), "macos".to_string())));
+    assert!(result.contains(&("machine".to_string(), "workstation-01".to_string())));
+    assert!(result.contains(&("user".to_string(), "local-user".to_string())));
+    assert!(result.contains(&("git_user".to_string(), "Alice Dev".to_string())));
+}
+
+#[test]
 fn session_tags_does_not_alias_prefixed_session_id() {
     let mut conn = test_db();
     let canonical = "d99dfe22-d05c-4c78-8698-015d06e5dabb";
