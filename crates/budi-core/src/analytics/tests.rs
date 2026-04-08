@@ -1,5 +1,5 @@
 use super::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 fn cache_stats(
     conn: &Connection,
@@ -1111,6 +1111,138 @@ fn no_request_id_no_dedup() {
         count, 2,
         "messages without request_id should both be inserted"
     );
+}
+
+#[test]
+fn jsonl_dedup_matches_otel_by_fingerprint_within_window() {
+    let mut conn = test_db();
+
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            cost_cents, cost_confidence)
+         VALUES ('otel-a', 'sess-otel', 'assistant', '2026-03-25T00:00:01.050Z', 'claude-opus-4-6',
+                 'claude_code', 10, 5, 0, 0, 1.0, 'otel_exact')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            cost_cents, cost_confidence)
+         VALUES ('otel-b', 'sess-otel', 'assistant', '2026-03-25T00:00:01.120Z', 'claude-opus-4-6',
+                 'claude_code', 900, 400, 5000, 50000, 7.3, 'otel_exact')",
+        [],
+    )
+    .unwrap();
+
+    let msg = ParsedMessage {
+        uuid: "jsonl-match".to_string(),
+        session_id: Some("sess-otel".to_string()),
+        timestamp: "2026-03-25T00:00:01.180Z".parse().unwrap(),
+        cwd: Some("/tmp/repo".to_string()),
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 900,
+        output_tokens: 400,
+        cache_creation_tokens: 5000,
+        cache_read_tokens: 50000,
+        git_branch: Some("main".to_string()),
+        repo_id: Some("github.com/example/repo".to_string()),
+        provider: "claude_code".to_string(),
+        cost_cents: Some(7.3),
+        session_title: None,
+        parent_uuid: Some("parent-1".to_string()),
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "estimated".to_string(),
+        request_id: Some("req-match".to_string()),
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+    };
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "should enrich OTEL row instead of inserting duplicate"
+    );
+
+    let (match_req, match_parent): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT request_id, parent_uuid FROM messages WHERE id = 'otel-b'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(match_req.as_deref(), Some("req-match"));
+    assert_eq!(match_parent.as_deref(), Some("parent-1"));
+
+    let other_req: Option<String> = conn
+        .query_row(
+            "SELECT request_id FROM messages WHERE id = 'otel-a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other_req, None);
+}
+
+#[test]
+fn jsonl_dedup_preserves_message_when_otel_candidates_are_ambiguous() {
+    let mut conn = test_db();
+
+    for id in ["otel-1", "otel-2"] {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                cost_cents, cost_confidence)
+             VALUES (?1, 'sess-ambig', 'assistant', '2026-03-25T00:00:01.100Z', 'claude-opus-4-6',
+                     'claude_code', 1000, 500, 5000, 50000, 7.3, 'otel_exact')",
+            params![id],
+        )
+        .unwrap();
+    }
+
+    let msg = ParsedMessage {
+        uuid: "jsonl-ambig".to_string(),
+        session_id: Some("sess-ambig".to_string()),
+        timestamp: "2026-03-25T00:00:01.200Z".parse().unwrap(),
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_creation_tokens: 5000,
+        cache_read_tokens: 50000,
+        provider: "claude_code".to_string(),
+        cost_cents: Some(7.3),
+        cost_confidence: "estimated".to_string(),
+        ..Default::default()
+    };
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 3,
+        "ambiguous OTEL matches should not collapse JSONL row"
+    );
+
+    let inserted_exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM messages WHERE id = 'jsonl-ambig'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(inserted_exists, 1);
 }
 
 #[test]

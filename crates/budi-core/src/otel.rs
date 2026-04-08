@@ -73,6 +73,7 @@ pub struct OtelApiRequest {
     pub timestamp: DateTime<Utc>,
     pub timestamp_nano: String,
     pub model: String,
+    pub request_id: Option<String>,
     /// Parsed from OTEL attributes but intentionally not used for ingestion —
     /// cost_cents is recomputed from tokens x pricing because cost_usd
     /// systematically underreports (~10%). Kept for tests and debugging.
@@ -91,6 +92,19 @@ fn get_attr_str(attrs: &[KeyValue], key: &str) -> Option<String> {
             .as_ref()
             .and_then(|v| v.string_value.as_ref().cloned())
     })
+}
+
+fn get_first_attr_str(attrs: &[KeyValue], keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| get_attr_str(attrs, key))
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
 }
 
 fn get_attr_double(attrs: &[KeyValue], key: &str) -> Option<f64> {
@@ -174,6 +188,15 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
                 };
 
                 let model = get_attr_str(attrs, "model").unwrap_or_default();
+                let request_id = get_first_attr_str(
+                    attrs,
+                    &[
+                        "message.id",
+                        "message_id",
+                        "request_id",
+                        "message_request_id",
+                    ],
+                );
                 let cost_usd = get_attr_double(attrs, "cost_usd").unwrap_or(0.0);
                 let input_tokens = get_attr_u64(attrs, "input_tokens").unwrap_or(0);
                 let output_tokens = get_attr_u64(attrs, "output_tokens").unwrap_or(0);
@@ -185,6 +208,7 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
                     timestamp,
                     timestamp_nano,
                     model,
+                    request_id,
                     cost_usd,
                     input_tokens,
                     output_tokens,
@@ -217,6 +241,7 @@ fn otel_event_snapshot_json(event: &OtelApiRequest, cost_cents_computed: f64) ->
         "timestamp": event.timestamp.to_rfc3339(),
         "timestamp_nano": event.timestamp_nano,
         "model": event.model,
+        "request_id": event.request_id,
         "cost_usd_reported": event.cost_usd,
         "cost_cents_computed": cost_cents_computed,
         "input_tokens": event.input_tokens,
@@ -237,6 +262,98 @@ mod hex {
         }
         s
     }
+}
+
+#[derive(Debug, Clone)]
+struct MessageDedupCandidate {
+    id: String,
+    request_id: Option<String>,
+    timestamp: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DedupStrategy {
+    DeterministicOtelId,
+    ExactRequestId,
+    SourceFingerprint,
+    TimestampFallback,
+}
+
+impl DedupStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DeterministicOtelId => "deterministic_otel_id",
+            Self::ExactRequestId => "exact_request_id",
+            Self::SourceFingerprint => "source_fingerprint",
+            Self::TimestampFallback => "timestamp_fallback",
+        }
+    }
+}
+
+fn normalize_request_id(id: Option<&str>) -> Option<&str> {
+    id.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn token_fingerprint_matches(candidate: &MessageDedupCandidate, event: &OtelApiRequest) -> bool {
+    candidate.input_tokens == event.input_tokens as i64
+        && candidate.output_tokens == event.output_tokens as i64
+        && candidate.cache_creation_tokens == event.cache_creation_tokens as i64
+        && candidate.cache_read_tokens == event.cache_read_tokens as i64
+}
+
+fn timestamp_distance_millis(timestamp: &str, target: DateTime<Utc>) -> i64 {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| {
+            dt.with_timezone(&Utc)
+                .signed_duration_since(target)
+                .num_milliseconds()
+                .abs()
+        })
+        .unwrap_or(i64::MAX)
+}
+
+fn choose_candidate<'a>(
+    candidates: &'a [MessageDedupCandidate],
+    event: &OtelApiRequest,
+) -> Option<(&'a MessageDedupCandidate, DedupStrategy)> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if let Some(request_id) = normalize_request_id(event.request_id.as_deref()) {
+        let by_request_id: Vec<&MessageDedupCandidate> = candidates
+            .iter()
+            .filter(|candidate| {
+                normalize_request_id(candidate.request_id.as_deref()) == Some(request_id)
+            })
+            .collect();
+        if let Some(best) = by_request_id.into_iter().min_by_key(|candidate| {
+            timestamp_distance_millis(&candidate.timestamp, event.timestamp)
+        }) {
+            return Some((best, DedupStrategy::ExactRequestId));
+        }
+    }
+
+    let by_fingerprint: Vec<&MessageDedupCandidate> = candidates
+        .iter()
+        .filter(|candidate| token_fingerprint_matches(candidate, event))
+        .collect();
+    if by_fingerprint.len() == 1 {
+        return Some((by_fingerprint[0], DedupStrategy::SourceFingerprint));
+    }
+    if by_fingerprint.len() > 1 {
+        return None;
+    }
+
+    if candidates.len() == 1 {
+        return Some((&candidates[0], DedupStrategy::TimestampFallback));
+    }
+
+    None
 }
 
 /// Ingest OTEL api_request events into the messages table.
@@ -284,26 +401,75 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
             .ok();
 
         let (repo_id, git_branch, cwd) = session_ctx.unwrap_or((None, None, None));
+        let otel_event_uuid = otel_uuid(&event.session_id, &event.timestamp_nano);
 
-        // Check if an otel_exact row already exists for this API call (dedup repeated OTEL events)
-        let existing_otel_uuid: Option<String> = tx
-            .query_row(
-                "SELECT id
-                 FROM messages
-                 WHERE session_id = ?1
-                   AND model = ?2
-                   AND role = 'assistant'
-                   AND cost_confidence = 'otel_exact'
-                   AND timestamp BETWEEN ?3 AND ?4
-                 LIMIT 1",
+        // Fetch candidates in the constrained window and resolve in Rust:
+        // request_id -> source fingerprint -> timestamp fallback.
+        let mut stmt = tx.prepare_cached(
+            "SELECT id, request_id, timestamp, input_tokens, output_tokens,
+                    cache_creation_tokens, cache_read_tokens, cost_confidence
+             FROM messages
+             WHERE session_id = ?1
+               AND model = ?2
+               AND role = 'assistant'
+               AND timestamp BETWEEN ?3 AND ?4",
+        )?;
+        let rows: Vec<(MessageDedupCandidate, String)> = stmt
+            .query_map(
                 params![event.session_id, event.model, ts_lo, ts_hi],
+                |row| {
+                    Ok((
+                        MessageDedupCandidate {
+                            id: row.get(0)?,
+                            request_id: row.get(1)?,
+                            timestamp: row.get(2)?,
+                            input_tokens: row.get(3)?,
+                            output_tokens: row.get(4)?,
+                            cache_creation_tokens: row.get(5)?,
+                            cache_read_tokens: row.get(6)?,
+                        },
+                        row.get(7)?,
+                    ))
+                },
+            )?
+            .filter_map(|r| r.ok())
+            .collect();
+        let otel_candidates: Vec<MessageDedupCandidate> = rows
+            .iter()
+            .filter(|(_, confidence)| confidence == "otel_exact")
+            .map(|(candidate, _)| candidate.clone())
+            .collect();
+        let jsonl_candidates: Vec<MessageDedupCandidate> = rows
+            .iter()
+            .filter(|(_, confidence)| confidence != "otel_exact")
+            .map(|(candidate, _)| candidate.clone())
+            .collect();
+
+        let otel_selection = choose_candidate(&otel_candidates, event);
+        let existing_otel_match: Option<(String, DedupStrategy)> = tx
+            .query_row(
+                "SELECT id FROM messages WHERE id = ?1 AND cost_confidence = 'otel_exact' LIMIT 1",
+                params![otel_event_uuid],
                 |row| row.get(0),
             )
-            .ok();
+            .ok()
+            .map(|id| (id, DedupStrategy::DeterministicOtelId))
+            .or_else(|| {
+                otel_selection
+                    .as_ref()
+                    .map(|(candidate, strategy)| (candidate.id.clone(), *strategy))
+            });
 
         let snapshot_json = otel_event_snapshot_json(event, cost_cents);
 
-        if let Some(existing_uuid) = existing_otel_uuid {
+        if let Some((existing_uuid, strategy)) = existing_otel_match {
+            tracing::debug!(
+                session_id = %event.session_id,
+                model = %event.model,
+                strategy = strategy.as_str(),
+                message_id = %existing_uuid,
+                "OTEL dedup matched existing otel_exact message"
+            );
             // Already processed — just log to otel_events and skip
             tx.execute(
                 "INSERT INTO otel_events (
@@ -324,37 +490,37 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
             )?;
             continue;
         }
+        if otel_candidates.len() > 1 && otel_selection.is_none() {
+            let fingerprint_matches = otel_candidates
+                .iter()
+                .filter(|candidate| token_fingerprint_matches(candidate, event))
+                .count();
+            tracing::warn!(
+                session_id = %event.session_id,
+                model = %event.model,
+                candidate_count = otel_candidates.len(),
+                fingerprint_matches,
+                "OTEL dedup saw ambiguous otel_exact candidates; skipping unsafe merge"
+            );
+        }
 
-        // Strategy 1: Try to find and upgrade an existing JSONL row.
-        // Fetch candidates from the index-friendly range, then filter in Rust.
-        let existing_uuid: Option<String> = {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id, cost_confidence, timestamp FROM messages
-                 WHERE session_id = ?1
-                   AND model = ?2
-                   AND role = 'assistant'
-                   AND timestamp BETWEEN ?3 AND ?4",
-            )?;
-            let rows: Vec<(String, String, String)> = stmt
-                .query_map(
-                    params![event.session_id, event.model, ts_lo, ts_hi],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?
-                .filter_map(|r| r.ok())
-                .collect();
-            // Pick the closest non-otel_exact row by actual timestamp distance
-            let target_secs = event.timestamp.timestamp();
-            rows.into_iter()
-                .filter(|(_, conf, _)| conf != "otel_exact")
-                .min_by_key(|(_, _, row_ts)| {
-                    DateTime::parse_from_rfc3339(row_ts)
-                        .map(|dt| (dt.timestamp() - target_secs).unsigned_abs())
-                        .unwrap_or(u64::MAX)
-                })
-                .map(|(uuid, _, _)| uuid)
-        };
+        let jsonl_selection = choose_candidate(&jsonl_candidates, event);
+        if jsonl_candidates.len() > 1 && jsonl_selection.is_none() {
+            let fingerprint_matches = jsonl_candidates
+                .iter()
+                .filter(|candidate| token_fingerprint_matches(candidate, event))
+                .count();
+            tracing::warn!(
+                session_id = %event.session_id,
+                model = %event.model,
+                candidate_count = jsonl_candidates.len(),
+                fingerprint_matches,
+                "OTEL dedup saw ambiguous JSONL candidates; inserting dedicated OTEL row"
+            );
+        }
 
-        let message_id: String = if let Some(ref jsonl_uuid) = existing_uuid {
+        let message_id: String = if let Some((jsonl_candidate, strategy)) = jsonl_selection {
+            let jsonl_uuid = jsonl_candidate.id.clone();
             // Upgrade the existing JSONL row in-place with exact OTEL data
             tx.execute(
                 "UPDATE messages SET
@@ -364,8 +530,9 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                     output_tokens = ?3,
                     cache_creation_tokens = ?4,
                     cache_read_tokens = ?5,
-                    model = ?6
-                 WHERE id = ?7",
+                    model = ?6,
+                    request_id = COALESCE(request_id, ?7)
+                 WHERE id = ?8",
                 params![
                     cost_cents,
                     event.input_tokens as i64,
@@ -373,25 +540,26 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                     event.cache_creation_tokens as i64,
                     event.cache_read_tokens as i64,
                     event.model,
+                    event.request_id,
                     jsonl_uuid,
                 ],
             )?;
+            tracing::info!(
+                session_id = %event.session_id,
+                model = %event.model,
+                strategy = strategy.as_str(),
+                message_id = %jsonl_uuid,
+                "OTEL upgraded existing JSONL message"
+            );
             upserted += 1;
-            jsonl_uuid.clone()
+            jsonl_uuid
         } else {
             // Strategy 2: No JSONL row yet — insert with deterministic OTEL UUID.
-            // If JSONL syncs later, the JSONL row will be a separate INSERT OR IGNORE
-            // with a different UUID. We handle that via the reverse path: JSONL's
-            // INSERT OR IGNORE succeeds (different UUID), but we'll clean it up
-            // in the next OTEL event or it stays as a low-cost duplicate.
-            // Actually, once this otel row exists, future OTEL events with the same
-            // timestamp_nano will match it via ON CONFLICT and be no-ops.
-            let uuid = otel_uuid(&event.session_id, &event.timestamp_nano);
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                    cost_cents, cost_confidence, repo_id, git_branch, cwd)
-                VALUES (?1, ?2, 'assistant', ?3, ?4, 'claude_code', ?5, ?6, ?7, ?8, ?9, 'otel_exact', ?10, ?11, ?12)
+                    cost_cents, cost_confidence, repo_id, git_branch, cwd, request_id)
+                VALUES (?1, ?2, 'assistant', ?3, ?4, 'claude_code', ?5, ?6, ?7, ?8, ?9, 'otel_exact', ?10, ?11, ?12, ?13)
                 ON CONFLICT(id) DO UPDATE SET
                     cost_cents = excluded.cost_cents,
                     cost_confidence = excluded.cost_confidence,
@@ -399,10 +567,11 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                     output_tokens = excluded.output_tokens,
                     cache_creation_tokens = excluded.cache_creation_tokens,
                     cache_read_tokens = excluded.cache_read_tokens,
-                    model = excluded.model
+                    model = excluded.model,
+                    request_id = COALESCE(messages.request_id, excluded.request_id)
                 WHERE messages.cost_confidence != 'otel_exact'",
                 params![
-                    uuid,
+                    otel_event_uuid,
                     event.session_id,
                     ts,
                     event.model,
@@ -414,10 +583,11 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                     repo_id,
                     git_branch,
                     cwd,
+                    event.request_id,
                 ],
             )?;
             upserted += 1;
-            uuid
+            otel_event_uuid.clone()
         };
 
         // Insert stub session if it doesn't exist yet (hooks may arrive later)
@@ -522,6 +692,7 @@ mod tests {
         assert_eq!(events[0].output_tokens, 500);
         assert_eq!(events[0].cache_read_tokens, 50000);
         assert_eq!(events[0].cache_creation_tokens, 5000);
+        assert_eq!(events[0].request_id, None);
         assert_eq!(events[1].model, "claude-sonnet-4-6");
         assert!((events[1].cost_usd - 0.02).abs() < 1e-10);
     }
@@ -605,6 +776,36 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, 500);
         assert_eq!(events[0].output_tokens, 100);
+    }
+
+    #[test]
+    fn parse_otel_logs_extracts_request_id_from_supported_keys() {
+        let payload: ExportLogsServiceRequest = serde_json::from_value(serde_json::json!({
+            "resourceLogs": [{
+                "resource": {
+                    "attributes": [
+                        {"key": "session.id", "value": {"stringValue": "sess-req"}}
+                    ]
+                },
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "timeUnixNano": "1711500000000000000",
+                        "body": {"stringValue": "claude_code.api_request"},
+                        "attributes": [
+                            {"key": "model", "value": {"stringValue": "claude-opus-4-6"}},
+                            {"key": "message.id", "value": {"stringValue": "msg_otel_1"}},
+                            {"key": "input_tokens", "value": {"intValue": "500"}},
+                            {"key": "output_tokens", "value": {"intValue": "100"}}
+                        ]
+                    }]
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let events = parse_otel_logs(&payload);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id.as_deref(), Some("msg_otel_1"));
     }
 
     #[test]
@@ -692,6 +893,7 @@ mod tests {
                 .with_timezone(&Utc),
             timestamp_nano: "1711500000200000000".to_string(),
             model: "claude-opus-4-6".to_string(),
+            request_id: None,
             cost_usd: 0.07,
             input_tokens: 1000,
             output_tokens: 500,
@@ -739,6 +941,133 @@ mod tests {
     }
 
     #[test]
+    fn otel_prefers_fingerprint_match_when_multiple_jsonl_candidates_exist() {
+        let mut conn = setup_db();
+
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                cost_cents, cost_confidence)
+             VALUES ('jsonl-a', 'sess-fp', 'assistant', '2024-03-27T00:00:00.050Z', 'claude-opus-4-6',
+                     'claude_code', 100, 20, 0, 0, 1.0, 'estimated')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                cost_cents, cost_confidence)
+             VALUES ('jsonl-b', 'sess-fp', 'assistant', '2024-03-27T00:00:00.120Z', 'claude-opus-4-6',
+                     'claude_code', 900, 400, 5000, 50000, 3.5, 'estimated')",
+            [],
+        )
+        .unwrap();
+
+        let events = vec![OtelApiRequest {
+            session_id: "sess-fp".to_string(),
+            timestamp: DateTime::parse_from_rfc3339("2024-03-27T00:00:00.180Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            timestamp_nano: "1711500000180000000".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            request_id: None,
+            cost_usd: 0.07,
+            input_tokens: 900,
+            output_tokens: 400,
+            cache_read_tokens: 50000,
+            cache_creation_tokens: 5000,
+        }];
+
+        let count = ingest_otel_events(&mut conn, &events).unwrap();
+        assert_eq!(count, 1);
+
+        let (a_conf, b_conf): (String, String) = conn
+            .query_row(
+                "SELECT
+                    (SELECT cost_confidence FROM messages WHERE id = 'jsonl-a'),
+                    (SELECT cost_confidence FROM messages WHERE id = 'jsonl-b')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(a_conf, "estimated");
+        assert_eq!(b_conf, "otel_exact");
+
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+
+        let linked: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM otel_events ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked.as_deref(), Some("jsonl-b"));
+    }
+
+    #[test]
+    fn otel_inserts_new_row_when_jsonl_fingerprint_is_ambiguous() {
+        let mut conn = setup_db();
+
+        for id in ["jsonl-1", "jsonl-2"] {
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                    cost_cents, cost_confidence)
+                 VALUES (?1, 'sess-ambig', 'assistant', '2024-03-27T00:00:00.100Z', 'claude-opus-4-6',
+                         'claude_code', 1000, 500, 5000, 50000, 3.0, 'estimated')",
+                params![id],
+            )
+            .unwrap();
+        }
+
+        let events = vec![OtelApiRequest {
+            session_id: "sess-ambig".to_string(),
+            timestamp: DateTime::parse_from_rfc3339("2024-03-27T00:00:00.200Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            timestamp_nano: "1711500000200000000".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            request_id: None,
+            cost_usd: 0.07,
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 50000,
+            cache_creation_tokens: 5000,
+        }];
+
+        let count = ingest_otel_events(&mut conn, &events).unwrap();
+        assert_eq!(count, 1);
+
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 3, "ambiguous candidates should not be merged");
+
+        let exact_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE cost_confidence = 'otel_exact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exact_count, 1);
+
+        let inserted_id = otel_uuid("sess-ambig", "1711500000200000000");
+        let exists: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE id = ?1",
+                params![inserted_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
+    }
+
+    #[test]
     fn otel_does_not_overwrite_existing_otel_data() {
         let mut conn = setup_db();
 
@@ -750,6 +1079,7 @@ mod tests {
                 .with_timezone(&Utc),
             timestamp_nano: "1711500000000000000".to_string(),
             model: "claude-opus-4-6".to_string(),
+            request_id: None,
             cost_usd: 0.05,
             input_tokens: 1000,
             output_tokens: 500,
@@ -758,19 +1088,18 @@ mod tests {
         }];
         ingest_otel_events(&mut conn, &events).unwrap();
 
-        // Try to overwrite with different OTEL data (same timestamp_nano → same otel UUID,
-        // and the existing row is already otel_exact so the timestamp match will find it
-        // but the WHERE clause in ON CONFLICT prevents overwrite)
+        // Send a second OTEL event in the same narrow time window.
+        // With only one otel_exact candidate present, constrained fallback should
+        // treat it as the same API call and keep the original exact data.
         let events2 = vec![OtelApiRequest {
             session_id: "sess-keep".to_string(),
             timestamp: DateTime::parse_from_rfc3339("2024-03-27T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            // Use a DIFFERENT timestamp_nano so it doesn't match the existing otel row
-            // by UUID, but DOES match by session_id + model + close timestamp.
-            // Since the existing row is otel_exact, the timestamp match should skip it.
+            // Different timestamp_nano intentionally avoids deterministic-id matching.
             timestamp_nano: "1711500000100000000".to_string(),
             model: "claude-opus-4-6".to_string(),
+            request_id: None,
             cost_usd: 0.99, // different cost
             input_tokens: 9999,
             output_tokens: 9999,
@@ -828,6 +1157,7 @@ mod tests {
                 .with_timezone(&Utc),
             timestamp_nano: "1711500000000000000".to_string(),
             model: "claude-opus-4-6".to_string(),
+            request_id: None,
             cost_usd: 0.03,
             input_tokens: 500,
             output_tokens: 200,

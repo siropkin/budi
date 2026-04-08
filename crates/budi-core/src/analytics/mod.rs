@@ -214,6 +214,97 @@ pub struct MessageRow {
     pub tags: Vec<SessionTag>,
 }
 
+#[derive(Debug, Clone)]
+struct OtelMatchCandidate {
+    id: String,
+    request_id: Option<String>,
+    timestamp: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OtelMatchStrategy {
+    ExactRequestId,
+    SourceFingerprint,
+    TimestampFallback,
+}
+
+impl OtelMatchStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactRequestId => "exact_request_id",
+            Self::SourceFingerprint => "source_fingerprint",
+            Self::TimestampFallback => "timestamp_fallback",
+        }
+    }
+}
+
+fn normalize_nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn timestamp_distance_millis(timestamp: &str, target: DateTime<Utc>) -> i64 {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| {
+            dt.with_timezone(&Utc)
+                .signed_duration_since(target)
+                .num_milliseconds()
+                .abs()
+        })
+        .unwrap_or(i64::MAX)
+}
+
+fn fingerprint_matches(candidate: &OtelMatchCandidate, msg: &ParsedMessage) -> bool {
+    candidate.input_tokens == msg.input_tokens as i64
+        && candidate.output_tokens == msg.output_tokens as i64
+        && candidate.cache_creation_tokens == msg.cache_creation_tokens as i64
+        && candidate.cache_read_tokens == msg.cache_read_tokens as i64
+}
+
+fn choose_otel_match_candidate<'a>(
+    candidates: &'a [OtelMatchCandidate],
+    msg: &ParsedMessage,
+) -> Option<(&'a OtelMatchCandidate, OtelMatchStrategy)> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if let Some(request_id) = normalize_nonempty(msg.request_id.as_deref()) {
+        let by_request_id: Vec<&OtelMatchCandidate> = candidates
+            .iter()
+            .filter(|candidate| {
+                normalize_nonempty(candidate.request_id.as_deref()) == Some(request_id)
+            })
+            .collect();
+        if let Some(best) = by_request_id
+            .into_iter()
+            .min_by_key(|candidate| timestamp_distance_millis(&candidate.timestamp, msg.timestamp))
+        {
+            return Some((best, OtelMatchStrategy::ExactRequestId));
+        }
+    }
+
+    let by_fingerprint: Vec<&OtelMatchCandidate> = candidates
+        .iter()
+        .filter(|candidate| fingerprint_matches(candidate, msg))
+        .collect();
+    if by_fingerprint.len() == 1 {
+        return Some((by_fingerprint[0], OtelMatchStrategy::SourceFingerprint));
+    }
+    if by_fingerprint.len() > 1 {
+        return None;
+    }
+
+    if candidates.len() == 1 {
+        return Some((&candidates[0], OtelMatchStrategy::TimestampFallback));
+    }
+
+    None
+}
+
 /// Ingest a batch of parsed messages into the database.
 /// `tags` is parallel to `messages` — each entry is the list of tags for that message.
 /// If `sync_file` is provided, atomically updates the sync offset in the same transaction.
@@ -250,28 +341,63 @@ pub fn ingest_messages_with_sync(
             .as_deref()
             .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b));
 
-        // OTEL dedup: if an otel_exact row already covers this API call (same session +
-        // model + close timestamp but different UUID), don't insert a duplicate. Instead,
-        // enrich the OTEL row with JSONL-only context (parent_uuid, cwd, git_branch)
-        // that OTEL doesn't carry.
+        // OTEL dedup: prefer request_id and token fingerprint matching before
+        // constrained timestamp fallback so nearby same-model calls do not merge.
         if msg.role == "assistant" && normalized_session_id.is_some() && msg.model.is_some() {
+            let session_id = normalized_session_id.as_deref().unwrap_or_default();
+            let model = msg.model.as_deref().unwrap_or_default();
             // Pre-compute ±1 second window for index-friendly range predicates
             let ts_lo = (msg.timestamp - chrono::Duration::seconds(1)).to_rfc3339();
             let ts_hi = (msg.timestamp + chrono::Duration::seconds(1)).to_rfc3339();
-            let otel_uuid: Option<String> = tx
-                .query_row(
-                    "SELECT id FROM messages
-                    WHERE session_id = ?1
-                       AND model = ?2
-                       AND role = 'assistant'
-                       AND cost_confidence = 'otel_exact'
-                       AND timestamp BETWEEN ?3 AND ?4
-                     LIMIT 1",
-                    params![normalized_session_id.as_deref(), msg.model, ts_lo, ts_hi],
-                    |row| row.get(0),
-                )
-                .ok();
-            if let Some(otel_id) = otel_uuid {
+            let mut stmt = tx.prepare_cached(
+                "SELECT id, request_id, timestamp, input_tokens, output_tokens,
+                        cache_creation_tokens, cache_read_tokens
+                 FROM messages
+                 WHERE session_id = ?1
+                   AND model = ?2
+                   AND role = 'assistant'
+                   AND cost_confidence = 'otel_exact'
+                   AND timestamp BETWEEN ?3 AND ?4",
+            )?;
+            let otel_candidates: Vec<OtelMatchCandidate> = stmt
+                .query_map(params![session_id, model, ts_lo, ts_hi], |row| {
+                    Ok(OtelMatchCandidate {
+                        id: row.get(0)?,
+                        request_id: row.get(1)?,
+                        timestamp: row.get(2)?,
+                        input_tokens: row.get(3)?,
+                        output_tokens: row.get(4)?,
+                        cache_creation_tokens: row.get(5)?,
+                        cache_read_tokens: row.get(6)?,
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            let otel_selection = choose_otel_match_candidate(&otel_candidates, msg);
+            if otel_candidates.len() > 1 && otel_selection.is_none() {
+                let fingerprint_matches = otel_candidates
+                    .iter()
+                    .filter(|candidate| fingerprint_matches(candidate, msg))
+                    .count();
+                tracing::warn!(
+                    session_id = session_id,
+                    model = model,
+                    candidate_count = otel_candidates.len(),
+                    fingerprint_matches,
+                    "JSONL dedup found ambiguous OTEL candidates; preserving separate message"
+                );
+            }
+
+            if let Some((candidate, strategy)) = otel_selection {
+                let otel_id = candidate.id.clone();
+                tracing::debug!(
+                    session_id = session_id,
+                    model = model,
+                    strategy = strategy.as_str(),
+                    message_id = %otel_id,
+                    "JSONL dedup matched OTEL row for enrichment"
+                );
                 // Enrich the OTEL row with JSONL context (fill NULLs and empty sentinels)
                 tx.execute(
                     "UPDATE messages SET
