@@ -235,21 +235,31 @@ fn otel_uuid(session_id: &str, timestamp_nano: &str) -> String {
     hex::encode(&hash[..16])
 }
 
-fn otel_event_snapshot_json(event: &OtelApiRequest, cost_cents_computed: f64) -> String {
-    serde_json::json!({
-        "session_id": event.session_id,
-        "timestamp": event.timestamp.to_rfc3339(),
-        "timestamp_nano": event.timestamp_nano,
-        "model": event.model,
-        "request_id": event.request_id,
-        "cost_usd_reported": event.cost_usd,
-        "cost_cents_computed": cost_cents_computed,
-        "input_tokens": event.input_tokens,
-        "output_tokens": event.output_tokens,
-        "cache_read_tokens": event.cache_read_tokens,
-        "cache_creation_tokens": event.cache_creation_tokens
-    })
-    .to_string()
+fn otel_event_snapshot_json(
+    event: &OtelApiRequest,
+    cost_cents_computed: f64,
+    policy: &crate::privacy::PrivacyPolicy,
+) -> Option<String> {
+    if policy.mode == crate::privacy::PrivacyMode::Omit {
+        return None;
+    }
+
+    Some(
+        serde_json::json!({
+            "session_id": crate::privacy::minimize_sensitive_field(Some(event.session_id.as_str()), policy.mode),
+            "timestamp": event.timestamp.to_rfc3339(),
+            "timestamp_nano": event.timestamp_nano,
+            "model": event.model,
+            "request_id": crate::privacy::minimize_sensitive_field(event.request_id.as_deref(), policy.mode),
+            "cost_usd_reported": event.cost_usd,
+            "cost_cents_computed": cost_cents_computed,
+            "input_tokens": event.input_tokens,
+            "output_tokens": event.output_tokens,
+            "cache_read_tokens": event.cache_read_tokens,
+            "cache_creation_tokens": event.cache_creation_tokens
+        })
+        .to_string(),
+    )
 }
 
 /// Hex-encode bytes (no extra dependency).
@@ -366,6 +376,16 @@ fn choose_candidate<'a>(
 ///
 /// Returns the number of rows upserted.
 pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> Result<usize> {
+    let policy = crate::privacy::load_privacy_policy();
+    ingest_otel_events_with_policy(conn, events, &policy)
+}
+
+/// Ingest OTEL events using an explicit privacy policy.
+pub fn ingest_otel_events_with_policy(
+    conn: &mut Connection,
+    events: &[OtelApiRequest],
+    policy: &crate::privacy::PrivacyPolicy,
+) -> Result<usize> {
     if events.is_empty() {
         return Ok(0);
     }
@@ -460,7 +480,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                     .map(|(candidate, strategy)| (candidate.id.clone(), *strategy))
             });
 
-        let snapshot_json = otel_event_snapshot_json(event, cost_cents);
+        let snapshot_json = otel_event_snapshot_json(event, cost_cents, policy);
 
         if let Some((existing_uuid, strategy)) = existing_otel_match {
             tracing::debug!(
@@ -480,7 +500,7 @@ pub fn ingest_otel_events(conn: &mut Connection, events: &[OtelApiRequest]) -> R
                 params![
                     event.session_id,
                     ts,
-                    snapshot_json,
+                    snapshot_json.clone(),
                     existing_uuid,
                     event.timestamp_nano,
                     event.model,
@@ -1178,6 +1198,71 @@ mod tests {
         assert_eq!(repo_id.as_deref(), Some("github.com/user/repo"));
         assert_eq!(branch.as_deref(), Some("feature/otel"));
         assert_eq!(cwd.as_deref(), Some("/home/user/repo"));
+    }
+
+    #[test]
+    fn ingest_otel_events_with_omit_policy_drops_raw_snapshot() {
+        let mut conn = setup_db();
+        let events = vec![OtelApiRequest {
+            session_id: "sess-privacy-omit".to_string(),
+            timestamp: DateTime::parse_from_rfc3339("2024-03-27T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            timestamp_nano: "1711500000000000000".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            request_id: Some("msg_abc123".to_string()),
+            cost_usd: 0.05,
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 50000,
+            cache_creation_tokens: 5000,
+        }];
+        let policy = crate::privacy::PrivacyPolicy {
+            mode: crate::privacy::PrivacyMode::Omit,
+            raw_retention_days: None,
+            session_metadata_retention_days: None,
+        };
+
+        ingest_otel_events_with_policy(&mut conn, &events, &policy).unwrap();
+
+        let raw_json: Option<String> = conn
+            .query_row("SELECT raw_json FROM otel_events LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(raw_json.is_none());
+    }
+
+    #[test]
+    fn ingest_otel_events_with_hash_policy_hashes_sensitive_raw_fields() {
+        let mut conn = setup_db();
+        let events = vec![OtelApiRequest {
+            session_id: "sess-privacy-hash".to_string(),
+            timestamp: DateTime::parse_from_rfc3339("2024-03-27T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            timestamp_nano: "1711500000000000000".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            request_id: Some("msg_secret".to_string()),
+            cost_usd: 0.05,
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 50000,
+            cache_creation_tokens: 5000,
+        }];
+        let policy = crate::privacy::PrivacyPolicy {
+            mode: crate::privacy::PrivacyMode::Hash,
+            raw_retention_days: None,
+            session_metadata_retention_days: None,
+        };
+
+        ingest_otel_events_with_policy(&mut conn, &events, &policy).unwrap();
+
+        let raw_json: Option<String> = conn
+            .query_row("SELECT raw_json FROM otel_events LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let raw_json = raw_json.expect("raw_json should be present in hash mode");
+        assert!(!raw_json.contains("sess-privacy-hash"));
+        assert!(!raw_json.contains("msg_secret"));
+        assert!(raw_json.contains("sha256:"));
     }
 
     #[test]

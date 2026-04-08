@@ -143,7 +143,7 @@ fn rebuild_sessions_from_hooks(conn: &Connection) -> Result<()> {
          ORDER BY timestamp ASC",
     )?;
 
-    let rows: Vec<(String, String, String)> = stmt
+    let rows: Vec<(Option<String>, String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .context("Failed to query hook_events for session rebuild")?
         .filter_map(|r| {
@@ -154,6 +154,9 @@ fn rebuild_sessions_from_hooks(conn: &Connection) -> Result<()> {
 
     let mut rebuilt = 0;
     for (raw_json, _provider, stored_ts) in &rows {
+        let Some(raw_json) = raw_json.as_deref() else {
+            continue;
+        };
         let json: serde_json::Value = match serde_json::from_str(raw_json) {
             Ok(v) => v,
             Err(_) => continue,

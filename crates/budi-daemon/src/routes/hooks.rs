@@ -746,6 +746,9 @@ pub async fn hooks_ingest(
         budi_core::hooks::ingest_hook_event(&tx, &event)?;
 
         tx.commit()?;
+        if let Err(e) = budi_core::privacy::enforce_retention(&conn) {
+            tracing::warn!("Privacy retention cleanup failed after hook ingest: {e}");
+        }
         Ok::<_, anyhow::Error>(())
     })
     .await

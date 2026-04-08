@@ -173,6 +173,10 @@ fn sync_with_max_age(
         tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
     }
 
+    if let Err(e) = crate::privacy::enforce_retention(conn) {
+        tracing::warn!("Privacy retention cleanup failed during sync: {e}");
+    }
+
     mark_sync_completed(conn)?;
     Ok((total_files, total_messages, warnings))
 }
