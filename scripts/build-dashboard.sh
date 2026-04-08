@@ -11,7 +11,11 @@ fi
 
 echo "Building dashboard frontend..."
 cd "$FRONTEND_DIR"
-npm install
+if [[ -f package-lock.json ]]; then
+  npm ci --silent --no-audit --no-fund
+else
+  npm install --silent --no-audit --no-fund
+fi
 npm run build
 
 echo "dashboard build complete."

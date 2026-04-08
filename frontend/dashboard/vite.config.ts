@@ -24,5 +24,23 @@ export default defineConfig(({ mode }) => ({
   build: {
     outDir: "../../crates/budi-daemon/static/dashboard-dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) {
+            return undefined;
+          }
+          if (
+            id.includes("/recharts/")
+          ) {
+            return "vendor-recharts";
+          }
+          if (id.includes("/d3-")) {
+            return "vendor-d3";
+          }
+          return undefined;
+        },
+      },
+    },
   },
 }));

@@ -238,6 +238,61 @@ parse_args() {
   done
 }
 
+build_cursor_extension_vsix() {
+  local extension_dir="$REPO_ROOT/extensions/cursor-budi"
+  local vsix_path="$extension_dir/cursor-budi.vsix"
+  local log_file
+  log_file="$(mktemp -t budi-cursor-extension.XXXXXX.log)"
+
+  (
+    set +e
+    cd "$extension_dir" || exit 10
+
+    if [[ -f package-lock.json ]]; then
+      npm ci --silent --no-audit --no-fund
+    else
+      npm install --silent --no-audit --no-fund
+    fi
+    local npm_install_rc=$?
+    [[ "$npm_install_rc" -eq 0 ]] || exit "$npm_install_rc"
+
+    npm run build --silent
+    local npm_build_rc=$?
+    [[ "$npm_build_rc" -eq 0 ]] || exit "$npm_build_rc"
+
+    npm run package --silent
+    exit $?
+  ) >"$log_file" 2>&1
+  local extension_rc=$?
+
+  if [[ "$extension_rc" -eq 0 ]]; then
+    rm -f "$log_file"
+    return 0
+  fi
+
+  local fallback_desc=""
+  if [[ -s "$vsix_path" ]]; then
+    fallback_desc="using existing cursor-budi.vsix"
+  else
+    : > "$vsix_path"
+    fallback_desc="created empty cursor-budi.vsix (auto-install disabled)"
+  fi
+
+  if [[ "$extension_rc" -eq 137 ]]; then
+    log "WARN: Cursor extension build was killed (exit 137; likely resource pressure); $fallback_desc"
+  else
+    log "WARN: Cursor extension build failed (exit $extension_rc); $fallback_desc"
+  fi
+  log "WARN: Cursor extension diagnostics (last 20 lines):"
+  while IFS= read -r line; do
+    log "WARN:   $line"
+  done < <(tail -n 20 "$log_file")
+  log "WARN: Hint: run 'cd $extension_dir && npm ci && npm run build && npm run package' to debug packaging."
+
+  rm -f "$log_file"
+  return 0
+}
+
 main() {
   parse_args "$@"
 
@@ -274,55 +329,7 @@ main() {
         # This is best-effort: install should still succeed even if packaging cannot run.
         if command -v npm >/dev/null 2>&1; then
           log "Building Cursor extension..."
-          (
-            set +e
-            cd "$REPO_ROOT/extensions/cursor-budi" || exit 0
-
-            if [[ -f package-lock.json ]]; then
-              npm ci --silent
-            else
-              npm install --silent
-            fi
-            local npm_install_rc=$?
-            if [[ "$npm_install_rc" -ne 0 ]]; then
-              if [[ -s cursor-budi.vsix ]]; then
-                log "WARN: npm install failed; using existing cursor-budi.vsix"
-                exit 0
-              fi
-              : > cursor-budi.vsix
-              log "WARN: npm install failed; created empty cursor-budi.vsix (auto-install disabled)"
-              exit 0
-            fi
-
-            npm run build --silent
-            local npm_build_rc=$?
-            if [[ "$npm_build_rc" -ne 0 ]]; then
-              if [[ -s cursor-budi.vsix ]]; then
-                log "WARN: extension build failed; using existing cursor-budi.vsix"
-                exit 0
-              fi
-              : > cursor-budi.vsix
-              log "WARN: extension build failed; created empty cursor-budi.vsix (auto-install disabled)"
-              exit 0
-            fi
-
-            if command -v vsce >/dev/null 2>&1; then
-              vsce package --no-dependencies -o cursor-budi.vsix
-            elif [[ -x node_modules/.bin/vsce ]]; then
-              node_modules/.bin/vsce package --no-dependencies -o cursor-budi.vsix
-            else
-              npx --no-install vsce package --no-dependencies -o cursor-budi.vsix
-            fi
-            local package_rc=$?
-            if [[ "$package_rc" -ne 0 ]]; then
-              if [[ -s cursor-budi.vsix ]]; then
-                log "WARN: vsce package failed; using existing cursor-budi.vsix"
-                exit 0
-              fi
-              : > cursor-budi.vsix
-              log "WARN: vsce package failed; created empty cursor-budi.vsix (auto-install disabled)"
-            fi
-          ) 2>&1 | tail -1
+          build_cursor_extension_vsix
         else
           log "npm not found — skipping Cursor extension build (extension auto-install will be disabled)"
         fi
