@@ -822,16 +822,10 @@ fn sync_from_usage_api(
     pipeline: &mut crate::pipeline::Pipeline,
     max_age_days: Option<u64>,
 ) -> Option<Result<(usize, usize, Vec<String>)>> {
-    // Run session repair and backfill unconditionally — they only need DB access,
-    // not API auth, and must run even when auth is expired or no new events arrive.
-    run_cursor_repairs(conn);
-
     let auth = match extract_cursor_auth() {
         Some(a) => a,
         None => {
             // No valid auth — fall back to file-based sync (returns None).
-            // Repairs already ran above, and file-based sync produces messages
-            // with session_ids from file paths.
             return None;
         }
     };
@@ -875,6 +869,9 @@ fn sync_from_usage_api(
         return Some(Ok((0, 0, warnings)));
     }
 
+    // Session repair/backfill is only needed when new Cursor data arrives.
+    run_cursor_repairs(conn);
+
     let sessions = load_session_contexts(conn);
     let mut messages = usage_events_to_messages(&fetched.events, &sessions);
     let tags = pipeline.process(&mut messages);
@@ -894,8 +891,8 @@ fn sync_from_usage_api(
     Some(Ok((api_calls, count, warnings)))
 }
 
-/// Session repair and backfill that runs on every sync regardless of auth status.
-fn run_cursor_repairs(conn: &mut Connection) {
+/// Session repair and backfill for Cursor data.
+pub(crate) fn run_cursor_repairs(conn: &mut Connection) {
     // Persist session windows/metadata discovered from Cursor local composer
     // headers so session rows stay useful even when hooks were missing.
     repair_cursor_sessions_from_composer_headers(conn);
