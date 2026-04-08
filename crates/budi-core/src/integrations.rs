@@ -76,7 +76,7 @@ pub fn validate_cc_hooks(settings: &Value) -> (bool, Vec<String>) {
         let ok = hooks
             .get(*event)
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|e| is_budi_cc_hook_entry(e)))
+            .map(|arr| arr.iter().any(is_budi_cc_hook_entry))
             .unwrap_or(false);
         if !ok {
             missing.push((*event).to_string());
@@ -97,7 +97,7 @@ pub fn validate_cursor_hooks(config: &Value) -> (bool, Vec<String>) {
         let ok = hooks
             .get(*event)
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|e| is_budi_cursor_hook_entry(e)))
+            .map(|arr| arr.iter().any(is_budi_cursor_hook_entry))
             .unwrap_or(false);
         if !ok {
             missing.push((*event).to_string());

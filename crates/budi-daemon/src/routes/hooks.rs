@@ -414,12 +414,12 @@ pub async fn health_integrations()
 
         let mcp_installed = claude_settings
             .as_ref()
-            .map(|s| integrations::check_mcp_config(s))
+            .map(integrations::check_mcp_config)
             .unwrap_or(false);
 
         let otel_installed = claude_settings
             .as_ref()
-            .map(|s| integrations::check_otel_config_loose(s))
+            .map(integrations::check_otel_config_loose)
             .unwrap_or(false);
 
         let statusline_installed = claude_settings
