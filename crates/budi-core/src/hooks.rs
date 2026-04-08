@@ -238,6 +238,30 @@ pub fn parse_hook_event(json: &Value) -> Result<HookEvent> {
     })
 }
 
+/// Parse and ingest one raw hook payload into sessions + hook_events.
+///
+/// Runs in a short transaction and is suitable for queue-drain workers.
+pub fn ingest_hook_payload(conn: &mut Connection, payload: &Value) -> Result<()> {
+    let event = parse_hook_event(payload)?;
+    let tx = conn.transaction()?;
+
+    // If prompt submission, classify and update session category.
+    if matches!(event.event.as_str(), "user_prompt_submit")
+        && let Some(prompt) = payload
+            .get("user_prompt")
+            .or_else(|| payload.get("prompt"))
+            .and_then(|v| v.as_str())
+        && let Some(category) = classify_prompt(prompt)
+    {
+        let _ = update_session_category(&tx, &event, &category);
+    }
+
+    upsert_session(&tx, &event)?;
+    ingest_hook_event(&tx, &event)?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn resolve_hook_message_link(
     conn: &Connection,
     session_id: Option<&str>,

@@ -222,6 +222,16 @@ pub fn parse_otel_logs(request: &ExportLogsServiceRequest) -> Vec<OtelApiRequest
     events
 }
 
+/// Parse and ingest one OTEL JSON payload into analytics tables.
+pub fn ingest_otel_payload(conn: &mut Connection, payload: &serde_json::Value) -> Result<usize> {
+    let request: ExportLogsServiceRequest = serde_json::from_value(payload.clone())?;
+    let events = parse_otel_logs(&request);
+    if events.is_empty() {
+        return Ok(0);
+    }
+    ingest_otel_events(conn, &events)
+}
+
 // ── Ingestion ─────────────────────────────────────────────────────────
 
 /// Generate a deterministic UUID from session_id + timestamp_nano.

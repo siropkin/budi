@@ -191,6 +191,38 @@ async fn main() -> Result<()> {
     {
         tracing::warn!("Failed to initialize database: {e}");
     }
+    if let Err(e) = budi_core::ingest_queue::initialize_queue_db() {
+        tracing::warn!("Failed to initialize ingest queue database: {e}");
+    }
+
+    // Drain queued hook/OTEL payloads continuously in bounded batches.
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            match tokio::task::spawn_blocking(|| budi_core::ingest_queue::process_until_idle(4, 64))
+                .await
+            {
+                Ok(Ok(report)) => {
+                    if report.processed > 0 || report.retried > 0 || report.failed > 0 {
+                        tracing::debug!(
+                            processed = report.processed,
+                            retried = report.retried,
+                            failed = report.failed,
+                            remaining = report.remaining,
+                            "Ingest queue batch processed"
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Ingest queue processing failed: {e}");
+                }
+                Err(e) => {
+                    tracing::warn!("Ingest queue worker task failed: {e}");
+                }
+            }
+        }
+    });
 
     // Auto-sync transcripts every 30 seconds to keep analytics fresh.
     tokio::spawn(async move {
