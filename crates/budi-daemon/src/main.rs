@@ -1,12 +1,17 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
+use axum::Json;
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use budi_core::analytics;
 use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
 use clap::{Parser, Subcommand};
+use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 mod routes;
@@ -34,7 +39,11 @@ enum Commands {
 pub struct AppState {
     pub syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub integrations_installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub admin_token: Option<String>,
 }
+
+const ADMIN_TOKEN_ENV_VAR: &str = "BUDI_DAEMON_ADMIN_TOKEN";
+const ADMIN_TOKEN_HEADER: &str = "x-budi-admin-token";
 
 struct BusyFlagGuard {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -55,6 +64,21 @@ impl Drop for BusyFlagGuard {
 fn build_router(app_state: AppState) -> Router {
     use routes::{analytics as a, dashboard as d, hooks as h, otel as o};
 
+    let protected_mutation_routes = Router::new()
+        .route("/sync", post(h::analytics_sync))
+        .route("/sync/all", post(h::analytics_history))
+        .route("/sync/reset", post(h::analytics_sync_reset))
+        .route("/admin/migrate", post(a::analytics_migrate))
+        .route("/admin/repair", post(a::analytics_repair))
+        .route(
+            "/admin/integrations/install",
+            post(h::admin_install_integrations),
+        )
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            require_local_or_admin_token,
+        ));
+
     Router::new()
         .route("/favicon.ico", get(d::favicon))
         .route("/health", get(h::health))
@@ -68,9 +92,6 @@ fn build_router(app_state: AppState) -> Router {
             "/v1/metrics",
             post(o::otel_metrics_ingest).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
-        .route("/sync", post(h::analytics_sync))
-        .route("/sync/all", post(h::analytics_history))
-        .route("/sync/reset", post(h::analytics_sync_reset))
         .route("/sync/status", get(h::sync_status))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))
@@ -92,12 +113,6 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route("/admin/providers", get(a::analytics_registered_providers))
         .route("/admin/schema", get(a::analytics_schema_version))
-        .route("/admin/migrate", post(a::analytics_migrate))
-        .route("/admin/repair", post(a::analytics_repair))
-        .route(
-            "/admin/integrations/install",
-            post(h::admin_install_integrations),
-        )
         .route("/analytics/tools", get(a::analytics_tools))
         .route("/analytics/mcp", get(a::analytics_mcp))
         .route(
@@ -152,8 +167,68 @@ fn build_router(app_state: AppState) -> Router {
         .route("/dashboard", get(d::dashboard))
         .route("/dashboard/{*rest}", get(d::dashboard))
         .route("/static/dashboard/{*path}", get(d::dashboard_asset))
+        .merge(protected_mutation_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(app_state)
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or_else(|_| host.eq_ignore_ascii_case("localhost"))
+}
+
+fn load_admin_token_from_env() -> Option<String> {
+    std::env::var(ADMIN_TOKEN_ENV_VAR)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+fn request_has_valid_admin_token(headers: &axum::http::HeaderMap, configured_token: &str) -> bool {
+    let bearer_matches = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == configured_token);
+    if bearer_matches {
+        return true;
+    }
+    headers
+        .get(ADMIN_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| token == configured_token)
+}
+
+async fn require_local_or_admin_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> impl IntoResponse {
+    let is_loopback_caller = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|connect| connect.0.ip().is_loopback());
+    if is_loopback_caller {
+        return next.run(request).await;
+    }
+
+    if let Some(configured_token) = state.admin_token.as_deref()
+        && request_has_valid_admin_token(request.headers(), configured_token)
+    {
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "error": format!(
+                "remote mutation endpoints are blocked; use loopback requests or provide a valid admin token via Authorization: Bearer <token> or {ADMIN_TOKEN_HEADER}"
+            )
+        })),
+    )
+        .into_response()
 }
 
 #[tokio::main]
@@ -176,9 +251,17 @@ async fn main() -> Result<()> {
     // take over without manual intervention (e.g. after `cargo build && cp`).
     kill_existing_daemon(port);
 
+    let admin_token = load_admin_token_from_env();
+    if !host_is_loopback(&host) && admin_token.is_none() {
+        tracing::warn!(
+            "Daemon bound to non-loopback host ({host}) without {ADMIN_TOKEN_ENV_VAR}; mutation endpoints are loopback-only."
+        );
+    }
+
     let app_state = AppState {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admin_token,
     };
 
     let sync_flag = app_state.syncing.clone();
@@ -231,7 +314,11 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("budi-daemon listening on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -340,15 +427,39 @@ fn kill_existing_daemon(_port: u16) {}
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn test_app() -> Router {
-        build_router(AppState {
+    fn test_state(admin_token: Option<&str>) -> AppState {
+        AppState {
             syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })
+            admin_token: admin_token.map(|token| token.to_string()),
+        }
+    }
+
+    fn test_app() -> Router {
+        build_router(test_state(None))
+    }
+
+    fn protected_test_app(admin_token: Option<&str>) -> Router {
+        let state = test_state(admin_token);
+        Router::new()
+            .route("/protected", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_local_or_admin_token,
+            ))
+            .with_state(state)
+    }
+
+    fn request_with_caller_ip(path: &str, ip: [u8; 4]) -> Request<Body> {
+        Request::post(path)
+            .extension(ConnectInfo(SocketAddr::from((ip, 62000))))
+            .body(Body::empty())
+            .unwrap()
     }
 
     #[tokio::test]
@@ -425,5 +536,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn protected_mutation_blocks_remote_without_token() {
+        let app = protected_test_app(None);
+        let resp = app
+            .oneshot(request_with_caller_ip("/protected", [10, 1, 2, 3]))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn protected_mutation_allows_loopback_without_token() {
+        let app = protected_test_app(None);
+        let resp = app
+            .oneshot(request_with_caller_ip("/protected", [127, 0, 0, 1]))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_mutation_allows_remote_with_valid_bearer_token() {
+        let app = protected_test_app(Some("top-secret"));
+        let req = Request::post("/protected")
+            .header("authorization", "Bearer top-secret")
+            .extension(ConnectInfo(SocketAddr::from(([10, 0, 0, 15], 62000))))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

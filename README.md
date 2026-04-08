@@ -129,7 +129,15 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks/MCP/OTEL/statusline, Cursor hooks/extension, Starship prompt module). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize in `~/.config/budi/config.toml` with `daemon_port`.
+`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks/MCP/OTEL/statusline, Cursor hooks/extension, Starship prompt module). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses `127.0.0.1:7878` by default — customize in `~/.config/budi/config.toml` with `daemon_host` / `daemon_port`.
+
+If you bind to a non-loopback host (for example `0.0.0.0`), mutation endpoints are protected:
+- loopback callers are allowed by default
+- remote callers must provide a valid admin token
+
+Set `BUDI_DAEMON_ADMIN_TOKEN` on the daemon process and pass it as either:
+- `Authorization: Bearer <token>`
+- `x-budi-admin-token: <token>`
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -449,16 +457,21 @@ Messages with `otel_exact` or `exact` confidence show exact cost in the dashboar
 <details>
 <summary>Daemon API</summary>
 
-The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
+The daemon runs on `http://127.0.0.1:7878` by default and exposes a REST API.
+
+Security model for mutation routes (`/sync*`, `/admin/migrate`, `/admin/repair`, `/admin/integrations/install`):
+- loopback callers are always allowed
+- non-loopback callers must provide a valid token via `Authorization: Bearer <token>` or `x-budi-admin-token`
+- configure token with `BUDI_DAEMON_ADMIN_TOKEN` in the daemon environment
 
 **System:**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
-| POST | `/sync` | Sync recent data (last 30 days) |
-| POST | `/sync/all` | Load full transcript history |
-| POST | `/sync/reset` | Wipe sync state + full re-sync |
+| POST | `/sync` | Sync recent data (last 30 days), protected (loopback or admin token) |
+| POST | `/sync/all` | Load full transcript history, protected (loopback or admin token) |
+| POST | `/sync/reset` | Wipe sync state + full re-sync, protected (loopback or admin token) |
 | GET | `/sync/status` | Syncing flag + last_synced |
 | POST | `/hooks/ingest` | Receive hook events |
 | GET | `/health/integrations` | Hooks/MCP/OTEL/statusline status + DB stats |
@@ -493,8 +506,8 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | GET | `/analytics/session-health` | Session health vitals and tips |
 | GET | `/admin/providers` | Registered providers |
 | GET | `/admin/schema` | Database schema version |
-| POST | `/admin/migrate` | Run database migration |
-| POST | `/admin/repair` | Repair schema drift + run migration |
+| POST | `/admin/migrate` | Run database migration, protected (loopback or admin token) |
+| POST | `/admin/repair` | Repair schema drift + run migration, protected (loopback or admin token) |
 
 Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
