@@ -360,6 +360,10 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 │ Dashboard│ ──────────▶ │  - 30s sync  │ ──────────────────┘
 └──────────┘             │  - analytics │    Extract → Normalize
                          │  - hooks     │      → Enrich → Load
+┌──────────┐             │  - queue     │
+│ ingest   │◀───────────▶│  drainer     │
+│ queue DB │   durable   │              │
+└──────────┘             └──────────────┘
 ┌──────────┐    HTTP     └──────────────┘
 │ MCP      │ ──────────▶ (stdio JSON-RPC, 15 tools)
 │ Server   │  thin client
@@ -378,7 +382,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
   └── OTLP HTTP/JSON ──▶ POST /v1/logs (auto-configured)
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user).
+The daemon is the single source of truth — the CLI never opens the database directly. Realtime hooks/OTEL payloads are written to a durable local queue first, then drained into analytics in bounded retries. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user).
 
 **Data model** — six tables, four data entities + two supporting:
 
@@ -415,7 +419,7 @@ budi is local-first, but you can now enforce tighter storage controls for raw pa
 
 Use `off` to disable a retention window for a category.
 
-Retention cleanup runs automatically after sync, hook ingestion, and OTEL ingestion.
+Retention cleanup runs automatically after sync and queued realtime ingestion processing.
 
 **At-rest protection (SQLCipher strategy):**
 - Current default uses bundled SQLite (WAL) for broad compatibility and easy installs.
@@ -492,11 +496,11 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | POST | `/sync` | Sync recent data (last 30 days) |
 | POST | `/sync/all` | Load full transcript history |
 | POST | `/sync/reset` | Wipe sync state + full re-sync |
-| GET | `/sync/status` | Syncing flag + last_synced |
+| GET | `/sync/status` | Syncing flag + last_synced + ingest queue backlog/failed metrics |
 | POST | `/hooks/ingest` | Receive hook events |
 | GET | `/health/integrations` | Hooks/MCP/OTEL/statusline status + DB stats |
 | GET | `/health/check-update` | Check for updates via GitHub |
-| POST | `/v1/logs` | OTLP logs ingestion (exact cost from Claude Code) |
+| POST | `/v1/logs` | OTLP logs ingestion (durable-queued, then background processed) |
 | POST | `/v1/metrics` | OTLP metrics ingestion (stub for future use) |
 
 **Analytics:**

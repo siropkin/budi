@@ -26,6 +26,9 @@ pub struct SyncStatusResponse {
     pub syncing: bool,
     pub last_sync_completed_at: Option<String>,
     pub newest_data_at: Option<String>,
+    pub ingest_backlog: u64,
+    pub ingest_ready: u64,
+    pub ingest_failed: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_synced: Option<String>,
 }
@@ -524,6 +527,9 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
     let status = tokio::task::spawn_blocking(|| {
         let db_path = budi_core::analytics::db_path().ok()?;
         let conn = budi_core::analytics::open_db(&db_path).ok()?;
+        let queue = budi_core::ingest_queue::queue_stats()
+            .ok()
+            .unwrap_or_default();
         Some((
             budi_core::analytics::last_sync_completed_at(&conn)
                 .ok()
@@ -531,16 +537,21 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
             budi_core::analytics::newest_ingested_data_at(&conn)
                 .ok()
                 .flatten(),
+            queue,
         ))
     })
     .await
     .ok()
     .flatten();
-    let (last_sync_completed_at, newest_data_at) = status.unwrap_or((None, None));
+    let (last_sync_completed_at, newest_data_at, queue_stats) =
+        status.unwrap_or((None, None, budi_core::ingest_queue::QueueStats::default()));
     Json(SyncStatusResponse {
         syncing,
         last_sync_completed_at: last_sync_completed_at.clone(),
         newest_data_at,
+        ingest_backlog: queue_stats.pending,
+        ingest_ready: queue_stats.ready,
+        ingest_failed: queue_stats.failed,
         last_synced: last_sync_completed_at,
     })
 }
@@ -711,49 +722,18 @@ pub async fn analytics_history(
 // ---------------------------------------------------------------------------
 // Hook event ingestion
 //
-// This endpoint opens its own SQLite connection via `open_db`, which is safe
-// to run concurrently with the background sync.  SQLite in WAL mode allows
-// concurrent readers, and write serialization is handled by SQLite's internal
-// locking (SQLITE_BUSY with a timeout configured via `busy_timeout`).  The
-// `syncing` AtomicBool only guards against *duplicate* long-running syncs;
-// hook ingestion writes are small and fast, so the SQLite-level lock is
-// sufficient to prevent data corruption.
+// Durable-first path:
+// 1) append raw payload to ingest queue db
+// 2) background worker drains queue into analytics tables in bounded batches
 // ---------------------------------------------------------------------------
 
 pub async fn hooks_ingest(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
-    tokio::task::spawn_blocking(move || {
-        let event = budi_core::hooks::parse_hook_event(&payload)?;
+    tokio::task::spawn_blocking(move || budi_core::ingest_queue::enqueue_hook_payload(&payload))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+        .map_err(internal_error)?;
 
-        let db_path = budi_core::analytics::db_path()?;
-        let mut conn = budi_core::analytics::open_db(&db_path)?;
-
-        let tx = conn.transaction()?;
-
-        // If prompt submission, classify and update session
-        if matches!(event.event.as_str(), "user_prompt_submit")
-            && let Some(prompt) = payload
-                .get("user_prompt")
-                .or_else(|| payload.get("prompt"))
-                .and_then(|v| v.as_str())
-            && let Some(category) = budi_core::hooks::classify_prompt(prompt)
-        {
-            let _ = budi_core::hooks::update_session_category(&tx, &event, &category);
-        }
-
-        budi_core::hooks::upsert_session(&tx, &event)?;
-        budi_core::hooks::ingest_hook_event(&tx, &event)?;
-
-        tx.commit()?;
-        if let Err(e) = budi_core::privacy::enforce_retention(&conn) {
-            tracing::warn!("Privacy retention cleanup failed after hook ingest: {e}");
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(json!({"ok": true})))
+    Ok(Json(json!({"ok": true, "queued": true})))
 }
