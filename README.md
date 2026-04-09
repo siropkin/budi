@@ -246,7 +246,13 @@ All data commands support `--period today|week|month|all` and `--format json`.
 
 ## Tags & cost attribution
 
-Every message is automatically tagged with: `provider`, `model`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `tool`, `user_email`.
+Every message is automatically tagged with: `provider`, `model`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `tool`, `user_email`, `platform`, `machine`, `user`, `git_user`.
+
+Identity tag semantics:
+- `platform`: OS platform (`macos`, `linux`, `windows`)
+- `machine`: host/machine name
+- `user`: local OS username
+- `git_user`: Git identity (`user.name`/`user.email` fallback)
 
 `repo_id` and `git_branch` are stored as canonical message/session fields (not tags), so repo/branch analytics stay single-source and do not double-count.
 

@@ -116,12 +116,14 @@ impl Enricher for ToolEnricher {
 }
 
 // ---------------------------------------------------------------------------
-// IdentityEnricher — sets user_name and machine_name
+// IdentityEnricher — emits explicit local identity tags
 // ---------------------------------------------------------------------------
 
 pub struct IdentityEnricher {
     user_name: String,
     machine_name: String,
+    platform: String,
+    git_user: String,
 }
 
 impl Default for IdentityEnricher {
@@ -136,9 +138,13 @@ impl IdentityEnricher {
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_default();
         let machine_name = get_hostname();
+        let platform = std::env::consts::OS.to_string();
+        let git_user = get_git_user_identity();
         Self {
             user_name,
             machine_name,
+            platform,
+            git_user,
         }
     }
 }
@@ -171,6 +177,38 @@ fn get_hostname() -> String {
         .unwrap_or_default()
 }
 
+fn read_git_config(args: &[&str]) -> Option<String> {
+    std::process::Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if value.is_empty() { None } else { Some(value) }
+            } else {
+                None
+            }
+        })
+}
+
+fn non_empty_env(var_name: &str) -> Option<String> {
+    std::env::var(var_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn get_git_user_identity() -> String {
+    non_empty_env("GIT_AUTHOR_NAME")
+        .or_else(|| read_git_config(&["config", "--get", "user.name"]))
+        .or_else(|| read_git_config(&["config", "--global", "--get", "user.name"]))
+        .or_else(|| non_empty_env("GIT_AUTHOR_EMAIL"))
+        .or_else(|| read_git_config(&["config", "--get", "user.email"]))
+        .or_else(|| read_git_config(&["config", "--global", "--get", "user.email"]))
+        .unwrap_or_default()
+}
+
 impl Enricher for IdentityEnricher {
     fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
         let mut tags = Vec::new();
@@ -187,6 +225,18 @@ impl Enricher for IdentityEnricher {
             tags.push(Tag {
                 key: tk::MACHINE.to_string(),
                 value: machine.to_string(),
+            });
+        }
+        if !self.platform.is_empty() {
+            tags.push(Tag {
+                key: tk::PLATFORM.to_string(),
+                value: self.platform.clone(),
+            });
+        }
+        if !self.git_user.is_empty() {
+            tags.push(Tag {
+                key: tk::GIT_USER.to_string(),
+                value: self.git_user.clone(),
             });
         }
 
@@ -430,13 +480,48 @@ mod tests {
         let mut enricher = IdentityEnricher::new();
         let mut msg = test_msg();
         let tags = enricher.enrich(&mut msg);
-        // Should produce user and machine tags (values depend on environment)
+        // Should produce identity tags (values depend on environment)
         if !enricher.user_name.is_empty() {
             assert!(tags.iter().any(|t| t.key == "user"));
         }
         if !enricher.machine_name.is_empty() {
             assert!(tags.iter().any(|t| t.key == "machine"));
         }
+        if !enricher.platform.is_empty() {
+            assert!(tags.iter().any(|t| t.key == "platform"));
+        }
+        if !enricher.git_user.is_empty() {
+            assert!(tags.iter().any(|t| t.key == "git_user"));
+        }
+    }
+
+    #[test]
+    fn identity_enricher_emits_explicit_platform_machine_and_git_user() {
+        let mut enricher = IdentityEnricher {
+            user_name: "local-user".to_string(),
+            machine_name: "workstation-01".to_string(),
+            platform: "macos".to_string(),
+            git_user: "Alice Dev".to_string(),
+        };
+        let mut msg = test_msg();
+        let tags = enricher.enrich(&mut msg);
+
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "user" && t.value == "local-user")
+        );
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "machine" && t.value == "workstation-01")
+        );
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "platform" && t.value == "macos")
+        );
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "git_user" && t.value == "Alice Dev")
+        );
     }
 
     #[test]

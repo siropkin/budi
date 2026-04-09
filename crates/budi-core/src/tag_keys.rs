@@ -8,6 +8,8 @@ pub const TICKET_ID: &str = "ticket_id";
 pub const TICKET_PREFIX: &str = "ticket_prefix";
 pub const USER: &str = "user";
 pub const MACHINE: &str = "machine";
+pub const PLATFORM: &str = "platform";
+pub const GIT_USER: &str = "git_user";
 pub const SESSION_TITLE: &str = "session_title";
 pub const PROVIDER: &str = "provider";
 pub const MODEL: &str = "model";
@@ -26,6 +28,8 @@ pub const TOOL_USE_ID: &str = "tool_use_id";
 pub const SESSION_IDENTITY_KEYS: &[&str] = &[
     USER,
     MACHINE,
+    PLATFORM,
+    GIT_USER,
     USER_EMAIL,
     COMPOSER_MODE,
     PERMISSION_MODE,

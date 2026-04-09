@@ -28,7 +28,7 @@ impl Pipeline {
     ) -> Self {
         // Enricher order is critical — do not reorder without understanding dependencies:
         //   1. HookEnricher  — populates session-level metadata (composer_mode, etc.)
-        //   2. IdentityEnricher — populates user/machine tags
+        //   2. IdentityEnricher — populates local identity tags (user/platform/machine/git_user)
         //   3. GitEnricher   — sets repo_id for glob_match (MUST run before TagEnricher)
         //   4. ToolEnricher  — emits per-message tool tags from parsed tool calls
         //   5. CostEnricher  — calculates cost_cents and cost_confidence
@@ -48,7 +48,7 @@ impl Pipeline {
     /// Returns a parallel Vec of tags for each message.
     ///
     /// Two kinds of tags:
-    /// - **Identity tags** (user, machine, composer_mode, …): constant for the
+    /// - **Identity tags** (user, platform, machine, git_user, composer_mode, …): constant for the
     ///   whole session → deduplicated, emitted once on the first assistant msg.
     /// - **Context tags** (ticket_id, activity, tool, …): can change mid-session
     ///   → emitted on every assistant message so cost attribution is accurate.
@@ -459,7 +459,7 @@ mod tests {
             );
         }
 
-        // Identity tags (user, machine) should appear only once across all messages.
+        // Identity tags should appear only once across all messages.
         let all_user_tags: Vec<_> = all_tags
             .iter()
             .flat_map(|t| t.iter())
