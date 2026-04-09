@@ -235,7 +235,7 @@ budi sync --force             # re-ingest all data from scratch (use after upgra
 budi repair                   # repair schema drift + run migration checks
 budi update                   # check for updates (auto-detects Homebrew)
 budi update --version <name>  # update to a specific version
-budi health                   # show session health vitals for most recent session
+budi health                   # show session health vitals for most recent active session
 budi health --session <id>    # health vitals for a specific session
 budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
@@ -313,6 +313,7 @@ The scoring is intentionally conservative:
 - It measures the current working stretch, so a `/compact` resets context-based checks.
 - It looks at the active model stretch for cache reuse, so model switches do not poison the whole session.
 - Cost acceleration uses per-user-turn costs when hook data provides prompt boundaries, and falls back to per-reply costs otherwise.
+- When `budi health` runs without `--session`, it picks the latest session by assistant activity first, then falls back to session timestamps.
 - It prefers concrete next steps over internal jargon.
 
 Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`, Cursor suggestions point you toward a fresh composer session, and unknown providers receive neutral advice. Different providers may intentionally get different recommendations for the same health issue.

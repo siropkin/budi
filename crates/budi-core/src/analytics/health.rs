@@ -144,7 +144,21 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
         Some(s) => s.to_string(),
         None => conn
             .query_row(
-                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1",
+                "WITH latest_assistant AS (
+                     SELECT session_id, MAX(timestamp) AS last_assistant_at
+                     FROM messages
+                     WHERE role = 'assistant' AND session_id IS NOT NULL
+                     GROUP BY session_id
+                 )
+                 SELECT s.id
+                 FROM sessions s
+                 LEFT JOIN latest_assistant la ON la.session_id = s.id
+                 ORDER BY
+                     (la.last_assistant_at IS NULL) ASC,
+                     la.last_assistant_at DESC,
+                     COALESCE(s.started_at, s.ended_at) DESC,
+                     s.id DESC
+                 LIMIT 1",
                 [],
                 |row| row.get(0),
             )
