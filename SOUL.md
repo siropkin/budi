@@ -98,9 +98,9 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/config.rs` - BudiConfig, StatuslineConfig, TagsConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server, ~38 routes
-- `crates/budi-daemon/src/routes/hooks.rs` - /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update endpoints
+- `crates/budi-daemon/src/routes/hooks.rs` - /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
-- `crates/budi-daemon/src/routes/otel.rs` - /v1/logs OTLP ingestion
+- `crates/budi-daemon/src/routes/otel.rs` - /v1/logs and /v1/metrics OTLP ingestion endpoints
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
 - `crates/budi-cli/src/mcp.rs` - MCP server handler (15 tools: analytics + config + health)
 - `crates/budi-cli/src/commands/mcp.rs` - `mcp-serve` subcommand (stdio transport)
@@ -126,7 +126,8 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
   - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` - Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
 - Dashboard frontend sources live in `frontend/dashboard/`; built assets are embedded from `crates/budi-daemon/static/dashboard-dist` (served at `/static/dashboard/*`)
-- Analytics endpoints: `/analytics/summary`, `/analytics/messages`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion - not used by dashboard/MCP)
-- Admin endpoints: `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration)
-- Sync endpoints: `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync), `/sync/status` (syncing flag + last_synced)
+- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/hook-events`, `/analytics/sessions/{id}/otel-events`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion - not used by dashboard/MCP)
+- Admin endpoints (loopback-only): `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration), `/admin/integrations/install` (integration installer orchestration)
+- Sync mutation endpoints (loopback-only): `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync)
+- Sync status endpoint: `/sync/status` (syncing flag + last_synced)
 - Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)

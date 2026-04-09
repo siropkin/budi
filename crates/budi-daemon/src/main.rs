@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use budi_core::analytics;
 use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
@@ -53,7 +54,21 @@ impl Drop for BusyFlagGuard {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, dashboard as d, hooks as h, otel as o};
+    use routes::{analytics as a, dashboard as d, hooks as h, otel as o, require_loopback};
+
+    let protected_routes = Router::new()
+        .route("/sync", post(h::analytics_sync))
+        .route("/sync/all", post(h::analytics_history))
+        .route("/sync/reset", post(h::analytics_sync_reset))
+        .route("/admin/providers", get(a::analytics_registered_providers))
+        .route("/admin/schema", get(a::analytics_schema_version))
+        .route("/admin/migrate", post(a::analytics_migrate))
+        .route("/admin/repair", post(a::analytics_repair))
+        .route(
+            "/admin/integrations/install",
+            post(h::admin_install_integrations),
+        )
+        .route_layer(from_fn(require_loopback));
 
     Router::new()
         .route("/favicon.ico", get(d::favicon))
@@ -68,9 +83,6 @@ fn build_router(app_state: AppState) -> Router {
             "/v1/metrics",
             post(o::otel_metrics_ingest).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
-        .route("/sync", post(h::analytics_sync))
-        .route("/sync/all", post(h::analytics_history))
-        .route("/sync/reset", post(h::analytics_sync_reset))
         .route("/sync/status", get(h::sync_status))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))
@@ -90,14 +102,6 @@ fn build_router(app_state: AppState) -> Router {
         )
         .route("/analytics/providers", get(a::analytics_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
-        .route("/admin/providers", get(a::analytics_registered_providers))
-        .route("/admin/schema", get(a::analytics_schema_version))
-        .route("/admin/migrate", post(a::analytics_migrate))
-        .route("/admin/repair", post(a::analytics_repair))
-        .route(
-            "/admin/integrations/install",
-            post(h::admin_install_integrations),
-        )
         .route("/analytics/tools", get(a::analytics_tools))
         .route("/analytics/mcp", get(a::analytics_mcp))
         .route(
@@ -152,6 +156,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/dashboard", get(d::dashboard))
         .route("/dashboard/{*rest}", get(d::dashboard))
         .route("/static/dashboard/{*path}", get(d::dashboard_asset))
+        .merge(protected_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(app_state)
 }
@@ -263,7 +268,11 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("budi-daemon listening on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -372,6 +381,7 @@ fn kill_existing_daemon(_port: u16) {}
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -457,5 +467,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn protected_admin_route_requires_connect_info() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::get("/admin/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn protected_admin_route_allows_loopback_client() {
+        let app = test_app();
+        let mut req = Request::get("/admin/providers")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_admin_route_blocks_non_loopback_client() {
+        let app = test_app();
+        let mut req = Request::get("/admin/providers")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 10], 54545))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sync_mutation_route_blocks_non_loopback_client() {
+        let app = test_app();
+        let mut req = Request::post("/sync").body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 4], 43434))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

@@ -502,15 +502,16 @@ Messages with `otel_exact` or `exact` confidence show exact cost in the dashboar
 <summary>Daemon API</summary>
 
 The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
+Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoints plus `POST /sync`, `POST /sync/all`, and `POST /sync/reset`.
 
 **System:**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
-| POST | `/sync` | Sync recent data (last 30 days) |
-| POST | `/sync/all` | Load full transcript history |
-| POST | `/sync/reset` | Wipe sync state + full re-sync |
+| POST | `/sync` | Sync recent data (last 30 days, loopback-only) |
+| POST | `/sync/all` | Load full transcript history (loopback-only) |
+| POST | `/sync/reset` | Wipe sync state + full re-sync (loopback-only) |
 | GET | `/sync/status` | Syncing flag + last_synced + ingest queue backlog/failed metrics |
 | POST | `/hooks/ingest` | Receive hook events |
 | GET | `/health/integrations` | Hooks/MCP/OTEL/statusline status + DB stats |
@@ -523,7 +524,9 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/analytics/summary` | Cost and token totals |
+| GET | `/analytics/filter-options` | Filter values for providers/models/projects/branches |
 | GET | `/analytics/messages` | Message list (paginated, searchable) |
+| GET | `/analytics/messages/{message_uuid}/detail` | Full detail for a specific message |
 | GET | `/analytics/projects` | Repos ranked by usage |
 | GET | `/analytics/branches` | Cost per git branch |
 | GET | `/analytics/branches/{branch}` | Cost for a specific branch |
@@ -540,13 +543,19 @@ The daemon runs on `http://127.0.0.1:7878` and exposes a REST API.
 | GET | `/analytics/cost-confidence` | Breakdown by cost confidence level |
 | GET | `/analytics/subagent-cost` | Subagent vs main agent cost |
 | GET | `/analytics/sessions` | Session list (paginated, searchable) |
+| GET | `/analytics/sessions/{id}` | Session metadata and aggregate stats |
 | GET | `/analytics/sessions/{id}/messages` | Messages for a specific session |
+| GET | `/analytics/sessions/{id}/curve` | Session input token growth curve |
+| GET | `/analytics/sessions/{id}/hook-events` | Hook events linked to a session |
+| GET | `/analytics/sessions/{id}/otel-events` | OTEL events linked to a session |
 | GET | `/analytics/sessions/{id}/tags` | Tags for a specific session |
 | GET | `/analytics/session-health` | Session health vitals and tips |
-| GET | `/admin/providers` | Registered providers |
-| GET | `/admin/schema` | Database schema version |
-| POST | `/admin/migrate` | Run database migration |
-| POST | `/admin/repair` | Repair schema drift + run migration |
+| GET | `/analytics/session-audit` | Session attribution/linking audit stats |
+| GET | `/admin/providers` | Registered providers (loopback-only) |
+| GET | `/admin/schema` | Database schema version (loopback-only) |
+| POST | `/admin/migrate` | Run database migration (loopback-only) |
+| POST | `/admin/repair` | Repair schema drift + run migration (loopback-only) |
+| POST | `/admin/integrations/install` | Install/update integrations from daemon (loopback-only) |
 
 Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
