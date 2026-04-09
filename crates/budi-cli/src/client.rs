@@ -4,6 +4,7 @@
 //! the SQLite database.
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -107,20 +108,43 @@ pub struct DaemonClient {
     client: Client,
 }
 
+fn ensure_daemon_ready<H, E>(
+    repo_root: Option<&Path>,
+    config: &BudiConfig,
+    daemon_is_healthy: H,
+    ensure_running: E,
+) -> Result<()>
+where
+    H: Fn(&BudiConfig) -> bool,
+    E: Fn(Option<&Path>, &BudiConfig) -> Result<()>,
+{
+    let was_healthy = daemon_is_healthy(config);
+    ensure_running(repo_root, config).with_context(|| {
+        if was_healthy {
+            "Failed to validate or restart budi daemon. Run `budi doctor` to diagnose."
+        } else {
+            "Failed to start budi daemon. Run `budi doctor` to diagnose."
+        }
+    })
+}
+
 impl DaemonClient {
     /// Create a new client, auto-starting the daemon if needed.
     pub fn connect() -> Result<Self> {
         let config = Self::load_config();
         let base_url = config.daemon_base_url();
+        let repo_root = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| config::find_repo_root(&cwd).ok());
 
-        if !daemon_health(&config) {
-            // Try to auto-start daemon
-            let repo_root = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| config::find_repo_root(&cwd).ok());
-            ensure_daemon_running(repo_root.as_deref(), &config)
-                .context("Failed to start budi daemon. Run `budi doctor` to diagnose")?;
-        }
+        // Always run readiness checks, even when health is green.
+        // `ensure_daemon_running` also handles version mismatches by restarting stale daemons.
+        ensure_daemon_ready(
+            repo_root.as_deref(),
+            &config,
+            daemon_health,
+            ensure_daemon_running,
+        )?;
 
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
@@ -465,5 +489,77 @@ impl DaemonClient {
             .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
         Ok(resp.json()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn ensure_daemon_ready_checks_running_daemon_too() {
+        let config = BudiConfig::default();
+        let ensure_calls = Cell::new(0usize);
+
+        let result = ensure_daemon_ready(
+            None,
+            &config,
+            |_| true,
+            |_, _| {
+                ensure_calls.set(ensure_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(ensure_calls.get(), 1);
+    }
+
+    #[test]
+    fn ensure_daemon_ready_still_checks_when_daemon_is_down() {
+        let config = BudiConfig::default();
+        let ensure_calls = Cell::new(0usize);
+
+        let result = ensure_daemon_ready(
+            None,
+            &config,
+            |_| false,
+            |_, _| {
+                ensure_calls.set(ensure_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(ensure_calls.get(), 1);
+    }
+
+    #[test]
+    fn ensure_daemon_ready_uses_startup_error_context_when_unhealthy() {
+        let config = BudiConfig::default();
+        let err = ensure_daemon_ready(None, &config, |_| false, |_, _| anyhow::bail!("boom"))
+            .expect_err("should fail");
+
+        assert!(
+            err.to_string()
+                .contains("Failed to start budi daemon. Run `budi doctor` to diagnose."),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_daemon_ready_uses_mismatch_error_context_when_healthy() {
+        let config = BudiConfig::default();
+        let err = ensure_daemon_ready(None, &config, |_| true, |_, _| anyhow::bail!("boom"))
+            .expect_err("should fail");
+
+        assert!(
+            err.to_string().contains(
+                "Failed to validate or restart budi daemon. Run `budi doctor` to diagnose."
+            ),
+            "unexpected error: {err}"
+        );
     }
 }
