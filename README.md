@@ -246,7 +246,11 @@ All data commands support `--period today|week|month|all` and `--format json`.
 
 ## Tags & cost attribution
 
-Every message is automatically tagged with: `provider`, `model`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `tool`, `user_email`, `platform`, `machine`, `user`, `git_user`.
+Assistant messages are tagged with core attribution keys: `provider`, `model`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `tool`, `tool_use_id`, `user_email`, `platform`, `machine`, `user`, `git_user`.
+
+Conditional tags:
+- `cost_confidence` is added when `cost_cents` is present.
+- `speed` is added only for non-`standard` speed modes.
 
 Identity tag semantics:
 - `platform`: OS platform (`macos`, `linux`, `windows`)

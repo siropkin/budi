@@ -43,7 +43,7 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 ```
 Sources (JSONL files, OTEL spans, Cursor API, Hooks)
   -> Providers discover + parse -> ParsedMessage structs
-  -> Pipeline: HookEnricher -> IdentityEnricher -> GitEnricher -> CostEnricher -> TagEnricher
+  -> Pipeline: HookEnricher -> IdentityEnricher -> GitEnricher -> ToolEnricher -> CostEnricher -> TagEnricher
   -> SQLite (messages + tags + derived rollup tables)
   -> Dashboard / CLI stats / Statusline
 ```
@@ -87,7 +87,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/analytics/health.rs` - Session health vitals, ProviderKind-aware tips, overall-state logic
 - `crates/budi-core/src/analytics/tests.rs` - Analytics + session health unit tests
 - `crates/budi-core/src/pipeline/mod.rs` - Pipeline struct, Enricher trait, default_pipeline()
-- `crates/budi-core/src/pipeline/enrichers.rs` - All 5 enricher implementations
+- `crates/budi-core/src/pipeline/enrichers.rs` - All 6 enricher implementations
 - `crates/budi-core/src/cost.rs` - Cost estimation, ModelPricing, per-provider pricing tables
 - `crates/budi-core/src/hooks.rs` - HookEvent parsing, session upsert, prompt classification
 - `crates/budi-core/src/otel.rs` - OTLP JSON parsing, OTEL->JSONL dedup
@@ -116,7 +116,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
 - `budi init` installs hooks in `~/.claude/settings.json` (CC) and `~/.cursor/hooks.json` (Cursor), plus OTEL env vars and MCP server
 - **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 15 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity), config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status), and health (session_health). Thin HTTP client to daemon - stdout is JSON-RPC only, logging to stderr
-- Tags are auto-detected (provider, model, tool, ticket_id, activity, etc.) + custom rules via `~/.config/budi/tags.toml`
+- Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-turn or per-reply cost growth), retry loops (tool failure loops from hook_events). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Auto-installed by `budi init` when Cursor CLI is on PATH (`.vsix` embedded in binary via `include_bytes!`). Communicates with daemon via HTTP. Tracks active session via `~/.local/share/budi/cursor-sessions.json` (written by hooks, watched by extension). `budi doctor` and `/health/integrations` both check extension install status.

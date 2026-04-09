@@ -165,7 +165,9 @@ fn propagate_session_context(messages: &mut [ParsedMessage]) {
             msg.cwd = Some(c.clone());
         }
         if let Some(cat) = &msg.prompt_category {
-            if !cat.is_empty() && ctx.category.is_none() {
+            if !cat.is_empty() {
+                // Activity classification can change mid-session.
+                // Keep the latest non-empty prompt_category and propagate it forward.
                 ctx.category = Some(cat.clone());
             }
         } else if let Some(ref cat) = ctx.category {
@@ -469,6 +471,63 @@ mod tests {
             all_user_tags.len() <= 1,
             "identity tag 'user' should be deduplicated, found {} occurrences",
             all_user_tags.len()
+        );
+    }
+
+    #[test]
+    fn activity_tag_tracks_latest_prompt_category() {
+        use crate::config::TagsConfig;
+        let mut pipeline = Pipeline::default_pipeline(
+            Some(TagsConfig::default()),
+            std::collections::HashMap::new(),
+        );
+
+        let mut u1 = test_msg();
+        u1.uuid = "u1".into();
+        u1.session_id = Some("sess-1".into());
+        u1.role = "user".into();
+        u1.prompt_category = Some("bugfix".into());
+        u1.timestamp = "2026-03-14T18:13:42Z".parse().unwrap();
+
+        let mut a1 = test_msg();
+        a1.uuid = "a1".into();
+        a1.session_id = Some("sess-1".into());
+        a1.role = "assistant".into();
+        a1.model = Some("claude-opus".into());
+        a1.output_tokens = 100;
+        a1.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut u2 = test_msg();
+        u2.uuid = "u2".into();
+        u2.session_id = Some("sess-1".into());
+        u2.role = "user".into();
+        u2.prompt_category = Some("feature".into());
+        u2.timestamp = "2026-03-14T18:14:00Z".parse().unwrap();
+
+        let mut a2 = test_msg();
+        a2.uuid = "a2".into();
+        a2.session_id = Some("sess-1".into());
+        a2.role = "assistant".into();
+        a2.model = Some("claude-opus".into());
+        a2.output_tokens = 200;
+        a2.timestamp = "2026-03-14T18:14:01Z".parse().unwrap();
+
+        let mut msgs = vec![u1, a1, u2, a2];
+        let all_tags = pipeline.process(&mut msgs);
+
+        assert!(
+            all_tags[1]
+                .iter()
+                .any(|t| t.key == "activity" && t.value == "bugfix"),
+            "a1 should keep first activity tag, got: {:?}",
+            all_tags[1]
+        );
+        assert!(
+            all_tags[3]
+                .iter()
+                .any(|t| t.key == "activity" && t.value == "feature"),
+            "a2 should inherit updated activity tag, got: {:?}",
+            all_tags[3]
         );
     }
 
