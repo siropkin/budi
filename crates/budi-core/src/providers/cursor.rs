@@ -91,35 +91,50 @@ impl Provider for CursorProvider {
 // ---------------------------------------------------------------------------
 
 /// Returns all state.vscdb paths found on the system: globalStorage and
-/// every workspace under workspaceStorage, for both macOS and Linux.
+/// every workspace under workspaceStorage, across macOS/Linux/Windows layouts.
 fn all_state_vscdb_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     let home = match crate::config::home_dir() {
         Ok(h) => h,
         Err(_) => return paths,
     };
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
 
-    // macOS globalStorage
-    let mac_global = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
-    if mac_global.exists() {
-        paths.push(mac_global);
+    for root in cursor_user_state_roots(&home, appdata.as_deref()) {
+        let global = root.join("globalStorage/state.vscdb");
+        if global.exists() {
+            push_unique_path(&mut paths, global);
+        }
+
+        let ws_dir = root.join("workspaceStorage");
+        scan_workspace_dbs(&ws_dir, &mut paths);
     }
-
-    // Linux globalStorage
-    let linux_global = home.join(".config/Cursor/User/globalStorage/state.vscdb");
-    if linux_global.exists() {
-        paths.push(linux_global);
-    }
-
-    // macOS workspaceStorage
-    let mac_ws = home.join("Library/Application Support/Cursor/User/workspaceStorage");
-    scan_workspace_dbs(&mac_ws, &mut paths);
-
-    // Linux workspaceStorage
-    let linux_ws = home.join(".config/Cursor/User/workspaceStorage");
-    scan_workspace_dbs(&linux_ws, &mut paths);
 
     paths
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !paths.iter().any(|p| p == &candidate) {
+        paths.push(candidate);
+    }
+}
+
+/// Cursor stores state.vscdb under OS-specific "User" roots:
+/// - macOS: ~/Library/Application Support/Cursor/User
+/// - Linux: ~/.config/Cursor/User
+/// - Windows: %APPDATA%/Cursor/User (or ~/AppData/Roaming/Cursor/User fallback)
+fn cursor_user_state_roots(home: &Path, appdata: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    push_unique_path(
+        &mut roots,
+        home.join("Library/Application Support/Cursor/User"),
+    );
+    push_unique_path(&mut roots, home.join(".config/Cursor/User"));
+    push_unique_path(&mut roots, home.join("AppData/Roaming/Cursor/User"));
+    if let Some(appdata_dir) = appdata {
+        push_unique_path(&mut roots, appdata_dir.join("Cursor/User"));
+    }
+    roots
 }
 
 /// Scan a workspaceStorage directory for `*/state.vscdb` files.
@@ -130,7 +145,7 @@ fn scan_workspace_dbs(ws_dir: &Path, paths: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let db = entry.path().join("state.vscdb");
         if db.exists() {
-            paths.push(db);
+            push_unique_path(paths, db);
         }
     }
 }
@@ -271,14 +286,21 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
     Some(CursorAuth { user_id, jwt })
 }
 
+fn parse_timestamp_ms(value: &Value) -> Option<i64> {
+    let ts = match value {
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok())),
+        _ => None,
+    }?;
+    (ts > 0).then_some(ts)
+}
+
 /// Parse a single usage event JSON value into a CursorUsageEvent.
 /// Returns None if the event should be skipped.
 fn parse_usage_event(ev: &Value) -> Option<CursorUsageEvent> {
-    let ts: i64 = ev
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .filter(|&t: &i64| t > 0)?;
+    let ts: i64 = ev.get("timestamp").and_then(parse_timestamp_ms)?;
 
     let model = ev
         .get("model")
@@ -357,10 +379,7 @@ fn parse_usage_event(ev: &Value) -> Option<CursorUsageEvent> {
 
 /// Extract usage-event timestamp in milliseconds from raw API JSON.
 fn usage_event_timestamp_ms(ev: &Value) -> Option<i64> {
-    ev.get("timestamp")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|&ts| ts > 0)
+    ev.get("timestamp").and_then(parse_timestamp_ms)
 }
 
 struct UsageFetchResult {
@@ -2047,12 +2066,57 @@ mod tests {
         })
     }
 
+    fn usage_event_json_numeric(ts_ms: i64) -> Value {
+        serde_json::json!({
+            "timestamp": ts_ms,
+            "model": "composer-2-fast",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 0,
+                "totalCents": 0.2
+            }
+        })
+    }
+
+    #[test]
+    fn parse_usage_event_accepts_numeric_timestamp() {
+        let ev = usage_event_json_numeric(1_774_455_909_363);
+        let parsed = parse_usage_event(&ev).expect("numeric timestamp should be accepted");
+        assert_eq!(parsed.timestamp_ms, 1_774_455_909_363);
+        assert_eq!(parsed.model, "composer-2-fast");
+    }
+
     #[test]
     fn quick_sync_paginates_until_existing_watermark() {
         // 200 new events after watermark=1000, spread across two full pages.
         let page1: Vec<Value> = (1101..=1200).rev().map(usage_event_json).collect();
         let page2: Vec<Value> = (1001..=1100).rev().map(usage_event_json).collect();
         let page3: Vec<Value> = (901..=1000).rev().map(usage_event_json).collect();
+        let pages = [page1, page2, page3];
+
+        let fetched = fetch_usage_events_with_page_loader(Some(1000), false, |page| {
+            Ok(pages
+                .get((page.saturating_sub(1)) as usize)
+                .cloned()
+                .unwrap_or_default())
+        })
+        .unwrap();
+
+        assert_eq!(fetched.pages_fetched, 3);
+        assert_eq!(fetched.events.len(), 200);
+        assert_eq!(fetched.events.first().map(|e| e.timestamp_ms), Some(1001));
+        assert_eq!(fetched.events.last().map(|e| e.timestamp_ms), Some(1200));
+    }
+
+    #[test]
+    fn quick_sync_handles_numeric_timestamps() {
+        // Cursor has shipped timestamp as both JSON string and number.
+        // Numeric timestamps must still drive watermark pagination + parsing.
+        let page1: Vec<Value> = (1101..=1200).rev().map(usage_event_json_numeric).collect();
+        let page2: Vec<Value> = (1001..=1100).rev().map(usage_event_json_numeric).collect();
+        let page3: Vec<Value> = (901..=1000).rev().map(usage_event_json_numeric).collect();
         let pages = [page1, page2, page3];
 
         let fetched = fetch_usage_events_with_page_loader(Some(1000), false, |page| {
@@ -2087,5 +2151,23 @@ mod tests {
         assert_eq!(fetched.events.len(), 100);
         assert_eq!(fetched.events.first().map(|e| e.timestamp_ms), Some(1101));
         assert_eq!(fetched.events.last().map(|e| e.timestamp_ms), Some(1200));
+    }
+
+    #[test]
+    fn cursor_user_state_roots_include_windows_variants_without_duplicates() {
+        let home = Path::new("/tmp/home");
+        let appdata = home.join("AppData/Roaming");
+        let roots = cursor_user_state_roots(home, Some(appdata.as_path()));
+
+        assert!(roots.contains(&home.join("Library/Application Support/Cursor/User")));
+        assert!(roots.contains(&home.join(".config/Cursor/User")));
+        assert!(roots.contains(&home.join("AppData/Roaming/Cursor/User")));
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|p| *p == &home.join("AppData/Roaming/Cursor/User"))
+                .count(),
+            1
+        );
     }
 }

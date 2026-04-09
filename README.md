@@ -60,7 +60,7 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 | Agent | Status | How |
 |-------|--------|-----|
 | **Claude Code** | Supported | OpenTelemetry (exact cost) + JSONL transcripts + hooks |
-| **Cursor** | Supported | Usage API + hooks |
+| **Cursor** | Supported | Usage API + hooks (local transcript fallback when API/auth unavailable) |
 | **Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI** | Planned | |
 
 ## Contributing
@@ -389,7 +389,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
   └── OTLP HTTP/JSON ──▶ POST /v1/logs (auto-configured)
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. Realtime hooks/OTEL payloads are written to a durable local queue first, then drained into analytics in bounded retries. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user).
+The daemon is the single source of truth — the CLI never opens the database directly. Realtime hooks/OTEL payloads are written to a durable local queue first, then drained into analytics in bounded retries. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user). For Cursor, Usage API sync is primary, with local transcript parsing as a fallback when API auth/network is unavailable.
 
 **Data model** — eight tables, six data entities + two supporting:
 
