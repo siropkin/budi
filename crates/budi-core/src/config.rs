@@ -13,19 +13,33 @@ pub(crate) const BUDI_CONFIG_FILE_NAME: &str = "config.toml";
 pub(crate) const BUDI_REPO_ROOT_MARKER_FILE_NAME: &str = "repo-root.txt";
 pub(crate) const BUDI_LOG_DIR_NAME: &str = "logs";
 
+fn parse_env_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
 /// Cross-platform home directory detection.
 /// Uses HOME on Unix, USERPROFILE (then HOMEPATH) on Windows.
 pub fn home_dir() -> Result<PathBuf> {
-    if let Ok(home) = env::var("HOME") {
-        return Ok(PathBuf::from(home));
+    if let Ok(home) = env::var("HOME")
+        && let Some(path) = parse_env_path(&home)
+    {
+        return Ok(path);
     }
     #[cfg(windows)]
     {
         if let Ok(profile) = env::var("USERPROFILE") {
-            return Ok(PathBuf::from(profile));
+            if let Some(path) = parse_env_path(&profile) {
+                return Ok(path);
+            }
         }
         if let (Ok(drive), Ok(path)) = (env::var("HOMEDRIVE"), env::var("HOMEPATH")) {
-            return Ok(PathBuf::from(format!("{drive}{path}")));
+            if let Some(path) = parse_env_path(&format!("{drive}{path}")) {
+                return Ok(path);
+            }
         }
     }
     anyhow::bail!("Could not determine home directory (HOME not set)")
@@ -259,8 +273,10 @@ fn resolve_worktree_main_root(git_file: &Path) -> Option<PathBuf> {
 }
 
 pub fn budi_home_dir() -> Result<PathBuf> {
-    if let Ok(override_dir) = env::var(BUDI_HOME_ENV) {
-        return Ok(PathBuf::from(override_dir));
+    if let Ok(override_dir) = env::var(BUDI_HOME_ENV)
+        && let Some(path) = parse_env_path(&override_dir)
+    {
+        return Ok(path);
     }
     #[cfg(windows)]
     {
@@ -425,6 +441,19 @@ mod tests {
         let data_dir = PathBuf::from("/tmp/budi-marker-test");
         let marker_path = repo_root_marker_path(&data_dir);
         assert!(marker_path.ends_with(BUDI_REPO_ROOT_MARKER_FILE_NAME));
+    }
+
+    #[test]
+    fn parse_env_path_rejects_blank_values() {
+        assert!(parse_env_path("").is_none());
+        assert!(parse_env_path("   ").is_none());
+        assert!(parse_env_path("\n\t ").is_none());
+    }
+
+    #[test]
+    fn parse_env_path_trims_whitespace() {
+        let parsed = parse_env_path("  /tmp/budi-home  ").expect("path should parse");
+        assert_eq!(parsed, PathBuf::from("/tmp/budi-home"));
     }
 
     #[test]
