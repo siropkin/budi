@@ -94,7 +94,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
-- `crates/budi-core/src/migration.rs` - Schema v20, all migration paths
+- `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/config.rs` - BudiConfig, StatuslineConfig, TagsConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server, ~38 routes

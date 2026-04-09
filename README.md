@@ -129,7 +129,7 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks/MCP/OTEL/statusline, Cursor hooks/extension, Starship prompt module). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize in `~/.config/budi/config.toml` with `daemon_port`.
+`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks/MCP/OTEL/statusline, Cursor hooks/extension, Starship prompt module). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
