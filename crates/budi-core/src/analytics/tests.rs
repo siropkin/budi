@@ -3093,6 +3093,29 @@ fn health_auto_selects_latest_session() {
 }
 
 #[test]
+fn health_auto_select_prefers_recent_assistant_activity_when_started_at_missing() {
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('old', 'claude_code', '2026-03-20')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, provider) VALUES ('active', 'claude_code')",
+        [],
+    )
+    .unwrap();
+
+    let msgs: Vec<ParsedMessage> = (0..6)
+        .map(|i| health_msg(&format!("active-m{i}"), "active", i, 100, 900, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, None).unwrap();
+    assert_eq!(h.message_count, 6);
+}
+
+#[test]
 fn health_does_not_alias_prefixed_session_id() {
     let mut conn = test_db();
     conn.execute(
