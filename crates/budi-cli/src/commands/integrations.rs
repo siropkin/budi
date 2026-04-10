@@ -18,24 +18,20 @@ use serde_json::{Value, json};
 #[serde(rename_all = "kebab-case")]
 pub enum IntegrationComponent {
     ClaudeCodeHooks,
-    ClaudeCodeMcp,
     ClaudeCodeOtel,
     ClaudeCodeStatusline,
     CursorHooks,
     CursorExtension,
-    Starship,
 }
 
 impl IntegrationComponent {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::ClaudeCodeHooks => "Claude Code hooks",
-            Self::ClaudeCodeMcp => "Claude Code MCP server",
             Self::ClaudeCodeOtel => "Claude Code OTEL",
             Self::ClaudeCodeStatusline => "Claude Code status line",
             Self::CursorHooks => "Cursor hooks",
             Self::CursorExtension => "Cursor extension",
-            Self::Starship => "Starship prompt integration",
         }
     }
 }
@@ -191,7 +187,6 @@ fn prompt_statusline_preset() -> Result<StatuslinePreset> {
 pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
     [
         IntegrationComponent::ClaudeCodeHooks,
-        IntegrationComponent::ClaudeCodeMcp,
         IntegrationComponent::ClaudeCodeOtel,
         IntegrationComponent::ClaudeCodeStatusline,
         IntegrationComponent::CursorHooks,
@@ -204,12 +199,10 @@ pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
 pub fn all_components() -> BTreeSet<IntegrationComponent> {
     [
         IntegrationComponent::ClaudeCodeHooks,
-        IntegrationComponent::ClaudeCodeMcp,
         IntegrationComponent::ClaudeCodeOtel,
         IntegrationComponent::ClaudeCodeStatusline,
         IntegrationComponent::CursorHooks,
         IntegrationComponent::CursorExtension,
-        IntegrationComponent::Starship,
     ]
     .into_iter()
     .collect()
@@ -251,12 +244,10 @@ pub fn detect_component_state(
 ) -> InstallState {
     let installed = match component {
         IntegrationComponent::ClaudeCodeHooks => claude_hooks_installed(),
-        IntegrationComponent::ClaudeCodeMcp => claude_mcp_installed(),
         IntegrationComponent::ClaudeCodeOtel => claude_otel_installed(config),
         IntegrationComponent::ClaudeCodeStatusline => claude_statusline_installed(),
         IntegrationComponent::CursorHooks => cursor_hooks_installed(),
         IntegrationComponent::CursorExtension => is_cursor_extension_installed(),
-        IntegrationComponent::Starship => starship_installed(),
     };
     if installed {
         InstallState::Installed
@@ -286,7 +277,6 @@ pub fn install_selected(
     let mut report = InstallReport::default();
 
     let uses_claude_settings = selected.contains(&IntegrationComponent::ClaudeCodeHooks)
-        || selected.contains(&IntegrationComponent::ClaudeCodeMcp)
         || selected.contains(&IntegrationComponent::ClaudeCodeOtel)
         || selected.contains(&IntegrationComponent::ClaudeCodeStatusline);
 
@@ -310,15 +300,6 @@ pub fn install_selected(
 
     if selected.contains(&IntegrationComponent::CursorExtension) {
         install_cursor_extension(&mut report.warnings);
-    }
-
-    if selected.contains(&IntegrationComponent::Starship)
-        && let Err(e) = install_starship_integration(config)
-    {
-        let yellow = super::ansi("\x1b[33m");
-        let reset = super::ansi("\x1b[0m");
-        eprintln!("{yellow}  Warning:{reset} Starship integration failed: {e}");
-        report.warnings.push(format!("Starship: {e}"));
     }
 
     report
@@ -389,18 +370,6 @@ fn install_claude_settings(
         changed = true;
     } else if selected.contains(&IntegrationComponent::ClaudeCodeHooks) {
         println!("  Hooks: Claude Code hooks already installed");
-    }
-
-    if selected.contains(&IntegrationComponent::ClaudeCodeMcp) {
-        if apply_mcp_server(&mut settings) {
-            println!(
-                "  MCP: installed budi server in {}",
-                settings_path.display()
-            );
-            changed = true;
-        } else {
-            println!("  MCP: budi server already configured");
-        }
     }
 
     if selected.contains(&IntegrationComponent::ClaudeCodeOtel)
@@ -533,32 +502,6 @@ fn apply_cc_hooks(settings: &mut Value) -> bool {
     }
 
     changed
-}
-
-fn apply_mcp_server(settings: &mut Value) -> bool {
-    let obj = match settings.as_object_mut() {
-        Some(o) => o,
-        None => return false,
-    };
-    let mcp_servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    if !mcp_servers.is_object() {
-        *mcp_servers = json!({});
-    }
-
-    let budi_path = which_budi();
-    let desired = json!({
-        "command": budi_path,
-        "args": ["mcp-serve"],
-        "type": "stdio"
-    });
-
-    let mcp_obj = mcp_servers.as_object_mut().unwrap();
-    if mcp_obj.get("budi") == Some(&desired) {
-        return false;
-    }
-
-    mcp_obj.insert("budi".to_string(), desired);
-    true
 }
 
 /// Apply OTEL env vars. Returns true when settings changed.
@@ -880,53 +823,6 @@ pub fn is_cursor_extension_installed() -> bool {
     }
 }
 
-fn install_starship_integration(config: &config::BudiConfig) -> Result<()> {
-    let home = budi_core::config::home_dir()?;
-    let starship_path = home.join(".config/starship.toml");
-    if let Some(parent) = starship_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-
-    let mut content = if starship_path.exists() {
-        fs::read_to_string(&starship_path)
-            .with_context(|| format!("Failed to read {}", starship_path.display()))?
-    } else {
-        String::new()
-    };
-
-    if content.contains("[custom.budi]") {
-        println!("  Starship: integration already configured");
-        return Ok(());
-    }
-
-    if !content.trim().is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-
-    let health_url = format!("{}/health", config.daemon_base_url());
-    let block = format!(
-        r#"
-# Added by budi
-[custom.budi]
-command = "budi statusline --format=starship"
-when = "curl -sf {health_url} >/dev/null 2>&1"
-format = "[$output]($style) "
-style = "cyan"
-shell = ["sh"]
-"#
-    );
-
-    content.push_str(&block);
-    fs::write(&starship_path, content)
-        .with_context(|| format!("Failed writing {}", starship_path.display()))?;
-    println!(
-        "  Starship: installed integration in {}",
-        starship_path.display()
-    );
-    Ok(())
-}
-
 pub fn claude_statusline_installed() -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
@@ -943,13 +839,6 @@ pub fn claude_hooks_installed() -> bool {
         return false;
     };
     budi_core::integrations::validate_cc_hooks(&settings).0
-}
-
-pub fn claude_mcp_installed() -> bool {
-    let Some(settings) = read_claude_settings() else {
-        return false;
-    };
-    budi_core::integrations::check_mcp_config(&settings)
 }
 
 pub fn claude_otel_installed(config: &config::BudiConfig) -> bool {
@@ -976,37 +865,11 @@ pub fn cursor_hooks_installed() -> bool {
     budi_core::integrations::validate_cursor_hooks(&cfg).0
 }
 
-pub fn starship_installed() -> bool {
-    let home = match budi_core::config::home_dir() {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    let path = home.join(".config/starship.toml");
-    let raw = match fs::read_to_string(path) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-    raw.contains("[custom.budi]")
-}
-
 fn read_claude_settings() -> Option<Value> {
     let home = budi_core::config::home_dir().ok()?;
     let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
     let raw = fs::read_to_string(settings_path).ok()?;
     serde_json::from_str::<Value>(&raw).ok()
-}
-
-/// Find the budi binary path, preferring the same directory as the running binary.
-fn which_budi() -> String {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("budi");
-        if candidate.exists() {
-            return candidate.display().to_string();
-        }
-    }
-    "budi".to_string()
 }
 
 fn is_legacy_cc_hook(entry: &Value) -> bool {

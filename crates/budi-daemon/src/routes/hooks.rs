@@ -42,7 +42,6 @@ pub enum IntegrationInstallComponent {
     ClaudeCodeStatusline,
     CursorHooks,
     CursorExtension,
-    Starship,
 }
 
 impl IntegrationInstallComponent {
@@ -54,7 +53,6 @@ impl IntegrationInstallComponent {
             Self::ClaudeCodeStatusline => "claude-code-statusline",
             Self::CursorHooks => "cursor-hooks",
             Self::CursorExtension => "cursor-extension",
-            Self::Starship => "starship",
         }
     }
 }
@@ -415,11 +413,6 @@ pub async fn health_integrations()
             .map(|s| integrations::validate_cc_hooks(s).0)
             .unwrap_or(false);
 
-        let mcp_installed = claude_settings
-            .as_ref()
-            .map(integrations::check_mcp_config)
-            .unwrap_or(false);
-
         let otel_installed = claude_settings
             .as_ref()
             .map(integrations::check_otel_config_loose)
@@ -443,17 +436,6 @@ pub async fn health_integrations()
 
         // Cursor extension
         let cursor_extension = is_cursor_extension_installed(&home);
-
-        // Starship integration (optional shell prompt integration)
-        let starship_path = format!("{home}/.config/starship.toml");
-        let starship = std::fs::read_to_string(&starship_path)
-            .ok()
-            .is_some_and(|raw| {
-                let has_section = raw.contains("[custom.budi]");
-                let has_command = raw.contains("budi statusline --format=starship")
-                    || raw.contains("budi statusline --format starship");
-                has_section && has_command
-            });
 
         // DB stats + paths
         let db_path = budi_core::analytics::db_path().ok();
@@ -503,10 +485,8 @@ pub async fn health_integrations()
             claude_code_hooks: hooks_installed,
             cursor_hooks,
             cursor_extension,
-            mcp_server: mcp_installed,
             otel: otel_installed,
             statusline: statusline_installed,
-            starship,
             database: db_stats,
             paths: IntegrationPaths {
                 database: db_path_str,

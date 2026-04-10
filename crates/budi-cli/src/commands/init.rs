@@ -27,7 +27,6 @@ pub fn cmd_init(
     statusline_preset: Option<StatuslinePreset>,
     repo_root: Option<PathBuf>,
     no_daemon: bool,
-    no_open: bool,
     no_sync: bool,
 ) -> Result<InitOutcome> {
     let repo_root = if local || repo_root.is_some() {
@@ -150,7 +149,6 @@ pub fn cmd_init(
 
     let bold_cyan = super::ansi("\x1b[1;36m");
     let bold = super::ansi("\x1b[1m");
-    let underline = super::ansi("\x1b[4m");
     let reset = super::ansi("\x1b[0m");
 
     let status_suffix = if had_hook_warnings {
@@ -191,7 +189,6 @@ pub fn cmd_init(
                 .unwrap_or_else(|_| "<unable to resolve budi home>".to_string())
         );
     }
-    println!("  Dashboard: {dashboard_url}");
     println!();
     let sync_counts = match sync_result {
         Ok(counts) => Some(counts),
@@ -204,9 +201,8 @@ pub fn cmd_init(
     println!();
     let dim = super::ansi("\x1b[90m");
     println!("  {bold}Next steps:{reset}");
-    println!("    1. Open the dashboard: {underline}{dashboard_url}{reset}");
-    println!("    2. Run `budi stats` to see your spending");
-    let mut next_step = 3usize;
+    println!("    1. Run `budi stats` to see your spending");
+    let mut next_step = 2usize;
     if is_reinit {
         println!(
             "    {next_step}. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
@@ -220,7 +216,9 @@ pub fn cmd_init(
         println!(
             "    {next_step}. No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
         );
+        next_step += 1;
     }
+    println!("    {next_step}. {dim}Local dashboard (legacy): {dashboard_url}{reset}");
     println!();
     if selected_integrations.is_empty() {
         println!(
@@ -230,10 +228,6 @@ pub fn cmd_init(
         println!("  {dim}Restart Claude Code and Cursor to activate updated integrations.{reset}");
     }
     println!();
-
-    if !no_open && !is_reinit {
-        open_url_in_browser(&dashboard_url);
-    }
 
     if had_hook_warnings {
         let yellow = super::ansi("\x1b[33m");
@@ -248,31 +242,6 @@ pub fn cmd_init(
         Ok(InitOutcome::PartialSuccess)
     } else {
         Ok(InitOutcome::Success)
-    }
-}
-
-pub fn open_url_in_browser(url: &str) {
-    let result = if cfg!(target_os = "macos") {
-        Command::new("open")
-            .arg(url)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-    } else if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-    } else {
-        Command::new("xdg-open")
-            .arg(url)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-    };
-    if let Err(e) = result {
-        tracing::debug!("Could not open browser: {e}");
     }
 }
 
@@ -346,7 +315,7 @@ fn prompt_for_integrations(
 ) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
     if local {
         let enable_global = prompt_yes_no(
-            "  Install global integrations too (Claude/Cursor hooks, status line, MCP, OTEL)?",
+            "  Install global integrations too (Claude/Cursor hooks, status line, OTEL)?",
             false,
         )?;
         if !enable_global {
@@ -363,10 +332,6 @@ fn prompt_for_integrations(
             true,
         ),
         (
-            super::integrations::IntegrationComponent::ClaudeCodeMcp,
-            true,
-        ),
-        (
             super::integrations::IntegrationComponent::ClaudeCodeOtel,
             true,
         ),
@@ -379,7 +344,6 @@ fn prompt_for_integrations(
             super::integrations::IntegrationComponent::CursorExtension,
             true,
         ),
-        (super::integrations::IntegrationComponent::Starship, false),
     ];
     for (component, default_enabled) in defaults {
         let question = format!("  - {}?", component.display_name());

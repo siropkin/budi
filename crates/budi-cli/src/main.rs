@@ -7,7 +7,6 @@ use tracing_subscriber::EnvFilter;
 mod client;
 mod commands;
 mod daemon;
-mod mcp;
 
 use crate::commands::integrations::{IntegrationComponent, StatuslinePreset};
 
@@ -18,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi open               Open the dashboard in the browser\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -51,9 +50,6 @@ enum Commands {
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
-        /// Don't open the dashboard in the browser
-        #[arg(long)]
-        no_open: bool,
         /// Skip automatic sync of existing transcripts
         #[arg(long)]
         no_sync: bool,
@@ -121,7 +117,7 @@ Examples:
         #[arg(long, conflicts_with = "all")]
         force: bool,
     },
-    /// Open the budi dashboard in the browser
+    /// Open the local dashboard in the browser (legacy — will be replaced by the Rich CLI)
     Open,
     /// Update budi to the latest version
     Update {
@@ -157,9 +153,6 @@ Examples:
         #[arg(long)]
         session: Option<String>,
     },
-    /// Run the MCP server (stdio transport) for AI agent integration
-    #[command(name = "mcp-serve")]
-    McpServe,
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -222,7 +215,7 @@ pub enum StatsFormat {
 pub enum StatuslineFormat {
     /// ANSI colors + OSC 8 hyperlinks (for Claude Code statusline)
     Claude,
-    /// Plain text, no ANSI (for Starship / shell prompts)
+    /// Plain text, no ANSI (for shell prompts)
     Starship,
     /// Raw JSON
     Json,
@@ -249,7 +242,6 @@ fn main() -> Result<()> {
             statusline_preset,
             repo_root,
             no_daemon,
-            no_open,
             no_sync,
         } => {
             let outcome = commands::init::cmd_init(
@@ -261,7 +253,6 @@ fn main() -> Result<()> {
                 statusline_preset,
                 repo_root,
                 no_daemon,
-                no_open,
                 no_sync,
             )?;
             if matches!(outcome, commands::init::InitOutcome::PartialSuccess) {
@@ -334,13 +325,6 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Health { session } => commands::health::cmd_health(session),
-        Commands::McpServe => {
-            // MCP server uses async — stdout is reserved for JSON-RPC.
-            // Reinitialize logging to stderr only (the default tracing init above
-            // uses stderr already, but with ANSI colors that could leak into stdio).
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::mcp::run_mcp_server())
-        }
         Commands::Statusline { install, format } => {
             if install {
                 commands::statusline::cmd_statusline_install()

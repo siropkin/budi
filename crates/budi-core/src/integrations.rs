@@ -106,20 +106,6 @@ pub fn validate_cursor_hooks(config: &Value) -> (bool, Vec<String>) {
     (missing.is_empty(), missing)
 }
 
-/// Check if the budi MCP server is configured in a parsed Claude Code settings value.
-pub fn check_mcp_config(settings: &Value) -> bool {
-    let Some(budi) = settings.get("mcpServers").and_then(|m| m.get("budi")) else {
-        return false;
-    };
-    budi.get("command")
-        .and_then(|c| c.as_str())
-        .is_some_and(|c| c.contains("budi"))
-        && budi
-            .get("args")
-            .and_then(|a| a.as_array())
-            .is_some_and(|args| args.iter().any(|a| a.as_str() == Some("mcp-serve")))
-}
-
 /// Check if OTEL env vars are correctly configured in a parsed Claude Code settings value.
 ///
 /// `daemon_port` is used to verify the endpoint points to the expected local daemon.
@@ -276,38 +262,6 @@ mod tests {
         let (ok, missing) = validate_cursor_hooks(&config);
         assert!(!ok);
         assert_eq!(missing, vec!["no hooks key"]);
-    }
-
-    #[test]
-    fn check_mcp_config_detects_budi_server() {
-        let settings = json!({
-            "mcpServers": {
-                "budi": {
-                    "command": "/usr/local/bin/budi",
-                    "args": ["mcp-serve"],
-                    "type": "stdio"
-                }
-            }
-        });
-        assert!(check_mcp_config(&settings));
-    }
-
-    #[test]
-    fn check_mcp_config_rejects_missing_args() {
-        let settings = json!({
-            "mcpServers": {
-                "budi": {
-                    "command": "/usr/local/bin/budi"
-                }
-            }
-        });
-        assert!(!check_mcp_config(&settings));
-    }
-
-    #[test]
-    fn check_mcp_config_rejects_missing_server() {
-        let settings = json!({"mcpServers": {}});
-        assert!(!check_mcp_config(&settings));
     }
 
     #[test]

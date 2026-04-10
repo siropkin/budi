@@ -385,19 +385,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         println!("  {dim}Tip: hook delivery failures are logged to {hook_log_hint}{reset}");
     }
 
-    // Check MCP server configuration in Claude Code settings
-    {
-        let mcp_ok = check_mcp_config(&claude_settings);
-        if mcp_ok {
-            println!("  {green}\u{2713}{reset} MCP: budi server configured");
-        } else {
-            let yellow = super::ansi("\x1b[33m");
-            println!(
-                "  {yellow}!{reset} MCP: budi server not configured. Run `budi integrations install --with claude-code-mcp`"
-            );
-        }
-    }
-
     // Check OTEL configuration in Claude Code settings
     {
         let otel_ok = check_otel_config(&claude_settings, &config);
@@ -537,17 +524,6 @@ fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
         return false;
     };
     budi_core::integrations::check_otel_config(&settings, config.daemon_port)
-}
-
-/// Check if the budi MCP server is configured in Claude Code settings file.
-fn check_mcp_config(settings_path: &str) -> bool {
-    let Ok(raw) = std::fs::read_to_string(settings_path) else {
-        return false;
-    };
-    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    budi_core::integrations::check_mcp_config(&settings)
 }
 
 fn hook_log_path_hint() -> String {
