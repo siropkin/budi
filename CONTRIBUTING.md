@@ -2,6 +2,12 @@
 
 Thanks for helping improve budi.
 
+## Prerequisites
+
+- Rust stable toolchain (`rustup`, `cargo`)
+- Node.js 20+ and npm (for dashboard and Cursor extension work)
+- `gh` CLI (required when validating release-install flows with `scripts/install.sh --from-release`)
+
 ## Quick start
 
 ```bash
@@ -18,6 +24,8 @@ cargo test
 
 ## Local quality checks
 
+Run checks only for the area you changed, plus any shared Rust code impacted by your change.
+
 ### Rust workspace
 
 ```bash
@@ -26,11 +34,17 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+To mirror CI exactly for formatting, use:
+
+```bash
+cargo fmt --all -- --check
+```
+
 ### Dashboard frontend (`frontend/dashboard`)
 
 ```bash
 cd frontend/dashboard
-npm install
+npm ci
 npm run build
 ```
 
@@ -54,11 +68,11 @@ For local dashboard UI development (hot reload + API proxy):
 
 ```bash
 # terminal A (repo root)
-cargo run -p budi-daemon
+cargo run -p budi-daemon -- serve
 
 # terminal B
 cd frontend/dashboard
-npm install
+npm ci
 npm run dev
 ```
 
@@ -118,6 +132,26 @@ Issue templates are available in the repository to keep reports actionable.
 - [ ] Extension lint/format/test/build checks pass if extension code changed.
 - [ ] Docs were updated for user-visible behavior changes.
 - [ ] Migration or compatibility impact is noted (if relevant).
+- [ ] Follow-up work is captured explicitly (issue or PR TODO) if not included in this PR.
+- [ ] PR links the driving issue (`Closes #...` or equivalent) when applicable.
+
+## PR review expectations
+
+Use findings-first PR descriptions so reviewers can quickly assess risk:
+
+1. What area you reviewed or changed
+2. What you changed and why
+3. Risks/compatibility notes and any deferred follow-ups
+4. Validation evidence (commands run + pass/fail)
+
+If a review issue leads to "no code changes needed", still include a small artifact (for example a docs note, checklist update, or review report in `docs/reviews/`) so the decision is auditable.
+
+## Contributor troubleshooting quick hits
+
+- **`budi` and `budi-daemon` mismatch**: keep one install source on `PATH`; run `budi doctor`.
+- **Dashboard looks stale after frontend edits**: rebuild via `./scripts/build-dashboard.sh`, then restart daemon.
+- **Cursor extension status stale/offline**: run `budi doctor`, then `Budi: Refresh Status` or reload Cursor window.
+- **MCP tests fail unexpectedly**: verify `budi-daemon` is running before `budi mcp-serve` contract checks.
 
 ## Adding a new provider
 
