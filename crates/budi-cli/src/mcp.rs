@@ -20,15 +20,21 @@ use crate::client::DaemonClient;
 
 // ─── Request types ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct PeriodRequest {
-    /// Time period: "today", "week", "month", "all". Default: "month"
-    #[serde(default = "default_period")]
-    pub period: String,
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Period {
+    Today,
+    Week,
+    #[default]
+    Month,
+    All,
 }
 
-fn default_period() -> String {
-    "month".into()
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeriodRequest {
+    /// Time period bucket. Valid values: today, week, month, all. Default: month.
+    #[serde(default)]
+    pub period: Period,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -37,18 +43,18 @@ pub struct BranchRequest {
     pub branch: String,
     /// Optional repository filter (recommended when branch names exist in multiple repos)
     pub repo_id: Option<String>,
-    /// Time period: "today", "week", "month", "all". Default: "month"
-    #[serde(default = "default_period")]
-    pub period: String,
+    /// Time period bucket. Valid values: today, week, month, all. Default: month.
+    #[serde(default)]
+    pub period: Period,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TagRequest {
     /// Tag key to break down by (e.g. "ticket_id", "activity", "user", "composer_mode", "permission_mode", "duration", "tool", "cost_confidence")
     pub key: String,
-    /// Time period: "today", "week", "month", "all". Default: "month"
-    #[serde(default = "default_period")]
-    pub period: String,
+    /// Time period bucket. Valid values: today, week, month, all. Default: month.
+    #[serde(default)]
+    pub period: Period,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -106,8 +112,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let summary: Value = self.daemon_get(
             "/analytics/summary",
@@ -216,8 +222,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let models: Vec<Value> = self.daemon_get(
             "/analytics/models",
@@ -257,8 +263,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let mut query = build_params(since.as_deref(), until.as_deref());
         query.push(("limit".to_string(), "30".to_string()));
@@ -292,8 +298,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let branches: Vec<Value> = self.daemon_get(
             "/analytics/branches",
@@ -334,8 +340,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<BranchRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
         let branch = &params.0.branch;
 
         let mut query = build_params(since.as_deref(), until.as_deref());
@@ -399,8 +405,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<TagRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
         let key = &params.0.key;
 
         let mut query = build_params(since.as_deref(), until.as_deref());
@@ -439,8 +445,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let providers: Vec<Value> = self.daemon_get(
             "/analytics/providers",
@@ -500,8 +506,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let tools: Vec<Value> = self.daemon_get(
             "/analytics/tools",
@@ -546,8 +552,8 @@ impl BudiMcpServer {
         &self,
         params: Parameters<PeriodRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (since, until) = period_to_dates(&params.0.period);
-        let period_label = period_label(&params.0.period);
+        let (since, until) = period_to_dates(params.0.period);
+        let period_label = period_label(params.0.period);
 
         let activity: Vec<Value> = self.daemon_get(
             "/analytics/activity",
@@ -752,15 +758,16 @@ impl BudiMcpServer {
 
     #[tool(description = "Trigger a data sync to refresh analytics with latest transcripts.")]
     async fn sync_data(&self) -> Result<CallToolResult, McpError> {
+        const SYNC_PATH: &str = "/sync";
         let (status, response_body) = tokio::task::block_in_place(|| {
             let resp = self
                 .client
-                .post(format!("{}/sync", self.base_url))
+                .post(format!("{}{}", self.base_url, SYNC_PATH))
                 .json(&serde_json::json!({ "migrate": false }))
                 .timeout(Duration::from_secs(120))
                 .send()
                 .map_err(|e| {
-                    McpError::internal_error(format!("Daemon not reachable: {e}"), None)
+                    McpError::internal_error(daemon_unreachable_message(&self.base_url, e), None)
                 })?;
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
@@ -769,7 +776,8 @@ impl BudiMcpServer {
 
         if !status.is_success() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Sync failed: {response_body}"
+                "Sync failed: {}",
+                daemon_http_error_message(status, &response_body, SYNC_PATH)
             ))]));
         }
 
@@ -855,9 +863,10 @@ impl BudiMcpServer {
         if let Some(ref sid) = params.0.session_id {
             query.push(("session_id".to_string(), sid.clone()));
         }
-        let health: Value = self.daemon_get("/analytics/session-health", &query)?;
-        let pretty = serde_json::to_string_pretty(&health).unwrap_or_default();
-        Ok(CallToolResult::success(vec![Content::text(pretty)]))
+        let health: budi_core::analytics::SessionHealth =
+            self.daemon_get("/analytics/session-health", &query)?;
+        let text = format_session_health_text(&health, params.0.session_id.as_deref());
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
@@ -892,20 +901,14 @@ impl BudiMcpServer {
                 .query(params)
                 .send()
                 .map_err(|e| {
-                    McpError::internal_error(
-                        format!(
-                            "budi daemon not reachable at {}. Run `budi init` to start it. Error: {e}",
-                            self.base_url
-                        ),
-                        None,
-                    )
+                    McpError::internal_error(daemon_unreachable_message(&self.base_url, e), None)
                 })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().unwrap_or_default();
                 return Err(McpError::internal_error(
-                    format!("Daemon returned {status}: {body}"),
+                    daemon_http_error_message(status, &body, path),
                     None,
                 ));
             }
@@ -927,13 +930,7 @@ impl BudiMcpServer {
                 .query(params)
                 .send()
                 .map_err(|e| {
-                    McpError::internal_error(
-                        format!(
-                            "budi daemon not reachable at {}. Run `budi init` to start it. Error: {e}",
-                            self.base_url
-                        ),
-                        None,
-                    )
+                    McpError::internal_error(daemon_unreachable_message(&self.base_url, e), None)
                 })?;
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
@@ -942,33 +939,26 @@ impl BudiMcpServer {
     }
 }
 
-fn period_to_dates(period: &str) -> (Option<String>, Option<String>) {
+fn period_to_dates(period: Period) -> (Option<String>, Option<String>) {
     let today = Local::now().date_naive();
     match period {
-        "today" => {
+        Period::Today => {
             let since = local_midnight_to_utc(today);
             (Some(since), None)
         }
-        "week" => {
+        Period::Week => {
             let weekday = today.weekday().num_days_from_monday();
             let monday = today - chrono::Duration::days(weekday as i64);
             let since = local_midnight_to_utc(monday);
             (Some(since), None)
         }
-        "month" => {
+        Period::Month => {
             let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
                 .expect("valid first-of-month date");
             let since = local_midnight_to_utc(first);
             (Some(since), None)
         }
-        "all" => (None, None),
-        other => {
-            tracing::warn!("Unknown period '{other}', defaulting to month");
-            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-                .expect("valid first-of-month date");
-            let since = local_midnight_to_utc(first);
-            (Some(since), None)
-        }
+        Period::All => (None, None),
     }
 }
 
@@ -980,13 +970,122 @@ fn local_midnight_to_utc(date: NaiveDate) -> String {
     local_dt.with_timezone(&chrono::Utc).to_rfc3339()
 }
 
-fn period_label(period: &str) -> &str {
+fn period_label(period: Period) -> &'static str {
     match period {
-        "today" => "Today",
-        "week" => "This week",
-        "month" => "This month",
-        "all" => "All time",
-        _ => "This month",
+        Period::Today => "Today",
+        Period::Week => "This week",
+        Period::Month => "This month",
+        Period::All => "All time",
+    }
+}
+
+fn daemon_unreachable_message(base_url: &str, err: reqwest::Error) -> String {
+    format!(
+        "budi daemon is unreachable at {base_url}. Run `budi init` (or `budi doctor`) to start/repair it. Error: {err}"
+    )
+}
+
+fn daemon_http_error_message(status: reqwest::StatusCode, body: &str, path: &str) -> String {
+    let detail = daemon_error_detail(body);
+    match status {
+        reqwest::StatusCode::CONFLICT => format!(
+            "Daemon is busy (often an existing sync/migration in progress). Wait for it to finish, then retry `{path}`. Details: {detail}"
+        ),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => format!(
+            "Daemon is not ready yet. Wait a few seconds, then retry `{path}`. Details: {detail}"
+        ),
+        reqwest::StatusCode::NOT_FOUND => format!(
+            "Daemon endpoint `{path}` was not found. Restart budi to refresh daemon/CLI compatibility. Details: {detail}"
+        ),
+        _ if status.is_server_error() => {
+            format!("Daemon returned server error {status} for `{path}`. Details: {detail}")
+        }
+        _ => format!("Daemon returned {status} for `{path}`. Details: {detail}"),
+    }
+}
+
+fn daemon_error_detail(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "no response body".to_string();
+    }
+    let parsed: Result<Value, _> = serde_json::from_str(trimmed);
+    if let Ok(val) = parsed {
+        if let Some(msg) = val.get("error").and_then(|v| v.as_str()) {
+            return msg.to_string();
+        }
+        if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
+            return msg.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn format_session_health_text(
+    health: &budi_core::analytics::SessionHealth,
+    session_id: Option<&str>,
+) -> String {
+    let mut text = String::from("Session Health\n");
+    text.push_str(&format!(
+        "Session: {}\n",
+        session_id.unwrap_or("latest active session")
+    ));
+    text.push_str(&format!("State: {}\n", health.state.to_uppercase()));
+    text.push_str(&format!("Messages: {}\n", health.message_count));
+    text.push_str(&format!(
+        "Total cost: {}\n",
+        format_dollars(health.total_cost_cents / 100.0)
+    ));
+    text.push_str(&format!("Tip: {}\n", health.tip));
+
+    text.push_str("\nVitals:\n");
+    push_vital_line(
+        &mut text,
+        "Context Growth",
+        health.vitals.context_drag.as_ref(),
+    );
+    push_vital_line(
+        &mut text,
+        "Cache Reuse",
+        health.vitals.cache_efficiency.as_ref(),
+    );
+    push_vital_line(&mut text, "Retry Loops", health.vitals.thrashing.as_ref());
+    push_vital_line(
+        &mut text,
+        "Cost Acceleration",
+        health.vitals.cost_acceleration.as_ref(),
+    );
+
+    if !health.details.is_empty() {
+        text.push_str("\nDetails:\n");
+        for detail in &health.details {
+            text.push_str(&format!(
+                "- {} [{}]: {}\n",
+                detail.vital,
+                detail.state.to_uppercase(),
+                detail.tip
+            ));
+            if !detail.actions.is_empty() {
+                text.push_str(&format!("  Actions: {}\n", detail.actions.join("; ")));
+            }
+        }
+    }
+
+    text
+}
+
+fn push_vital_line(
+    text: &mut String,
+    name: &str,
+    vital: Option<&budi_core::analytics::VitalScore>,
+) {
+    match vital {
+        Some(v) => text.push_str(&format!(
+            "- {name}: {} ({})\n",
+            v.state.to_uppercase(),
+            v.label
+        )),
+        None => text.push_str(&format!("- {name}: GRAY (not enough data yet)\n")),
     }
 }
 
@@ -1043,4 +1142,82 @@ fn urlencoding_simple(s: &str) -> String {
         .replace(' ', "%20")
         .replace('#', "%23")
         .replace('?', "%3F")
+}
+
+#[cfg(test)]
+mod tests {
+    use budi_core::analytics::{HealthDetail, SessionHealth, SessionVitals, VitalScore};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn period_defaults_to_month() {
+        let req: PeriodRequest = serde_json::from_value(json!({})).expect("valid default request");
+        assert!(matches!(req.period, Period::Month));
+    }
+
+    #[test]
+    fn period_rejects_unknown_values() {
+        let err = serde_json::from_value::<PeriodRequest>(json!({ "period": "quarter" }))
+            .expect_err("unknown period should fail");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn daemon_error_prefers_json_error_field() {
+        let detail = daemon_error_detail(r#"{ "error": "sync already running" }"#);
+        assert_eq!(detail, "sync already running");
+    }
+
+    #[test]
+    fn conflict_error_message_is_actionable() {
+        let msg = daemon_http_error_message(
+            reqwest::StatusCode::CONFLICT,
+            r#"{ "error": "sync already in progress" }"#,
+            "/sync",
+        );
+        assert!(msg.contains("Daemon is busy"));
+        assert!(msg.contains("sync already in progress"));
+    }
+
+    #[test]
+    fn session_health_text_includes_summary_vitals_and_actions() {
+        let health = SessionHealth {
+            state: "yellow".to_string(),
+            message_count: 42,
+            total_cost_cents: 123.45,
+            vitals: SessionVitals {
+                context_drag: Some(VitalScore {
+                    state: "yellow".to_string(),
+                    label: "Context grew quickly".to_string(),
+                }),
+                cache_efficiency: None,
+                thrashing: Some(VitalScore {
+                    state: "green".to_string(),
+                    label: "No loops detected".to_string(),
+                }),
+                cost_acceleration: None,
+            },
+            tip: "Trim context with /compact soon.".to_string(),
+            details: vec![HealthDetail {
+                vital: "context_drag".to_string(),
+                state: "yellow".to_string(),
+                label: "Context growth".to_string(),
+                tip: "Compact now to reduce prompt bloat.".to_string(),
+                actions: vec!["Run /compact".to_string(), "Split tasks".to_string()],
+            }],
+        };
+
+        let text = format_session_health_text(&health, Some("session-123"));
+        assert!(text.contains("Session: session-123"));
+        assert!(text.contains("State: YELLOW"));
+        assert!(text.contains("Total cost: $1.23"));
+        assert!(text.contains("- Context Growth: YELLOW (Context grew quickly)"));
+        assert!(text.contains("- Cache Reuse: GRAY (not enough data yet)"));
+        assert!(text.contains("Actions: Run /compact; Split tasks"));
+    }
 }

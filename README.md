@@ -305,6 +305,9 @@ Budi includes an MCP (Model Context Protocol) server so AI agents can query your
 | `session_health` | Session health vitals, tips, and overall state |
 
 All analytics tools accept a `period` parameter: `today`, `week`, `month`, `all` (default: `month`).
+Invalid period values are rejected by the MCP schema (no silent fallback).
+
+`session_health` returns a concise summary for agents: overall state, messages, total cost, primary tip, and a vital-by-vital breakdown with actions when available.
 
 The MCP server is a thin HTTP client to the daemon — it never touches the database directly. Communication uses stdio (JSON-RPC), and all logging goes to stderr.
 

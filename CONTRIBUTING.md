@@ -141,9 +141,12 @@ Issue templates are available in the repository to keep reports actionable.
 ```bash
 # Send initialize + tools/list via stdin:
 printf '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/list","id":2}\n' | cargo run --bin budi -- mcp-serve 2>/dev/null
+
+# Optional contract check: invalid period should fail with invalid params
+printf '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"get_cost_summary","arguments":{"period":"quarter"}}}\n' | cargo run --bin budi -- mcp-serve 2>/dev/null
 ```
 
-The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTTP client to the daemon - make sure `budi-daemon` is running first.
+The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTTP client to the daemon - make sure `budi-daemon` is running first. Runtime daemon failures should surface actionable MCP error text (busy/not-ready/mismatch guidance).
 
 ## Releasing
 
