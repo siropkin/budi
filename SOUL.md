@@ -32,6 +32,23 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 
 ## Architecture
 
+### Product boundaries
+
+The monorepo contains three logical products planned for eventual extraction (see [ADR-0086](docs/adr/0086-extraction-boundaries.md)):
+
+| Product | Location | Role |
+|---------|----------|------|
+| **budi-core** | `crates/`, `scripts/`, `homebrew/` | Rust workspace: daemon, CLI, core business logic. Stays in this repo. |
+| **budi-cursor** | `extensions/cursor-budi/` | VS Code/Cursor extension. Communicates with daemon over HTTP and `budi` CLI. Will be extracted to its own repo. |
+| **budi-cloud** | `frontend/dashboard/` + future cloud API | Local dashboard (moves to cloud repo) and cloud ingest API. Will be extracted to its own repo. |
+
+Key coupling points today:
+- The CLI embeds the Cursor extension vsix via `include_bytes!` for auto-install (`budi init`).
+- The daemon embeds the built dashboard from `crates/budi-daemon/static/dashboard-dist/`.
+- CI builds all three products in a single workflow.
+
+These coupling points are documented with untangling plans in ADR-0086. New code should not introduce additional cross-product dependencies.
+
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, OTEL ingestion, hooks, config, migrations
