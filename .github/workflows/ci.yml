@@ -78,6 +78,14 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit
 
+      - name: Validate shell script syntax
+        run: |
+          set -euo pipefail
+          for script in scripts/*.sh homebrew/setup-tap.sh; do
+            bash -n "$script"
+          done
+          echo "Shell script syntax checks passed"
+
       - name: Build release binaries
         env:
           BUDI_REQUIRE_CURSOR_VSIX: "1"
