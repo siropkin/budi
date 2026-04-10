@@ -139,6 +139,8 @@ function buildHtml(
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  const jsStringLiteral = (s: string) =>
+    JSON.stringify(s).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 
   // Session details
   let detailSection = "";
@@ -193,7 +195,7 @@ function buildHtml(
       <div class="session-title">${title}</div>
       ${healthHtml}
       <div class="card-links">
-        <a href="#" onclick="openDashboard('${sessionUrl}')">Session Detail \u2197</a>
+        <a href="#" onclick='openDashboard(${jsStringLiteral(sessionUrl)})'>Session Detail \u2197</a>
       </div>
     </div>`;
   }
@@ -225,7 +227,7 @@ function buildHtml(
         const isActive = s.session_id === activeSessionId;
         const title = escapeHtml(sessionName(s.session_id));
         return `
-        <div class="session-row${isActive ? " session-active" : ""}" onclick="selectSession('${s.session_id}')">
+        <div class="session-row${isActive ? " session-active" : ""}" onclick='selectSession(${jsStringLiteral(s.session_id)})'>
           <span class="session-health">${icon(s.health_state || "green")}</span>
           <div class="session-info">
             <span class="session-name">${title}</span>
@@ -256,8 +258,8 @@ function buildHtml(
 
   const linksHtml = `
     <div class="links">
-      <a href="#" onclick="openDashboard('${dashboardUrl}/dashboard')">Dashboard \u2197</a>
-      <a href="#" onclick="openDashboard('${dashboardUrl}/dashboard/sessions')">All Sessions \u2197</a>
+      <a href="#" onclick='openDashboard(${jsStringLiteral(`${dashboardUrl}/dashboard`)})'>Dashboard \u2197</a>
+      <a href="#" onclick='openDashboard(${jsStringLiteral(`${dashboardUrl}/dashboard/sessions`)})'>All Sessions \u2197</a>
     </div>`;
 
   return `<!DOCTYPE html>

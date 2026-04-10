@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as path from "path";
 import {
   fetchStatusline,
   fetchRecentSessions,
@@ -14,10 +15,14 @@ import { HealthPanelProvider } from "./panel";
 let statusBarItem: vscode.StatusBarItem;
 let dataPollTimer: ReturnType<typeof setInterval> | undefined;
 let sessionFileWatcher: fs.FSWatcher | undefined;
+let sessionDirWatcher: fs.FSWatcher | undefined;
+let sessionWatchDebounce: ReturnType<typeof setTimeout> | undefined;
 let healthProvider: HealthPanelProvider;
 let currentSessionId: string | undefined;
 let pinnedSessionId: string | undefined;
 let log: vscode.OutputChannel;
+let refreshInFlight = false;
+let pendingRefreshDaemonUrl: string | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   log = vscode.window.createOutputChannel("budi");
@@ -45,7 +50,7 @@ export function activate(context: vscode.ExtensionContext): void {
   healthProvider.setOnSelectSession((sessionId) => {
     pinnedSessionId = sessionId;
     log.appendLine(`[budi] session: pinned to ${sessionId} (from panel)`);
-    refreshData(daemonUrl);
+    requestRefresh(daemonUrl);
   });
 
   context.subscriptions.push(
@@ -65,7 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("budi.refreshStatus", () => {
       log.appendLine(`[budi] manual refresh triggered`);
-      refreshData(daemonUrl);
+      requestRefresh(daemonUrl);
     }),
   );
 
@@ -117,7 +122,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
 
-      refreshData(daemonUrl);
+      requestRefresh(daemonUrl);
     }),
   );
 
@@ -134,13 +139,14 @@ export function activate(context: vscode.ExtensionContext): void {
         daemonUrl = updated.get("daemonUrl", "http://127.0.0.1:7878");
         dataPollInterval = updated.get("pollingIntervalMs", 15000);
         restartDataPoll(daemonUrl, dataPollInterval);
+        watchSessionFile(daemonUrl);
+        requestRefresh(daemonUrl);
       }
     }),
   );
 
   watchSessionFile(daemonUrl);
-
-  refreshData(daemonUrl);
+  requestRefresh(daemonUrl);
   startDataPoll(daemonUrl, dataPollInterval);
 }
 
@@ -153,13 +159,19 @@ export function deactivate(): void {
     sessionFileWatcher.close();
     sessionFileWatcher = undefined;
   }
+  if (sessionDirWatcher) {
+    sessionDirWatcher.close();
+    sessionDirWatcher = undefined;
+  }
+  if (sessionWatchDebounce) {
+    clearTimeout(sessionWatchDebounce);
+    sessionWatchDebounce = undefined;
+  }
 }
 
 function startDataPoll(daemonUrl: string, intervalMs: number): void {
   dataPollTimer = setInterval(() => {
-    refreshData(daemonUrl).catch((err) => {
-      log.appendLine(`[budi] poll error: ${err}`);
-    });
+    requestRefresh(daemonUrl);
   }, intervalMs);
 }
 
@@ -176,25 +188,77 @@ function restartDataPoll(daemonUrl: string, intervalMs: number): void {
  * statusline and panel — giving near-instant updates on interaction.
  */
 function watchSessionFile(daemonUrl: string): void {
-  try {
-    if (!fs.existsSync(SESSION_FILE)) return;
+  if (sessionFileWatcher) {
+    sessionFileWatcher.close();
+    sessionFileWatcher = undefined;
+  }
+  if (sessionDirWatcher) {
+    sessionDirWatcher.close();
+    sessionDirWatcher = undefined;
+  }
 
-    let debounce: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRefresh = () => {
+    if (sessionWatchDebounce) clearTimeout(sessionWatchDebounce);
+    sessionWatchDebounce = setTimeout(() => {
+      const newId = resolveSessionId();
+      if (newId !== currentSessionId) {
+        log.appendLine(
+          `[budi] session file changed: ${currentSessionId ?? "none"} → ${newId ?? "none"}`,
+        );
+      }
+      requestRefresh(daemonUrl);
+    }, 500);
+  };
+
+  const attachFileWatcher = () => {
+    if (!fs.existsSync(SESSION_FILE)) return;
     sessionFileWatcher = fs.watch(SESSION_FILE, () => {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        const newId = resolveSessionId();
-        if (newId !== currentSessionId) {
-          log.appendLine(
-            `[budi] session file changed: ${currentSessionId ?? "none"} → ${newId ?? "none"}`,
-          );
-        }
-        refreshData(daemonUrl).catch(() => {});
-      }, 500);
+      scheduleRefresh();
     });
+  };
+
+  try {
+    attachFileWatcher();
+
+    const sessionDir = path.dirname(SESSION_FILE);
+    if (fs.existsSync(sessionDir)) {
+      sessionDirWatcher = fs.watch(sessionDir, (_eventType, fileName) => {
+        if (fileName && fileName.toString() !== path.basename(SESSION_FILE)) {
+          return;
+        }
+        if (!sessionFileWatcher && fs.existsSync(SESSION_FILE)) {
+          log.appendLine("[budi] session file detected, attaching watcher");
+          attachFileWatcher();
+        }
+        scheduleRefresh();
+      });
+    }
   } catch {
     // File may not exist yet — will be created by first hook.
   }
+}
+
+function requestRefresh(daemonUrl: string): void {
+  pendingRefreshDaemonUrl = daemonUrl;
+  if (refreshInFlight) return;
+
+  refreshInFlight = true;
+  void (async () => {
+    try {
+      while (pendingRefreshDaemonUrl) {
+        const nextDaemonUrl = pendingRefreshDaemonUrl;
+        pendingRefreshDaemonUrl = undefined;
+        await refreshData(nextDaemonUrl);
+      }
+    } catch (err) {
+      log.appendLine(`[budi] refresh error: ${err}`);
+    } finally {
+      refreshInFlight = false;
+      if (pendingRefreshDaemonUrl) {
+        requestRefresh(pendingRefreshDaemonUrl);
+      }
+    }
+  })();
 }
 
 function resolveSessionId(): string | undefined {
