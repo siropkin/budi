@@ -136,7 +136,7 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks, OTEL, statusline, Cursor hooks/extension). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+`budi init` starts the daemon, syncs existing data, and **prompts you to choose which agents to track** (Claude Code, Cursor) and then **which integrations to install** (hooks, OTEL, statusline, extension). Only enabled agents have their data collected; disabled agents produce no collection side effects. Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -149,7 +149,7 @@ Use this sequence if you want the fastest "did setup really work?" path:
 1. **Install and initialize**
    - Homebrew: `brew install siropkin/budi/budi` then `budi init`
    - Standalone installers and `./scripts/install.sh` already run `budi init` for you
-2. **Accept integration prompts** during `budi init` (recommended defaults are safe)
+2. **Choose agents and integrations** during `budi init` (recommended defaults are safe)
 3. **Wait for first sync**
    - Fresh install: full history scan (can take a few minutes)
    - Re-run init: quick recent sync (last 30 days)
@@ -237,7 +237,7 @@ budi update                      # downloads latest release, migrates DB, restar
 budi update --version 7.1.0     # update to a specific version
 ```
 
-Works for all installation methods — automatically detects Homebrew and runs `brew upgrade` when appropriate. Update refreshes integrations you previously enabled (stored in `~/.config/budi/integrations.toml`).
+Works for all installation methods — automatically detects Homebrew and runs `brew upgrade` when appropriate. Update refreshes integrations you previously enabled (stored in `~/.config/budi/integrations.toml`). Agent enablement is stored separately in `~/.config/budi/agents.toml`.
 
 ## Integrations
 

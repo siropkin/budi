@@ -112,3 +112,18 @@ pub fn available_providers() -> Vec<Box<dyn Provider>> {
         .filter(|p| p.is_available())
         .collect()
 }
+
+/// Returns only providers that the user has explicitly enabled.
+///
+/// If no `agents.toml` exists (legacy install), falls back to
+/// `available_providers()` for backward compatibility.
+pub fn enabled_providers() -> Vec<Box<dyn Provider>> {
+    let agents_config = crate::config::load_agents_config();
+    match agents_config {
+        Some(config) => all_providers()
+            .into_iter()
+            .filter(|p| p.is_available() && config.is_agent_enabled(p.name()))
+            .collect(),
+        None => available_providers(),
+    }
+}
