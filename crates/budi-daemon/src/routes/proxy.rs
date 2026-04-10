@@ -1,0 +1,379 @@
+//! Proxy route handlers for forwarding AI agent traffic to upstream providers.
+//!
+//! Supports two protocol families (ADR-0082):
+//! - OpenAI Chat Completions: `POST /v1/chat/completions`, `GET /v1/models`
+//! - Anthropic Messages: `POST /v1/messages`
+
+use std::time::Instant;
+
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header};
+use axum::response::IntoResponse;
+use futures_util::StreamExt;
+use serde_json::Value;
+
+use budi_core::proxy::{ProxyEvent, ProxyProvider};
+
+use crate::ProxyState;
+
+const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MiB per ADR-0082
+
+/// Proxy handler for Anthropic Messages API.
+/// `POST /v1/messages`
+pub async fn anthropic_messages(
+    State(state): State<ProxyState>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    proxy_request(state, req, ProxyProvider::Anthropic, "/v1/messages").await
+}
+
+/// Proxy handler for OpenAI Chat Completions API.
+/// `POST /v1/chat/completions`
+pub async fn openai_chat_completions(
+    State(state): State<ProxyState>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    proxy_request(state, req, ProxyProvider::OpenAi, "/v1/chat/completions").await
+}
+
+/// Proxy handler for OpenAI Models API.
+/// `GET /v1/models`
+pub async fn openai_models(
+    State(state): State<ProxyState>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    proxy_request(state, req, ProxyProvider::OpenAi, "/v1/models").await
+}
+
+fn upstream_base_url(state: &ProxyState, provider: ProxyProvider) -> &str {
+    match provider {
+        ProxyProvider::Anthropic => &state.anthropic_upstream,
+        ProxyProvider::OpenAi => &state.openai_upstream,
+    }
+}
+
+fn proxy_error_json(message: &str) -> Value {
+    serde_json::json!({
+        "error": {
+            "type": "proxy_error",
+            "message": message,
+        }
+    })
+}
+
+async fn proxy_request(
+    state: ProxyState,
+    req: Request<Body>,
+    provider: ProxyProvider,
+    path: &str,
+) -> Response<Body> {
+    let start = Instant::now();
+    let method = req.method().clone();
+    let incoming_headers = req.headers().clone();
+
+    let body_bytes: axum::body::Bytes = match read_body(req).await {
+        Ok(bytes) => bytes,
+        Err(resp) => return resp,
+    };
+
+    let (model, is_streaming) = if method == Method::POST && !body_bytes.is_empty() {
+        extract_request_metadata(&body_bytes)
+    } else {
+        (String::new(), false)
+    };
+
+    let upstream_url = format!("{}{}", upstream_base_url(&state, provider), path);
+    let mut upstream_req = state
+        .http_client
+        .request(method, &upstream_url)
+        .timeout(std::time::Duration::from_secs(300));
+
+    upstream_req = forward_headers(upstream_req, &incoming_headers, provider);
+
+    if !body_bytes.is_empty() {
+        upstream_req = upstream_req.body(body_bytes.clone());
+    }
+
+    let upstream_resp = match upstream_req.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            let duration_ms = start.elapsed().as_millis() as i64;
+            tracing::warn!(
+                provider = provider.as_str(),
+                model = %model,
+                duration_ms,
+                "Upstream request failed: {e}"
+            );
+            record_event(
+                &state,
+                provider,
+                &model,
+                None,
+                None,
+                duration_ms,
+                502,
+                is_streaming,
+            );
+            return build_error_response(
+                StatusCode::BAD_GATEWAY,
+                &proxy_error_json(&format!("upstream unreachable: {e}")),
+            );
+        }
+    };
+
+    let status = upstream_resp.status();
+    let resp_headers = upstream_resp.headers().clone();
+    let is_sse = resp_headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
+
+    if is_sse {
+        let duration_ms = start.elapsed().as_millis() as i64;
+        record_event(
+            &state,
+            provider,
+            &model,
+            None,
+            None,
+            duration_ms,
+            status.as_u16(),
+            true,
+        );
+
+        let stream = upstream_resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(std::io::Error::other));
+        let body = Body::from_stream(stream);
+
+        let mut response = Response::builder().status(status);
+        copy_response_headers(&resp_headers, response.headers_mut().unwrap());
+        return response.body(body).unwrap();
+    }
+
+    let resp_bytes = match upstream_resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            let duration_ms = start.elapsed().as_millis() as i64;
+            tracing::warn!(
+                provider = provider.as_str(),
+                model = %model,
+                duration_ms,
+                "Failed to read upstream response: {e}"
+            );
+            record_event(
+                &state,
+                provider,
+                &model,
+                None,
+                None,
+                duration_ms,
+                502,
+                is_streaming,
+            );
+            return build_error_response(
+                StatusCode::BAD_GATEWAY,
+                &proxy_error_json(&format!("failed to read upstream response: {e}")),
+            );
+        }
+    };
+
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    let (input_tokens, output_tokens) = if status.is_success() {
+        extract_response_tokens(&resp_bytes, provider)
+    } else {
+        (None, None)
+    };
+
+    record_event(
+        &state,
+        provider,
+        &model,
+        input_tokens,
+        output_tokens,
+        duration_ms,
+        status.as_u16(),
+        is_streaming,
+    );
+
+    let mut response = Response::builder().status(status);
+    copy_response_headers(&resp_headers, response.headers_mut().unwrap());
+    response.body(Body::from(resp_bytes)).unwrap_or_else(|_| {
+        build_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &proxy_error_json("failed to build response"),
+        )
+    })
+}
+
+async fn read_body(req: Request<Body>) -> Result<axum::body::Bytes, Response<Body>> {
+    let body = req.into_body();
+    match axum::body::to_bytes(body, MAX_BODY_SIZE).await {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => Err(build_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &proxy_error_json("request body exceeds 16 MiB limit"),
+        )),
+    }
+}
+
+fn extract_request_metadata(body: &[u8]) -> (String, bool) {
+    let parsed: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), false),
+    };
+    let model = parsed
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_streaming = parsed
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    (model, is_streaming)
+}
+
+fn extract_response_tokens(body: &[u8], provider: ProxyProvider) -> (Option<i64>, Option<i64>) {
+    let parsed: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let usage = parsed.get("usage");
+    match provider {
+        ProxyProvider::Anthropic => {
+            let input = usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_i64());
+            let output = usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_i64());
+            (input, output)
+        }
+        ProxyProvider::OpenAi => {
+            let input = usage
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_i64());
+            let output = usage
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|v| v.as_i64());
+            (input, output)
+        }
+    }
+}
+
+fn forward_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+    provider: ProxyProvider,
+) -> reqwest::RequestBuilder {
+    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
+        req = req.header(header::CONTENT_TYPE, ct);
+    }
+    match provider {
+        ProxyProvider::Anthropic => {
+            if let Some(key) = headers.get("x-api-key") {
+                req = req.header("x-api-key", key);
+            }
+            if let Some(ver) = headers.get("anthropic-version") {
+                req = req.header("anthropic-version", ver);
+            }
+            if let Some(beta) = headers.get("anthropic-beta") {
+                req = req.header("anthropic-beta", beta);
+            }
+        }
+        ProxyProvider::OpenAi => {
+            if let Some(auth) = headers.get(header::AUTHORIZATION) {
+                req = req.header(header::AUTHORIZATION, auth);
+            }
+        }
+    }
+    // Forward accept header if present
+    if let Some(accept) = headers.get(header::ACCEPT) {
+        req = req.header(header::ACCEPT, accept);
+    }
+    req
+}
+
+fn copy_response_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    for name in &[
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::HeaderName::from_static("x-request-id"),
+        header::HeaderName::from_static("request-id"),
+    ] {
+        if let Some(val) = from.get(name) {
+            to.insert(name.clone(), val.clone());
+        }
+    }
+    // SSE-specific headers
+    if from
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"))
+    {
+        to.insert(
+            header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+    }
+}
+
+fn build_error_response(status: StatusCode, body: &Value) -> Response<Body> {
+    let bytes = serde_json::to_vec(body).unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(bytes))
+        .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_event(
+    state: &ProxyState,
+    provider: ProxyProvider,
+    model: &str,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    duration_ms: i64,
+    status_code: u16,
+    is_streaming: bool,
+) {
+    let event = ProxyEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        input_tokens,
+        output_tokens,
+        duration_ms,
+        status_code,
+        is_streaming,
+    };
+
+    tracing::info!(
+        provider = %event.provider,
+        model = %event.model,
+        status = event.status_code,
+        duration_ms = event.duration_ms,
+        input_tokens = ?event.input_tokens,
+        output_tokens = ?event.output_tokens,
+        streaming = event.is_streaming,
+        "Proxy request completed"
+    );
+
+    let db_path = state.analytics_db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = record_event_blocking(&db_path, &event) {
+            tracing::warn!("Failed to record proxy event: {e}");
+        }
+    });
+}
+
+fn record_event_blocking(db_path: &std::path::Path, event: &ProxyEvent) -> anyhow::Result<()> {
+    let conn = budi_core::analytics::open_db(db_path)?;
+    budi_core::proxy::ensure_proxy_schema(&conn)?;
+    budi_core::proxy::insert_proxy_event(&conn, event)?;
+    Ok(())
+}

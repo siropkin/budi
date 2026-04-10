@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use axum::Router;
@@ -6,7 +7,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use budi_core::analytics;
-use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
+use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT, ProxyConfig};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -28,6 +29,10 @@ enum Commands {
         host: String,
         #[arg(long, default_value_t = DEFAULT_DAEMON_PORT)]
         port: u16,
+        #[arg(long)]
+        proxy_port: Option<u16>,
+        #[arg(long)]
+        no_proxy: bool,
     },
 }
 
@@ -35,6 +40,14 @@ enum Commands {
 pub struct AppState {
     pub syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub integrations_installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone)]
+pub struct ProxyState {
+    pub http_client: reqwest::Client,
+    pub anthropic_upstream: String,
+    pub openai_upstream: String,
+    pub analytics_db_path: PathBuf,
 }
 
 struct BusyFlagGuard {
@@ -51,6 +64,17 @@ impl Drop for BusyFlagGuard {
     fn drop(&mut self) {
         self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+fn build_proxy_router(proxy_state: ProxyState) -> Router {
+    use routes::proxy as p;
+
+    Router::new()
+        .route("/v1/messages", post(p::anthropic_messages))
+        .route("/v1/chat/completions", post(p::openai_chat_completions))
+        .route("/v1/models", get(p::openai_models))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .with_state(proxy_state)
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -169,11 +193,18 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let (host, port) = match cli.command.unwrap_or(Commands::Serve {
+    let (host, port, proxy_port_override, no_proxy) = match cli.command.unwrap_or(Commands::Serve {
         host: DEFAULT_DAEMON_HOST.to_string(),
         port: DEFAULT_DAEMON_PORT,
+        proxy_port: None,
+        no_proxy: false,
     }) {
-        Commands::Serve { host, port } => (host, port),
+        Commands::Serve {
+            host,
+            port,
+            proxy_port,
+            no_proxy,
+        } => (host, port, proxy_port, no_proxy),
     };
 
     // Kill any existing budi-daemon on the same port so a fresh binary can
@@ -263,6 +294,53 @@ async fn main() -> Result<()> {
             .await;
         }
     });
+
+    // --- Start proxy server if enabled ---
+    let proxy_config = ProxyConfig::default();
+    let proxy_enabled = !no_proxy && proxy_config.effective_enabled();
+    let proxy_port = proxy_port_override.unwrap_or_else(|| proxy_config.effective_port());
+
+    if proxy_enabled {
+        let analytics_db_path = analytics::db_path().unwrap_or_default();
+        let proxy_state = ProxyState {
+            http_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("failed to build proxy HTTP client"),
+            anthropic_upstream: proxy_config.anthropic_upstream.clone(),
+            openai_upstream: proxy_config.openai_upstream.clone(),
+            analytics_db_path,
+        };
+
+        if let Ok(db_path) = analytics::db_path()
+            && let Ok(conn) = analytics::open_db(&db_path)
+            && let Err(e) = budi_core::proxy::ensure_proxy_schema(&conn)
+        {
+            tracing::warn!("Failed to initialize proxy schema: {e}");
+        }
+
+        let proxy_app = build_proxy_router(proxy_state);
+        let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse()?;
+
+        kill_existing_daemon(proxy_port);
+
+        match tokio::net::TcpListener::bind(proxy_addr).await {
+            Ok(proxy_listener) => {
+                tracing::info!("budi proxy listening on {}", proxy_addr);
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(proxy_listener, proxy_app).await {
+                        tracing::error!("Proxy server error: {e}");
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to bind proxy on {proxy_addr}: {e}. \
+                     Check if another process is using port {proxy_port}."
+                );
+            }
+        }
+    }
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -392,6 +470,19 @@ mod tests {
         })
     }
 
+    fn test_proxy_app() -> Router {
+        let tmp = std::env::temp_dir().join("budi-proxy-test-db");
+        std::fs::create_dir_all(&tmp).ok();
+        let db_path = tmp.join("analytics.db");
+        let proxy_state = ProxyState {
+            http_client: reqwest::Client::new(),
+            anthropic_upstream: "http://127.0.0.1:19999".to_string(),
+            openai_upstream: "http://127.0.0.1:19999".to_string(),
+            analytics_db_path: db_path,
+        };
+        build_proxy_router(proxy_state)
+    }
+
     #[tokio::test]
     async fn health_returns_ok() {
         let app = test_app();
@@ -514,5 +605,84 @@ mod tests {
             .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 4], 43434))));
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn proxy_anthropic_returns_bad_gateway_when_upstream_unreachable() {
+        let app = test_proxy_app();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", "test-key")
+                    .header("anthropic-version", "2023-06-01")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "proxy_error");
+    }
+
+    #[tokio::test]
+    async fn proxy_openai_returns_bad_gateway_when_upstream_unreachable() {
+        let app = test_proxy_app();
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "proxy_error");
+    }
+
+    #[tokio::test]
+    async fn proxy_models_returns_bad_gateway_when_upstream_unreachable() {
+        let app = test_proxy_app();
+        let resp = app
+            .oneshot(
+                Request::get("/v1/models")
+                    .header("authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_oversized_body() {
+        let app = test_proxy_app();
+        let huge_body = vec![0u8; 17 * 1024 * 1024]; // 17 MiB > 16 MiB limit
+        let resp = app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(huge_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

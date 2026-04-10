@@ -47,6 +47,7 @@ pub fn home_dir() -> Result<PathBuf> {
 
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
+pub const DEFAULT_PROXY_PORT: u16 = 9878;
 
 /// Known agent identifiers used in `agents.toml`.
 pub const KNOWN_AGENTS: &[&str] = &["claude-code", "cursor"];
@@ -308,6 +309,47 @@ pub fn load_tags_config() -> Option<TagsConfig> {
     }
 }
 
+/// Proxy configuration loaded from `[proxy]` section of `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub anthropic_upstream: String,
+    pub openai_upstream: String,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: DEFAULT_PROXY_PORT,
+            anthropic_upstream: "https://api.anthropic.com".to_string(),
+            openai_upstream: "https://api.openai.com".to_string(),
+        }
+    }
+}
+
+impl ProxyConfig {
+    /// Resolve the effective proxy port, respecting env var override.
+    pub fn effective_port(&self) -> u16 {
+        if let Ok(val) = env::var("BUDI_PROXY_PORT")
+            && let Ok(port) = val.trim().parse::<u16>()
+        {
+            return port;
+        }
+        self.port
+    }
+
+    /// Resolve whether the proxy is enabled, respecting env var override.
+    pub fn effective_enabled(&self) -> bool {
+        if let Ok(val) = env::var("BUDI_PROXY_ENABLED") {
+            return val.trim().eq_ignore_ascii_case("true") || val.trim() == "1";
+        }
+        self.enabled
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudiConfig {
@@ -315,6 +357,8 @@ pub struct BudiConfig {
     pub daemon_host: String,
     /// Port the daemon listens on. Default: 7878.
     pub daemon_port: u16,
+    /// Proxy configuration.
+    pub proxy: ProxyConfig,
 }
 
 impl Default for BudiConfig {
@@ -322,6 +366,7 @@ impl Default for BudiConfig {
         Self {
             daemon_host: DEFAULT_DAEMON_HOST.to_string(),
             daemon_port: DEFAULT_DAEMON_PORT,
+            proxy: ProxyConfig::default(),
         }
     }
 }
@@ -699,5 +744,58 @@ enabled = true
         let config: AgentsConfig = toml::from_str(toml_str).unwrap();
         assert!(config.claude_code.enabled);
         assert!(!config.cursor.enabled);
+    }
+
+    #[test]
+    fn proxy_config_defaults() {
+        let config = ProxyConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.port, 9878);
+        assert_eq!(config.anthropic_upstream, "https://api.anthropic.com");
+        assert_eq!(config.openai_upstream, "https://api.openai.com");
+    }
+
+    #[test]
+    fn proxy_config_parses_toml() {
+        let toml_str = r#"
+enabled = false
+port = 9999
+anthropic_upstream = "https://custom-anthropic.example.com"
+openai_upstream = "https://custom-openai.example.com"
+"#;
+        let config: ProxyConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.port, 9999);
+        assert_eq!(
+            config.anthropic_upstream,
+            "https://custom-anthropic.example.com"
+        );
+        assert_eq!(config.openai_upstream, "https://custom-openai.example.com");
+    }
+
+    #[test]
+    fn proxy_config_in_budi_config() {
+        let toml_str = r#"
+daemon_host = "127.0.0.1"
+daemon_port = 7878
+
+[proxy]
+enabled = true
+port = 9878
+"#;
+        let config: BudiConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.proxy.enabled);
+        assert_eq!(config.proxy.port, 9878);
+    }
+
+    #[test]
+    fn budi_config_without_proxy_uses_defaults() {
+        let toml_str = r#"
+daemon_host = "127.0.0.1"
+daemon_port = 7878
+"#;
+        let config: BudiConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.proxy.enabled);
+        assert_eq!(config.proxy.port, 9878);
     }
 }
