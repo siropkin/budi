@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { ArrowDown, ArrowUp, Download } from "lucide-react";
@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { AnalyticsFilterBar } from "@/components/analytics-filter-bar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ErrorState, LoadingState } from "@/components/state";
 import { fetchAllSessions, fetchRegisteredProviders, fetchSessions } from "@/lib/api";
@@ -64,8 +65,10 @@ export function SessionsPage() {
 
   const [sortBy, setSortBy] = useState<SortColumn>("started_at");
   const [sortAsc, setSortAsc] = useState(false);
-  const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState("");
   const [offset, setOffset] = useState(0);
+  const search = searchInput.trim();
+  const deferredSearch = useDeferredValue(search);
 
   const providersQuery = useQuery({
     queryKey: ["registered-providers"],
@@ -74,7 +77,7 @@ export function SessionsPage() {
   });
 
   const sessionsQuery = useQuery({
-    queryKey: ["sessions", filters, sortBy, sortAsc, search, offset],
+    queryKey: ["sessions", filters, sortBy, sortAsc, deferredSearch, offset],
     queryFn: ({ signal }) =>
       fetchSessions(
         filters,
@@ -83,7 +86,7 @@ export function SessionsPage() {
           offset,
           sort_by: sortBy,
           sort_asc: sortAsc,
-          search: search.trim() || undefined,
+          search: deferredSearch || undefined,
         },
         signal,
       ),
@@ -113,7 +116,7 @@ export function SessionsPage() {
     exportingRef.current = true;
     const toastId = toast.loading("Exporting sessions...");
     try {
-      const allSessions = await fetchAllSessions(filters, search.trim() || undefined);
+      const allSessions = await fetchAllSessions(filters, search || undefined);
       const csv = toCsv(allSessions, SESSION_CSV_COLUMNS);
       downloadCsv(csv, buildExportFilename("sessions", filters));
       toast.success(`Exported ${allSessions.length} sessions`, { id: toastId });
@@ -123,6 +126,10 @@ export function SessionsPage() {
       exportingRef.current = false;
     }
   }, [filters, search, SESSION_CSV_COLUMNS]);
+
+  useEffect(() => {
+    setOffset(0);
+  }, [filters, sortBy, sortAsc, deferredSearch]);
 
   const hasMore = useMemo(() => {
     if (!sessionsQuery.data) return false;
@@ -145,6 +152,7 @@ export function SessionsPage() {
   const sessions = sessionsQuery.data.sessions;
   const totalCount = sessionsQuery.data.total_count;
   const multiProvider = providers.length > 1;
+  const tableColumnCount = multiProvider ? 9 : 8;
 
   const onSort = (column: SortColumn) => {
     if (column === sortBy) {
@@ -160,8 +168,17 @@ export function SessionsPage() {
     <div className="space-y-5">
       <AnalyticsFilterBar />
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Sessions</CardTitle>
+        <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center">
+            <CardTitle>Sessions</CardTitle>
+            <Input
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+              placeholder="Search title, repo, branch, model, provider..."
+              className="h-9 w-full md:w-[360px]"
+              aria-label="Search sessions"
+            />
+          </div>
           <Button type="button" variant="outline" size="sm" onClick={handleExportCsv} disabled={sessions.length === 0}>
             <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
             Export CSV
@@ -186,52 +203,62 @@ export function SessionsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sessions.map((session) => {
-                  const modelList = session.models ?? [];
-                  const rawModel = modelList.join(", ");
-                  const modelSummary =
-                    modelList.length > 0
-                      ? `${formatModelName(modelList[0])}${modelList.length > 1 ? ` +${modelList.length - 1}` : ""}`
-                      : "--";
+                {sessions.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={tableColumnCount} className="py-8 text-center text-sm text-muted-foreground">
+                      {search
+                        ? `No sessions match "${search}" for the current filters.`
+                        : "No sessions found for the current filters."}
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  sessions.map((session) => {
+                    const modelList = session.models ?? [];
+                    const rawModel = modelList.join(", ");
+                    const modelSummary =
+                      modelList.length > 0
+                        ? `${formatModelName(modelList[0])}${modelList.length > 1 ? ` +${modelList.length - 1}` : ""}`
+                        : "--";
 
-                  const providerDisplay = providers.find((entry) => entry.name === session.provider)?.display_name ?? session.provider;
-                  const duration = fmtDurationMs(session.duration_ms);
-                  const tokenCount = (session.input_tokens ?? 0) + (session.output_tokens ?? 0);
-                  const repoIds = session.repo_ids ?? [];
-                  const gitBranches = session.git_branches ?? [];
-                  const primaryRepo = repoIds[0] ?? null;
-                  const primaryBranch = gitBranches[0] ?? null;
-                  const branch = primaryBranch?.replace(/^refs\/heads\//, "") || "--";
-                  const repoLabel =
-                    repoIds.length > 1 ? `${repoName(primaryRepo)} +${repoIds.length - 1}` : repoName(primaryRepo);
-                  const branchLabel = gitBranches.length > 1 ? `${branch} +${gitBranches.length - 1}` : branch;
+                    const providerDisplay = providers.find((entry) => entry.name === session.provider)?.display_name ?? session.provider;
+                    const duration = fmtDurationMs(session.duration_ms);
+                    const tokenCount = (session.input_tokens ?? 0) + (session.output_tokens ?? 0);
+                    const repoIds = session.repo_ids ?? [];
+                    const gitBranches = session.git_branches ?? [];
+                    const primaryRepo = repoIds[0] ?? null;
+                    const primaryBranch = gitBranches[0] ?? null;
+                    const branch = primaryBranch?.replace(/^refs\/heads\//, "") || "--";
+                    const repoLabel =
+                      repoIds.length > 1 ? `${repoName(primaryRepo)} +${repoIds.length - 1}` : repoName(primaryRepo);
+                    const branchLabel = gitBranches.length > 1 ? `${branch} +${gitBranches.length - 1}` : branch;
 
-                  return (
-                    <TableRow
-                      key={session.id}
-                      role="link"
-                      tabIndex={0}
-                      className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      onClick={() => navigate(`/sessions/${encodeURIComponent(session.id)}`)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          navigate(`/sessions/${encodeURIComponent(session.id)}`);
-                        }
-                      }}
-                    >
-                      <TableCell className={SESSION_CELL_CLASS}>{fmtDate(session.started_at)}</TableCell>
-                      <TableCell className={SESSION_CELL_CLASS} title={session.title ?? ""}>{session.title || "--"}</TableCell>
-                      <TableCell className={SESSION_CELL_CLASS}>{duration}</TableCell>
-                      {multiProvider ? <TableCell className={SESSION_CELL_CLASS}>{providerDisplay}</TableCell> : null}
-                      <TableCell className={SESSION_CELL_CLASS} title={rawModel}>{modelSummary}</TableCell>
-                      <TableCell className={SESSION_CELL_CLASS} title={primaryRepo ?? ""}>{repoLabel}</TableCell>
-                      <TableCell className={SESSION_CELL_CLASS} title={branch}>{branchLabel}</TableCell>
-                      <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtNum(tokenCount)}</TableCell>
-                      <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtCost((session.cost_cents ?? 0) / 100)}</TableCell>
-                    </TableRow>
-                  );
-                })}
+                    return (
+                      <TableRow
+                        key={session.id}
+                        role="link"
+                        tabIndex={0}
+                        className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={() => navigate(`/sessions/${encodeURIComponent(session.id)}`)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            navigate(`/sessions/${encodeURIComponent(session.id)}`);
+                          }
+                        }}
+                      >
+                        <TableCell className={SESSION_CELL_CLASS}>{fmtDate(session.started_at)}</TableCell>
+                        <TableCell className={SESSION_CELL_CLASS} title={session.title ?? ""}>{session.title || "--"}</TableCell>
+                        <TableCell className={SESSION_CELL_CLASS}>{duration}</TableCell>
+                        {multiProvider ? <TableCell className={SESSION_CELL_CLASS}>{providerDisplay}</TableCell> : null}
+                        <TableCell className={SESSION_CELL_CLASS} title={rawModel}>{modelSummary}</TableCell>
+                        <TableCell className={SESSION_CELL_CLASS} title={primaryRepo ?? ""}>{repoLabel}</TableCell>
+                        <TableCell className={SESSION_CELL_CLASS} title={branch}>{branchLabel}</TableCell>
+                        <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtNum(tokenCount)}</TableCell>
+                        <TableCell className={`${SESSION_CELL_CLASS} whitespace-nowrap text-right`}>{fmtCost((session.cost_cents ?? 0) / 100)}</TableCell>
+                      </TableRow>
+                    );
+                  })
+                )}
               </TableBody>
             </Table>
           </div>
