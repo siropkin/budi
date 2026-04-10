@@ -67,6 +67,7 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, quality checks, and PR workflow.
 Architecture and module boundaries are documented in [SOUL.md](SOUL.md).
+Architecture decision records live in [`docs/adr/`](docs/adr/).
 
 Quick validation matrix:
 
