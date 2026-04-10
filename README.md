@@ -135,6 +135,38 @@ To install a specific version, set the `VERSION` environment variable: `VERSION=
 
 Run `budi doctor` to verify everything is set up correctly.
 
+### First run checklist (5 minutes)
+
+Use this sequence if you want the fastest "did setup really work?" path:
+
+1. **Install and initialize**
+   - Homebrew: `brew install siropkin/budi/budi` then `budi init`
+   - Standalone installers and `./scripts/install.sh` already run `budi init` for you
+2. **Accept integration prompts** during `budi init` (recommended defaults are safe)
+3. **Wait for first sync**
+   - Fresh install: full history scan (can take a few minutes)
+   - Re-run init: quick recent sync (last 30 days)
+4. **Confirm health**
+   - Run `budi doctor`
+   - Open dashboard at `http://127.0.0.1:7878/dashboard`
+5. **Generate your first data point**
+   - Send one prompt in Claude Code or Cursor, then run `budi sync`
+   - Run `budi stats` and confirm non-zero usage
+6. **Restart apps once**
+   - Restart Claude Code and Cursor after `budi init` so hooks/statusline/extension changes take effect
+
+### PATH and duplicate binary checks
+
+If `budi` is "not found" or behavior looks inconsistent after an update, verify which binary is being executed:
+
+- macOS/Linux:
+  - `command -v budi`
+  - `which -a budi`
+- Windows (PowerShell):
+  - `Get-Command budi -All`
+
+Keep only one install source first on PATH (Homebrew **or** standalone path), not both.
+
 ## Status line
 
 Budi adds a live cost display to Claude Code (optional in `budi init`):

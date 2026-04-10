@@ -25,6 +25,15 @@ budi integrations install --with cursor-extension
 
 Run `budi doctor` to verify.
 
+### First-run smoke check
+
+After install/reload, validate in under a minute:
+
+1. Run `budi doctor` and confirm Cursor hooks + daemon are healthy
+2. Send one prompt in Cursor chat
+3. Click the budi status bar item (`🟢/🟡/🔴`) to open the health panel
+4. If no session appears yet, run **Budi: Refresh Status** once
+
 **Manual install** (if auto-install was skipped or you want to rebuild):
 
 ```bash
