@@ -151,6 +151,43 @@ jobs:
             tar -C "${RUNNER_TEMP}" -czf "${archive}" "${package}"
           fi
 
+          ARCHIVE_PATH="${GITHUB_WORKSPACE}/${archive}"
+          if [[ "$target" != *windows* ]]; then
+            ARCHIVE_PATH="${archive}"
+          fi
+
+          ARCHIVE_PATH="${ARCHIVE_PATH}" PACKAGE_NAME="${package}" TARGET_TRIPLE="${target}" python - <<'PY'
+          import os
+          import sys
+          import tarfile
+          import zipfile
+
+          archive = os.environ["ARCHIVE_PATH"]
+          package = os.environ["PACKAGE_NAME"]
+          target = os.environ["TARGET_TRIPLE"]
+
+          required = ["README.md", "LICENSE", "budi", "budi-daemon"]
+          if "windows" in target:
+            required[2] = "budi.exe"
+            required[3] = "budi-daemon.exe"
+
+          expected = {f"{package}/{name}" for name in required}
+          names: set[str]
+          if archive.endswith(".zip"):
+            with zipfile.ZipFile(archive, "r") as zf:
+              names = set(zf.namelist())
+          else:
+            with tarfile.open(archive, "r:gz") as tf:
+              names = set(tf.getnames())
+
+          missing = sorted(path for path in expected if path not in names)
+          if missing:
+            print(f"::error::Archive validation failed for {archive}; missing: {', '.join(missing)}")
+            sys.exit(1)
+
+          print(f"Archive validation passed for {archive}")
+          PY
+
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:

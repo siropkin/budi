@@ -184,11 +184,34 @@ The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTT
 
 ## Releasing
 
-```bash
-./scripts/release.sh 7.0.0        # bump version + update Cargo.lock
-./scripts/release.sh 7.0.0 --tag  # also create git tag
+Release automation is tag-driven (`.github/workflows/release.yml`) and expects a clean `main` branch.
 
-# Then:
+```bash
+./scripts/release.sh 7.0.0        # bump version + update Cargo.lock (clean tree required)
 git commit -am "chore: bump version to 7.0.0"
-git push origin main v7.0.0       # CI builds release artifacts
+./scripts/release.sh 7.0.0 --tag  # create tag v7.0.0 (main only; refuses duplicate tags)
+git push origin main v7.0.0       # CI + release workflows build and publish assets
 ```
+
+Post-push release checks:
+
+```bash
+gh release view v7.0.0 --repo siropkin/budi
+gh release download v7.0.0 --repo siropkin/budi --pattern SHA256SUMS -D /tmp/budi-release-check
+cat /tmp/budi-release-check/SHA256SUMS
+```
+
+Expected release artifacts:
+
+- `budi-v<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `budi-v<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `budi-v<version>-x86_64-apple-darwin.tar.gz`
+- `budi-v<version>-aarch64-apple-darwin.tar.gz`
+- `budi-v<version>-x86_64-pc-windows-msvc.zip`
+- `SHA256SUMS`
+
+Homebrew auto-update notes:
+
+- The release workflow updates `siropkin/homebrew-budi` after publishing assets.
+- `HOMEBREW_TAP_TOKEN` must be configured in `siropkin/budi` repo secrets.
+- If the workflow cannot push the formula update, run `homebrew/setup-tap.sh <tag>` manually and open a follow-up PR/issue with the failure details.
