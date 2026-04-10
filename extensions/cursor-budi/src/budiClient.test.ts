@@ -4,6 +4,7 @@ import {
   aggregateHealth,
   formatAggregationStatusText,
   formatAggregationTooltip,
+  splitSessionsByDay,
   type SessionListEntry,
 } from "./budiClient";
 
@@ -56,5 +57,43 @@ describe("aggregation status formatting", () => {
     expect(tooltip).toContain("Today's sessions: 2");
     expect(tooltip).toContain("$12.34");
     expect(tooltip).toContain("needs attention");
+  });
+});
+
+describe("splitSessionsByDay", () => {
+  it("groups sessions into today and yesterday", () => {
+    const now = new Date();
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    const yesterday = new Date(now.getTime() - 26 * 60 * 60 * 1000).toISOString();
+    const threeDaysAgo = new Date(now.getTime() - 72 * 60 * 60 * 1000).toISOString();
+
+    const sessions: SessionListEntry[] = [
+      {
+        session_id: "today",
+        started_at: twoHoursAgo,
+        message_count: 1,
+        cost_cents: 1,
+        provider: "cursor",
+      },
+      {
+        session_id: "yesterday",
+        started_at: yesterday,
+        message_count: 1,
+        cost_cents: 1,
+        provider: "cursor",
+      },
+      {
+        session_id: "old",
+        started_at: threeDaysAgo,
+        message_count: 1,
+        cost_cents: 1,
+        provider: "cursor",
+      },
+      { session_id: "missing", message_count: 1, cost_cents: 1, provider: "cursor" },
+    ];
+
+    const grouped = splitSessionsByDay(sessions);
+    expect(grouped.today.map((s) => s.session_id)).toEqual(["today"]);
+    expect(grouped.yesterday.map((s) => s.session_id)).toEqual(["yesterday"]);
   });
 });

@@ -592,6 +592,12 @@ Windows equivalent:
 1. Restart Claude Code after `budi init`
 2. Check: `budi statusline` should output cost data
 
+**Cursor extension shows offline or stale session:**
+1. Run `budi doctor` to verify daemon + Cursor hooks
+2. In Cursor, run **Budi: Refresh Status**
+3. If needed, reload Cursor window (`Developer: Reload Window`) after `budi init` or daemon URL changes
+4. Use **Budi: Select Session** when passively switching tabs (hooks track most recently interacted-with session)
+
 ## Uninstall
 
 ```bash

@@ -59,10 +59,29 @@ Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**
 ## How it works
 
 1. **Hooks** — Cursor hooks (`budi hook`) fire on chat interactions and update `cursor-sessions.json` in budi's data directory (`~/.local/share/budi` on Unix, `%LOCALAPPDATA%\budi` on Windows)
-2. **File watcher** — the extension watches the session file and detects when the active session changes
+2. **File watcher** — the extension watches both the session file and its parent directory, so it can detect active-session changes immediately (including when the file is created after extension startup)
 3. **Daemon** — `budi statusline --format json` (or direct HTTP to daemon) returns session cost, health state, and vitals
 4. **Health panel** — fetches session health details and lists recent sessions from `/analytics/sessions`
 
 ## Limitations
 
 Cursor does not expose the currently focused chat tab to extensions. The statusline tracks the most recently _interacted-with_ session (via hooks). For passive tab switching, use **Budi: Select Session** or click a session in the health panel.
+
+## Troubleshooting
+
+**Status bar says offline / panel shows daemon offline**
+
+1. Run `budi doctor` and confirm daemon health
+2. Run `budi init` if the daemon is not running
+3. If you changed `budi.daemonUrl`, run **Budi: Refresh Status** (or reload Cursor) to force an immediate reconnect
+
+**Session does not switch quickly after chat activity**
+
+1. Confirm Cursor hooks are installed (`budi doctor`)
+2. Send one message in Cursor to create/update `cursor-sessions.json`
+3. Use **Budi: Select Session** to pin manually when switching passively between chats
+
+**Panel data is stale**
+
+- The extension updates on both event-driven file changes and periodic polling (`budi.pollingIntervalMs`, default 15s)
+- Use **Budi: Refresh Status** for an immediate refresh
