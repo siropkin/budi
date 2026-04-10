@@ -35,7 +35,7 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, OTEL ingestion, hooks, config, migrations
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate, repair, health, mcp-serve
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate, repair, health
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard, analytics API, hook ingestion, OTEL ingestion
 
 ### Data flow
@@ -55,7 +55,7 @@ Enricher order is critical - each depends on prior enrichers. Do not reorder.
 Eight tables, six data entities + two supporting:
 - **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation from hooks. Primary key field: id
-- **hook_events** - Raw event log for tool stats and MCP tracking. One row per hook event
+- **hook_events** - Raw event log for tool stats. One row per hook event
 - **otel_events** - Raw OpenTelemetry event storage for debugging/audit
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync
@@ -102,8 +102,6 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, mcp, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/otel.rs` - /v1/logs and /v1/metrics OTLP ingestion endpoints
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
-- `crates/budi-cli/src/mcp.rs` - MCP server handler (15 tools: analytics + config + health)
-- `crates/budi-cli/src/commands/mcp.rs` - `mcp-serve` subcommand (stdio transport)
 - `frontend/dashboard/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
 - `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`
 - `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
@@ -114,20 +112,19 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 
 - CLI never touches SQLite directly - all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
-- `budi init` installs hooks in `~/.claude/settings.json` (CC) and `~/.cursor/hooks.json` (Cursor), plus OTEL env vars and MCP server
-- **MCP server**: `budi mcp-serve` runs an MCP server over stdio. Installed into `~/.claude/settings.json` mcpServers by `budi init`. 15 tools for analytics (cost summary, models, projects, branches, tags, providers, tools, activity), config (get_config, set_tag_rules, set_statusline_config, sync_data, get_status), and health (session_health). Thin HTTP client to daemon - stdout is JSON-RPC only, logging to stderr. Analytics tools use a typed `period` enum (`today|week|month|all`, default `month`) and reject invalid values. Daemon HTTP failures include actionable hints for common states (busy/not-ready/mismatch).
+- `budi init` installs hooks in `~/.claude/settings.json` (CC) and `~/.cursor/hooks.json` (Cursor), plus OTEL env vars
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-turn or per-reply cost growth), retry loops (tool failure loops from hook_events). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Auto-installed by `budi init` when Cursor CLI is on PATH (`.vsix` embedded in binary via `include_bytes!`). Communicates with daemon via HTTP. Tracks active session via `~/.local/share/budi/cursor-sessions.json` (written by hooks, watched by extension). `budi doctor` and `/health/integrations` both check extension install status.
 - **Dashboard** is a React SPA at `/dashboard` with client-side routing:
   - `/dashboard` (Overview) - Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
-  - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools, MCP servers
+  - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools
   - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
   - `/dashboard/settings` - Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
 - Dashboard frontend sources live in `frontend/dashboard/`; built assets are embedded from `crates/budi-daemon/static/dashboard-dist` (served at `/static/dashboard/*`)
-- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/hook-events`, `/analytics/sessions/{id}/otel-events`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion - not used by dashboard/MCP)
+- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/tools`, `/analytics/mcp`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/hook-events`, `/analytics/sessions/{id}/otel-events`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion)
 - Admin endpoints (loopback-only): `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration), `/admin/integrations/install` (integration installer orchestration)
 - Sync mutation endpoints (loopback-only): `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync)
 - Sync status endpoint: `/sync/status` (syncing flag + last_synced)
-- Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/MCP/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)
+- Health endpoints: `/health` (ok + version), `/health/integrations` (hooks/OTEL/statusline status + DB stats + paths), `/health/check-update` (GitHub releases)

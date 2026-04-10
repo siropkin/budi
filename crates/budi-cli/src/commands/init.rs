@@ -201,24 +201,21 @@ pub fn cmd_init(
     println!();
     let dim = super::ansi("\x1b[90m");
     println!("  {bold}Next steps:{reset}");
-    println!("    1. Run `budi stats` to see your spending");
-    let mut next_step = 2usize;
+    println!("    Run `budi stats` to see your spending");
     if is_reinit {
         println!(
-            "    {next_step}. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
+            "    Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
         );
-        next_step += 1;
     }
     if !no_sync
         && let Some((_, messages_synced)) = sync_counts
         && messages_synced == 0
     {
         println!(
-            "    {next_step}. No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
+            "    No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
         );
-        next_step += 1;
     }
-    println!("    {next_step}. {dim}Local dashboard (legacy): {dashboard_url}{reset}");
+    println!("    {dim}Local dashboard (legacy): {dashboard_url}{reset}");
     println!();
     if selected_integrations.is_empty() {
         println!(
