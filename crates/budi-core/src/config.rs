@@ -93,7 +93,8 @@ pub fn agents_config_path() -> Result<PathBuf> {
     Ok(budi_config_dir()?.join("agents.toml"))
 }
 
-/// Load agents config. Returns `None` if the file does not exist (legacy install).
+/// Load agents config. Returns `None` if the file does not exist (legacy install)
+/// or if the file is effectively empty (no explicit agent sections).
 /// Callers should treat `None` as "all available agents enabled" for backward compatibility.
 pub fn load_agents_config() -> Option<AgentsConfig> {
     let path = agents_config_path().ok()?;
@@ -101,6 +102,44 @@ pub fn load_agents_config() -> Option<AgentsConfig> {
         return None;
     }
     let raw = fs::read_to_string(&path).ok()?;
+
+    // An empty or whitespace-only file should be treated the same as a missing
+    // file (all-enabled fallback) rather than silently disabling every agent.
+    let has_explicit_sections = KNOWN_AGENTS
+        .iter()
+        .any(|agent| raw.contains(&format!("[{agent}]")));
+    if !has_explicit_sections {
+        if !raw.trim().is_empty() {
+            tracing::warn!(
+                "{}: no recognized agent sections found; treating as absent",
+                path.display()
+            );
+        }
+        return None;
+    }
+
+    let parsed: toml::Value = match toml::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            return None;
+        }
+    };
+
+    // Warn about unknown top-level keys so typos don't silently disable an agent.
+    if let Some(table) = parsed.as_table() {
+        for key in table.keys() {
+            if !KNOWN_AGENTS.contains(&key.as_str()) {
+                tracing::warn!(
+                    "{}: unknown agent key '{}'; known agents: {}",
+                    path.display(),
+                    key,
+                    KNOWN_AGENTS.join(", ")
+                );
+            }
+        }
+    }
+
     match toml::from_str(&raw) {
         Ok(config) => Some(config),
         Err(e) => {

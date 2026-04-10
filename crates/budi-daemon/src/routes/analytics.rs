@@ -1030,25 +1030,3 @@ pub async fn analytics_tools(
 
     Ok(Json(result))
 }
-
-pub async fn analytics_mcp(
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<budi_core::hooks::McpStats>>, (StatusCode, Json<serde_json::Value>)> {
-    let filters = parse_dimension_filters(&params.filters);
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        budi_core::hooks::query_mcp_stats_with_filters(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            &filters,
-            params.limit.unwrap_or(20).min(200),
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
-    Ok(Json(result))
-}
