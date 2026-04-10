@@ -114,7 +114,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/config.rs` - BudiConfig, AgentsConfig, StatuslineConfig, TagsConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
-- `crates/budi-daemon/src/main.rs` - HTTP server, ~38 routes
+- `crates/budi-daemon/src/main.rs` - HTTP server, ~37 routes
 - `crates/budi-daemon/src/routes/hooks.rs` - /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/otel.rs` - /v1/logs and /v1/metrics OTLP ingestion endpoints
