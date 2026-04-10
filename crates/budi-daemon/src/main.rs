@@ -103,7 +103,6 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/providers", get(a::analytics_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route("/analytics/tools", get(a::analytics_tools))
-        .route("/analytics/mcp", get(a::analytics_mcp))
         .route(
             "/analytics/cache-efficiency",
             get(a::analytics_cache_efficiency),
