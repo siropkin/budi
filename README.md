@@ -196,7 +196,7 @@ slots = ["today", "week", "month", "branch"]
 
 Available slots: `today`, `week`, `month`, `session`, `branch`, `project`, `provider`.
 
-Budi no longer ships a built-in Starship integration, but you can still show cost in your shell prompt manually. Add to `~/.config/starship.toml`:
+If you use [Starship](https://starship.rs), you can show session cost in your prompt. Add to `~/.config/starship.toml`:
 
 ```toml
 [custom.budi]
@@ -207,7 +207,7 @@ style = "cyan"
 shell = ["sh"]
 ```
 
-This works with any Starship setup — `budi statusline --format=starship` outputs plain text.
+`budi statusline --format=starship` outputs plain text compatible with any Starship config.
 
 ## Cursor extension
 
