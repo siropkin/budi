@@ -3,7 +3,13 @@ use std::process::Command;
 use anyhow::Result;
 
 pub fn cmd_open() -> Result<()> {
-    // Ensure daemon is running before opening browser
+    let yellow = crate::commands::ansi("\x1b[33m");
+    let reset = crate::commands::ansi("\x1b[0m");
+    eprintln!(
+        "{yellow}Note:{reset} The local dashboard is legacy and will be replaced by the Rich CLI. \
+         Use `budi stats` for cost analytics."
+    );
+
     if let Err(e) = crate::client::DaemonClient::connect() {
         anyhow::bail!(
             "Could not connect to budi daemon: {e}\nRun `budi init` or `budi doctor` to diagnose."

@@ -136,7 +136,7 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks/MCP/OTEL/statusline, Cursor hooks/extension, Starship prompt module). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+`budi init` starts the daemon, syncs existing data, and now **prompts you to choose integrations** (Claude hooks, OTEL, statusline, Cursor hooks/extension). In non-interactive mode it uses safe defaults. You can also choose explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -155,7 +155,7 @@ Use this sequence if you want the fastest "did setup really work?" path:
    - Re-run init: quick recent sync (last 30 days)
 4. **Confirm health**
    - Run `budi doctor`
-   - Open dashboard at `http://127.0.0.1:7878/dashboard`
+   - Run `budi stats` to confirm data is flowing
 5. **Generate your first data point**
    - Send one prompt in Claude Code or Cursor, then run `budi sync`
    - Run `budi stats` and confirm non-zero usage
@@ -196,7 +196,7 @@ slots = ["today", "week", "month", "branch"]
 
 Available slots: `today`, `week`, `month`, `session`, `branch`, `project`, `provider`.
 
-For Starship integration, add to `~/.config/starship.toml`:
+If you use [Starship](https://starship.rs), you can show session cost in your prompt. Add to `~/.config/starship.toml`:
 
 ```toml
 [custom.budi]
@@ -206,6 +206,8 @@ format = "[$output]($style) "
 style = "cyan"
 shell = ["sh"]
 ```
+
+`budi statusline --format=starship` outputs plain text compatible with any Starship config.
 
 ## Cursor extension
 
@@ -245,7 +247,6 @@ Manage integrations anytime (especially if you skipped some during first init):
 budi integrations list
 budi integrations install --with claude-code-hooks --with claude-code-otel
 budi integrations install --with cursor-extension
-budi integrations install --with starship
 ```
 
 **Restart Claude Code and Cursor** after updating to pick up any changes.
@@ -255,10 +256,9 @@ budi integrations install --with starship
 ```bash
 budi init                     # start daemon, install hooks, sync data
 budi init --integrations none # initialize data/daemon without editor integrations
-budi init --with starship     # install an extra integration during init
 budi integrations list        # show what is installed vs available
 budi integrations install ... # install integrations later
-budi open                     # open web dashboard
+budi open                     # open local dashboard (legacy)
 budi doctor                   # check health: daemon, database, config
 budi doctor --deep            # run full SQLite integrity_check (slower)
 budi stats                    # usage summary with cost breakdown
@@ -278,7 +278,6 @@ budi health                   # show session health vitals for most recent activ
 budi health --session <id>    # health vitals for a specific session
 budi uninstall                # remove hooks, status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
-budi mcp-serve                # run MCP server (used by Claude Code, not called directly)
 ```
 
 All data commands support `--period today|week|month|all` and `--format json`.
@@ -313,42 +312,6 @@ value = "backend"
 match_repo = "*Backend*"
 ```
 
-## MCP server
-
-Budi includes an MCP (Model Context Protocol) server so AI agents can query your cost data and configure budi directly from conversation. Installed automatically by `budi init` into `~/.claude/settings.json`.
-
-**Example prompts:**
-- "What's my AI coding cost this week?"
-- "Which model is costing me the most?"
-- "Show me cost per branch this month"
-- "Set up tag rules for my team repos"
-
-**Available tools (15):**
-
-| Tool | Description |
-|------|-------------|
-| `get_cost_summary` | Total cost, tokens, messages for a period |
-| `get_model_breakdown` | Cost breakdown by model |
-| `get_project_costs` | Cost breakdown by repo/project |
-| `get_branch_costs` | Cost breakdown by git branch |
-| `get_branch_detail` | Detailed stats for a specific branch |
-| `get_tag_breakdown` | Cost breakdown by any tag key |
-| `get_provider_breakdown` | Cost breakdown by agent (Claude Code, Cursor) |
-| `get_tool_usage` | Tool call frequency + MCP server stats |
-| `get_activity` | Daily activity chart data |
-| `get_config` | Current budi configuration |
-| `set_tag_rules` | Configure custom tag rules |
-| `set_statusline_config` | Configure statusline slots |
-| `sync_data` | Trigger data sync |
-| `get_status` | Daemon health, schema, sync state |
-| `session_health` | Session health vitals, tips, and overall state |
-
-All analytics tools accept a `period` parameter: `today`, `week`, `month`, `all` (default: `month`).
-Invalid period values are rejected by the MCP schema (no silent fallback).
-
-`session_health` returns a concise summary for agents: overall state, messages, total cost, primary tip, and a vital-by-vital breakdown with actions when available.
-
-The MCP server is a thin HTTP client to the daemon — it never touches the database directly. Communication uses stdio (JSON-RPC), and all logging goes to stderr.
 
 ## Session health
 
@@ -556,7 +519,7 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | POST | `/sync/reset` | Wipe sync state + full re-sync (loopback-only) |
 | GET | `/sync/status` | Syncing flag + last_synced + ingest queue backlog/failed metrics |
 | POST | `/hooks/ingest` | Receive hook events |
-| GET | `/health/integrations` | Hooks/MCP/OTEL/statusline status + DB stats |
+| GET | `/health/integrations` | Hooks/OTEL/statusline status + DB stats |
 | GET | `/health/check-update` | Check for updates via GitHub |
 | POST | `/v1/logs` | OTLP logs ingestion (durable-queued, then background processed) |
 | POST | `/v1/metrics` | OTLP metrics ingestion (stub for future use) |
@@ -578,7 +541,6 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | GET | `/analytics/activity` | Token activity over time |
 | GET | `/analytics/tags` | Cost breakdown by tag |
 | GET | `/analytics/tools` | Tool usage frequency and duration |
-| GET | `/analytics/mcp` | MCP server usage stats |
 | GET | `/analytics/statusline` | Status line data |
 | GET | `/analytics/cache-efficiency` | Cache hit rates and savings |
 | GET | `/analytics/session-cost-curve` | Cost per message by session length |
