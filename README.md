@@ -66,6 +66,13 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, quality checks, and PR workflow.
+Architecture and module boundaries are documented in [SOUL.md](SOUL.md).
+
+Quick validation matrix:
+
+- Rust changes: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
+- Dashboard changes: `cd frontend/dashboard && npm ci && npm run build`
+- Cursor extension changes: `cd extensions/cursor-budi && npm ci && npm run lint && npm run format:check && npm run test && npm run build`
 
 To report a bug or request a feature, open a GitHub issue using the repository templates so maintainers get reproducible details quickly.
 

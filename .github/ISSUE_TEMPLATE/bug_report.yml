@@ -44,6 +44,15 @@ body:
       description: Paste relevant command output, stack traces, or screenshots.
       render: shell
   - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic checks run
+      description: Share `budi doctor` output and any relevant validation commands already tried.
+      placeholder: |
+        - budi doctor:
+        - budi sync:
+        - additional checks:
+  - type: textarea
     id: environment
     attributes:
       label: Environment
@@ -56,3 +65,9 @@ body:
         - Node:
     validations:
       required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and urgency
+      description: Who is blocked and how severe is the issue?
+      placeholder: Affects all new installs / blocks release / minor annoyance, etc.
