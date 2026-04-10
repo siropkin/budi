@@ -46,7 +46,7 @@ No cloud. No uploads. Everything stays on your machine.
 - **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
-- Web dashboard at `http://localhost:7878/dashboard`
+- Web dashboard at `http://localhost:7878/dashboard` (legacy — will be replaced by the Rich CLI and cloud dashboard)
 - Live cost + health status line in Claude Code and Cursor
 - Background sync every 30 seconds — no workflow changes needed
 - ~6 MB Rust binary, minimal footprint
@@ -197,7 +197,7 @@ slots = ["today", "week", "month", "branch"]
 
 Available slots: `today`, `week`, `month`, `session`, `branch`, `project`, `provider`.
 
-If you use [Starship](https://starship.rs), you can show session cost in your prompt. Add to `~/.config/starship.toml`:
+For Starship integration, add to `~/.config/starship.toml`:
 
 ```toml
 [custom.budi]
@@ -207,8 +207,6 @@ format = "[$output]($style) "
 style = "cyan"
 shell = ["sh"]
 ```
-
-`budi statusline --format=starship` outputs plain text compatible with any Starship config.
 
 ## Cursor extension
 
@@ -257,6 +255,7 @@ budi integrations install --with cursor-extension
 ```bash
 budi init                     # start daemon, install hooks, sync data
 budi init --integrations none # initialize data/daemon without editor integrations
+budi init --with cursor-extension  # install an extra integration during init
 budi integrations list        # show what is installed vs available
 budi integrations install ... # install integrations later
 budi open                     # open local dashboard (legacy)
@@ -312,7 +311,6 @@ key = "team"
 value = "backend"
 match_repo = "*Backend*"
 ```
-
 
 ## Session health
 
@@ -375,15 +373,12 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
                          │              │                    ▲
 ┌──────────┐    HTTP     │  - OTEL recv │    Pipeline       │
 │ Dashboard│ ──────────▶ │  - 30s sync  │ ──────────────────┘
-└──────────┘             │  - analytics │    Extract → Normalize
-                         │  - hooks     │      → Enrich → Load
-┌──────────┐             │  - queue     │
-│ ingest   │◀───────────▶│  drainer     │
-│ queue DB │   durable   │              │
-└──────────┘             └──────────────┘
-┌──────────┐    HTTP     └──────────────┘
-│ MCP      │ ──────────▶ (stdio JSON-RPC, 15 tools)
-│ Server   │  thin client
+│ (legacy) │             │  - analytics │    Extract → Normalize
+└──────────┘             │  - hooks     │      → Enrich → Load
+                         │  - queue     │
+┌──────────┐             │  drainer     │
+│ ingest   │◀───────────▶│              │
+│ queue DB │   durable   └──────────────┘
 └──────────┘
                           ▲   ▲   ▲   ▲
              OTEL ────────┘   │   │   └───── Cursor API
@@ -407,7 +402,7 @@ The daemon is the single source of truth — the CLI never opens the database di
 |-------|------|
 | **messages** | Single cost entity — all token/cost data lives here (one row per API call) |
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
-| **hook_events** | Raw event log for tool stats and MCP tracking |
+| **hook_events** | Raw event log for tool stats and session metadata |
 | **otel_events** | Raw OpenTelemetry event storage for debugging/audit |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
@@ -520,7 +515,7 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | POST | `/sync/reset` | Wipe sync state + full re-sync (loopback-only) |
 | GET | `/sync/status` | Syncing flag + last_synced + ingest queue backlog/failed metrics |
 | POST | `/hooks/ingest` | Receive hook events |
-| GET | `/health/integrations` | Hooks/OTEL/statusline status + DB stats |
+| GET | `/health/integrations` | Hooks/OTEL/statusline/extension status + DB stats |
 | GET | `/health/check-update` | Check for updates via GitHub |
 | POST | `/v1/logs` | OTLP logs ingestion (durable-queued, then background processed) |
 | POST | `/v1/metrics` | OTLP metrics ingestion (stub for future use) |

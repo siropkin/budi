@@ -151,7 +151,6 @@ If a review issue leads to "no code changes needed", still include a small artif
 - **`budi` and `budi-daemon` mismatch**: keep one install source on `PATH`; run `budi doctor`.
 - **Dashboard looks stale after frontend edits**: rebuild via `./scripts/build-dashboard.sh`, then restart daemon.
 - **Cursor extension status stale/offline**: run `budi doctor`, then `Budi: Refresh Status` or reload Cursor window.
-- **MCP tests fail unexpectedly**: verify `budi-daemon` is running before `budi mcp-serve` contract checks.
 
 ## Adding a new provider
 
@@ -169,18 +168,6 @@ If a review issue leads to "no code changes needed", still include a small artif
 2. `enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag>` - mutate the message and/or return tags
 3. Register in `Pipeline::default_pipeline()` in `crates/budi-core/src/pipeline/mod.rs`
 4. Enricher order matters: Hook -> Identity -> Git -> Tool -> Cost -> Tag
-
-## Testing MCP server
-
-```bash
-# Send initialize + tools/list via stdin:
-printf '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/list","id":2}\n' | cargo run --bin budi -- mcp-serve 2>/dev/null
-
-# Optional contract check: invalid period should fail with invalid params
-printf '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"get_cost_summary","arguments":{"period":"quarter"}}}\n' | cargo run --bin budi -- mcp-serve 2>/dev/null
-```
-
-The MCP server uses stdio (stdout = JSON-RPC, stderr = logging). It's a thin HTTP client to the daemon - make sure `budi-daemon` is running first. Runtime daemon failures should surface actionable MCP error text (busy/not-ready/mismatch guidance).
 
 ## Releasing
 
