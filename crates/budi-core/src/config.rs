@@ -48,6 +48,80 @@ pub fn home_dir() -> Result<PathBuf> {
 pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 
+/// Known agent identifiers used in `agents.toml`.
+pub const KNOWN_AGENTS: &[&str] = &["claude-code", "cursor"];
+
+/// Per-agent enablement entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentEntry {
+    pub enabled: bool,
+}
+
+/// Per-agent enablement config loaded from `~/.config/budi/agents.toml`.
+///
+/// When the file is absent (legacy install), callers should treat all
+/// available agents as enabled for backward compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentsConfig {
+    #[serde(rename = "claude-code")]
+    pub claude_code: AgentEntry,
+    pub cursor: AgentEntry,
+}
+
+impl AgentsConfig {
+    pub fn is_agent_enabled(&self, provider_name: &str) -> bool {
+        match provider_name {
+            "claude_code" => self.claude_code.enabled,
+            "cursor" => self.cursor.enabled,
+            _ => false,
+        }
+    }
+
+    /// Returns a config with all known agents enabled.
+    pub fn all_enabled() -> Self {
+        Self {
+            claude_code: AgentEntry { enabled: true },
+            cursor: AgentEntry { enabled: true },
+        }
+    }
+}
+
+/// Path to the global agents config file.
+pub fn agents_config_path() -> Result<PathBuf> {
+    Ok(budi_config_dir()?.join("agents.toml"))
+}
+
+/// Load agents config. Returns `None` if the file does not exist (legacy install).
+/// Callers should treat `None` as "all available agents enabled" for backward compatibility.
+pub fn load_agents_config() -> Option<AgentsConfig> {
+    let path = agents_config_path().ok()?;
+    if !path.exists() {
+        return None;
+    }
+    let raw = fs::read_to_string(&path).ok()?;
+    match toml::from_str(&raw) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Save agents config to disk.
+pub fn save_agents_config(config: &AgentsConfig) -> Result<()> {
+    let path = agents_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let raw = toml::to_string_pretty(config)?;
+    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
+    Ok(())
+}
+
 /// Known statusline slot names.
 pub const STATUSLINE_SLOTS: &[&str] = &[
     "today", "week", "month", "session", "branch", "project", "provider", "health",
@@ -539,5 +613,52 @@ format = "{today} | {week} | {branch}"
     fn statusline_config_empty_toml_uses_defaults() {
         let config: StatuslineConfig = toml::from_str("").unwrap();
         assert_eq!(config.slots, vec!["today", "week", "month"]);
+    }
+
+    #[test]
+    fn agents_config_default_disables_all() {
+        let config = AgentsConfig::default();
+        assert!(!config.claude_code.enabled);
+        assert!(!config.cursor.enabled);
+        assert!(!config.is_agent_enabled("claude_code"));
+        assert!(!config.is_agent_enabled("cursor"));
+    }
+
+    #[test]
+    fn agents_config_all_enabled() {
+        let config = AgentsConfig::all_enabled();
+        assert!(config.is_agent_enabled("claude_code"));
+        assert!(config.is_agent_enabled("cursor"));
+    }
+
+    #[test]
+    fn agents_config_unknown_provider_disabled() {
+        let config = AgentsConfig::all_enabled();
+        assert!(!config.is_agent_enabled("copilot"));
+    }
+
+    #[test]
+    fn agents_config_round_trips_toml() {
+        let config = AgentsConfig {
+            claude_code: AgentEntry { enabled: true },
+            cursor: AgentEntry { enabled: false },
+        };
+        let raw = toml::to_string_pretty(&config).unwrap();
+        assert!(raw.contains("[claude-code]"));
+        assert!(raw.contains("enabled = true"));
+        let parsed: AgentsConfig = toml::from_str(&raw).unwrap();
+        assert!(parsed.claude_code.enabled);
+        assert!(!parsed.cursor.enabled);
+    }
+
+    #[test]
+    fn agents_config_parses_partial_toml() {
+        let toml_str = r#"
+[claude-code]
+enabled = true
+"#;
+        let config: AgentsConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.claude_code.enabled);
+        assert!(!config.cursor.enabled);
     }
 }

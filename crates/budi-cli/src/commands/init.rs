@@ -55,6 +55,16 @@ pub fn cmd_init(
     clean_duplicate_binaries();
     check_daemon_binary_and_version();
 
+    let agents_config = resolve_agents(yes, io::stdin().is_terminal())?;
+    if let Err(e) = config::save_agents_config(&agents_config) {
+        eprintln!(
+            "{}  Warning:{} could not persist agent preferences: {e}",
+            super::ansi("\x1b[33m"),
+            super::ansi("\x1b[0m")
+        );
+    }
+    print_agents_summary(&agents_config);
+
     let selected_integrations = resolve_init_integrations(
         local,
         yes,
@@ -62,6 +72,7 @@ pub fn cmd_init(
         without,
         integrations_mode,
         io::stdin().is_terminal(),
+        &agents_config,
     )?;
     let statusline_preset = resolve_statusline_preset(
         &selected_integrations,
@@ -201,21 +212,24 @@ pub fn cmd_init(
     println!();
     let dim = super::ansi("\x1b[90m");
     println!("  {bold}Next steps:{reset}");
-    println!("    Run `budi stats` to see your spending");
+    println!("    1. Run `budi stats` to see your spending");
+    let mut next_step = 2usize;
     if is_reinit {
         println!(
-            "    Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
+            "    {next_step}. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
         );
+        next_step += 1;
     }
     if !no_sync
         && let Some((_, messages_synced)) = sync_counts
         && messages_synced == 0
     {
         println!(
-            "    No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
+            "    {next_step}. No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
         );
+        next_step += 1;
     }
-    println!("    {dim}Local dashboard (legacy): {dashboard_url}{reset}");
+    println!("    {next_step}. {dim}Local dashboard (legacy): {dashboard_url}{reset}");
     println!();
     if selected_integrations.is_empty() {
         println!(
@@ -242,6 +256,51 @@ pub fn cmd_init(
     }
 }
 
+fn resolve_agents(yes: bool, is_tty: bool) -> Result<config::AgentsConfig> {
+    if let Some(existing) = config::load_agents_config()
+        && (yes || !is_tty)
+    {
+        return Ok(existing);
+    }
+
+    if !is_tty || yes {
+        return Ok(config::AgentsConfig::all_enabled());
+    }
+
+    println!();
+    println!("  Select agents to track:");
+    let claude_enabled = prompt_yes_no("  - Claude Code?", true)?;
+    let cursor_enabled = prompt_yes_no("  - Cursor?", true)?;
+    println!();
+
+    Ok(config::AgentsConfig {
+        claude_code: config::AgentEntry {
+            enabled: claude_enabled,
+        },
+        cursor: config::AgentEntry {
+            enabled: cursor_enabled,
+        },
+    })
+}
+
+fn print_agents_summary(agents: &config::AgentsConfig) {
+    let green = super::ansi("\x1b[32m");
+    let dim = super::ansi("\x1b[90m");
+    let reset = super::ansi("\x1b[0m");
+    let agents_list: Vec<&str> = [
+        agents.claude_code.enabled.then_some("Claude Code"),
+        agents.cursor.enabled.then_some("Cursor"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if agents_list.is_empty() {
+        println!("  {dim}Agents: none enabled{reset}");
+    } else {
+        println!("  {green}Agents:{reset} {}", agents_list.join(", "));
+    }
+}
+
 fn resolve_init_integrations(
     local: bool,
     yes: bool,
@@ -249,6 +308,7 @@ fn resolve_init_integrations(
     without: Vec<super::integrations::IntegrationComponent>,
     mode: InitIntegrationsMode,
     is_tty: bool,
+    agents_config: &config::AgentsConfig,
 ) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
     let mut selected = match mode {
         InitIntegrationsMode::None => BTreeSet::new(),
@@ -273,7 +333,26 @@ fn resolve_init_integrations(
         selected.remove(&component);
     }
 
+    filter_integrations_by_agents(&mut selected, agents_config);
+
     Ok(selected)
+}
+
+/// Remove integration components for agents that are not enabled.
+fn filter_integrations_by_agents(
+    selected: &mut BTreeSet<super::integrations::IntegrationComponent>,
+    agents: &config::AgentsConfig,
+) {
+    use super::integrations::IntegrationComponent;
+    if !agents.claude_code.enabled {
+        selected.remove(&IntegrationComponent::ClaudeCodeHooks);
+        selected.remove(&IntegrationComponent::ClaudeCodeOtel);
+        selected.remove(&IntegrationComponent::ClaudeCodeStatusline);
+    }
+    if !agents.cursor.enabled {
+        selected.remove(&IntegrationComponent::CursorHooks);
+        selected.remove(&IntegrationComponent::CursorExtension);
+    }
 }
 
 fn resolve_statusline_preset(

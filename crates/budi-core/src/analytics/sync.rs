@@ -32,7 +32,7 @@ fn sync_with_max_age(
     conn: &mut Connection,
     max_age_days: Option<u64>,
 ) -> Result<(usize, usize, Vec<String>)> {
-    let providers = crate::provider::available_providers();
+    let providers = crate::provider::enabled_providers();
     let tags_config = crate::config::load_tags_config();
     let session_cache = crate::hooks::load_session_meta(conn, max_age_days).unwrap_or_default();
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);

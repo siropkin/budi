@@ -274,6 +274,46 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Per-agent enablement status
+    {
+        let agents = budi_core::config::load_agents_config();
+        match agents {
+            Some(ref cfg) => {
+                let enabled: Vec<&str> = [
+                    cfg.claude_code.enabled.then_some("Claude Code"),
+                    cfg.cursor.enabled.then_some("Cursor"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let disabled: Vec<&str> = [
+                    (!cfg.claude_code.enabled).then_some("Claude Code"),
+                    (!cfg.cursor.enabled).then_some("Cursor"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if !enabled.is_empty() {
+                    println!(
+                        "  {green}\u{2713}{reset} agents enabled: {}",
+                        enabled.join(", ")
+                    );
+                }
+                if !disabled.is_empty() {
+                    println!(
+                        "  {dim}-{reset} agents disabled: {} {dim}(data not collected){reset}",
+                        disabled.join(", ")
+                    );
+                }
+            }
+            None => {
+                println!(
+                    "  {dim}-{reset} agents: no agents.toml found — all available agents enabled (legacy mode)"
+                );
+            }
+        }
+    }
+
     // Check hooks installation — validate structure, not just string presence
     let home = budi_core::config::home_dir()
         .map(|p| p.to_string_lossy().to_string())
