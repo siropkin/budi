@@ -27,6 +27,7 @@ The budi daemon (`crates/budi-daemon/`) runs an axum HTTP server on `127.0.0.1:7
 | **Codex CLI** | Env var or config | `OPENAI_BASE_URL` env (deprecated) or `openai_base_url` in `config.toml` | OpenAI Chat Completions (`POST /v1/chat/completions`) | SSE (`text/event-stream`) | **High** | Config key is preferred since March 2026; env var still works with a deprecation warning. |
 | **Gemini CLI** | Env var (SDK-native) | `GOOGLE_GEMINI_BASE_URL` | Gemini (`POST /v1beta/models/{model}:streamGenerateContent`) | SSE (requires `?alt=sse` query param) | **Medium** | URL handling evolved — SDK now natively reads the env var. Different API shape from OpenAI/Anthropic. |
 | **Copilot CLI** | Env vars (BYOK) | `COPILOT_PROVIDER_BASE_URL` + `COPILOT_PROVIDER_TYPE` + `COPILOT_MODEL` | OpenAI Chat Completions (when `COPILOT_PROVIDER_TYPE=openai`) | SSE (`text/event-stream`) | **Medium** | Does **not** support standard `OPENAI_BASE_URL`. Requires BYOK env vars. `HTTPS_PROXY` does not reliably intercept model traffic. |
+| **Codex Desktop** | Settings file | `openai_base_url` in `~/.codex/config.toml` | OpenAI Chat Completions | SSE | **Medium** | macOS GUI app. Shares config with Codex CLI but cannot be launched via env var wrapper. Sandboxed — may need `network_access = true` in sandbox config. |
 
 #### Confidence Definitions
 
@@ -38,7 +39,7 @@ The budi daemon (`crates/budi-daemon/`) runs an axum HTTP server on `127.0.0.1:7
 Based on confidence and market share, the proxy implementation should prioritize:
 
 - **Tier 1 (R2 must-have)**: Claude Code, Codex CLI. Both use simple env vars, both have high confidence, and both use well-documented API formats (Anthropic Messages, OpenAI Chat Completions).
-- **Tier 2 (R2 should-have)**: Cursor, Copilot CLI. Both route through OpenAI-compatible endpoints, but Cursor requires a GUI setting and Copilot requires proprietary BYOK vars. Support is achievable but onboarding friction is higher.
+- **Tier 2 (R2 should-have)**: Cursor, Copilot CLI, Codex Desktop. All route through OpenAI-compatible endpoints, but require GUI settings, proprietary env vars, or manual config file edits. Support is achievable but onboarding friction is higher.
 - **Tier 3 (R2 stretch / post-R2)**: Gemini CLI. Different API format (not OpenAI-compatible), partially documented streaming protocol, and the env var situation was in flux. Supporting Gemini requires a separate protocol handler.
 
 ### 2. Supported Protocol Surface (v1)

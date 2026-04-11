@@ -197,6 +197,24 @@ pub fn cmd_launch(
     }
 
     if !binary_exists(agent.binary) {
+        // Special case: codex CLI not found, check for Codex Desktop app
+        if agent.name == "codex" {
+            #[cfg(target_os = "macos")]
+            if std::path::Path::new("/Applications/Codex.app").exists() {
+                eprintln!(
+                    "{yellow}Codex Desktop detected but Codex CLI is not installed.{reset}\n\
+                     \n\
+                     To route Codex Desktop through the budi proxy, add to ~/.codex/config.toml:\n\
+                     \n\
+                     openai_base_url = \"http://localhost:{proxy_port}\"\n\
+                     \n\
+                     Then restart Codex Desktop.",
+                    proxy_port = resolve_proxy_port(proxy_port_override, &config),
+                );
+                return Ok(());
+            }
+        }
+
         anyhow::bail!(
             "{} binary '{}' not found in PATH.\n\
              Install {} first, then run: budi launch {}",
@@ -204,6 +222,15 @@ pub fn cmd_launch(
             agent.binary,
             agent.display_name,
             agent.name
+        );
+    }
+
+    // Copilot CLI: verify `gh copilot` extension is installed
+    if agent.name == "copilot" && !gh_copilot_available() {
+        anyhow::bail!(
+            "GitHub Copilot CLI not found.\n\
+             Install with: gh extension install github/gh-copilot\n\
+             Then run: budi launch copilot"
         );
     }
 
@@ -299,6 +326,17 @@ fn binary_exists(name: &str) -> bool {
         }
     }
     false
+}
+
+/// Check if `gh copilot --help` succeeds (extension is installed).
+fn gh_copilot_available() -> bool {
+    Command::new("gh")
+        .args(["copilot", "--help"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Check that the proxy TCP port is accepting connections.

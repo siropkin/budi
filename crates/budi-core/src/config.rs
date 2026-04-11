@@ -50,7 +50,7 @@ pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 pub const DEFAULT_PROXY_PORT: u16 = 9878;
 
 /// Known agent identifiers used in `agents.toml`.
-pub const KNOWN_AGENTS: &[&str] = &["claude-code", "cursor"];
+pub const KNOWN_AGENTS: &[&str] = &["claude-code", "codex-cli", "cursor", "copilot-cli"];
 
 /// Per-agent enablement entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -68,14 +68,20 @@ pub struct AgentEntry {
 pub struct AgentsConfig {
     #[serde(rename = "claude-code")]
     pub claude_code: AgentEntry,
+    #[serde(rename = "codex-cli")]
+    pub codex_cli: AgentEntry,
     pub cursor: AgentEntry,
+    #[serde(rename = "copilot-cli")]
+    pub copilot_cli: AgentEntry,
 }
 
 impl AgentsConfig {
     pub fn is_agent_enabled(&self, provider_name: &str) -> bool {
         match provider_name {
             "claude_code" => self.claude_code.enabled,
+            "codex_cli" => self.codex_cli.enabled,
             "cursor" => self.cursor.enabled,
+            "copilot_cli" => self.copilot_cli.enabled,
             _ => false,
         }
     }
@@ -84,7 +90,20 @@ impl AgentsConfig {
     pub fn all_enabled() -> Self {
         Self {
             claude_code: AgentEntry { enabled: true },
+            codex_cli: AgentEntry { enabled: true },
             cursor: AgentEntry { enabled: true },
+            copilot_cli: AgentEntry { enabled: true },
+        }
+    }
+
+    /// Human-readable display name for an agent identifier.
+    pub fn display_name(agent: &str) -> &'static str {
+        match agent {
+            "claude-code" => "Claude Code",
+            "codex-cli" => "Codex CLI",
+            "cursor" => "Cursor",
+            "copilot-cli" => "Copilot CLI",
+            _ => "Unknown",
         }
     }
 }
@@ -703,36 +722,47 @@ format = "{today} | {week} | {branch}"
     fn agents_config_default_disables_all() {
         let config = AgentsConfig::default();
         assert!(!config.claude_code.enabled);
+        assert!(!config.codex_cli.enabled);
         assert!(!config.cursor.enabled);
+        assert!(!config.copilot_cli.enabled);
         assert!(!config.is_agent_enabled("claude_code"));
+        assert!(!config.is_agent_enabled("codex_cli"));
         assert!(!config.is_agent_enabled("cursor"));
+        assert!(!config.is_agent_enabled("copilot_cli"));
     }
 
     #[test]
     fn agents_config_all_enabled() {
         let config = AgentsConfig::all_enabled();
         assert!(config.is_agent_enabled("claude_code"));
+        assert!(config.is_agent_enabled("codex_cli"));
         assert!(config.is_agent_enabled("cursor"));
+        assert!(config.is_agent_enabled("copilot_cli"));
     }
 
     #[test]
     fn agents_config_unknown_provider_disabled() {
         let config = AgentsConfig::all_enabled();
-        assert!(!config.is_agent_enabled("copilot"));
+        assert!(!config.is_agent_enabled("gemini"));
     }
 
     #[test]
     fn agents_config_round_trips_toml() {
         let config = AgentsConfig {
             claude_code: AgentEntry { enabled: true },
+            codex_cli: AgentEntry { enabled: true },
             cursor: AgentEntry { enabled: false },
+            copilot_cli: AgentEntry { enabled: false },
         };
         let raw = toml::to_string_pretty(&config).unwrap();
         assert!(raw.contains("[claude-code]"));
+        assert!(raw.contains("[codex-cli]"));
         assert!(raw.contains("enabled = true"));
         let parsed: AgentsConfig = toml::from_str(&raw).unwrap();
         assert!(parsed.claude_code.enabled);
+        assert!(parsed.codex_cli.enabled);
         assert!(!parsed.cursor.enabled);
+        assert!(!parsed.copilot_cli.enabled);
     }
 
     #[test]

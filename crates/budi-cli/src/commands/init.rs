@@ -10,7 +10,7 @@ use budi_core::config;
 use crate::daemon::ensure_daemon_running;
 use crate::{InitIntegrationsMode, StatuslinePreset};
 
-/// Run `budi init`. Prints warnings to stderr if hook installation had issues.
+/// Run `budi init`. Prints warnings to stderr if integration setup had issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitOutcome {
     Success,
@@ -28,7 +28,7 @@ pub fn cmd_init(
     repo_root: Option<PathBuf>,
     no_daemon: bool,
     _no_open: bool,
-    no_sync: bool,
+    _no_sync: bool,
 ) -> Result<InitOutcome> {
     let repo_root = if local || repo_root.is_some() {
         let root = super::try_resolve_repo_root(repo_root);
@@ -121,17 +121,6 @@ pub fn cmd_init(
         eprintln!("  Run `budi doctor` to diagnose.");
     }
 
-    // Detect re-init before sync — DB already exists means quick sync is enough.
-    let is_reinit = if let Some(ref root) = repo_root {
-        config::repo_paths(root)
-            .map(|p| p.data_dir.join("analytics.db").exists())
-            .unwrap_or(false)
-    } else {
-        budi_core::analytics::db_path()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-    };
-
     // Ensure database schema is ready BEFORE starting daemon.
     if let Ok(db_path) = budi_core::analytics::db_path()
         && let Err(e) = budi_core::analytics::open_db_with_migration(&db_path)
@@ -145,22 +134,11 @@ pub fn cmd_init(
         println!("  Daemon: running on {}", config.daemon_base_url());
     }
 
-    // Fresh install: full history sync (users won't run `budi sync --all` manually).
-    // Re-init: quick 30-day sync (fast, data already exists).
-    let sync_result = if no_sync {
-        Ok((0, 0))
-    } else if is_reinit {
-        println!("  Sync: syncing recent transcripts...");
-        super::sync::init_quick_sync()
-    } else {
-        println!("  Sync: scanning transcripts (this may take a few minutes)...");
-        super::sync::init_full_sync()
-    };
-
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
 
     let bold_cyan = super::ansi("\x1b[1;36m");
     let bold = super::ansi("\x1b[1m");
+    let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
 
     let status_suffix = if had_integration_warnings {
@@ -171,17 +149,10 @@ pub fn cmd_init(
 
     println!();
     if let Some(ref root) = repo_root {
-        if is_reinit {
-            println!(
-                "{bold_cyan}  budi{reset} re-initialized{status_suffix} in {}",
-                root.display()
-            );
-        } else {
-            println!(
-                "{bold_cyan}  budi{reset} initialized{status_suffix} in {}",
-                root.display()
-            );
-        }
+        println!(
+            "{bold_cyan}  budi{reset} initialized{status_suffix} in {}",
+            root.display()
+        );
     } else {
         println!("{bold_cyan}  budi{reset} initialized{status_suffix} (global)");
     }
@@ -202,35 +173,17 @@ pub fn cmd_init(
         );
     }
     println!();
-    let sync_counts = match sync_result {
-        Ok(counts) => Some(counts),
-        Err(e) => {
-            tracing::warn!("auto-sync failed: {e}");
-            println!("  Sync: skipped (run `budi sync` manually).");
-            None
-        }
-    };
-    println!();
-    let dim = super::ansi("\x1b[90m");
     println!("  {bold}Next steps:{reset}");
-    println!("    1. Run `budi stats` to see your spending");
-    let mut next_step = 2usize;
-    if is_reinit {
-        println!(
-            "    {next_step}. Run `budi sync --all` to load full history {dim}(only last 30 days were synced){reset}"
-        );
-        next_step += 1;
-    }
-    if !no_sync
-        && let Some((_, messages_synced)) = sync_counts
-        && messages_synced == 0
-    {
-        println!(
-            "    {next_step}. No transcript data yet — open Claude Code or Cursor, send one prompt, then run `budi sync`"
-        );
-        next_step += 1;
-    }
-    println!("    {next_step}. {dim}Local dashboard (legacy): {dashboard_url}{reset}");
+    println!("    1. Start coding:  `budi launch claude` or `budi launch codex`");
+    println!(
+        "       {dim}For Cursor: set Override OpenAI Base URL to http://localhost:{} in Settings → Models{reset}",
+        config.proxy.effective_port()
+    );
+    println!(
+        "    2. Import history: `budi import` {dim}(load past transcripts from Claude Code / Cursor){reset}"
+    );
+    println!("    3. Health check:   `budi status`");
+    println!("    4. {dim}Local dashboard (legacy): {dashboard_url}{reset}");
     println!();
     if selected_integrations.is_empty() {
         println!(
@@ -271,15 +224,23 @@ fn resolve_agents(yes: bool, is_tty: bool) -> Result<config::AgentsConfig> {
     println!();
     println!("  Select agents to track:");
     let claude_enabled = prompt_yes_no("  - Claude Code?", true)?;
+    let codex_enabled = prompt_yes_no("  - Codex CLI?", true)?;
     let cursor_enabled = prompt_yes_no("  - Cursor?", true)?;
+    let copilot_enabled = prompt_yes_no("  - Copilot CLI?", true)?;
     println!();
 
     Ok(config::AgentsConfig {
         claude_code: config::AgentEntry {
             enabled: claude_enabled,
         },
+        codex_cli: config::AgentEntry {
+            enabled: codex_enabled,
+        },
         cursor: config::AgentEntry {
             enabled: cursor_enabled,
+        },
+        copilot_cli: config::AgentEntry {
+            enabled: copilot_enabled,
         },
     })
 }
@@ -290,7 +251,9 @@ fn print_agents_summary(agents: &config::AgentsConfig) {
     let reset = super::ansi("\x1b[0m");
     let agents_list: Vec<&str> = [
         agents.claude_code.enabled.then_some("Claude Code"),
+        agents.codex_cli.enabled.then_some("Codex CLI"),
         agents.cursor.enabled.then_some("Cursor"),
+        agents.copilot_cli.enabled.then_some("Copilot CLI"),
     ]
     .into_iter()
     .flatten()
