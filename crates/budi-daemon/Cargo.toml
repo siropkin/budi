@@ -24,4 +24,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+rusqlite.workspace = true
 tower = { version = "0.5", features = ["util"] }

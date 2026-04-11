@@ -685,4 +685,240 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
+
+    // --- SSE streaming tests ---
+
+    /// Start a mock HTTP server that returns an SSE response, then closes.
+    async fn start_mock_sse_server(sse_body: String) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {sse_body}"
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        });
+
+        addr
+    }
+
+    struct ProxyTestHarness {
+        app: Router,
+        db_path: PathBuf,
+    }
+
+    fn proxy_with_upstream(upstream: &str) -> ProxyTestHarness {
+        let safe_name = std::thread::current()
+            .name()
+            .unwrap_or("t")
+            .replace("::", "_");
+        let tmp = std::env::temp_dir().join(format!("budi-sse-test-{safe_name}"));
+        std::fs::create_dir_all(&tmp).ok();
+        let db_path = tmp.join("analytics.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let proxy_state = ProxyState {
+            http_client: reqwest::Client::new(),
+            anthropic_upstream: upstream.to_string(),
+            openai_upstream: upstream.to_string(),
+            analytics_db_path: db_path.clone(),
+        };
+        ProxyTestHarness {
+            app: build_proxy_router(proxy_state),
+            db_path,
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_streams_anthropic_sse_and_extracts_tokens() {
+        let sse_body = [
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_t\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ].concat();
+
+        let addr = start_mock_sse_server(sse_body).await;
+        let h = proxy_with_upstream(&format!("http://{addr}"));
+
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "stream": true,
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let resp = h
+            .app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", "test-key")
+                    .header("anthropic-version", "2023-06-01")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/event-stream"),
+            "expected SSE content-type"
+        );
+
+        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&resp_bytes);
+        assert!(
+            text.contains("message_start"),
+            "SSE data should pass through"
+        );
+        assert!(text.contains("Hello"), "content delta should pass through");
+
+        // Wait for spawn_blocking event recording
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
+        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+        let (input, output, streaming): (Option<i64>, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, is_streaming FROM proxy_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(input, Some(25), "input_tokens from message_start");
+        assert_eq!(output, Some(15), "output_tokens from message_delta");
+        assert_eq!(streaming, 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_streams_openai_sse_and_extracts_tokens() {
+        let sse_body = [
+            "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n",
+            "data: [DONE]\n\n",
+        ].concat();
+
+        let addr = start_mock_sse_server(sse_body).await;
+        let h = proxy_with_upstream(&format!("http://{addr}"));
+
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let resp = h
+            .app
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&resp_bytes);
+        assert!(text.contains("Hi"), "content should pass through");
+        assert!(
+            text.contains("[DONE]"),
+            "terminal event should pass through"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
+        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+        let (input, output): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(input, Some(10), "prompt_tokens from usage");
+        assert_eq!(output, Some(20), "completion_tokens from usage");
+    }
+
+    #[tokio::test]
+    async fn proxy_sse_duration_reflects_stream_end() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = socket.read(&mut buf).await;
+            let headers =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(headers.as_bytes()).await;
+            let _ = socket
+                .write_all(b"data: {\"type\":\"message_start\"}\n\n")
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let _ = socket
+                .write_all(b"data: {\"type\":\"message_stop\"}\n\n")
+                .await;
+        });
+
+        let h = proxy_with_upstream(&format!("http://{addr}"));
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let resp = h
+            .app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", "k")
+                    .header("anthropic-version", "2023-06-01")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let _ = resp.into_body().collect().await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
+        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+        let duration_ms: i64 = conn
+            .query_row(
+                "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            duration_ms >= 200,
+            "duration_ms ({duration_ms}) should reflect stream end, not header time"
+        );
+    }
 }

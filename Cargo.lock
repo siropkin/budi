@@ -213,6 +213,7 @@ dependencies = [
  "include_dir",
  "mime_guess",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
