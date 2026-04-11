@@ -52,7 +52,7 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor) for historical import, pipeline (enrichment), cost calculation, proxy event storage, config, migrations
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard and analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
 ### Agent compatibility tiers (ADR-0082)

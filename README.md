@@ -259,7 +259,8 @@ budi import                   # one-time import of historical transcripts
 budi integrations list        # show what is installed vs available
 budi integrations install ... # install integrations later
 budi open                     # open local dashboard (legacy)
-budi doctor                   # check health: daemon, database, config
+budi status                   # quick check: daemon, proxy, today's spend
+budi doctor                   # full diagnostic: daemon, proxy, database, config
 budi doctor --deep            # run full SQLite integrity_check (slower)
 budi stats                    # usage summary with cost breakdown
 budi stats --models           # model usage breakdown
@@ -268,6 +269,9 @@ budi stats --branches         # branches ranked by cost
 budi stats --branch <name>    # cost for a specific branch
 budi stats --tag ticket_id    # cost per ticket
 budi stats --tag ticket_prefix # cost per team prefix
+budi sessions                 # list recent sessions with cost and health
+budi sessions <id>            # session detail: cost, models, health, tags
+budi sessions --search claude # filter sessions by search term
 budi sync                     # on-demand historical backfill (30-day window)
 budi sync --all               # on-demand historical backfill (full history)
 budi sync --force             # re-run historical backfill from scratch

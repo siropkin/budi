@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    BranchCost, ModelUsage, ProviderStats, RepoUsage, SessionHealth, TagCost, UsageSummary,
+    BranchCost, ModelUsage, PaginatedSessions, ProviderStats, RepoUsage, SessionHealth,
+    SessionListEntry, SessionTag, TagCost, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -470,6 +471,66 @@ impl DaemonClient {
             .client
             .get(format!("{}/analytics/providers", self.base_url))
             .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    pub fn sessions(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        search: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedSessions> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = since {
+            params.push(("since", s.to_string()));
+        }
+        if let Some(u) = until {
+            params.push(("until", u.to_string()));
+        }
+        if let Some(q) = search {
+            params.push(("search", q.to_string()));
+        }
+        params.push(("sort_by", "started_at".to_string()));
+        params.push(("limit", limit.to_string()));
+        params.push(("offset", offset.to_string()));
+        let resp = self
+            .client
+            .get(format!("{}/analytics/sessions", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    pub fn session_detail(&self, session_id: &str) -> Result<Option<SessionListEntry>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/analytics/sessions/{}",
+                self.base_url, session_id
+            ))
+            .send()
+            .map_err(describe_send_error)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = check_response(resp)?;
+        Ok(Some(resp.json()?))
+    }
+
+    pub fn session_tags(&self, session_id: &str) -> Result<Vec<SessionTag>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/analytics/sessions/{}/tags",
+                self.base_url, session_id
+            ))
             .send()
             .map_err(describe_send_error)?;
         let resp = check_response(resp)?;

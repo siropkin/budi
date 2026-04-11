@@ -182,31 +182,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
                 db_path.display()
             );
         }
-        // Check for hook delivery errors — only flag recent ones (last 24h)
-        if let Ok(home) = budi_core::config::budi_home_dir() {
-            let log_path = home.join("hook-debug.log");
-            if log_path.exists()
-                && let Ok(meta) = std::fs::metadata(&log_path)
-                && meta.len() > 0
-            {
-                let recent_count = count_recent_hook_errors(&log_path);
-                if recent_count > 0 {
-                    let yellow = super::ansi("\x1b[33m");
-                    println!(
-                        "  {yellow}!{reset} hook errors: {recent_count} in the last 24h ({})",
-                        log_path.display()
-                    );
-                    issues.push(format!(
-                        "Hook delivery errors logged recently ({recent_count} in last 24h). Check hook-debug.log"
-                    ));
-                } else {
-                    println!(
-                        "  {green}\u{2713}{reset} hook errors: none recent (stale log at {})",
-                        log_path.display()
-                    );
-                }
-            }
-        }
     }
 
     // Disk space check (warn if < 100MB available)
@@ -314,171 +289,23 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
-    // Check hooks installation — validate structure, not just string presence
-    let home = budi_core::config::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let claude_settings = format!("{}/.claude/settings.json", home);
-    let cursor_hooks = format!("{}/.cursor/hooks.json", home);
-
-    // Validate hook JSON syntax before deeper checks
-    if Path::new(&claude_settings).exists() {
-        match std::fs::read_to_string(&claude_settings).and_then(|raw| {
-            serde_json::from_str::<serde_json::Value>(&raw)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        }) {
-            Ok(_) => {}
-            Err(e) => {
-                println!(
-                    "  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}",
-                    claude_settings
-                );
-                issues.push(format!(
-                    "Claude Code settings has invalid JSON: {e}. Fix or delete the file."
-                ));
-            }
-        }
-    }
-    if Path::new(&cursor_hooks).exists() {
-        match std::fs::read_to_string(&cursor_hooks).and_then(|raw| {
-            serde_json::from_str::<serde_json::Value>(&raw)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        }) {
-            Ok(_) => {}
-            Err(e) => {
-                println!(
-                    "  {red}\u{2717}{reset} hook JSON syntax: {} is invalid: {e}",
-                    cursor_hooks
-                );
-                issues.push(format!(
-                    "Cursor hooks has invalid JSON: {e}. Fix or delete the file."
-                ));
-            }
-        }
-    }
-
-    let (claude_ok, claude_missing) = validate_claude_hooks(&claude_settings);
-    let cursor_dir_exists = Path::new(&format!("{home}/.cursor")).is_dir();
-    let (cursor_ok, cursor_missing) = if cursor_dir_exists {
-        validate_cursor_hooks(&cursor_hooks)
-    } else {
-        (false, vec![])
-    };
-
-    if claude_ok || cursor_ok {
-        let sources: Vec<&str> = [
-            claude_ok.then_some("Claude Code"),
-            cursor_ok.then_some("Cursor"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        println!("  {green}\u{2713}{reset} hooks: {}", sources.join(", "));
-
-        // Report partial issues for providers that have hooks but are incomplete
-        if !claude_ok && !claude_missing.is_empty() && claude_missing[0] != "file not readable" {
-            let yellow = super::ansi("\x1b[33m");
-            println!(
-                "  {yellow}!{reset} Claude Code hooks: missing events: {}",
-                claude_missing.join(", ")
-            );
-            issues.push(format!(
-                "Claude Code hooks missing events: {}. Run `budi integrations install --with claude-code-hooks` to fix.",
-                claude_missing.join(", ")
-            ));
-        }
-        if cursor_dir_exists
-            && !cursor_ok
-            && !cursor_missing.is_empty()
-            && cursor_missing[0] != "file not readable"
-        {
-            let yellow = super::ansi("\x1b[33m");
-            println!(
-                "  {yellow}!{reset} Cursor hooks: missing events: {}",
-                cursor_missing.join(", ")
-            );
-            issues.push(format!(
-                "Cursor hooks missing events: {}. Run `budi integrations install --with cursor-hooks` to fix.",
-                cursor_missing.join(", ")
-            ));
-        } else if cursor_dir_exists && !cursor_ok {
-            let dim = super::ansi("\x1b[90m");
-            println!("  {dim}-{reset} hooks: Cursor hooks missing or misconfigured");
-        }
-    } else {
-        let hook_log_hint = hook_log_path_hint();
-        println!("  {red}\u{2717}{reset} hooks: no hooks found or misconfigured");
-        println!(
-            "    Run `budi integrations install --with claude-code-hooks --with cursor-hooks`"
-        );
-        println!("    Tip: hook delivery failures are logged to {hook_log_hint}");
-        issues.push(
-            "No hooks installed. Run `budi integrations install --with claude-code-hooks --with cursor-hooks`."
-                .into(),
-        );
-    }
-
-    // Print hook debug hint if any hook-related issues were found
-    if !claude_ok || (cursor_dir_exists && !cursor_ok) {
-        let hook_log_hint = hook_log_path_hint();
-        println!();
-        println!("  {dim}Tip: hook delivery failures are logged to {hook_log_hint}{reset}");
-    }
-
-    // Check OTEL configuration in Claude Code settings
+    // Proxy health check
     {
-        let otel_ok = check_otel_config(&claude_settings, &config);
-        if otel_ok {
-            println!("  {green}\u{2713}{reset} OTEL: configured for exact cost tracking");
-        } else {
-            let yellow = super::ansi("\x1b[33m");
-            println!(
-                "  {yellow}!{reset} OTEL: not configured. Run `budi integrations install --with claude-code-otel`"
-            );
-            // Not a hard issue — JSONL still works, just estimated cost
-        }
-    }
-
-    // Check Cursor extension
-    {
-        let cursor_on_path = super::integrations::find_cursor_cli().is_some();
-        if cursor_on_path {
-            let ext_installed = super::integrations::is_cursor_extension_installed();
-            if ext_installed {
-                println!("  {green}\u{2713}{reset} Cursor extension: installed");
+        let proxy_port = config.proxy.effective_port();
+        let proxy_enabled = config.proxy.effective_enabled();
+        if proxy_enabled {
+            let proxy_ok = check_proxy_port(proxy_port);
+            if proxy_ok {
+                println!("  {green}\u{2713}{reset} proxy: running on port {proxy_port}");
             } else {
-                let yellow = super::ansi("\x1b[33m");
-                println!(
-                    "  {yellow}!{reset} Cursor extension: not installed. Run `budi integrations install --with cursor-extension`"
-                );
+                println!("  {red}\u{2717}{reset} proxy: not responding on port {proxy_port}");
+                issues.push(format!(
+                    "Proxy not running on port {proxy_port}. Start budi daemon with `budi init`."
+                ));
             }
         } else {
-            println!("  {dim}-{reset} Cursor extension: cursor CLI not found");
+            println!("  {dim}-{reset} proxy: disabled in config");
         }
-    }
-
-    // Check transcript directories exist
-    let cc_transcripts = format!("{}/.claude/transcripts", home);
-    let cursor_transcripts = format!("{}/.cursor/projects", home);
-    let has_cc = Path::new(&cc_transcripts).is_dir();
-    let has_cursor = Path::new(&cursor_transcripts).is_dir();
-    if has_cc || has_cursor {
-        let sources: Vec<&str> = [
-            has_cc.then_some("Claude Code"),
-            has_cursor.then_some("Cursor"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        println!(
-            "  {green}\u{2713}{reset} transcripts: {}",
-            sources.join(", ")
-        );
-    } else {
-        println!("  {red}\u{2717}{reset} transcripts: no transcript directories found");
-        issues.push(
-            "No transcript directories found. Use Claude Code or Cursor to generate data.".into(),
-        );
     }
 
     println!();
@@ -492,36 +319,6 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         anyhow::bail!("{} issue(s) found", issues.len());
     }
     Ok(())
-}
-
-/// Read and parse a JSON file, returning parsed value or an error description.
-fn read_json_file(path: &str) -> Result<serde_json::Value, Vec<String>> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Err(vec!["file not readable".into()]),
-    };
-    match serde_json::from_str(&content) {
-        Ok(v) => Ok(v),
-        Err(_) => Err(vec!["invalid JSON".into()]),
-    }
-}
-
-/// Validate Claude Code hooks from file path.
-/// Returns (ok, missing_events).
-fn validate_claude_hooks(path: &str) -> (bool, Vec<String>) {
-    match read_json_file(path) {
-        Ok(settings) => budi_core::integrations::validate_cc_hooks(&settings),
-        Err(errs) => (false, errs),
-    }
-}
-
-/// Validate Cursor hooks from file path.
-/// Returns (ok, missing_events).
-fn validate_cursor_hooks(path: &str) -> (bool, Vec<String>) {
-    match read_json_file(path) {
-        Ok(config) => budi_core::integrations::validate_cursor_hooks(&config),
-        Err(errs) => (false, errs),
-    }
 }
 
 fn doctor_check(label: &str, ok: bool, path: Option<&Path>) {
@@ -555,39 +352,13 @@ fn integrity_check_mode_label(deep: bool) -> &'static str {
     }
 }
 
-/// Check if OTEL env vars are correctly configured in Claude Code settings file.
-fn check_otel_config(settings_path: &str, config: &config::BudiConfig) -> bool {
-    let Ok(raw) = std::fs::read_to_string(settings_path) else {
-        return false;
-    };
-    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    budi_core::integrations::check_otel_config(&settings, config.daemon_port)
-}
-
-fn hook_log_path_hint() -> String {
-    budi_core::config::budi_home_dir()
-        .map(|p| p.join("hook-debug.log").display().to_string())
-        .unwrap_or_else(|_| "<budi-home>/hook-debug.log".to_string())
-}
-
-/// Count hook errors from the last 24 hours in the debug log.
-/// Lines have format: `[2026-03-30T03:19:14.945796+00:00] hook POST ...`
-fn count_recent_hook_errors(log_path: &Path) -> usize {
-    let Ok(content) = std::fs::read_to_string(log_path) else {
-        return 0;
-    };
-    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-    content
-        .lines()
-        .filter(|line| {
-            line.strip_prefix('[')
-                .and_then(|s| s.split(']').next())
-                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                .is_some_and(|dt| dt > cutoff)
-        })
-        .count()
+/// TCP probe to check if the proxy is listening on the given port.
+fn check_proxy_port(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(500),
+    )
+    .is_ok()
 }
 
 /// Check available disk space in MB. Uses `df -k` on Unix, skips on Windows.

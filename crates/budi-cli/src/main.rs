@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi launch claude      Launch Claude Code through the budi proxy\n  budi launch codex       Launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi doctor             Check health: daemon, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi launch claude      Launch Claude Code through the budi proxy\n  budi launch codex       Launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -152,6 +152,33 @@ Examples:
         #[arg(long)]
         session: Option<String>,
     },
+    /// List recent sessions or show session detail
+    #[command(after_help = "\
+Examples:
+  budi sessions                    Recent sessions (today)
+  budi sessions -p week            This week's sessions
+  budi sessions --search claude    Filter by search term
+  budi sessions <session-id>       Show detail for a specific session
+  budi sessions --format json      JSON output for scripting")]
+    Sessions {
+        /// Session ID for detail view (omit for session list)
+        #[arg()]
+        session_id: Option<String>,
+        /// Time period for session list (default: today)
+        #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
+        period: StatsPeriod,
+        /// Filter sessions by search term (model, repo, branch, provider)
+        #[arg(long)]
+        search: Option<String>,
+        /// Max sessions to show (default: 20)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
+    },
+    /// Quick overview: daemon, proxy, today's cost (is everything working?)
+    Status,
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -354,6 +381,21 @@ fn main() -> Result<()> {
                 commands::statusline::cmd_statusline(format)
             }
         }
+        Commands::Sessions {
+            session_id,
+            period,
+            search,
+            limit,
+            format,
+        } => {
+            let json_output = matches!(format, StatsFormat::Json);
+            if let Some(id) = session_id {
+                commands::sessions::cmd_session_detail(&id, json_output)
+            } else {
+                commands::sessions::cmd_sessions(period, search.as_deref(), limit, json_output)
+            }
+        }
+        Commands::Status => commands::status::cmd_status(),
         Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
         Commands::Launch {
             agent,
