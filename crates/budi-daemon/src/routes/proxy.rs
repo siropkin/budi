@@ -25,6 +25,7 @@ use crate::ProxyState;
 const HEADER_BUDI_REPO: &str = "x-budi-repo";
 const HEADER_BUDI_BRANCH: &str = "x-budi-branch";
 const HEADER_BUDI_CWD: &str = "x-budi-cwd";
+const HEADER_BUDI_SESSION: &str = "x-budi-session";
 
 const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MiB per ADR-0082
 
@@ -95,6 +96,9 @@ async fn proxy_request(
         extract_header(&incoming_headers, HEADER_BUDI_CWD).as_deref(),
     );
 
+    let session_id = extract_header(&incoming_headers, HEADER_BUDI_SESSION)
+        .unwrap_or_else(budi_core::proxy::generate_proxy_session_id);
+
     let body_bytes: axum::body::Bytes = match read_body(req).await {
         Ok(bytes) => bytes,
         Err(resp) => return resp,
@@ -141,6 +145,7 @@ async fn proxy_request(
                 502,
                 is_streaming,
                 &attribution,
+                &session_id,
             );
             return build_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -165,6 +170,7 @@ async fn proxy_request(
             start,
             state,
             attribution,
+            session_id,
             line_buf: Vec::new(),
             input_tokens: None,
             output_tokens: None,
@@ -197,6 +203,7 @@ async fn proxy_request(
                 502,
                 is_streaming,
                 &attribution,
+                &session_id,
             );
             return build_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -223,6 +230,7 @@ async fn proxy_request(
         status.as_u16(),
         is_streaming,
         &attribution,
+        &session_id,
     );
 
     let mut response = Response::builder().status(status);
@@ -249,6 +257,7 @@ struct SseTapStream {
     start: Instant,
     state: ProxyState,
     attribution: ProxyAttribution,
+    session_id: String,
     line_buf: Vec<u8>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -359,6 +368,7 @@ impl SseTapStream {
             self.status_code,
             true,
             &self.attribution,
+            &self.session_id,
         );
     }
 }
@@ -496,6 +506,7 @@ fn record_event(
     status_code: u16,
     is_streaming: bool,
     attribution: &ProxyAttribution,
+    session_id: &str,
 ) {
     let cost_cents = if status_code < 400 {
         budi_core::proxy::compute_proxy_cost_cents(provider, model, input_tokens, output_tokens)
@@ -516,6 +527,7 @@ fn record_event(
         git_branch: attribution.git_branch.clone(),
         ticket_id: attribution.ticket_id.clone(),
         cost_cents,
+        session_id: session_id.to_string(),
     };
 
     tracing::info!(

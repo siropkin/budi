@@ -407,8 +407,6 @@ pub async fn health_integrations()
     use super::analytics::{DatabaseStats, IntegrationPaths, IntegrationsResponse};
 
     let result = tokio::task::spawn_blocking(|| -> IntegrationsResponse {
-        use budi_core::integrations;
-
         let home = budi_core::config::home_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
@@ -419,30 +417,12 @@ pub async fn health_integrations()
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
 
-        let hooks_installed = claude_settings
-            .as_ref()
-            .map(|s| integrations::validate_cc_hooks(s).0)
-            .unwrap_or(false);
-
-        let otel_installed = claude_settings
-            .as_ref()
-            .map(integrations::check_otel_config_loose)
-            .unwrap_or(false);
-
         let statusline_installed = claude_settings
             .as_ref()
             .and_then(|s| s.get("statusLine"))
             .and_then(|sl| sl.get("command"))
             .and_then(|c| c.as_str())
             .map(|c| c.contains("budi statusline") || c.contains("budi_out=$(budi"))
-            .unwrap_or(false);
-
-        // Cursor hooks
-        let cursor_path = format!("{home}/.cursor/hooks.json");
-        let cursor_hooks = std::fs::read_to_string(&cursor_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .map(|config| integrations::validate_cursor_hooks(&config).0)
             .unwrap_or(false);
 
         // Cursor extension
@@ -493,17 +473,13 @@ pub async fn health_integrations()
             .unwrap_or_default();
 
         IntegrationsResponse {
-            claude_code_hooks: hooks_installed,
-            cursor_hooks,
             cursor_extension,
-            otel: otel_installed,
             statusline: statusline_installed,
             database: db_stats,
             paths: IntegrationPaths {
                 database: db_path_str,
                 config: config_dir,
                 claude_settings: claude_path,
-                cursor_hooks: cursor_path,
             },
         }
     })

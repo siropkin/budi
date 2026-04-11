@@ -80,7 +80,18 @@ impl ProxyAttribution {
             resolved_repo
         };
 
-        let ticket_id = extract_ticket_id(&resolved_branch).unwrap_or_default();
+        let ticket_id = extract_ticket_id(&resolved_branch)
+            .or_else(|| extract_numeric_ticket(&resolved_branch))
+            .unwrap_or_else(|| "Unassigned".to_string());
+        // ADR-0082 §9: main/master/develop are integration branches, not tickets
+        let ticket_id = if matches!(
+            resolved_branch.as_str(),
+            "main" | "master" | "develop" | "HEAD" | ""
+        ) {
+            "Unassigned".to_string()
+        } else {
+            ticket_id
+        };
 
         Self {
             repo_id,
@@ -100,6 +111,36 @@ fn resolve_git_branch(cwd: &std::path::Path) -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Extract a numeric-only ticket ID from a branch name per ADR-0082 §9.
+/// Matches the first segment after `/` or at the start that is purely numeric
+/// followed by `-` or end-of-string. E.g., `fix/1234-typo` → `"1234"`.
+fn extract_numeric_ticket(branch: &str) -> Option<String> {
+    // Take the segment after the last `/`, or the whole branch
+    let segment = branch.rsplit('/').next().unwrap_or(branch);
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
+        return None;
+    }
+    let end = bytes
+        .iter()
+        .position(|&b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    // Must be followed by '-' or end-of-string to be a ticket, not just any number
+    if end < bytes.len() && bytes[end] != b'-' {
+        return None;
+    }
+    Some(segment[..end].to_string())
+}
+
+/// Generate a best-effort session ID when the agent does not provide one.
+/// Uses a UUID v4 prefixed with `proxy-session-` for easy identification.
+pub fn generate_proxy_session_id() -> String {
+    format!("proxy-session-{}", uuid::Uuid::new_v4())
 }
 
 /// Compute cost in cents for a proxy event using the provider pricing tables.
@@ -144,6 +185,10 @@ pub struct ProxyEvent {
     pub ticket_id: String,
     #[serde(default)]
     pub cost_cents: f64,
+    /// Session correlation ID. If the agent provides one via header, use it;
+    /// otherwise generate a best-effort ID per ADR-0082 §8.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 /// Ensure the `proxy_events` table exists in the analytics database.
@@ -163,6 +208,7 @@ pub fn ensure_proxy_schema(conn: &Connection) -> Result<()> {
             git_branch    TEXT NOT NULL DEFAULT '',
             ticket_id     TEXT NOT NULL DEFAULT '',
             cost_cents    REAL NOT NULL DEFAULT 0.0,
+            session_id    TEXT NOT NULL DEFAULT '',
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -179,6 +225,7 @@ pub fn ensure_proxy_schema(conn: &Connection) -> Result<()> {
         ("git_branch", "TEXT NOT NULL DEFAULT ''"),
         ("ticket_id", "TEXT NOT NULL DEFAULT ''"),
         ("cost_cents", "REAL NOT NULL DEFAULT 0.0"),
+        ("session_id", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE proxy_events ADD COLUMN {col} {def};"));
     }
@@ -194,8 +241,8 @@ pub fn insert_proxy_event(conn: &Connection, event: &ProxyEvent) -> Result<i64> 
         "INSERT INTO proxy_events (
             timestamp, provider, model, input_tokens, output_tokens,
             duration_ms, status_code, is_streaming,
-            repo_id, git_branch, ticket_id, cost_cents
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            repo_id, git_branch, ticket_id, cost_cents, session_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             event.timestamp,
             event.provider,
@@ -209,6 +256,7 @@ pub fn insert_proxy_event(conn: &Connection, event: &ProxyEvent) -> Result<i64> 
             event.git_branch,
             event.ticket_id,
             event.cost_cents,
+            event.session_id,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -302,6 +350,7 @@ mod tests {
             git_branch: String::new(),
             ticket_id: String::new(),
             cost_cents: 0.0,
+            session_id: String::new(),
         }
     }
 
@@ -387,7 +436,7 @@ mod tests {
         let attr = ProxyAttribution::resolve(None, None, None);
         assert_eq!(attr.repo_id, UNASSIGNED_REPO);
         assert!(attr.git_branch.is_empty());
-        assert!(attr.ticket_id.is_empty());
+        assert_eq!(attr.ticket_id, "Unassigned");
     }
 
     #[test]
@@ -403,7 +452,25 @@ mod tests {
         let attr = ProxyAttribution::resolve(Some("my-repo"), Some("main"), None);
         assert_eq!(attr.repo_id, "my-repo");
         assert_eq!(attr.git_branch, "main");
-        assert!(attr.ticket_id.is_empty());
+        assert_eq!(attr.ticket_id, "Unassigned");
+    }
+
+    #[test]
+    fn attribution_resolve_numeric_only_ticket() {
+        let attr = ProxyAttribution::resolve(Some("repo"), Some("fix/1234-typo"), None);
+        assert_eq!(attr.ticket_id, "1234");
+    }
+
+    #[test]
+    fn attribution_resolve_develop_branch_unassigned() {
+        let attr = ProxyAttribution::resolve(Some("repo"), Some("develop"), None);
+        assert_eq!(attr.ticket_id, "Unassigned");
+    }
+
+    #[test]
+    fn attribution_resolve_master_branch_unassigned() {
+        let attr = ProxyAttribution::resolve(Some("repo"), Some("master"), None);
+        assert_eq!(attr.ticket_id, "Unassigned");
     }
 
     #[test]

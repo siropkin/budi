@@ -373,10 +373,7 @@ pub struct RepairResponse {
 
 #[derive(serde::Serialize)]
 pub struct IntegrationsResponse {
-    pub claude_code_hooks: bool,
-    pub cursor_hooks: bool,
     pub cursor_extension: bool,
-    pub otel: bool,
     pub statusline: bool,
     pub database: DatabaseStats,
     pub paths: IntegrationPaths,
@@ -394,7 +391,6 @@ pub struct IntegrationPaths {
     pub database: String,
     pub config: String,
     pub claude_settings: String,
-    pub cursor_hooks: String,
 }
 
 #[derive(serde::Serialize)]
