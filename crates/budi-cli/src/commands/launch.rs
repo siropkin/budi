@@ -263,7 +263,7 @@ pub fn cmd_launch(
     {
         let status = cmd
             .status()
-            .with_context(|| format!("Failed to launch {}", agent.display_name))?;
+            .map_err(|e| anyhow::anyhow!("Failed to launch {}: {}", agent.display_name, e))?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }
