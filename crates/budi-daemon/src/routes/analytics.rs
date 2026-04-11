@@ -534,7 +534,7 @@ pub async fn analytics_schema_version()
             current,
             target,
             exists: true,
-            needs_migration: Some(current < target),
+            needs_migration: Some(budi_core::migration::needs_migration(&conn)),
         })
     })
     .await
@@ -865,7 +865,7 @@ pub async fn analytics_migrate(
             let conn = analytics::open_db(&db_path)?;
             let current = budi_core::migration::current_version(&conn);
             let target = budi_core::migration::SCHEMA_VERSION;
-            if current >= target {
+            if !budi_core::migration::needs_migration(&conn) {
                 return Ok(MigrateResponse {
                     current,
                     target,
