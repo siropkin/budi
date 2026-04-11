@@ -1,6 +1,6 @@
 # SOUL.md
 
-Local-first cost analytics for AI coding agents. Tracks tokens, costs, and usage per message via proxy interception and on-demand historical transcript import. No cloud prompt/code/response uploads.
+Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks tokens, costs, and usage per message via proxy interception and transcript analysis. No cloud - everything on-machine.
 
 ## Build & Test
 
@@ -51,19 +51,9 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 
 ### Crates
 
-- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor) for historical import, pipeline (enrichment), cost calculation, proxy event storage, config, migrations
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
+- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations. Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, stats, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard and analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
-
-### Agent compatibility tiers (ADR-0082)
-
-| Tier | Agents | Notes |
-|------|--------|-------|
-| **Tier 1 (must-have)** | Claude Code, Codex CLI | High-confidence proxy compatibility. |
-| **Tier 2 (should-have)** | Cursor, Copilot CLI | Supported with caveats (Cursor UI override, Copilot BYOK vars). |
-| **Tier 3 (deferred)** | Gemini CLI | Deferred in proxy v1; separate protocol handler required. |
-
-`budi launch <agent>` wraps agent startup: starts the daemon/proxy if needed, injects the correct env vars, and execs the agent. `budi launch claude` / `budi launch codex` (Tier 1) and `budi launch copilot` (Tier 2) are zero-config. `budi launch cursor` prints GUI setup instructions. `budi launch gemini` exits with a "not yet supported" message.
 
 ### Data flow
 
@@ -71,8 +61,7 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 Live data:
 Proxy (agent -> localhost:9878 -> upstream provider)
   -> Path-based routing (Anthropic /v1/messages, OpenAI /v1/chat/completions)
-  -> Attribution: X-Budi-Repo/X-Budi-Branch/X-Budi-Cwd headers -> git resolution fallback
-     -> repo fallback: Unassigned; ticket attribution: best-effort from branch naming
+  -> Attribution: X-Budi-Repo/Branch/Cwd headers -> git resolution -> Unassigned fallback
   -> SSE: chunk-by-chunk pass-through with tee/tap token extraction
   -> Non-SSE: buffered with JSON usage parsing
   -> Cost: computed from provider pricing tables
@@ -107,13 +96,15 @@ Nine tables, seven data entities + two supporting:
 | **JSONL** (Claude Code) | `estimated` | Per-message tokens (no thinking), cost calculated from pricing. Used by `budi import` for historical backfill |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents from Cursor's API. Used by `budi import` for historical backfill |
 
+Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingestion has been removed. The proxy is the sole live data source.
+
 ### Key concepts
 
 - **cost_confidence**: determines `~` prefix in dashboard for non-exact costs
 - **Source of truth vs derived**: `messages` remains canonical; rollup tables are derived caches maintained incrementally via SQLite triggers during ingest/update/delete
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
-- **Sync split**: `budi sync` = on-demand 30-day historical backfill, `budi sync --all` = on-demand full historical backfill. If proxy-ingested data exists, sync/import only backfills messages before the first proxy event to avoid double-counting
+- **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
 - **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). Agents set `ANTHROPIC_BASE_URL=http://localhost:9878` or `OPENAI_BASE_URL=http://localhost:9878` to route through the proxy. Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. SSE streaming responses are passed through chunk-by-chunk with no buffering; a tee/tap on the byte stream extracts token metadata (input/output tokens) from SSE events without modifying the data. Non-streaming responses are buffered and parsed for usage data. Duration is measured from request start to stream end (not to first headers). Mid-stream failures and client disconnects are handled gracefully — partial metadata is recorded via Drop. No read timeout on streaming; non-streaming uses 300s. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
 
 ## Key files
@@ -122,17 +113,18 @@ Nine tables, seven data entities + two supporting:
 - `crates/budi-core/src/analytics/health.rs` - Session health vitals, ProviderKind-aware tips, overall-state logic
 - `crates/budi-core/src/analytics/tests.rs` - Analytics + session health unit tests
 - `crates/budi-core/src/pipeline/mod.rs` - Pipeline struct, Enricher trait, default_pipeline()
-- `crates/budi-core/src/pipeline/enrichers.rs` - All 5 enricher implementations
+- `crates/budi-core/src/pipeline/enrichers.rs` - All 5 enricher implementations (HookEnricher removed)
 - `crates/budi-core/src/cost.rs` - Cost estimation, ModelPricing, per-provider pricing tables
+- `crates/budi-core/src/hooks.rs` - Prompt classification and migration helpers (hook_events table dropped in v22)
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
 - `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig
-- `crates/budi-cli/src/commands/launch.rs` - `budi launch <agent>` CLI wrapper: agent definitions, env var injection, proxy health check, exec
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878), ~40 routes
+- `crates/budi-daemon/src/routes/hooks.rs` - /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints (hook ingestion removed)
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/proxy.rs` - Proxy handlers for Anthropic Messages and OpenAI Chat Completions
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
@@ -147,11 +139,11 @@ Nine tables, seven data entities + two supporting:
 - CLI never touches SQLite directly - all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
 - `budi init` prompts for per-agent enablement (Claude Code, Cursor) and persists choices to `~/.config/budi/agents.toml`. Only enabled agents are synced. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility.
-- `budi init` configures integrations (statusline, extension) for enabled agents. Removed legacy integrations are skipped if explicitly selected
+- `budi init` configures integrations (statusline, extension) for enabled agents
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
-- **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
-- **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Auto-installed by `budi init` when Cursor CLI is on PATH (`.vsix` embedded in binary via `include_bytes!`). Communicates with daemon via HTTP. Tracks active session via `~/.local/share/budi/cursor-sessions.json` (watched by extension). `budi doctor` and `/health/integrations` both check extension install status.
+- **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook_events table dropped in v22). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
+- **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.
 - **Dashboard** is a React SPA at `/dashboard` with client-side routing:
   - `/dashboard` (Overview) - Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
   - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools
@@ -162,4 +154,4 @@ Nine tables, seven data entities + two supporting:
 - Admin endpoints (loopback-only): `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration), `/admin/integrations/install` (integration installer orchestration)
 - Sync mutation endpoints (loopback-only): `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync)
 - Sync status endpoint: `/sync/status` (syncing flag + last_synced)
-- Health endpoints: `/health` (ok + version), `/health/integrations` (statusline/extension status + DB stats + paths), `/health/check-update` (GitHub releases)
+- Health endpoints: `/health` (ok + version + api_version), `/health/integrations` (statusline/extension status + DB stats + paths), `/health/check-update` (GitHub releases)
