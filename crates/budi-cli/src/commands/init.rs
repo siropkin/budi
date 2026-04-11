@@ -94,7 +94,7 @@ pub fn cmd_init(
 
     let install_report =
         super::integrations::install_selected(&config, &selected_integrations, statusline_preset);
-    let hook_warnings = install_report.warnings;
+    let integration_warnings = install_report.warnings;
 
     if repo_root.is_none() {
         let mut prefs = super::integrations::load_preferences();
@@ -111,11 +111,11 @@ pub fn cmd_init(
         }
     }
 
-    let had_hook_warnings = !hook_warnings.is_empty();
+    let had_integration_warnings = !integration_warnings.is_empty();
 
-    if had_hook_warnings {
-        eprintln!("  Warning: hook installation had issues:");
-        for w in &hook_warnings {
+    if had_integration_warnings {
+        eprintln!("  Warning: integration setup had issues:");
+        for w in &integration_warnings {
             eprintln!("    - {w}");
         }
         eprintln!("  Run `budi doctor` to diagnose.");
@@ -163,7 +163,7 @@ pub fn cmd_init(
     let bold = super::ansi("\x1b[1m");
     let reset = super::ansi("\x1b[0m");
 
-    let status_suffix = if had_hook_warnings {
+    let status_suffix = if had_integration_warnings {
         " with warnings"
     } else {
         ""
@@ -241,16 +241,16 @@ pub fn cmd_init(
     }
     println!();
 
-    if had_hook_warnings {
+    if had_integration_warnings {
         let yellow = super::ansi("\x1b[33m");
         let reset2 = super::ansi("\x1b[0m");
         eprintln!(
-            "{yellow}  Warning:{reset2} {} hook issue(s) detected. Run `budi doctor` for details.",
-            hook_warnings.len()
+            "{yellow}  Warning:{reset2} {} integration issue(s) detected. Run `budi doctor` for details.",
+            integration_warnings.len()
         );
     }
 
-    if had_hook_warnings {
+    if had_integration_warnings {
         Ok(InitOutcome::PartialSuccess)
     } else {
         Ok(InitOutcome::Success)
@@ -335,6 +335,9 @@ fn resolve_init_integrations(
     }
 
     filter_integrations_by_agents(&mut selected, agents_config);
+    selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeHooks);
+    selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeOtel);
+    selected.remove(&super::integrations::IntegrationComponent::CursorHooks);
 
     Ok(selected)
 }
@@ -392,7 +395,7 @@ fn prompt_for_integrations(
 ) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
     if local {
         let enable_global = prompt_yes_no(
-            "  Install global integrations too (Claude/Cursor hooks, status line, OTEL)?",
+            "  Install global integrations too (Claude status line and Cursor extension)?",
             false,
         )?;
         if !enable_global {
@@ -405,18 +408,9 @@ fn prompt_for_integrations(
     let mut selected = BTreeSet::new();
     let defaults = [
         (
-            super::integrations::IntegrationComponent::ClaudeCodeHooks,
-            true,
-        ),
-        (
-            super::integrations::IntegrationComponent::ClaudeCodeOtel,
-            true,
-        ),
-        (
             super::integrations::IntegrationComponent::ClaudeCodeStatusline,
             true,
         ),
-        (super::integrations::IntegrationComponent::CursorHooks, true),
         (
             super::integrations::IntegrationComponent::CursorExtension,
             true,
