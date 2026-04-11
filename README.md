@@ -48,7 +48,7 @@ No cloud. No uploads. Everything stays on your machine.
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - Web dashboard at `http://localhost:7878/dashboard` (legacy — will be replaced by the Rich CLI and cloud dashboard)
 - Live cost + health status line in Claude Code and Cursor
-- **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Cursor Usage API)
+- **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Cursor Usage API). If proxy data already exists, import only backfills pre-proxy history to avoid double-counting
 - ~6 MB Rust binary, minimal footprint
 
 ## Platforms
@@ -153,6 +153,7 @@ Use this sequence if you want the fastest "did setup really work?" path:
 2. **Choose agents and integrations** during `budi init` (recommended defaults are safe)
 3. **Import historical data** (optional)
    - Run `budi import` to backfill from Claude Code JSONL transcripts and Cursor Usage API
+   - If you already have proxy-captured data, import backfills only messages before the first proxy event
 4. **Confirm health**
    - Run `budi doctor`
    - Run `budi stats` to confirm data is flowing

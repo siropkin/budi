@@ -231,10 +231,12 @@ async fn main() -> Result<()> {
                 });
             }
             Err(e) => {
-                tracing::error!(
+                let message = format!(
                     "Failed to bind proxy on {proxy_addr}: {e}. \
                      Check if another process is using port {proxy_port}."
                 );
+                tracing::error!("{message}");
+                anyhow::bail!("{message}");
             }
         }
     }

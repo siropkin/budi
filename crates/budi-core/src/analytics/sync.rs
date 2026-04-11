@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use super::{
@@ -37,8 +38,17 @@ fn sync_with_max_age(
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
     let mut total_files = 0;
     let mut total_messages = 0;
+    let mut total_messages_skipped_after_proxy_cutoff = 0usize;
     let mut cursor_file_messages_ingested = 0usize;
     let mut warnings: Vec<String> = Vec::new();
+    let proxy_cutoff = first_proxy_message_timestamp(conn);
+
+    if let Some(cutoff) = proxy_cutoff {
+        warnings.push(format!(
+            "Proxy data detected; importing transcript history only before {} to avoid double-counting.",
+            cutoff.to_rfc3339()
+        ));
+    }
 
     let cutoff = max_age_days
         .map(|days| std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86400));
@@ -96,6 +106,11 @@ fn sync_with_max_age(
             // this slice, so we add the original file offset back afterward.
             let (mut messages, relative_offset) = provider.parse_file(file_path, &content, 0)?;
             let new_offset = parse_start_offset.saturating_add(relative_offset);
+            if let Some(cutoff) = proxy_cutoff {
+                let before = messages.len();
+                messages.retain(|msg| msg.timestamp < cutoff);
+                total_messages_skipped_after_proxy_cutoff += before.saturating_sub(messages.len());
+            }
             if messages.is_empty() {
                 set_sync_offset(conn, &path_str, new_offset)?;
                 continue;
@@ -116,6 +131,13 @@ fn sync_with_max_age(
 
     if cursor_file_messages_ingested > 0 {
         crate::providers::cursor::run_cursor_repairs(conn);
+    }
+
+    if total_messages_skipped_after_proxy_cutoff > 0 {
+        warnings.push(format!(
+            "Skipped {} transcript messages at/after the first proxy event to prevent duplicate accounting.",
+            total_messages_skipped_after_proxy_cutoff
+        ));
     }
 
     if total_messages > 0 {
@@ -192,6 +214,22 @@ fn sync_with_max_age(
 
     mark_sync_completed(conn)?;
     Ok((total_files, total_messages, warnings))
+}
+
+fn first_proxy_message_timestamp(conn: &Connection) -> Option<DateTime<Utc>> {
+    let ts: Option<String> = conn
+        .query_row(
+            "SELECT MIN(timestamp) FROM messages WHERE role = 'assistant' AND cost_confidence = 'proxy_estimated'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    ts.and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(&raw)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+    })
 }
 
 fn ingest_in_batches(
@@ -568,7 +606,7 @@ fn truncate_title(text: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::read_transcript_tail;
+    use super::{first_proxy_message_timestamp, read_transcript_tail};
 
     fn temp_file_path(test_name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -605,5 +643,31 @@ mod tests {
         assert_eq!(content, "short\n");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn first_proxy_message_timestamp_returns_none_without_proxy_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::migration::migrate(&conn).expect("migrate schema");
+        assert!(first_proxy_message_timestamp(&conn).is_none());
+    }
+
+    #[test]
+    fn first_proxy_message_timestamp_returns_earliest_proxy_row() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::migration::migrate(&conn).expect("migrate schema");
+        conn.execute(
+            "INSERT INTO messages
+             (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence)
+             VALUES
+             ('m2', 'assistant', '2026-04-10T10:00:00Z', 'gpt-4o', 'openai', 10, 5, 0, 0, 1.0, 'proxy_estimated'),
+             ('m1', 'assistant', '2026-04-10T09:00:00Z', 'gpt-4o', 'openai', 10, 5, 0, 0, 1.0, 'proxy_estimated'),
+             ('m3', 'assistant', '2026-04-10T08:00:00Z', 'claude-sonnet-4-6', 'claude_code', 10, 5, 0, 0, 1.0, 'estimated')",
+            [],
+        )
+        .expect("insert messages");
+
+        let ts = first_proxy_message_timestamp(&conn).expect("timestamp exists");
+        assert_eq!(ts.to_rfc3339(), "2026-04-10T09:00:00+00:00");
     }
 }

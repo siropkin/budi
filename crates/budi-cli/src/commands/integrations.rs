@@ -34,6 +34,13 @@ impl IntegrationComponent {
             Self::CursorExtension => "Cursor extension",
         }
     }
+
+    fn is_removed_surface(self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCodeHooks | Self::ClaudeCodeOtel | Self::CursorHooks
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -111,8 +118,13 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
                 default_recommended_components()
             };
 
+            let removed_surface_notes = drop_removed_surfaces(&mut selected);
             if selected.is_empty() {
-                selected = default_recommended_components();
+                println!("No active integrations selected.");
+                for warning in removed_surface_notes {
+                    println!("  - {warning}");
+                }
+                return Ok(());
             }
 
             let mut preset = statusline_preset;
@@ -141,8 +153,12 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
                 }
             }
 
-            let report = install_selected(&cfg, &selected, preset);
+            let mut report = install_selected(&cfg, &selected, preset);
+            report.warnings.extend(removed_surface_notes);
             let mut prefs = load_preferences();
+            prefs
+                .enabled
+                .retain(|component| !component.is_removed_surface());
             for component in &selected {
                 prefs.enabled.insert(*component);
             }
@@ -186,10 +202,7 @@ fn prompt_statusline_preset() -> Result<StatuslinePreset> {
 
 pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
     [
-        IntegrationComponent::ClaudeCodeHooks,
-        IntegrationComponent::ClaudeCodeOtel,
         IntegrationComponent::ClaudeCodeStatusline,
-        IntegrationComponent::CursorHooks,
         IntegrationComponent::CursorExtension,
     ]
     .into_iter()
@@ -198,10 +211,7 @@ pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
 
 pub fn all_components() -> BTreeSet<IntegrationComponent> {
     [
-        IntegrationComponent::ClaudeCodeHooks,
-        IntegrationComponent::ClaudeCodeOtel,
         IntegrationComponent::ClaudeCodeStatusline,
-        IntegrationComponent::CursorHooks,
         IntegrationComponent::CursorExtension,
     ]
     .into_iter()
@@ -274,14 +284,22 @@ pub fn install_selected(
     selected: &BTreeSet<IntegrationComponent>,
     statusline_preset: Option<StatuslinePreset>,
 ) -> InstallReport {
+    let mut filtered_selected = selected.clone();
     let mut report = InstallReport::default();
+    report
+        .warnings
+        .extend(drop_removed_surfaces(&mut filtered_selected));
 
-    let uses_claude_settings = selected.contains(&IntegrationComponent::ClaudeCodeHooks)
-        || selected.contains(&IntegrationComponent::ClaudeCodeOtel)
-        || selected.contains(&IntegrationComponent::ClaudeCodeStatusline);
+    if filtered_selected.is_empty() {
+        return report;
+    }
+
+    let uses_claude_settings = filtered_selected.contains(&IntegrationComponent::ClaudeCodeHooks)
+        || filtered_selected.contains(&IntegrationComponent::ClaudeCodeOtel)
+        || filtered_selected.contains(&IntegrationComponent::ClaudeCodeStatusline);
 
     if uses_claude_settings
-        && let Err(e) = install_claude_settings(config, selected, statusline_preset)
+        && let Err(e) = install_claude_settings(config, &filtered_selected, statusline_preset)
     {
         let yellow = super::ansi("\x1b[33m");
         let reset = super::ansi("\x1b[0m");
@@ -289,7 +307,7 @@ pub fn install_selected(
         report.warnings.push(format!("Claude Code settings: {e}"));
     }
 
-    if selected.contains(&IntegrationComponent::CursorHooks)
+    if filtered_selected.contains(&IntegrationComponent::CursorHooks)
         && let Err(e) = install_cursor_hooks()
     {
         let yellow = super::ansi("\x1b[33m");
@@ -298,11 +316,30 @@ pub fn install_selected(
         report.warnings.push(format!("Cursor hooks: {e}"));
     }
 
-    if selected.contains(&IntegrationComponent::CursorExtension) {
+    if filtered_selected.contains(&IntegrationComponent::CursorExtension) {
         install_cursor_extension(&mut report.warnings);
     }
 
     report
+}
+
+fn drop_removed_surfaces(selected: &mut BTreeSet<IntegrationComponent>) -> Vec<String> {
+    let removed: Vec<IntegrationComponent> = selected
+        .iter()
+        .copied()
+        .filter(|component| component.is_removed_surface())
+        .collect();
+
+    let mut warnings = Vec::new();
+    for component in removed {
+        selected.remove(&component);
+        warnings.push(format!(
+            "{} is removed in 8.0 and was skipped.",
+            component.display_name()
+        ));
+    }
+
+    warnings
 }
 
 pub fn refresh_enabled_integrations(config: &config::BudiConfig) -> InstallReport {
