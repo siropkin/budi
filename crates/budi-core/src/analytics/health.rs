@@ -917,43 +917,8 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 }
 
 fn load_tool_events(
-    conn: &Connection,
-    session_ids: &[&str],
+    _conn: &Connection,
+    _session_ids: &[&str],
 ) -> Result<HashMap<String, Vec<SessionToolEvent>>> {
-    let mut grouped = HashMap::new();
-    if session_ids.is_empty() {
-        return Ok(grouped);
-    }
-
-    let placeholders: Vec<String> = (1..=session_ids.len()).map(|i| format!("?{i}")).collect();
-    let in_clause = placeholders.join(",");
-    let sql = format!(
-        "SELECT session_id, event, timestamp, tool_name
-         FROM hook_events
-         WHERE session_id IN ({in_clause})
-           AND event IN ('pre_compact', 'post_tool_use', 'post_tool_use_failure', 'user_prompt_submit')
-         ORDER BY session_id, timestamp ASC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::types::ToSql> = session_ids
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let rows = stmt.query_map(params.as_slice(), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            SessionToolEvent {
-                event: row.get(1)?,
-                timestamp: row.get(2)?,
-                tool_name: row.get(3)?,
-            },
-        ))
-    })?;
-
-    for row in rows.filter_map(|r| r.ok()) {
-        grouped.entry(row.0).or_insert_with(Vec::new).push(row.1);
-    }
-
-    Ok(grouped)
+    Ok(HashMap::new())
 }

@@ -243,7 +243,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
             if !exists {
                 println!("  {red}\u{2717}{reset} database: not created yet");
                 issues.push("No database. Run `budi sync` to create it.".into());
-            } else if current >= target {
+            } else if current == target {
                 println!("  {green}\u{2713}{reset} database schema: v{}", current);
             } else {
                 println!(

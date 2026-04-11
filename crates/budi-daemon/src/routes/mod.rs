@@ -1,7 +1,6 @@
 pub mod analytics;
 pub mod dashboard;
 pub mod hooks;
-pub mod otel;
 pub mod proxy;
 
 use std::net::SocketAddr;

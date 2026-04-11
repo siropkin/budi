@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,6 +42,7 @@ pub enum IntegrationInstallComponent {
     ClaudeCodeStatusline,
     CursorHooks,
     CursorExtension,
+    Starship,
 }
 
 impl IntegrationInstallComponent {
@@ -53,6 +54,7 @@ impl IntegrationInstallComponent {
             Self::ClaudeCodeStatusline => "claude-code-statusline",
             Self::CursorHooks => "cursor-hooks",
             Self::CursorExtension => "cursor-extension",
+            Self::Starship => "starship",
         }
     }
 }
@@ -507,9 +509,6 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
     let status = tokio::task::spawn_blocking(|| {
         let db_path = budi_core::analytics::db_path().ok()?;
         let conn = budi_core::analytics::open_db(&db_path).ok()?;
-        let queue = budi_core::ingest_queue::queue_stats()
-            .ok()
-            .unwrap_or_default();
         Some((
             budi_core::analytics::last_sync_completed_at(&conn)
                 .ok()
@@ -517,21 +516,19 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
             budi_core::analytics::newest_ingested_data_at(&conn)
                 .ok()
                 .flatten(),
-            queue,
         ))
     })
     .await
     .ok()
     .flatten();
-    let (last_sync_completed_at, newest_data_at, queue_stats) =
-        status.unwrap_or((None, None, budi_core::ingest_queue::QueueStats::default()));
+    let (last_sync_completed_at, newest_data_at) = status.unwrap_or((None, None));
     Json(SyncStatusResponse {
         syncing,
         last_sync_completed_at: last_sync_completed_at.clone(),
         newest_data_at,
-        ingest_backlog: queue_stats.pending,
-        ingest_ready: queue_stats.ready,
-        ingest_failed: queue_stats.failed,
+        ingest_backlog: 0,
+        ingest_ready: 0,
+        ingest_failed: 0,
         last_synced: last_sync_completed_at,
     })
 }
@@ -697,23 +694,4 @@ pub async fn analytics_history(
     .map_err(internal_error)?;
 
     Ok(Json(result))
-}
-
-// ---------------------------------------------------------------------------
-// Hook event ingestion
-//
-// Durable-first path:
-// 1) append raw payload to ingest queue db
-// 2) background worker drains queue into analytics tables in bounded batches
-// ---------------------------------------------------------------------------
-
-pub async fn hooks_ingest(
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
-    tokio::task::spawn_blocking(move || budi_core::ingest_queue::enqueue_hook_payload(&payload))
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-        .map_err(internal_error)?;
-
-    Ok(Json(json!({"ok": true, "queued": true})))
 }

@@ -1,11 +1,9 @@
-//! Pipeline enrichers: Git, Identity, Cost, Tag, Hook.
+//! Pipeline enrichers: Git, Identity, Cost, Tag.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::analytics::Tag;
 use crate::config::TagsConfig;
-use crate::hooks::SessionMeta;
 use crate::jsonl::ParsedMessage;
 use crate::pipeline::{Enricher, extract_ticket_id, glob_match};
 use crate::repo_id::RepoIdCache;
@@ -384,87 +382,6 @@ impl Enricher for TagEnricher {
                     value: rule.value.clone(),
                 });
             }
-        }
-        tags
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HookEnricher — produces tags from session metadata (hooks + sessions table)
-// ---------------------------------------------------------------------------
-
-pub struct HookEnricher {
-    session_cache: HashMap<String, SessionMeta>,
-}
-
-impl HookEnricher {
-    /// Create a new HookEnricher with pre-loaded session metadata.
-    pub fn new(session_cache: HashMap<String, SessionMeta>) -> Self {
-        Self { session_cache }
-    }
-}
-
-impl Enricher for HookEnricher {
-    fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
-        let mut tags = Vec::new();
-
-        let Some(ref session_id) = msg.session_id else {
-            return tags;
-        };
-        let Some(meta) = self.session_cache.get(session_id) else {
-            tracing::trace!(
-                "HookEnricher: session '{}' not found in cache (may be outside max_age window)",
-                session_id
-            );
-            return tags;
-        };
-
-        // Propagate repo_id, git_branch, and prompt_category from hook session
-        // metadata. This is the only bridge between sessions.prompt_category
-        // (set by hook events) and msg.prompt_category (consumed by Pipeline::process
-        // to emit the activity tag). Without this, Cursor users get no activity tags.
-        if msg.repo_id.is_none() && meta.repo_id.is_some() {
-            msg.repo_id = meta.repo_id.clone();
-        }
-        if msg.git_branch.is_none() && meta.git_branch.is_some() {
-            msg.git_branch = meta.git_branch.clone();
-        }
-        if msg.prompt_category.is_none() && meta.prompt_category.is_some() {
-            msg.prompt_category = meta.prompt_category.clone();
-        }
-
-        if let Some(ref mode) = meta.composer_mode {
-            tags.push(Tag {
-                key: tk::COMPOSER_MODE.to_string(),
-                value: mode.clone(),
-            });
-        }
-        if let Some(ref mode) = meta.permission_mode {
-            tags.push(Tag {
-                key: tk::PERMISSION_MODE.to_string(),
-                value: mode.clone(),
-            });
-        }
-        // NOTE: activity tag is emitted solely by Pipeline::process() from
-        // msg.prompt_category to avoid conflicting values from two sources.
-        if let Some(ref email) = meta.user_email {
-            tags.push(Tag {
-                key: tk::USER_EMAIL.to_string(),
-                value: email.clone(),
-            });
-        }
-        if let Some(ms) = meta.duration_ms {
-            let bucket = if ms < 300_000 {
-                "short"
-            } else if ms < 1_800_000 {
-                "medium"
-            } else {
-                "long"
-            };
-            tags.push(Tag {
-                key: tk::DURATION.to_string(),
-                value: bucket.to_string(),
-            });
         }
         tags
     }

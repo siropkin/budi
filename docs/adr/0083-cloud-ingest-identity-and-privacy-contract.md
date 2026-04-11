@@ -21,9 +21,6 @@ The local SQLite database stores:
 | `message_rollups_hourly` | Hourly aggregates: token counts, cost, model, provider, repo, branch | **No sensitive data.** Pre-aggregated counts and costs only. |
 | `message_rollups_daily` | Daily aggregates: same dimensions as hourly | **No sensitive data.** |
 | `tags` | Key-value pairs on messages (user-defined) | Tag keys/values are user-controlled; could contain anything. |
-| `hook_events` | Legacy hook payloads (being removed in R2) | Contains `raw_json`. Not synced. |
-| `otel_events` | Legacy OTEL payloads (being removed in R2) | Contains `raw_json`. Not synced. |
-
 The rollup tables are the natural sync unit. They contain pre-aggregated cost and usage metrics with no content, no prompts, no code, and no responses.
 
 ### Proxy Attribution (from ADR-0082)
@@ -46,7 +43,7 @@ The following data categories are **permanently excluded** from the sync payload
 |----------|----------|--------|
 | Prompt content | Message `role: user` text, system prompts | Contains proprietary code and business logic |
 | Model responses | Message `role: assistant` text, tool call arguments | Contains generated code and reasoning |
-| Raw payloads | `raw_json` on messages, sessions, hook_events, otel_events | Unstructured dumps that may contain anything |
+| Raw payloads | `raw_json` on messages, sessions | Unstructured dumps that may contain anything |
 | File paths | `cwd`, `workspace_root` on messages/sessions | Reveals project structure and local file system layout |
 | Email addresses | `user_email` on sessions | PII; identity is handled by API key, not email |
 | Tool execution details | MCP server names, tool arguments, tool results | Contains code context and execution artifacts |

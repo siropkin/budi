@@ -34,7 +34,6 @@ fn schema_creates_tables() {
         })
         .collect();
     assert!(tables.contains(&"sessions".to_string()));
-    assert!(tables.contains(&"hook_events".to_string()));
     assert!(tables.contains(&"messages".to_string()));
     assert!(tables.contains(&"sync_state".to_string()));
     assert!(tables.contains(&"message_rollups_hourly".to_string()));
@@ -2482,215 +2481,6 @@ fn session_tags_empty_for_unknown_session() {
     assert!(result.is_empty());
 }
 
-#[test]
-fn session_hook_events_support_filters_and_include_raw() {
-    let conn = test_db();
-    conn.execute(
-        "INSERT INTO hook_events (
-            provider, event, session_id, timestamp, raw_json,
-            message_id, link_confidence, tool_name, tool_use_id, message_request_id
-         ) VALUES (
-            'claude_code', 'post_tool_use', 'sess-hooks', '2026-03-25T00:00:01Z', '{\"ok\":true}',
-            'msg-1', 'exact_tool_use_id', 'Read', 'toolu_1', 'req-1'
-         )",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO hook_events (
-            provider, event, session_id, timestamp, raw_json, link_confidence
-         ) VALUES (
-            'claude_code', 'session_start', 'sess-hooks', '2026-03-25T00:00:00Z', '{\"start\":true}', 'unlinked'
-         )",
-        [],
-    )
-    .unwrap();
-
-    let linked = session_hook_events(
-        &conn,
-        "sess-hooks",
-        &SessionHookEventsParams {
-            linked_only: true,
-            event: Some("post_tool_use"),
-            limit: 50,
-            offset: 0,
-            include_raw: false,
-        },
-    )
-    .unwrap();
-    assert_eq!(linked.len(), 1);
-    assert_eq!(linked[0].message_id.as_deref(), Some("msg-1"));
-    assert!(linked[0].raw_json.is_none());
-
-    let with_raw = session_hook_events(
-        &conn,
-        "sess-hooks",
-        &SessionHookEventsParams {
-            linked_only: false,
-            event: None,
-            limit: 50,
-            offset: 0,
-            include_raw: true,
-        },
-    )
-    .unwrap();
-    assert_eq!(with_raw.len(), 2);
-    assert!(with_raw[0].raw_json.is_some());
-}
-
-#[test]
-fn message_detail_returns_linked_hook_and_otel_sets() {
-    let conn = test_db();
-    conn.execute(
-        "INSERT INTO messages (id, session_id, role, timestamp, model, request_id, provider, cost_confidence, cost_cents)
-         VALUES ('msg-detail-1', 'sess-detail', 'assistant', '2026-03-25T00:00:01Z', 'claude-opus-4-6', 'req-1', 'claude_code', 'otel_exact', 7.5)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO tags (message_id, key, value) VALUES ('msg-detail-1', 'tool', 'Read')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO tags (message_id, key, value) VALUES ('msg-detail-1', 'tool_use_id', 'toolu_1')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO hook_events (
-            provider, event, session_id, timestamp, raw_json,
-            message_id, link_confidence, tool_name, tool_use_id, message_request_id
-         ) VALUES (
-            'claude_code', 'post_tool_use', 'sess-detail', '2026-03-25T00:00:02Z', '{\"hook\":1}',
-            'msg-detail-1', 'exact_request_id', 'Read', 'toolu_1', 'req-1'
-         )",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO otel_events (
-            event_name, session_id, timestamp, processed, raw_json,
-            message_id, timestamp_nano, model, cost_usd_reported, cost_cents_computed
-         ) VALUES (
-            'claude_code.api_request', 'sess-detail', '2026-03-25T00:00:01.100Z', 1, '{\"otel\":1}',
-            'msg-detail-1', '1711324801100000000', 'claude-opus-4-6', 0.075, 7.5
-         )",
-        [],
-    )
-    .unwrap();
-
-    let detail = message_detail(&conn, "msg-detail-1").unwrap().unwrap();
-    assert_eq!(detail.message.id, "msg-detail-1");
-    assert_eq!(detail.tools, vec!["Read".to_string()]);
-    assert_eq!(detail.hook_events.len(), 1);
-    assert_eq!(detail.otel_events.len(), 1);
-    assert_eq!(
-        detail.otel_events[0].cost_cents_computed,
-        Some(7.5),
-        "computed cost should be surfaced"
-    );
-}
-
-#[test]
-fn ingest_messages_relinks_existing_unlinked_hook_and_otel_rows() {
-    let mut conn = test_db();
-    conn.execute(
-        "INSERT INTO hook_events (
-            provider, event, session_id, timestamp, raw_json, message_request_id, link_confidence
-         ) VALUES (
-            'claude_code', 'post_tool_use', 'sess-relink', '2026-03-25T00:00:01.050Z', '{}', 'msg_req_1', 'unlinked'
-         )",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO hook_events (
-            provider, event, session_id, timestamp, raw_json, tool_use_id, link_confidence
-         ) VALUES (
-            'claude_code', 'post_tool_use', 'sess-relink', '2026-03-25T00:00:01.060Z', '{}', 'toolu_link_1', 'unlinked'
-         )",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO otel_events (
-            event_name, session_id, timestamp, processed, raw_json,
-            message_id, timestamp_nano, model, cost_usd_reported, cost_cents_computed
-         ) VALUES (
-            'claude_code.api_request', 'sess-relink', '2026-03-25T00:00:01.080Z', 1, '{\"otel\":1}',
-            NULL, '1711324801080000000', NULL, 0.095, NULL
-         )",
-        [],
-    )
-    .unwrap();
-
-    let msg = ParsedMessage {
-        uuid: "msg-relink-1".to_string(),
-        session_id: Some("sess-relink".to_string()),
-        timestamp: "2026-03-25T00:00:01.000Z".parse().unwrap(),
-        role: "assistant".to_string(),
-        model: Some("claude-opus-4-6".to_string()),
-        input_tokens: 10,
-        output_tokens: 5,
-        cost_cents: Some(9.5),
-        cost_confidence: "otel_exact".to_string(),
-        request_id: Some("msg_req_1".to_string()),
-        ..Default::default()
-    };
-    let tags = vec![vec![Tag {
-        key: "tool_use_id".to_string(),
-        value: "toolu_link_1".to_string(),
-    }]];
-    ingest_messages(&mut conn, &[msg], Some(&tags)).unwrap();
-
-    let (req_link_uuid, req_link_conf): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT message_id, link_confidence
-             FROM hook_events
-             WHERE session_id = 'sess-relink' AND message_request_id = 'msg_req_1'
-             LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(req_link_uuid.as_deref(), Some("msg-relink-1"));
-    assert_eq!(
-        req_link_conf.as_deref(),
-        Some(crate::hooks::HOOK_LINK_EXACT_REQUEST_ID)
-    );
-
-    let (tool_link_uuid, tool_link_conf): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT message_id, link_confidence
-             FROM hook_events
-             WHERE session_id = 'sess-relink' AND tool_use_id = 'toolu_link_1'
-             LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(tool_link_uuid.as_deref(), Some("msg-relink-1"));
-    assert_eq!(
-        tool_link_conf.as_deref(),
-        Some(crate::hooks::HOOK_LINK_EXACT_TOOL_USE_ID)
-    );
-
-    let (otel_link_uuid, otel_model, otel_computed): (Option<String>, Option<String>, Option<f64>) =
-        conn.query_row(
-            "SELECT message_id, model, cost_cents_computed
-             FROM otel_events
-             WHERE session_id = 'sess-relink'
-             LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(otel_link_uuid.as_deref(), Some("msg-relink-1"));
-    assert_eq!(otel_model.as_deref(), Some("claude-opus-4-6"));
-    assert_eq!(otel_computed, Some(9.5));
-}
-
 // --- Session Health tests ---
 
 fn health_msg(
@@ -2738,37 +2528,25 @@ fn health_msg(
 }
 
 fn insert_health_hook_event_at(
-    conn: &Connection,
-    provider: &str,
-    session_id: &str,
-    event: &str,
-    timestamp: &str,
-    tool_name: Option<&str>,
+    _conn: &Connection,
+    _provider: &str,
+    _session_id: &str,
+    _event: &str,
+    _timestamp: &str,
+    _tool_name: Option<&str>,
 ) {
-    conn.execute(
-        "INSERT INTO hook_events (provider, event, session_id, timestamp, tool_name, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, '{}')",
-        rusqlite::params![provider, event, session_id, timestamp, tool_name],
-    )
-    .unwrap();
+    // hook_events table was dropped in v22; these inserts are now no-ops.
 }
 
 fn insert_health_hook_event(
-    conn: &Connection,
-    provider: &str,
-    session_id: &str,
-    event: &str,
-    idx: u64,
-    tool_name: Option<&str>,
+    _conn: &Connection,
+    _provider: &str,
+    _session_id: &str,
+    _event: &str,
+    _idx: u64,
+    _tool_name: Option<&str>,
 ) {
-    let ts = chrono::NaiveDateTime::parse_from_str(
-        &format!("2026-03-14 10:{:02}:30", idx),
-        "%Y-%m-%d %H:%M:%S",
-    )
-    .unwrap()
-    .and_utc()
-    .to_rfc3339();
-    insert_health_hook_event_at(conn, provider, session_id, event, &ts, tool_name);
+    // hook_events table was dropped in v22; these inserts are now no-ops.
 }
 
 #[test]
@@ -2875,6 +2653,8 @@ fn health_cost_acceleration_yellow() {
     assert_eq!(h.vitals.cost_acceleration.as_ref().unwrap().state, "yellow");
 }
 
+/// With `user_prompt_submit` hooks, short multi-turn Cursor sessions suppressed cost acceleration.
+/// After v22 (no `hook_events`), only the per-reply path runs — see assertions below.
 #[test]
 fn health_cost_acceleration_suppressed_for_short_turn_sessions() {
     let mut conn = test_db();
@@ -2902,8 +2682,10 @@ fn health_cost_acceleration_suppressed_for_short_turn_sessions() {
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert!(h.vitals.cost_acceleration.is_none());
-    assert_eq!(h.state, "green");
+    // Without hook_events, user_prompt_submit boundaries are missing, so turn-based
+    // suppression for short Cursor sessions does not apply; per-reply cost acceleration remains.
+    assert!(h.vitals.cost_acceleration.is_some());
+    assert_eq!(h.state, "red");
 }
 
 #[test]
@@ -2968,7 +2750,10 @@ fn health_thrashing_ignores_busy_successful_turn() {
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert_eq!(h.vitals.thrashing.as_ref().unwrap().state, "green");
+    assert!(
+        h.vitals.thrashing.is_none(),
+        "thrashing needs hook_events; table dropped in v22"
+    );
 }
 
 #[test]
@@ -2995,7 +2780,7 @@ fn health_thrashing_detects_retry_loop() {
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert_eq!(h.vitals.thrashing.as_ref().unwrap().state, "red");
+    assert!(h.vitals.thrashing.is_none());
 }
 
 #[test]
@@ -3194,7 +2979,7 @@ fn health_batch_matches_detail_thresholds() {
     assert_eq!(batch["s1"], detail.state);
 }
 
-// --- Coverage: green when only one vital is computable (positive default) ---
+// --- Coverage: green with sparse data when hook-based thrashing is unavailable (v22) ---
 
 #[test]
 fn health_green_when_only_thrashing_computable() {
@@ -3208,25 +2993,14 @@ fn health_green_when_only_thrashing_computable() {
         .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 50, 1.0))
         .collect();
     ingest_messages(&mut conn, &msgs, None).unwrap();
-    for idx in 0..3 {
-        insert_health_hook_event(
-            &conn,
-            "claude_code",
-            "s1",
-            "post_tool_use",
-            idx,
-            Some("Shell"),
-        );
-    }
-
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert!(h.vitals.thrashing.is_some());
+    assert!(h.vitals.thrashing.is_none());
     assert!(h.vitals.context_drag.is_none());
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
     assert_eq!(
         h.state, "green",
-        "single green vital → green (positive default)"
+        "no hook_events → thrashing absent; remaining vitals suppressed → green default"
     );
     assert_eq!(h.tip, "New session");
 }
@@ -3283,14 +3057,12 @@ fn health_cost_acceleration_red() {
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert_eq!(h.vitals.cost_acceleration.as_ref().unwrap().state, "red");
+    let ca = h.vitals.cost_acceleration.as_ref().unwrap();
+    assert_eq!(ca.state, "red");
     assert!(
-        h.vitals
-            .cost_acceleration
-            .as_ref()
-            .unwrap()
-            .label
-            .contains("turn")
+        ca.label.contains("reply"),
+        "without hook_events, cost acceleration uses reply fallback: {}",
+        ca.label
     );
 }
 
@@ -3350,7 +3122,7 @@ fn health_thrashing_yellow() {
     }
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    assert_eq!(h.vitals.thrashing.as_ref().unwrap().state, "yellow");
+    assert!(h.vitals.thrashing.is_none());
 }
 
 // --- Coverage: provider-specific tips diverge correctly ---
@@ -3598,11 +3370,6 @@ fn health_cursor_multi_reply_session_not_false_red() {
     );
 
     let h = session_health(&conn, Some("s1")).unwrap();
-    // With only 2 turns and prompt boundaries present, cost_acceleration is suppressed
-    assert!(
-        h.vitals.cost_acceleration.is_none(),
-        "2 prompt turns should suppress cost_acceleration"
-    );
     assert_ne!(
         h.state, "red",
         "multi-reply Cursor session should not be false red"
