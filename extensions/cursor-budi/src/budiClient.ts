@@ -54,6 +54,15 @@ export interface HealthAggregation {
   total: number;
 }
 
+export interface DaemonHealth {
+  ok: boolean;
+  version: string;
+  api_version: number;
+}
+
+/** The minimum daemon api_version this extension requires. */
+export const MIN_API_VERSION = 1;
+
 function formatCost(dollars: number): string {
   if (dollars >= 1000) {
     return `$${(dollars / 1000).toFixed(1)}K`;
@@ -101,6 +110,34 @@ export function aggregateHealth(sessions: SessionListEntry[]): HealthAggregation
     }
   }
   return agg;
+}
+
+/**
+ * Check daemon health and return version / api_version info.
+ * Returns null if the daemon is unreachable.
+ */
+export function fetchDaemonHealth(daemonUrl: string): Promise<DaemonHealth | null> {
+  return new Promise((resolve) => {
+    const req = http.get(`${daemonUrl}/health`, { timeout: 3000 }, (res) => {
+      let body = "";
+      res.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
 }
 
 /**

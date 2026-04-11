@@ -1,28 +1,26 @@
 import * as vscode from "vscode";
-import * as fs from "fs";
-import * as path from "path";
 import {
   fetchStatusline,
   fetchRecentSessions,
+  fetchDaemonHealth,
   splitSessionsByDay,
   aggregateHealth,
   formatAggregationStatusText,
   formatAggregationTooltip,
+  MIN_API_VERSION,
 } from "./budiClient";
-import { getActiveSessionFromFile, getAllActiveSessions, SESSION_FILE } from "./sessionStore";
+import { writeActiveWorkspace, clearActiveWorkspace } from "./sessionStore";
 import { HealthPanelProvider } from "./panel";
 
 let statusBarItem: vscode.StatusBarItem;
 let dataPollTimer: ReturnType<typeof setInterval> | undefined;
-let sessionFileWatcher: fs.FSWatcher | undefined;
-let sessionDirWatcher: fs.FSWatcher | undefined;
-let sessionWatchDebounce: ReturnType<typeof setTimeout> | undefined;
 let healthProvider: HealthPanelProvider;
 let currentSessionId: string | undefined;
 let pinnedSessionId: string | undefined;
 let log: vscode.OutputChannel;
 let refreshInFlight = false;
 let pendingRefreshDaemonUrl: string | undefined;
+let onboardingShown = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   log = vscode.window.createOutputChannel("budi");
@@ -37,6 +35,11 @@ export function activate(context: vscode.ExtensionContext): void {
   log.appendLine(
     `[budi] workspaceFolders = ${folders?.map((f) => f.uri.fsPath).join(", ") ?? "none"}`,
   );
+
+  // Write active workspace signal (cursor-sessions.json v1 contract).
+  if (folders && folders.length > 0) {
+    writeActiveWorkspace(folders[0].uri.fsPath);
+  }
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -100);
   statusBarItem.name = "budi";
@@ -59,7 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("budi.openDashboard", () => {
-      const sid = resolveSessionId();
+      const sid = currentSessionId;
       const url = sid
         ? `${daemonUrl}/dashboard/sessions/${encodeURIComponent(sid)}`
         : `${daemonUrl}/dashboard`;
@@ -76,16 +79,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("budi.selectSession", async () => {
-      const workspacePath = folders?.[0]?.uri.fsPath;
-      if (!workspacePath) {
-        vscode.window.showWarningMessage("budi: No workspace open.");
-        return;
-      }
-
-      const sessions = getAllActiveSessions(workspacePath);
-      if (sessions.length === 0) {
+      const sessions = await fetchRecentSessions(daemonUrl);
+      if (!sessions || sessions.length === 0) {
         vscode.window.showInformationMessage(
-          "budi: No active sessions found. Start a chat to create one.",
+          "budi: No recent sessions found. Start using Cursor with the proxy to create one.",
         );
         return;
       }
@@ -99,8 +96,8 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         ...sessions.map((s) => ({
           label: s.session_id === pinnedSessionId ? `$(pin) ${s.session_id}` : s.session_id,
-          description: s.composer_mode ?? "",
-          detail: `Started ${s.started_at}${s.last_active_at ? ` · Active ${s.last_active_at}` : ""}`,
+          description: s.provider ?? "",
+          detail: `Started ${s.started_at ?? "unknown"}${s.cost_cents > 0 ? ` · $${(s.cost_cents / 100).toFixed(2)}` : ""}`,
         })),
       ];
 
@@ -139,13 +136,14 @@ export function activate(context: vscode.ExtensionContext): void {
         daemonUrl = updated.get("daemonUrl", "http://127.0.0.1:7878");
         dataPollInterval = updated.get("pollingIntervalMs", 15000);
         restartDataPoll(daemonUrl, dataPollInterval);
-        watchSessionFile(daemonUrl);
         requestRefresh(daemonUrl);
       }
     }),
   );
 
-  watchSessionFile(daemonUrl);
+  // Check daemon health and show onboarding if needed.
+  void checkDaemonAndOnboard(daemonUrl);
+
   requestRefresh(daemonUrl);
   startDataPoll(daemonUrl, dataPollInterval);
 }
@@ -155,18 +153,7 @@ export function deactivate(): void {
     clearInterval(dataPollTimer);
     dataPollTimer = undefined;
   }
-  if (sessionFileWatcher) {
-    sessionFileWatcher.close();
-    sessionFileWatcher = undefined;
-  }
-  if (sessionDirWatcher) {
-    sessionDirWatcher.close();
-    sessionDirWatcher = undefined;
-  }
-  if (sessionWatchDebounce) {
-    clearTimeout(sessionWatchDebounce);
-    sessionWatchDebounce = undefined;
-  }
+  clearActiveWorkspace();
 }
 
 function startDataPoll(daemonUrl: string, intervalMs: number): void {
@@ -183,59 +170,48 @@ function restartDataPoll(daemonUrl: string, intervalMs: number): void {
 }
 
 /**
- * Watch cursor-sessions.json for changes. When a hook fires (user sends a
- * message, tool completes, etc.), the file updates and we refresh both the
- * statusline and panel — giving near-instant updates on interaction.
+ * Check daemon health on startup. If the daemon is unreachable or has an
+ * incompatible API version, show an onboarding notification.
  */
-function watchSessionFile(daemonUrl: string): void {
-  if (sessionFileWatcher) {
-    sessionFileWatcher.close();
-    sessionFileWatcher = undefined;
-  }
-  if (sessionDirWatcher) {
-    sessionDirWatcher.close();
-    sessionDirWatcher = undefined;
+async function checkDaemonAndOnboard(daemonUrl: string): Promise<void> {
+  const health = await fetchDaemonHealth(daemonUrl);
+
+  if (!health) {
+    log.appendLine("[budi] daemon is not reachable — showing onboarding");
+    showOnboardingNotification();
+    return;
   }
 
-  const scheduleRefresh = () => {
-    if (sessionWatchDebounce) clearTimeout(sessionWatchDebounce);
-    sessionWatchDebounce = setTimeout(() => {
-      const newId = resolveSessionId();
-      if (newId !== currentSessionId) {
-        log.appendLine(
-          `[budi] session file changed: ${currentSessionId ?? "none"} → ${newId ?? "none"}`,
+  log.appendLine(
+    `[budi] daemon healthy: version=${health.version}, api_version=${health.api_version}`,
+  );
+
+  if (health.api_version < MIN_API_VERSION) {
+    vscode.window.showWarningMessage(
+      `budi: The daemon (api_version ${health.api_version}) is older than ` +
+        `this extension requires (api_version ${MIN_API_VERSION}). ` +
+        `Please update budi: curl -fsSL https://raw.githubusercontent.com/siropkin/budi/main/scripts/install.sh | bash`,
+    );
+  }
+}
+
+function showOnboardingNotification(): void {
+  if (onboardingShown) return;
+  onboardingShown = true;
+
+  void vscode.window
+    .showInformationMessage(
+      "budi: Daemon not running. Install budi and run `budi init` to start tracking AI costs.",
+      "Setup Guide",
+      "Dismiss",
+    )
+    .then((choice) => {
+      if (choice === "Setup Guide") {
+        void vscode.env.openExternal(
+          vscode.Uri.parse("https://github.com/siropkin/budi#quick-start"),
         );
       }
-      requestRefresh(daemonUrl);
-    }, 500);
-  };
-
-  const attachFileWatcher = () => {
-    if (!fs.existsSync(SESSION_FILE)) return;
-    sessionFileWatcher = fs.watch(SESSION_FILE, () => {
-      scheduleRefresh();
     });
-  };
-
-  try {
-    attachFileWatcher();
-
-    const sessionDir = path.dirname(SESSION_FILE);
-    if (fs.existsSync(sessionDir)) {
-      sessionDirWatcher = fs.watch(sessionDir, (_eventType, fileName) => {
-        if (fileName && fileName.toString() !== path.basename(SESSION_FILE)) {
-          return;
-        }
-        if (!sessionFileWatcher && fs.existsSync(SESSION_FILE)) {
-          log.appendLine("[budi] session file detected, attaching watcher");
-          attachFileWatcher();
-        }
-        scheduleRefresh();
-      });
-    }
-  } catch {
-    // File may not exist yet — will be created by first hook.
-  }
 }
 
 function requestRefresh(daemonUrl: string): void {
@@ -261,30 +237,36 @@ function requestRefresh(daemonUrl: string): void {
   })();
 }
 
+/**
+ * Resolve the active session ID. In 8.0, sessions come from the daemon's
+ * proxy event tracking — no hook-based cursor-sessions.json dependency.
+ * The extension derives the active session from the most recent session
+ * in the daemon's API that matches this workspace.
+ */
 function resolveSessionId(): string | undefined {
-  if (pinnedSessionId) return pinnedSessionId;
-
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders || folders.length === 0) return undefined;
-
-  const session = getActiveSessionFromFile(folders[0].uri.fsPath);
-  return session?.session_id;
+  return pinnedSessionId ?? currentSessionId;
 }
 
 async function refreshData(daemonUrl: string): Promise<void> {
   const folders = vscode.workspace.workspaceFolders;
   const cwd = folders?.[0]?.uri.fsPath;
-  const sessionId = resolveSessionId();
-  currentSessionId = sessionId;
 
-  log.appendLine(`[budi] refreshData: session=${sessionId ?? "none"}, cwd=${cwd ?? "none"}`);
+  // Update workspace signal on each refresh.
+  if (cwd) {
+    writeActiveWorkspace(cwd);
+  }
 
-  healthProvider.updateContext(daemonUrl, sessionId);
+  healthProvider.updateContext(daemonUrl, resolveSessionId());
 
   const [statusline, recentSessions] = await Promise.all([
-    fetchStatusline(daemonUrl, sessionId, cwd).catch(() => null),
+    fetchStatusline(daemonUrl, resolveSessionId(), cwd).catch(() => null),
     fetchRecentSessions(daemonUrl).catch(() => null),
   ]);
+
+  // Derive the active session from recent sessions if not pinned.
+  if (!pinnedSessionId && recentSessions && recentSessions.length > 0) {
+    currentSessionId = recentSessions[0].session_id;
+  }
 
   const { today: todaySessions } = recentSessions
     ? splitSessionsByDay(recentSessions)

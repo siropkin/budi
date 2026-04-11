@@ -5,6 +5,7 @@ import {
   formatAggregationStatusText,
   formatAggregationTooltip,
   splitSessionsByDay,
+  MIN_API_VERSION,
   type SessionListEntry,
 } from "./budiClient";
 
@@ -95,5 +96,11 @@ describe("splitSessionsByDay", () => {
     const grouped = splitSessionsByDay(sessions);
     expect(grouped.today.map((s) => s.session_id)).toEqual(["today"]);
     expect(grouped.yesterday.map((s) => s.session_id)).toEqual(["yesterday"]);
+  });
+});
+
+describe("MIN_API_VERSION", () => {
+  it("is at least 1", () => {
+    expect(MIN_API_VERSION).toBeGreaterThanOrEqual(1);
   });
 });
