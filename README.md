@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-**Local-first cost analytics for AI coding agents.** See where your tokens and money go across Claude Code, Cursor, and more.
+**Local-first cost analytics for AI coding agents.** See where your tokens and money go across Claude Code, Cursor, and other proxy-compatible agents.
 
 ```bash
 brew install siropkin/budi/budi && budi init
@@ -57,11 +57,17 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 ## Supported agents
 
-| Agent | Status | How |
-|-------|--------|-----|
-| **Claude Code** | Supported | Proxy (real-time) + JSONL transcripts (historical import) |
-| **Cursor** | Supported | Proxy (real-time) + Usage API (historical import) |
-| **Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI** | Planned | |
+Proxy support follows the ADR-0082 compatibility tiers:
+
+| Tier | Agent | 8.0 proxy status | Setup |
+|------|-------|------------------|-------|
+| **Tier 1 (must-have)** | **Claude Code** | Supported | Set `ANTHROPIC_BASE_URL=http://127.0.0.1:9878` (+ `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`) |
+| **Tier 1 (must-have)** | **Codex CLI** | Supported | Set `openai_base_url` (preferred) or `OPENAI_BASE_URL=http://127.0.0.1:9878` |
+| **Tier 2 (should-have)** | **Cursor** | Supported with caveats | Use Cursor's `Override OpenAI Base URL` setting (`http://127.0.0.1:9878`) |
+| **Tier 2 (should-have)** | **Copilot CLI** | Supported in BYOK mode | Set `COPILOT_PROVIDER_TYPE=openai` and `COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:9878` |
+| **Tier 3 (deferred)** | **Gemini CLI** | Deferred / not implemented in proxy v1 | Requires a separate Gemini protocol handler |
+
+`budi init` currently automates onboarding for Claude Code and Cursor only. Other proxy-compatible agents can be routed through Budi with manual provider configuration.
 
 ## Contributing
 
@@ -137,7 +143,7 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon and **prompts you to choose which agents to track** (Claude Code, Cursor) and then **which integrations to install** (statusline, extension). Only enabled agents have their data collected; disabled agents produce no collection side effects. Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+`budi init` starts the daemon and **prompts you to choose which agents to track for built-in integrations and historical import** (currently Claude Code, Cursor) and then **which integrations to install** (statusline, extension). Only enabled agents have their data collected through those built-in import/integration paths; disabled agents produce no collection side effects there. Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -196,17 +202,6 @@ slots = ["today", "week", "month", "branch"]
 ```
 
 Available slots: `today`, `week`, `month`, `session`, `branch`, `project`, `provider`.
-
-For Starship integration, add to `~/.config/starship.toml`:
-
-```toml
-[custom.budi]
-command = "budi statusline --format=starship"
-when = "curl -sf http://localhost:7878/health >/dev/null 2>&1"
-format = "[$output]($style) "
-style = "cyan"
-shell = ["sh"]
-```
 
 ## Cursor extension
 
@@ -268,9 +263,9 @@ budi stats --branches         # branches ranked by cost
 budi stats --branch <name>    # cost for a specific branch
 budi stats --tag ticket_id    # cost per ticket
 budi stats --tag ticket_prefix # cost per team prefix
-budi sync                     # sync recent data (last 30 days)
-budi sync --all               # load full history (all time)
-budi sync --force             # re-ingest all data from scratch (use after upgrades)
+budi sync                     # on-demand historical backfill (30-day window)
+budi sync --all               # on-demand historical backfill (full history)
+budi sync --force             # re-run historical backfill from scratch
 budi repair                   # repair schema drift + run migration checks
 budi update                   # check for updates (auto-detects Homebrew)
 budi update --version <name>  # update to a specific version
@@ -337,11 +332,11 @@ Health state appears in the status line, the Cursor extension panel, and the ses
 
 ## Privacy
 
-Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on your machine (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
+Budi is 100% local-first — no prompt, code, or response uploads to any Budi cloud service. All analytics data stays on your machine (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi stores metadata such as timestamps, token counts, model names, and costs. Provider auth headers are forwarded to upstream APIs for normal request execution, but Budi does not persist API keys.
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. Proxy traffic is attributed to repos, branches, and tickets via `X-Budi-Repo`/`X-Budi-Branch`/`X-Budi-Cwd` headers or automatic git resolution, with cost computed from provider pricing tables. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be backfilled via `budi import`. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. Proxy attribution uses `X-Budi-Repo`/`X-Budi-Branch`/`X-Budi-Cwd` headers first, then best-effort git resolution from `cwd`; if repo attribution cannot be resolved it falls back to `Unassigned`. Ticket attribution is best-effort from branch naming. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be backfilled via `budi import`. The proxy is the only live ingest path. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
@@ -350,7 +345,7 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 
 | | budi | ccusage | Claude `/cost` |
 |---|---|---|---|
-| Multi-agent support | **Yes** (Claude Code + Cursor) | Claude Code only | Claude Code only |
+| Multi-agent support | **Yes** (tiered proxy support across Claude/Codex/Cursor/Copilot) | Claude Code only | Claude Code only |
 | Real-time cost via proxy | **Yes** | No | No |
 | Cost history | **Per-message + daily** | Per-session | Current session |
 | Web dashboard | **Yes** | No | No |
@@ -379,7 +374,7 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
                          ┌──────────────┐
 ┌──────────┐    proxy    │ budi proxy   │    upstream
 │ AI Agent │ ──────────▶ │  (port 9878) │ ──────────▶ Anthropic / OpenAI
-│ (CC/CX)  │  localhost  │  transparent │  API calls
+│ (tiered) │  localhost  │  transparent │  API calls
 └──────────┘             │  pass-thru   │
                          └──────────────┘
 
@@ -436,31 +431,6 @@ Retention cleanup runs automatically after sync and queued realtime ingestion pr
   - build budi against SQLCipher-enabled SQLite (`libsqlite3-sys` SQLCipher build),
   - or place the budi data directory on an encrypted volume (FileVault, LUKS, BitLocker).
 - SQLCipher integration is feasible but has tradeoffs (key management UX, packaging complexity, migration path from existing plaintext DBs), so default remains plain SQLite for now.
-
-</details>
-
-<details>
-<summary>Hooks (removed in 8.0)</summary>
-
-Hook-based ingestion (`budi hook`) and the `hook_events` table have been removed. The proxy (port 9878) is now the sole live data source.
-
-</details>
-
-<details>
-<summary>OpenTelemetry (removed in 8.0)</summary>
-
-OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. The proxy captures real-time cost data directly.
-
-**Cost confidence levels:**
-
-| Level | Source | Accuracy |
-|-------|--------|----------|
-| `proxy_estimated` | Proxy real-time capture | Estimated from response body / SSE stream |
-| `otel_exact` | Historical OTEL data (read-only) | Exact (includes thinking tokens) |
-| `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
-| `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
-
-Messages with `otel_exact` or `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
 
 </details>
 

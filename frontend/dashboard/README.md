@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Vite runs on `http://127.0.0.1:5174` and proxies daemon API routes (`/analytics`, `/admin`, `/sync`, `/health`, `/hooks`, `/v1`) to `http://127.0.0.1:7878`.
+Vite runs on `http://127.0.0.1:5174` and proxies daemon API routes (`/analytics`, `/admin`, `/sync`, `/health`) to `http://127.0.0.1:7878`.
 
 ### App surfaces
 
