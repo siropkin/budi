@@ -1,6 +1,6 @@
 # SOUL.md
 
-Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks tokens, costs, and usage per message via proxy interception and transcript analysis. No cloud - everything on-machine.
+Local-first cost analytics for AI coding agents (Claude Code, Codex CLI, Cursor, Copilot CLI). Tracks tokens, costs, and usage per message via proxy interception. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be imported via `budi import`. No cloud — everything on-machine.
 
 ## Build & Test
 
@@ -43,16 +43,16 @@ The monorepo contains three logical products planned for eventual extraction (se
 | **budi-cloud** | `frontend/dashboard/` + future cloud API | Local dashboard (moves to cloud repo) and cloud ingest API. Will be extracted to its own repo. |
 
 Key coupling points today:
-- The CLI embeds the Cursor extension vsix via `include_bytes!` for auto-install (`budi init`).
 - The daemon embeds the built dashboard from `crates/budi-daemon/static/dashboard-dist/`.
 - CI builds all three products in a single workflow.
+- The CLI downloads the Cursor extension vsix from GitHub Releases at install time (no longer embedded via `include_bytes!`).
 
 These coupling points are documented with untangling plans in ADR-0086. New code should not introduce additional cross-product dependencies.
 
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations. Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, stats, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, open, update, integrations, uninstall, migrate, repair
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard and analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
 ### Data flow
@@ -105,7 +105,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
 - **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
-- **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). Agents set `ANTHROPIC_BASE_URL=http://localhost:9878` or `OPENAI_BASE_URL=http://localhost:9878` to route through the proxy. Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. SSE streaming responses are passed through chunk-by-chunk with no buffering; a tee/tap on the byte stream extracts token metadata (input/output tokens) from SSE events without modifying the data. Non-streaming responses are buffered and parsed for usage data. Duration is measured from request start to stream end (not to first headers). Mid-stream failures and client disconnects are handled gracefully — partial metadata is recorded via Drop. No read timeout on streaming; non-streaming uses 300s. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
+- **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). `budi launch <agent>` sets the correct env vars automatically for CLI agents. Per-agent configuration: Claude Code uses `ANTHROPIC_BASE_URL` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; Codex CLI uses `OPENAI_BASE_URL`; Copilot CLI uses `COPILOT_PROVIDER_BASE_URL` + `COPILOT_PROVIDER_TYPE=openai`; Cursor requires the GUI setting `Override OpenAI Base URL` in Cursor Settings → Models. Gemini CLI is deferred (Tier 3, different API format). Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. SSE streaming responses are passed through chunk-by-chunk with no buffering; a tee/tap on the byte stream extracts token metadata (input/output tokens) from SSE events without modifying the data. Non-streaming responses are buffered and parsed for usage data. Duration is measured from request start to stream end (not to first headers). Mid-stream failures and client disconnects are handled gracefully — partial metadata is recorded via Drop. No read timeout on streaming; non-streaming uses 300s. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
 
 ## Key files
 
@@ -127,6 +127,9 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-daemon/src/routes/hooks.rs` - /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints (hook ingestion removed)
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/proxy.rs` - Proxy handlers for Anthropic Messages and OpenAI Chat Completions
+- `crates/budi-cli/src/commands/launch.rs` - `budi launch <agent>` wrapper: proxy env var injection per ADR-0082 compatibility matrix
+- `crates/budi-cli/src/commands/sessions.rs` - `budi sessions` list and detail view (Rich CLI)
+- `crates/budi-cli/src/commands/status.rs` - `budi status` quick overview (daemon, proxy, today's cost)
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
 - `frontend/dashboard/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
 - `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`
@@ -138,7 +141,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 
 - CLI never touches SQLite directly - all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
-- `budi init` prompts for per-agent enablement (Claude Code, Cursor) and persists choices to `~/.config/budi/agents.toml`. Only enabled agents are synced. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility.
+- `budi init` prompts for per-agent enablement (Claude Code, Codex CLI, Cursor, Copilot CLI) and persists choices to `~/.config/budi/agents.toml`. Only enabled agents are synced. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility.
 - `budi init` configures integrations (statusline, extension) for enabled agents
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries

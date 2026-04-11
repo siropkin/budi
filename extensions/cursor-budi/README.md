@@ -2,45 +2,53 @@
 
 Live AI coding cost analytics in your Cursor status bar and side panel.
 
+## Features
+
+- **Status bar** — session cost + health indicator, updates automatically
+- **Health panel** — click the status bar to open; shows active session vitals (context growth, cache reuse, cost acceleration, retry loops), other recent sessions with health at a glance, and cost overview
+- **Session switching** — click any session in the health panel to pin it, or use **Budi: Select Session** command
+- **Auto-tracking** — the proxy detects session activity and updates automatically
+
 ## Prerequisites
 
 - **budi** installed and initialized (`budi init`)
 - **budi-daemon** running (starts automatically after `budi init`)
-- **Proxy configured** — in Cursor Settings > Models, set **Override OpenAI Base URL** to `http://localhost:9878`
+- Cursor's `Override OpenAI Base URL` set to `http://localhost:9878` (Cursor Settings → Models) so LLM traffic routes through the budi proxy
 
 ## Install
 
-Install from the VS Code Marketplace (search for "budi"), or via CLI:
+The extension can be installed during `budi init` and later with:
 
 ```bash
 budi integrations install --with cursor-extension
 ```
 
-**Manual install** (for development):
+Run `budi doctor` to verify.
+
+### First-run smoke check
+
+After install/reload, validate in under a minute:
+
+1. Run `budi doctor` and confirm daemon + proxy are healthy
+2. Verify `Override OpenAI Base URL` is set to `http://localhost:9878` in Cursor Settings → Models
+3. Send one prompt in Cursor chat
+4. Click the budi status bar item (`🟢/🟡/🔴`) to open the health panel
+5. If no session appears yet, run **Budi: Refresh Status** once
+
+**Manual install** (if auto-install was skipped or you want to rebuild):
 
 ```bash
 cd extensions/cursor-budi
-npm ci && npm run build
+npm ci
+npm run lint
+npm run format:check
+npm run test
+npm run build
 npx vsce package --no-dependencies -o cursor-budi.vsix
 cursor --install-extension cursor-budi.vsix --force
 ```
 
-Then reload Cursor: **Cmd+Shift+P** > **Developer: Reload Window**
-
-## Features
-
-- **Status bar** — today's session cost + health overview, updates automatically
-- **Health panel** — click the status bar to open; shows active session vitals, recent sessions with health at a glance
-- **Session switching** — click any session in the health panel to pin it, or use **Budi: Select Session** command
-- **Onboarding** — guides you through proxy setup when the daemon is not running
-
-## How It Works
-
-In budi 8.0, all AI cost tracking runs through a local proxy:
-
-1. **Proxy** — Cursor sends API requests to `http://localhost:9878` instead of directly to OpenAI. The proxy forwards requests transparently while capturing token usage and cost metadata.
-2. **Daemon API** — the extension queries the daemon's HTTP API for statusline data, session health, and recent sessions.
-3. **Workspace signal** — the extension writes `~/.local/share/budi/cursor-sessions.json` to indicate which workspace is active (see [Contract](#cursor-sessionsjson-contract) below).
+Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**
 
 ## Commands
 
@@ -58,32 +66,16 @@ In budi 8.0, all AI cost tracking runs through a local proxy:
 | `budi.pollingIntervalMs` | `15000`                 | Status bar refresh interval (ms) |
 | `budi.daemonUrl`         | `http://127.0.0.1:7878` | Daemon URL                       |
 
-## cursor-sessions.json Contract
+## How it works
 
-**Version: 1** (ADR-0086 Section 3.4)
-
-The extension writes `~/.local/share/budi/cursor-sessions.json` to signal which Cursor workspace is currently active. The daemon may read this file to correlate proxy events with the active workspace.
-
-```json
-{
-  "version": 1,
-  "active_workspace": "/absolute/path/to/project",
-  "updated_at": "2026-04-11T20:00:00.000Z"
-}
-```
-
-| Field              | Type     | Description                                                       |
-| ------------------ | -------- | ----------------------------------------------------------------- |
-| `version`          | `number` | Contract version. Currently `1`. Breaking changes require a bump. |
-| `active_workspace` | `string` | Absolute path to the active Cursor workspace.                     |
-| `updated_at`       | `string` | ISO-8601 timestamp of last update.                                |
-
-The file is written on extension activation and updated on each status refresh. It is deleted on extension deactivation.
+1. **Proxy** — LLM traffic from Cursor routes through the budi proxy (port 9878), which captures session activity and updates `cursor-sessions.json` in budi's data directory (`~/.local/share/budi` on Unix, `%LOCALAPPDATA%\budi` on Windows)
+2. **File watcher** — the extension watches both the session file and its parent directory, so it can detect active-session changes immediately (including when the file is created after extension startup)
+3. **Daemon** — `budi statusline --format json` (or direct HTTP to daemon) returns session cost, health state, and vitals
+4. **Health panel** — fetches session health details and lists recent sessions from `/analytics/sessions`
 
 ## Limitations
 
-- Cursor does not expose the currently focused chat tab to extensions. The extension tracks the most recently active session. For passive tab switching, use **Budi: Select Session** or click a session in the health panel.
-- Some built-in Cursor features may bypass the proxy override and use Cursor-managed routes directly (ADR-0082 Section 1).
+Cursor does not expose the currently focused chat tab to extensions. The extension tracks the most recently active session (via proxy activity). For passive tab switching, use **Budi: Select Session** or click a session in the health panel.
 
 ## Troubleshooting
 
@@ -91,15 +83,16 @@ The file is written on extension activation and updated on each status refresh. 
 
 1. Run `budi doctor` and confirm daemon health
 2. Run `budi init` if the daemon is not running
-3. Check that the proxy is running on port 9878
+3. If you changed `budi.daemonUrl`, run **Budi: Refresh Status** (or reload Cursor) to force an immediate reconnect
 
-**No sessions appear after sending prompts**
+**Session does not switch quickly after chat activity**
 
-1. Verify "Override OpenAI Base URL" is set to `http://localhost:9878` in Cursor Settings > Models
-2. Restart Cursor after changing the setting
-3. Use **Budi: Refresh Status** for an immediate update
+1. Confirm the proxy is running (`budi doctor`)
+2. Verify `Override OpenAI Base URL` is set to `http://localhost:9878` in Cursor Settings → Models
+3. Send one message in Cursor to create/update `cursor-sessions.json`
+4. Use **Budi: Select Session** to pin manually when switching passively between chats
 
 **Panel data is stale**
 
-- The extension polls every 15 seconds (configurable via `budi.pollingIntervalMs`)
+- The extension updates on both event-driven file changes and periodic polling (`budi.pollingIntervalMs`, default 15s)
 - Use **Budi: Refresh Status** for an immediate refresh
