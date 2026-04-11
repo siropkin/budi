@@ -57,21 +57,11 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
         vals.insert("provider".to_string(), v.to_string());
     }
 
-    if let Some(state) = data.get("health_state").and_then(|v| v.as_str()) {
-        let icon = match state {
-            "red" => "🔴",
-            "yellow" => "🟡",
-            _ => "🟢",
-        };
-        let tip = data
-            .get("health_tip")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if tip.is_empty() {
-            vals.insert("health".to_string(), icon.to_string());
-        } else {
-            vals.insert("health".to_string(), format!("{icon} {tip}"));
-        }
+    // Health slot: just the session cost (no traffic-light emojis or tips per #127)
+    if data.get("health_state").is_some()
+        && let Some(v) = data.get("session_cost").and_then(|v| v.as_f64())
+    {
+        vals.insert("health".to_string(), fmt_cost(v));
     }
 
     vals
@@ -107,9 +97,10 @@ fn render_slots(slots: &[String], values: &HashMap<String, String>, sep: &str) -
     }
 }
 
-/// Health-aware rendering for coach/full presets.
-/// Green:       🟢 budi · $4.92 · session healthy · {extra}
-/// Yellow/Red:  🟡 budi · $5.42 · {tip} · {extra}
+/// Session-aware rendering for coach/full presets.
+///
+/// Session view: `📊 budi · $0.03 msg · $1.24 session · {extra}`
+/// Falls back to period view when no session data is available.
 ///
 /// `budi_label` is pre-formatted (may include ANSI/OSC 8 for Claude format).
 fn render_coach(
@@ -118,12 +109,7 @@ fn render_coach(
     ansi: bool,
     budi_label: &str,
 ) -> Option<String> {
-    let state = data.get("health_state")?.as_str()?;
-    let icon = match state {
-        "red" => "🔴",
-        "yellow" => "🟡",
-        _ => "🟢",
-    };
+    let _state = data.get("health_state")?.as_str()?;
 
     let (dim, reset) = if ansi {
         ("\x1b[90m", "\x1b[0m")
@@ -132,17 +118,15 @@ fn render_coach(
     };
 
     let session_cost = data.get("session_cost").and_then(|v| v.as_f64())?;
-    let cost_str = format!("{} session", fmt_cost(session_cost));
 
-    let mut parts: Vec<String> = vec![format!("{icon} {budi_label}"), cost_str];
+    let mut parts: Vec<String> = vec![format!("📊 {budi_label}")];
 
-    let tip = data
-        .get("health_tip")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if !tip.is_empty() {
-        parts.push(tip.to_lowercase());
+    // Last message cost (if available)
+    if let Some(msg_cost) = data.get("last_message_cost").and_then(|v| v.as_f64()) {
+        parts.push(format!("{} msg", fmt_cost(msg_cost)));
     }
+
+    parts.push(format!("{} session", fmt_cost(session_cost)));
 
     for (slot_name, values) in extra_slots {
         if let Some(v) = values.get(*slot_name) {

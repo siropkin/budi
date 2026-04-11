@@ -20,13 +20,8 @@ import type { RepairResponse } from "@/lib/types";
 import { fmtDate, fmtNum, fmtSyncTime, formatPath } from "@/lib/format";
 
 const INTEGRATIONS = [
-  { key: "claude_code_hooks", label: "Claude Code Hooks", component: "claude-code-hooks" },
-  { key: "cursor_hooks", label: "Cursor Hooks", component: "cursor-hooks" },
   { key: "cursor_extension", label: "Cursor Extension", component: "cursor-extension" },
-  { key: "mcp_server", label: "MCP Server", component: "claude-code-mcp" },
-  { key: "otel", label: "OTEL", component: "claude-code-otel" },
   { key: "statusline", label: "Statusline", component: "claude-code-statusline" },
-  { key: "starship", label: "Starship Prompt", component: "starship" },
 ] as const;
 
 type MutationToastCtx = {
@@ -310,7 +305,6 @@ export function SettingsPage() {
           <p title={paths.database}>Database: {formatPath(paths.database)}</p>
           <p title={paths.config}>Config: {formatPath(paths.config)}</p>
           <p title={paths.claude_settings}>Claude Settings: {formatPath(paths.claude_settings)}</p>
-          <p title={paths.cursor_hooks}>Cursor Hooks: {formatPath(paths.cursor_hooks)}</p>
         </CardContent>
       </Card>
 

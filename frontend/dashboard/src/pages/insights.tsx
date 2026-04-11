@@ -23,14 +23,6 @@ function confidenceLabel(raw: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function mcpName(raw: string): string {
-  const normalized = raw.replace(/^mcp__/, "");
-  const parts = normalized.split("__");
-  if (parts.length >= 2) {
-    return `${parts[0]} / ${parts.slice(1).join("/")}`;
-  }
-  return raw;
-}
 
 function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -96,11 +88,6 @@ export function InsightsPage() {
     sublabel: row.avg_duration_ms != null ? `Avg: ${fmtDurationMs(row.avg_duration_ms)}` : undefined,
   }));
 
-  const mcpRows = data.mcp.map((row) => ({
-    label: mcpName(row.tool_name),
-    value: row.call_count,
-    sublabel: row.avg_duration_ms != null ? `Avg: ${fmtDurationMs(row.avg_duration_ms)}` : undefined,
-  }));
 
   return (
     <div className="space-y-5">
@@ -145,15 +132,9 @@ export function InsightsPage() {
         </ChartCard>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <ChartCard title="Tools">
-          <CountBarChart data={toolsRows} emptyLabel="No tool usage for this period" valueLabel="calls" />
-        </ChartCard>
-
-        <ChartCard title="MCP Servers">
-          <CountBarChart data={mcpRows} emptyLabel="No MCP usage for this period" valueLabel="calls" />
-        </ChartCard>
-      </div>
+      <ChartCard title="Tools">
+        <CountBarChart data={toolsRows} emptyLabel="No tool usage for this period" valueLabel="calls" />
+      </ChartCard>
     </div>
   );
 }
