@@ -52,7 +52,7 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor) for historical import, pipeline (enrichment), cost calculation, proxy event storage, config, migrations
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, stats, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sync, import, statusline, doctor, open, update, uninstall, migrate, repair, health
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard and analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
 ### Agent compatibility tiers (ADR-0082)
@@ -63,7 +63,7 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 | **Tier 2 (should-have)** | Cursor, Copilot CLI | Supported with caveats (Cursor UI override, Copilot BYOK vars). |
 | **Tier 3 (deferred)** | Gemini CLI | Deferred in proxy v1; separate protocol handler required. |
 
-`budi init` currently automates onboarding for Claude Code and Cursor. Other proxy-compatible agents can be routed manually through proxy base URL settings.
+`budi launch <agent>` wraps agent startup: starts the daemon/proxy if needed, injects the correct env vars, and execs the agent. `budi launch claude` / `budi launch codex` (Tier 1) and `budi launch copilot` (Tier 2) are zero-config. `budi launch cursor` prints GUI setup instructions. `budi launch gemini` exits with a "not yet supported" message.
 
 ### Data flow
 
@@ -130,6 +130,7 @@ Nine tables, seven data entities + two supporting:
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
 - `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig
+- `crates/budi-cli/src/commands/launch.rs` - `budi launch <agent>` CLI wrapper: agent definitions, env var injection, proxy health check, exec
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878), ~40 routes
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)

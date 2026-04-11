@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi doctor             Check health: daemon, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi launch claude      Launch Claude Code through the budi proxy\n  budi launch codex       Launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi doctor             Check health: daemon, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -165,6 +165,31 @@ Examples:
     Integrations {
         #[command(subcommand)]
         action: IntegrationAction,
+    },
+    /// Launch an AI agent through the budi proxy (e.g. budi launch claude)
+    #[command(after_help = "\
+Supported agents:
+  claude    Claude Code (Tier 1) — sets ANTHROPIC_BASE_URL
+  codex     Codex CLI   (Tier 1) — sets OPENAI_BASE_URL
+  copilot   Copilot CLI (Tier 2) — sets COPILOT_PROVIDER_BASE_URL
+  cursor    Cursor      (Tier 2) — prints setup instructions (GUI only)
+  gemini    Gemini CLI  (Tier 3) — not yet supported
+
+Examples:
+  budi launch claude
+  budi launch codex -- --model o3
+  budi launch copilot
+  budi launch cursor
+  budi launch claude --proxy-port 9999")]
+    Launch {
+        /// Agent to launch: claude, codex, copilot, cursor, gemini
+        agent: String,
+        /// Override proxy port (default: 9878). Precedence: BUDI_PROXY_PORT env > this flag > config.toml.
+        #[arg(long)]
+        proxy_port: Option<u16>,
+        /// Arguments to pass through to the agent (use -- to separate)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -330,6 +355,11 @@ fn main() -> Result<()> {
             }
         }
         Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
+        Commands::Launch {
+            agent,
+            proxy_port,
+            args,
+        } => commands::launch::cmd_launch(&agent, proxy_port, &args),
     }
 }
 

@@ -67,7 +67,7 @@ Proxy support follows the ADR-0082 compatibility tiers:
 | **Tier 2 (should-have)** | **Copilot CLI** | Supported in BYOK mode | Set `COPILOT_PROVIDER_TYPE=openai` and `COPILOT_PROVIDER_BASE_URL=http://127.0.0.1:9878` |
 | **Tier 3 (deferred)** | **Gemini CLI** | Deferred / not implemented in proxy v1 | Requires a separate Gemini protocol handler |
 
-`budi init` currently automates onboarding for Claude Code and Cursor only. Other proxy-compatible agents can be routed through Budi with manual provider configuration.
+`budi launch <agent>` starts the proxy and launches the agent with the correct env vars — zero manual config for Tier 1/2 CLI agents. `budi init` still automates integration setup for Claude Code and Cursor.
 
 ## Contributing
 
@@ -164,8 +164,8 @@ Use this sequence if you want the fastest "did setup really work?" path:
    - Run `budi doctor`
    - Run `budi stats` to confirm data is flowing
 5. **Generate your first data point**
-   - Configure your agent to use the proxy (port 9878), send a prompt, then run `budi stats`
-   - Run `budi stats` and confirm non-zero usage
+   - Use `budi launch claude` (or `budi launch codex`) to start your agent through the proxy, send a prompt, then run `budi stats`
+   - Or configure your agent manually to use the proxy (port 9878) and confirm non-zero usage with `budi stats`
 6. **Restart apps once**
    - Restart Claude Code and Cursor after `budi init` so statusline/extension changes take effect
 
@@ -250,6 +250,11 @@ budi integrations install --with cursor-extension
 budi init                     # start daemon, configure integrations
 budi init --integrations none # initialize data/daemon without editor integrations
 budi init --with cursor-extension  # install an extra integration during init
+budi launch claude            # launch Claude Code through the proxy (zero config)
+budi launch codex             # launch Codex CLI through the proxy
+budi launch copilot           # launch Copilot CLI through the proxy
+budi launch cursor            # show Cursor GUI setup instructions
+budi launch claude --proxy-port 9999  # use a custom proxy port
 budi import                   # one-time import of historical transcripts
 budi integrations list        # show what is installed vs available
 budi integrations install ... # install integrations later

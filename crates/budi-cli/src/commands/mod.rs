@@ -10,6 +10,7 @@ pub mod health;
 pub mod import;
 pub mod init;
 pub mod integrations;
+pub mod launch;
 pub mod open;
 pub mod repair;
 pub mod stats;
