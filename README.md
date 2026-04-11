@@ -342,7 +342,7 @@ Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on you
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The daemon also runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The daemon also runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. Proxy traffic is attributed to repos, branches, and tickets via `X-Budi-Repo`/`X-Budi-Branch`/`X-Budi-Cwd` headers or automatic git resolution, with cost computed from provider pricing tables. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
@@ -411,7 +411,7 @@ The daemon is the single source of truth — the CLI never opens the database di
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
 | **hook_events** | Raw event log for tool stats and session metadata |
 | **otel_events** | Raw OpenTelemetry event storage for debugging/audit |
-| **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status) |
+| **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status, repo, branch, ticket, cost) |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
 | **message_rollups_hourly** | Derived hourly aggregates (provider/model/repo/branch/role) for low-latency analytics reads |
