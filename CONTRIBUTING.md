@@ -152,15 +152,18 @@ If a review issue leads to "no code changes needed", still include a small artif
 - **Dashboard looks stale after frontend edits**: rebuild via `./scripts/build-dashboard.sh`, then restart daemon.
 - **Cursor extension status stale/offline**: run `budi doctor`, then `Budi: Refresh Status` or reload Cursor window.
 
-## Adding a new provider
+## Adding support for a new agent
 
-1. Create `crates/budi-core/src/providers/<name>.rs`
-2. Implement the `Provider` trait: `name()`, `display_name()`, `is_available()`, `discover_files()`, `parse_file()`
-3. Optionally implement `sync_direct()` for API-based data sources (like Cursor Usage API)
-4. Add a pricing function `<name>_pricing_for_model(model: &str) -> ModelPricing`
-5. Register in `crate::provider::all_providers()`
-6. Add proxy/onboarding integration steps in `crates/budi-cli/src/commands/init.rs` if the agent needs setup automation
-7. Add tests
+New agents are supported via **proxy traffic classification** — no new `Provider` implementation needed for live data (see [ADR-0081](docs/adr/0081-product-contract-and-deprecation-policy.md)).
+
+1. Update the agent compatibility matrix in [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md)
+2. If the agent uses an existing protocol family (OpenAI Chat Completions or Anthropic Messages), add the agent's env var / config key to the `budi launch` CLI wrapper in `crates/budi-cli/src/commands/launch.rs`
+3. If the agent uses a new protocol family (e.g., Gemini), implement a new protocol handler in the proxy (`crates/budi-daemon/src/routes/proxy.rs`)
+4. Add pricing data for the agent's models in `crates/budi-core/src/cost.rs`
+5. Add onboarding instructions to README.md and update the supported agents table
+6. Add tests
+
+The existing `Provider` trait is retained only for historical import via `budi import`. Do not create new `Provider` implementations for live data ingestion.
 
 ## Adding a new enricher
 
