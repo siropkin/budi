@@ -3,14 +3,19 @@
 //! Supports two protocol families (ADR-0082):
 //! - OpenAI Chat Completions: `POST /v1/chat/completions`, `GET /v1/models`
 //! - Anthropic Messages: `POST /v1/messages`
+//!
+//! Streaming responses use [`SseTapStream`] to extract token metadata from SSE
+//! chunks without buffering or modifying the pass-through data (ADR-0082 §5).
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header};
 use axum::response::IntoResponse;
-use futures_util::StreamExt;
+use futures_util::Stream;
 use serde_json::Value;
 
 use budi_core::proxy::{ProxyEvent, ProxyProvider};
@@ -84,10 +89,13 @@ async fn proxy_request(
     };
 
     let upstream_url = format!("{}{}", upstream_base_url(&state, provider), path);
-    let mut upstream_req = state
-        .http_client
-        .request(method, &upstream_url)
-        .timeout(std::time::Duration::from_secs(300));
+    let mut upstream_req = state.http_client.request(method, &upstream_url);
+    // ADR-0082 §5: no read timeout on streaming responses. The stream ends
+    // when upstream closes or sends a terminal event. Non-streaming requests
+    // keep a generous whole-request timeout.
+    if !is_streaming {
+        upstream_req = upstream_req.timeout(std::time::Duration::from_secs(300));
+    }
 
     upstream_req = forward_headers(upstream_req, &incoming_headers, provider);
 
@@ -130,22 +138,19 @@ async fn proxy_request(
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
     if is_sse {
-        let duration_ms = start.elapsed().as_millis() as i64;
-        record_event(
-            &state,
+        let tap = SseTapStream {
+            inner: Box::pin(upstream_resp.bytes_stream()),
             provider,
-            &model,
-            None,
-            None,
-            duration_ms,
-            status.as_u16(),
-            true,
-        );
-
-        let stream = upstream_resp
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(std::io::Error::other));
-        let body = Body::from_stream(stream);
+            model,
+            status_code: status.as_u16(),
+            start,
+            state,
+            line_buf: Vec::new(),
+            input_tokens: None,
+            output_tokens: None,
+            recorded: false,
+        };
+        let body = Body::from_stream(tap);
 
         let mut response = Response::builder().status(status);
         copy_response_headers(&resp_headers, response.headers_mut().unwrap());
@@ -206,6 +211,132 @@ async fn proxy_request(
             &proxy_error_json("failed to build response"),
         )
     })
+}
+
+/// Wraps an upstream SSE byte stream to extract token metadata without
+/// modifying the pass-through data. Records a [`ProxyEvent`] when the stream
+/// completes, errors, or is dropped (client disconnect).
+///
+/// ADR-0082 §5: "capture happens via a tee/tap on the byte stream, not by
+/// deserializing and re-serializing every chunk."
+struct SseTapStream {
+    inner: Pin<Box<dyn Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send>>,
+    provider: ProxyProvider,
+    model: String,
+    status_code: u16,
+    start: Instant,
+    state: ProxyState,
+    line_buf: Vec<u8>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    recorded: bool,
+}
+
+impl Stream for SseTapStream {
+    type Item = Result<axum::body::Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.scan_sse_bytes(&bytes);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                this.finish_recording();
+                Poll::Ready(Some(Err(std::io::Error::other(e))))
+            }
+            Poll::Ready(None) => {
+                this.finish_recording();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for SseTapStream {
+    fn drop(&mut self) {
+        self.finish_recording();
+    }
+}
+
+impl SseTapStream {
+    /// Scan incoming bytes for complete SSE `data:` lines and extract tokens.
+    fn scan_sse_bytes(&mut self, bytes: &[u8]) {
+        self.line_buf.extend_from_slice(bytes);
+        while let Some(pos) = self.line_buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.line_buf.drain(..=pos).collect();
+            let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
+            let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
+            if let Some(data) = trimmed.strip_prefix(b"data: ") {
+                if data == b"[DONE]" {
+                    continue;
+                }
+                if let Ok(json) = serde_json::from_slice::<Value>(data) {
+                    self.extract_tokens(&json);
+                }
+            }
+        }
+    }
+
+    /// Best-effort token extraction from a single SSE data event.
+    fn extract_tokens(&mut self, json: &Value) {
+        match self.provider {
+            ProxyProvider::Anthropic => {
+                // message_start → .message.usage.input_tokens
+                if let Some(n) = json
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|v| v.as_i64())
+                {
+                    self.input_tokens = Some(n);
+                }
+                // message_delta → .usage.output_tokens
+                if let Some(n) = json
+                    .pointer("/usage/output_tokens")
+                    .and_then(|v| v.as_i64())
+                {
+                    self.output_tokens = Some(n);
+                }
+                // Fallback: .usage.input_tokens (some event shapes)
+                if self.input_tokens.is_none()
+                    && let Some(n) = json.pointer("/usage/input_tokens").and_then(|v| v.as_i64())
+                {
+                    self.input_tokens = Some(n);
+                }
+            }
+            ProxyProvider::OpenAi => {
+                // Final chunk (or stream_options include_usage) → .usage.*
+                if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
+                    if let Some(n) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                        self.input_tokens = Some(n);
+                    }
+                    if let Some(n) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                        self.output_tokens = Some(n);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record the proxy event exactly once (normal end, error, or Drop).
+    fn finish_recording(&mut self) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        let duration_ms = self.start.elapsed().as_millis() as i64;
+        record_event(
+            &self.state,
+            self.provider,
+            &self.model,
+            self.input_tokens,
+            self.output_tokens,
+            duration_ms,
+            self.status_code,
+            true,
+        );
+    }
 }
 
 async fn read_body(req: Request<Body>) -> Result<axum::body::Bytes, Response<Body>> {

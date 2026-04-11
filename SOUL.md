@@ -66,7 +66,8 @@ Sources (JSONL files, OTEL spans, Cursor API, Hooks)
 
 Proxy (agent -> localhost:9878 -> upstream provider)
   -> Path-based routing (Anthropic /v1/messages, OpenAI /v1/chat/completions)
-  -> Transparent pass-through with metadata capture
+  -> SSE: chunk-by-chunk pass-through with tee/tap token extraction
+  -> Non-SSE: buffered with JSON usage parsing
   -> SQLite (proxy_events table)
 ```
 
@@ -89,7 +90,7 @@ Nine tables, seven data entities + two supporting:
 
 | Source | Confidence | What it provides |
 |--------|-----------|-----------------|
-| **Proxy** (all agents) | `proxy` | Real-time per-request tokens from response body (non-streaming) or best-effort (streaming) |
+| **Proxy** (all agents) | `proxy` | Real-time per-request tokens from response body (non-streaming) or SSE tee/tap extraction (streaming) |
 | **OTEL** (Claude Code) | `otel_exact` | Per-request tokens including thinking, exact cost |
 | **JSONL** (Claude Code) | `estimated` | Per-message tokens (no thinking), cost calculated from pricing |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents from Cursor's API |
@@ -104,7 +105,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
 - **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
 - **Hook system**: `budi hook` reads stdin JSON, POSTs to daemon. Fire-and-forget, <50ms
-- **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). Agents set `ANTHROPIC_BASE_URL=http://localhost:9878` or `OPENAI_BASE_URL=http://localhost:9878` to route through the proxy. Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. Captures metadata (model, tokens, duration, status) in `proxy_events` table without modifying the response. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
+- **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). Agents set `ANTHROPIC_BASE_URL=http://localhost:9878` or `OPENAI_BASE_URL=http://localhost:9878` to route through the proxy. Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. SSE streaming responses are passed through chunk-by-chunk with no buffering; a tee/tap on the byte stream extracts token metadata (input/output tokens) from SSE events without modifying the data. Non-streaming responses are buffered and parsed for usage data. Duration is measured from request start to stream end (not to first headers). Mid-stream failures and client disconnects are handled gracefully — partial metadata is recorded via Drop. No read timeout on streaming; non-streaming uses 300s. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
 
 ## Key files
 

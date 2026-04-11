@@ -43,7 +43,7 @@ No cloud. No uploads. Everything stays on your machine.
 ## What it does
 
 - Tracks tokens, costs, and usage per message across AI coding agents
-- **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time
+- **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time — streaming responses pass through with no visible lag
 - **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
@@ -342,7 +342,7 @@ Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on you
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The daemon also runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The daemon also runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
