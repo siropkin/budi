@@ -66,9 +66,11 @@ Sources (JSONL files, OTEL spans, Cursor API, Hooks)
 
 Proxy (agent -> localhost:9878 -> upstream provider)
   -> Path-based routing (Anthropic /v1/messages, OpenAI /v1/chat/completions)
+  -> Attribution: X-Budi-Repo/Branch/Cwd headers -> git resolution -> Unassigned fallback
   -> SSE: chunk-by-chunk pass-through with tee/tap token extraction
   -> Non-SSE: buffered with JSON usage parsing
-  -> SQLite (proxy_events table)
+  -> Cost: computed from provider pricing tables
+  -> SQLite (proxy_events table + messages table for unified analytics)
 ```
 
 Enricher order is critical - each depends on prior enrichers. Do not reorder.
@@ -80,7 +82,7 @@ Nine tables, seven data entities + two supporting:
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation from hooks. Primary key field: id
 - **hook_events** - Raw event log for tool stats. One row per hook event
 - **otel_events** - Raw OpenTelemetry event storage for debugging/audit
-- **proxy_events** - Append-only log of proxied LLM API requests. Fields: timestamp, provider, model, input/output_tokens, duration_ms, status_code, is_streaming
+- **proxy_events** - Append-only log of proxied LLM API requests. Fields: timestamp, provider, model, input/output_tokens, duration_ms, status_code, is_streaming, repo_id, git_branch, ticket_id, cost_cents. Successful proxy events are also inserted into `messages` (cost_confidence='proxy_estimated') so existing analytics surfaces work without modification
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync
 - **message_rollups_hourly** - Derived hourly aggregates (provider/model/repo/branch/role dimensions) for low-latency analytics reads
@@ -90,7 +92,7 @@ Nine tables, seven data entities + two supporting:
 
 | Source | Confidence | What it provides |
 |--------|-----------|-----------------|
-| **Proxy** (all agents) | `proxy` | Real-time per-request tokens from response body (non-streaming) or SSE tee/tap extraction (streaming) |
+| **Proxy** (all agents) | `proxy_estimated` | Real-time per-request tokens from response body (non-streaming) or SSE tee/tap extraction (streaming). Attribution via `X-Budi-Repo`, `X-Budi-Branch`, `X-Budi-Cwd` headers or git-resolved from cwd. Falls back to `Unassigned` repo |
 | **OTEL** (Claude Code) | `otel_exact` | Per-request tokens including thinking, exact cost |
 | **JSONL** (Claude Code) | `estimated` | Per-message tokens (no thinking), cost calculated from pricing |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents from Cursor's API |
@@ -121,7 +123,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
-- `crates/budi-core/src/proxy.rs` - ProxyEvent types, proxy_events table schema and storage
+- `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
 - `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878), ~40 routes

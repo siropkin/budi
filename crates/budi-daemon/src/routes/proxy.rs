@@ -18,9 +18,13 @@ use axum::response::IntoResponse;
 use futures_util::Stream;
 use serde_json::Value;
 
-use budi_core::proxy::{ProxyEvent, ProxyProvider};
+use budi_core::proxy::{ProxyAttribution, ProxyEvent, ProxyProvider};
 
 use crate::ProxyState;
+
+const HEADER_BUDI_REPO: &str = "x-budi-repo";
+const HEADER_BUDI_BRANCH: &str = "x-budi-branch";
+const HEADER_BUDI_CWD: &str = "x-budi-cwd";
 
 const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MiB per ADR-0082
 
@@ -67,6 +71,14 @@ fn proxy_error_json(message: &str) -> Value {
     })
 }
 
+fn extract_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 async fn proxy_request(
     state: ProxyState,
     req: Request<Body>,
@@ -76,6 +88,12 @@ async fn proxy_request(
     let start = Instant::now();
     let method = req.method().clone();
     let incoming_headers = req.headers().clone();
+
+    let attribution = ProxyAttribution::resolve(
+        extract_header(&incoming_headers, HEADER_BUDI_REPO).as_deref(),
+        extract_header(&incoming_headers, HEADER_BUDI_BRANCH).as_deref(),
+        extract_header(&incoming_headers, HEADER_BUDI_CWD).as_deref(),
+    );
 
     let body_bytes: axum::body::Bytes = match read_body(req).await {
         Ok(bytes) => bytes,
@@ -122,6 +140,7 @@ async fn proxy_request(
                 duration_ms,
                 502,
                 is_streaming,
+                &attribution,
             );
             return build_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -145,6 +164,7 @@ async fn proxy_request(
             status_code: status.as_u16(),
             start,
             state,
+            attribution,
             line_buf: Vec::new(),
             input_tokens: None,
             output_tokens: None,
@@ -176,6 +196,7 @@ async fn proxy_request(
                 duration_ms,
                 502,
                 is_streaming,
+                &attribution,
             );
             return build_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -201,16 +222,14 @@ async fn proxy_request(
         duration_ms,
         status.as_u16(),
         is_streaming,
+        &attribution,
     );
 
     let mut response = Response::builder().status(status);
     copy_response_headers(&resp_headers, response.headers_mut().unwrap());
-    response.body(Body::from(resp_bytes)).unwrap_or_else(|_| {
-        build_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &proxy_error_json("failed to build response"),
-        )
-    })
+    response
+        .body(Body::from(resp_bytes))
+        .unwrap_or_else(|_| build_error_response(StatusCode::INTERNAL_SERVER_ERROR, &proxy_error_json("failed to build response")))
 }
 
 /// Wraps an upstream SSE byte stream to extract token metadata without
@@ -226,6 +245,7 @@ struct SseTapStream {
     status_code: u16,
     start: Instant,
     state: ProxyState,
+    attribution: ProxyAttribution,
     line_buf: Vec<u8>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -300,7 +320,8 @@ impl SseTapStream {
                 }
                 // Fallback: .usage.input_tokens (some event shapes)
                 if self.input_tokens.is_none()
-                    && let Some(n) = json.pointer("/usage/input_tokens").and_then(|v| v.as_i64())
+                    && let Some(n) =
+                        json.pointer("/usage/input_tokens").and_then(|v| v.as_i64())
                 {
                     self.input_tokens = Some(n);
                 }
@@ -335,6 +356,7 @@ impl SseTapStream {
             duration_ms,
             self.status_code,
             true,
+            &self.attribution,
         );
     }
 }
@@ -375,12 +397,8 @@ fn extract_response_tokens(body: &[u8], provider: ProxyProvider) -> (Option<i64>
     let usage = parsed.get("usage");
     match provider {
         ProxyProvider::Anthropic => {
-            let input = usage
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_i64());
-            let output = usage
-                .and_then(|u| u.get("output_tokens"))
-                .and_then(|v| v.as_i64());
+            let input = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_i64());
+            let output = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_i64());
             (input, output)
         }
         ProxyProvider::OpenAi => {
@@ -471,7 +489,14 @@ fn record_event(
     duration_ms: i64,
     status_code: u16,
     is_streaming: bool,
+    attribution: &ProxyAttribution,
 ) {
+    let cost_cents = if status_code < 400 {
+        budi_core::proxy::compute_proxy_cost_cents(provider, model, input_tokens, output_tokens)
+    } else {
+        0.0
+    };
+
     let event = ProxyEvent {
         timestamp: chrono::Utc::now().to_rfc3339(),
         provider: provider.to_string(),
@@ -481,6 +506,10 @@ fn record_event(
         duration_ms,
         status_code,
         is_streaming,
+        repo_id: attribution.repo_id.clone(),
+        git_branch: attribution.git_branch.clone(),
+        ticket_id: attribution.ticket_id.clone(),
+        cost_cents,
     };
 
     tracing::info!(
@@ -491,6 +520,10 @@ fn record_event(
         input_tokens = ?event.input_tokens,
         output_tokens = ?event.output_tokens,
         streaming = event.is_streaming,
+        repo_id = %event.repo_id,
+        git_branch = %event.git_branch,
+        ticket_id = %event.ticket_id,
+        cost_cents = event.cost_cents,
         "Proxy request completed"
     );
 
@@ -502,9 +535,19 @@ fn record_event(
     });
 }
 
-fn record_event_blocking(db_path: &std::path::Path, event: &ProxyEvent) -> anyhow::Result<()> {
+fn record_event_blocking(
+    db_path: &std::path::Path,
+    event: &ProxyEvent,
+) -> anyhow::Result<()> {
     let conn = budi_core::analytics::open_db(db_path)?;
     budi_core::proxy::ensure_proxy_schema(&conn)?;
     budi_core::proxy::insert_proxy_event(&conn, event)?;
+    // Only insert into the messages table for successful requests with a model.
+    if event.status_code < 400
+        && !event.model.is_empty()
+        && let Err(e) = budi_core::proxy::insert_proxy_message(&conn, event)
+    {
+        tracing::debug!("Failed to insert proxy message: {e}");
+    }
     Ok(())
 }
