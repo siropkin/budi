@@ -227,9 +227,12 @@ async fn proxy_request(
 
     let mut response = Response::builder().status(status);
     copy_response_headers(&resp_headers, response.headers_mut().unwrap());
-    response
-        .body(Body::from(resp_bytes))
-        .unwrap_or_else(|_| build_error_response(StatusCode::INTERNAL_SERVER_ERROR, &proxy_error_json("failed to build response")))
+    response.body(Body::from(resp_bytes)).unwrap_or_else(|_| {
+        build_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &proxy_error_json("failed to build response"),
+        )
+    })
 }
 
 /// Wraps an upstream SSE byte stream to extract token metadata without
@@ -320,8 +323,7 @@ impl SseTapStream {
                 }
                 // Fallback: .usage.input_tokens (some event shapes)
                 if self.input_tokens.is_none()
-                    && let Some(n) =
-                        json.pointer("/usage/input_tokens").and_then(|v| v.as_i64())
+                    && let Some(n) = json.pointer("/usage/input_tokens").and_then(|v| v.as_i64())
                 {
                     self.input_tokens = Some(n);
                 }
@@ -397,8 +399,12 @@ fn extract_response_tokens(body: &[u8], provider: ProxyProvider) -> (Option<i64>
     let usage = parsed.get("usage");
     match provider {
         ProxyProvider::Anthropic => {
-            let input = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_i64());
-            let output = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_i64());
+            let input = usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_i64());
+            let output = usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_i64());
             (input, output)
         }
         ProxyProvider::OpenAi => {
@@ -535,10 +541,7 @@ fn record_event(
     });
 }
 
-fn record_event_blocking(
-    db_path: &std::path::Path,
-    event: &ProxyEvent,
-) -> anyhow::Result<()> {
+fn record_event_blocking(db_path: &std::path::Path, event: &ProxyEvent) -> anyhow::Result<()> {
     let conn = budi_core::analytics::open_db(db_path)?;
     budi_core::proxy::ensure_proxy_schema(&conn)?;
     budi_core::proxy::insert_proxy_event(&conn, event)?;
