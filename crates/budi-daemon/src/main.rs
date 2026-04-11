@@ -718,10 +718,11 @@ mod tests {
     }
 
     fn proxy_with_upstream(upstream: &str) -> ProxyTestHarness {
-        let tmp = std::env::temp_dir().join(format!(
-            "budi-sse-test-{}",
-            std::thread::current().name().unwrap_or("t")
-        ));
+        let safe_name = std::thread::current()
+            .name()
+            .unwrap_or("t")
+            .replace("::", "_");
+        let tmp = std::env::temp_dir().join(format!("budi-sse-test-{safe_name}"));
         std::fs::create_dir_all(&tmp).ok();
         let db_path = tmp.join("analytics.db");
         let _ = std::fs::remove_file(&db_path);
