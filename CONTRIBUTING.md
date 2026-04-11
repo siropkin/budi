@@ -159,7 +159,7 @@ If a review issue leads to "no code changes needed", still include a small artif
 3. Optionally implement `sync_direct()` for API-based data sources (like Cursor Usage API)
 4. Add a pricing function `<name>_pricing_for_model(model: &str) -> ModelPricing`
 5. Register in `crate::provider::all_providers()`
-6. Add hook installation in `crates/budi-cli/src/commands/init.rs` if the agent supports hooks
+6. Add proxy/onboarding integration steps in `crates/budi-cli/src/commands/init.rs` if the agent needs setup automation
 7. Add tests
 
 ## Adding a new enricher
@@ -167,7 +167,7 @@ If a review issue leads to "no code changes needed", still include a small artif
 1. Create a struct implementing `pipeline::Enricher` in `crates/budi-core/src/pipeline/enrichers.rs`
 2. `enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag>` - mutate the message and/or return tags
 3. Register in `Pipeline::default_pipeline()` in `crates/budi-core/src/pipeline/mod.rs`
-4. Enricher order matters: Hook -> Identity -> Git -> Tool -> Cost -> Tag
+4. Enricher order matters: Identity -> Git -> Tool -> Cost -> Tag
 
 ## Releasing
 
