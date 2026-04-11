@@ -7,7 +7,7 @@ use serde_json::Value;
 
 pub mod doctor;
 pub mod health;
-pub mod hook;
+pub mod import;
 pub mod init;
 pub mod integrations;
 pub mod open;

@@ -21,20 +21,14 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Create the default pipeline with all standard enrichers.
-    /// `session_cache` is pre-loaded from the sessions/hook_events tables.
-    pub fn default_pipeline(
-        tags_config: Option<crate::config::TagsConfig>,
-        session_cache: std::collections::HashMap<String, crate::hooks::SessionMeta>,
-    ) -> Self {
+    pub fn default_pipeline(tags_config: Option<crate::config::TagsConfig>) -> Self {
         // Enricher order is critical — do not reorder without understanding dependencies:
-        //   1. HookEnricher  — populates session-level metadata (composer_mode, etc.)
-        //   2. IdentityEnricher — populates local identity tags (user/platform/machine/git_user)
-        //   3. GitEnricher   — sets repo_id for glob_match (MUST run before TagEnricher)
-        //   4. ToolEnricher  — emits per-message tool tags from parsed tool calls
-        //   5. CostEnricher  — calculates cost_cents and cost_confidence
-        //   6. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
+        //   1. IdentityEnricher — populates local identity tags (user/platform/machine/git_user)
+        //   2. GitEnricher   — sets repo_id for glob_match (MUST run before TagEnricher)
+        //   3. ToolEnricher  — emits per-message tool tags from parsed tool calls
+        //   4. CostEnricher  — calculates cost_cents and cost_confidence
+        //   5. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
         let enrichers: Vec<Box<dyn Enricher>> = vec![
-            Box::new(enrichers::HookEnricher::new(session_cache)),
             Box::new(enrichers::IdentityEnricher::new()),
             Box::new(enrichers::GitEnricher::new()),
             Box::new(enrichers::ToolEnricher),
@@ -368,10 +362,7 @@ mod tests {
     #[test]
     fn no_tags_on_user_messages() {
         use crate::config::TagsConfig;
-        let mut pipeline = Pipeline::default_pipeline(
-            Some(TagsConfig::default()),
-            std::collections::HashMap::new(),
-        );
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
 
         let mut user_msg = test_msg();
         user_msg.uuid = "u1".into();
@@ -413,10 +404,7 @@ mod tests {
     #[test]
     fn context_tags_on_every_assistant_message() {
         use crate::config::TagsConfig;
-        let mut pipeline = Pipeline::default_pipeline(
-            Some(TagsConfig::default()),
-            std::collections::HashMap::new(),
-        );
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
 
         let mut u1 = test_msg();
         u1.uuid = "u1".into();
@@ -477,10 +465,7 @@ mod tests {
     #[test]
     fn activity_tag_tracks_latest_prompt_category() {
         use crate::config::TagsConfig;
-        let mut pipeline = Pipeline::default_pipeline(
-            Some(TagsConfig::default()),
-            std::collections::HashMap::new(),
-        );
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
 
         let mut u1 = test_msg();
         u1.uuid = "u1".into();
@@ -534,10 +519,7 @@ mod tests {
     #[test]
     fn tool_tags_emit_all_tools_per_message() {
         use crate::config::TagsConfig;
-        let mut pipeline = Pipeline::default_pipeline(
-            Some(TagsConfig::default()),
-            std::collections::HashMap::new(),
-        );
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
 
         let mut msg = test_msg();
         msg.uuid = "a1".into();

@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi doctor             Check health: daemon, database, config\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi integrations list  Show integration status\n  budi doctor             Check health: daemon, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -50,6 +50,9 @@ enum Commands {
         repo_root: Option<PathBuf>,
         #[arg(long, hide = true)]
         no_daemon: bool,
+        /// Don't open the dashboard in the browser
+        #[arg(long)]
+        no_open: bool,
         /// Skip automatic sync of existing transcripts
         #[arg(long)]
         no_sync: bool,
@@ -141,12 +144,8 @@ Examples:
     Migrate,
     /// Repair schema drift and run migration checks
     Repair,
-    /// Receive hook events from Claude Code / Cursor (reads JSON from stdin, fire-and-forget)
-    #[command(hide = true)]
-    Hook {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        _args: Vec<String>,
-    },
+    /// Import historical transcripts from Claude Code and Cursor into the analytics database
+    Import,
     /// Show session health vitals (context drag, cache efficiency, thrashing, cost acceleration)
     Health {
         /// Session ID to check (default: most recent session)
@@ -215,7 +214,7 @@ pub enum StatsFormat {
 pub enum StatuslineFormat {
     /// ANSI colors + OSC 8 hyperlinks (for Claude Code statusline)
     Claude,
-    /// Plain text, no ANSI (for shell prompts)
+    /// Plain text, no ANSI (for Starship / shell prompts)
     Starship,
     /// Raw JSON
     Json,
@@ -242,6 +241,7 @@ fn main() -> Result<()> {
             statusline_preset,
             repo_root,
             no_daemon,
+            no_open,
             no_sync,
         } => {
             let outcome = commands::init::cmd_init(
@@ -253,6 +253,7 @@ fn main() -> Result<()> {
                 statusline_preset,
                 repo_root,
                 no_daemon,
+                no_open,
                 no_sync,
             )?;
             if matches!(outcome, commands::init::InitOutcome::PartialSuccess) {
@@ -319,11 +320,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Repair => commands::repair::cmd_repair(),
-        Commands::Hook { .. } => {
-            // Hooks must NEVER block the host agent. Swallow all errors silently.
-            let _ = commands::hook::cmd_hook();
-            Ok(())
-        }
+        Commands::Import => commands::import::cmd_import(),
         Commands::Health { session } => commands::health::cmd_health(session),
         Commands::Statusline { install, format } => {
             if install {

@@ -34,8 +34,7 @@ fn sync_with_max_age(
 ) -> Result<(usize, usize, Vec<String>)> {
     let providers = crate::provider::enabled_providers();
     let tags_config = crate::config::load_tags_config();
-    let session_cache = crate::hooks::load_session_meta(conn, max_age_days).unwrap_or_default();
-    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config, session_cache);
+    let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
     let mut total_files = 0;
     let mut total_messages = 0;
     let mut cursor_file_messages_ingested = 0usize;

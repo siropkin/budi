@@ -50,22 +50,6 @@ pub struct ProxyState {
     pub analytics_db_path: PathBuf,
 }
 
-struct BusyFlagGuard {
-    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl BusyFlagGuard {
-    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        Self { flag }
-    }
-}
-
-impl Drop for BusyFlagGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
 fn build_proxy_router(proxy_state: ProxyState) -> Router {
     use routes::proxy as p;
 
@@ -78,7 +62,7 @@ fn build_proxy_router(proxy_state: ProxyState) -> Router {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, dashboard as d, hooks as h, otel as o, require_loopback};
+    use routes::{analytics as a, dashboard as d, hooks as h, require_loopback};
 
     let protected_routes = Router::new()
         .route("/sync", post(h::analytics_sync))
@@ -99,14 +83,6 @@ fn build_router(app_state: AppState) -> Router {
         .route("/health", get(h::health))
         .route("/health/integrations", get(h::health_integrations))
         .route("/health/check-update", get(h::health_check_update))
-        .route(
-            "/v1/logs",
-            post(o::otel_logs_ingest).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-        )
-        .route(
-            "/v1/metrics",
-            post(o::otel_metrics_ingest).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-        )
         .route("/sync/status", get(h::sync_status))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))
@@ -174,7 +150,6 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/messages/{message_uuid}/detail",
             get(a::analytics_message_detail),
         )
-        .route("/hooks/ingest", post(h::hooks_ingest))
         // Dashboard SPA shell + hashed static assets.
         .route("/dashboard", get(d::dashboard))
         .route("/dashboard/{*rest}", get(d::dashboard))
@@ -216,7 +191,6 @@ async fn main() -> Result<()> {
         integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
-    let sync_flag = app_state.syncing.clone();
     let app = build_router(app_state);
 
     // Ensure the database exists and schema is up-to-date.
@@ -226,74 +200,6 @@ async fn main() -> Result<()> {
     {
         tracing::warn!("Failed to initialize database: {e}");
     }
-    if let Err(e) = budi_core::ingest_queue::initialize_queue_db() {
-        tracing::warn!("Failed to initialize ingest queue database: {e}");
-    }
-
-    // Drain queued hook/OTEL payloads continuously in bounded batches.
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            match tokio::task::spawn_blocking(|| budi_core::ingest_queue::process_until_idle(4, 64))
-                .await
-            {
-                Ok(Ok(report)) => {
-                    if report.processed > 0 || report.retried > 0 || report.failed > 0 {
-                        tracing::debug!(
-                            processed = report.processed,
-                            retried = report.retried,
-                            failed = report.failed,
-                            remaining = report.remaining,
-                            "Ingest queue batch processed"
-                        );
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("Ingest queue processing failed: {e}");
-                }
-                Err(e) => {
-                    tracing::warn!("Ingest queue worker task failed: {e}");
-                }
-            }
-        }
-    });
-
-    // Auto-sync transcripts every 30 seconds to keep analytics fresh.
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        interval.tick().await; // skip immediate first tick
-        loop {
-            interval.tick().await;
-            if sync_flag
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_err()
-            {
-                continue; // Another sync is running, skip this tick
-            }
-            let flag = sync_flag.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let _busy = BusyFlagGuard::new(flag);
-                (|| {
-                    let db_path = analytics::db_path().ok()?;
-                    let mut conn = analytics::open_db(&db_path).ok()?;
-                    if budi_core::migration::needs_migration(&conn) {
-                        tracing::warn!("Database needs migration. Skipping auto-sync.");
-                        return None;
-                    }
-                    analytics::sync_all(&mut conn)
-                        .ok()
-                        .map(|(f, m, _warnings)| (f, m))
-                })()
-            })
-            .await;
-        }
-    });
 
     // --- Start proxy server if enabled ---
     let proxy_config = ProxyConfig::default();

@@ -44,12 +44,11 @@ No cloud. No uploads. Everything stays on your machine.
 
 - Tracks tokens, costs, and usage per message across AI coding agents
 - **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time — streaming responses pass through with no visible lag
-- **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - Web dashboard at `http://localhost:7878/dashboard` (legacy — will be replaced by the Rich CLI and cloud dashboard)
 - Live cost + health status line in Claude Code and Cursor
-- Background sync every 30 seconds — no workflow changes needed
+- **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
 
 ## Platforms
@@ -60,8 +59,8 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 | Agent | Status | How |
 |-------|--------|-----|
-| **Claude Code** | Supported | OpenTelemetry (exact cost) + JSONL transcripts + hooks |
-| **Cursor** | Supported | Usage API + hooks (local transcript fallback when API/auth unavailable) |
+| **Claude Code** | Supported | Proxy (real-time) + JSONL transcripts (historical import) |
+| **Cursor** | Supported | Proxy (real-time) + Usage API (historical import) |
 | **Copilot CLI, Codex CLI, Cline, Aider, Gemini CLI** | Planned | |
 
 ## Contributing
@@ -138,7 +137,7 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon, syncs existing data, and **prompts you to choose which agents to track** (Claude Code, Cursor) and then **which integrations to install** (hooks, OTEL, statusline, extension). Only enabled agents have their data collected; disabled agents produce no collection side effects. Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate hook/config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+`budi init` starts the daemon and **prompts you to choose which agents to track** (Claude Code, Cursor) and then **which integrations to install** (statusline, extension). Only enabled agents have their data collected; disabled agents produce no collection side effects. Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. **Restart Claude Code and Cursor** after install to activate config changes. The daemon uses port 7878 by default — customize `daemon_port` in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -152,17 +151,16 @@ Use this sequence if you want the fastest "did setup really work?" path:
    - Homebrew: `brew install siropkin/budi/budi` then `budi init`
    - Standalone installers and `./scripts/install.sh` already run `budi init` for you
 2. **Choose agents and integrations** during `budi init` (recommended defaults are safe)
-3. **Wait for first sync**
-   - Fresh install: full history scan (can take a few minutes)
-   - Re-run init: quick recent sync (last 30 days)
+3. **Import historical data** (optional)
+   - Run `budi import` to backfill from Claude Code JSONL transcripts and Cursor Usage API
 4. **Confirm health**
    - Run `budi doctor`
    - Run `budi stats` to confirm data is flowing
 5. **Generate your first data point**
-   - Send one prompt in Claude Code or Cursor, then run `budi sync`
+   - Configure your agent to use the proxy (port 9878), send a prompt, then run `budi stats`
    - Run `budi stats` and confirm non-zero usage
 6. **Restart apps once**
-   - Restart Claude Code and Cursor after `budi init` so hooks/statusline/extension changes take effect
+   - Restart Claude Code and Cursor after `budi init` so statusline/extension changes take effect
 
 ### PATH and duplicate binary checks
 
@@ -213,7 +211,7 @@ shell = ["sh"]
 
 Budi includes a Cursor/VS Code extension that shows session health and cost in the status bar and a side panel. It can be installed during `budi init` and later via `budi integrations install --with cursor-extension`.
 
-The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 🔴 0`). Click it to open the health panel with session details, vitals, and tips. Active session tracking works via hooks — no manual setup needed.
+The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 🔴 0`). Click it to open the health panel with session details, vitals, and tips.
 
 **Manual install** (if auto-install was skipped or you want to rebuild):
 
@@ -245,7 +243,6 @@ Manage integrations anytime (especially if you skipped some during first init):
 
 ```bash
 budi integrations list
-budi integrations install --with claude-code-hooks --with claude-code-otel
 budi integrations install --with cursor-extension
 ```
 
@@ -254,9 +251,10 @@ budi integrations install --with cursor-extension
 ## CLI
 
 ```bash
-budi init                     # start daemon, install hooks, sync data
+budi init                     # start daemon, configure integrations
 budi init --integrations none # initialize data/daemon without editor integrations
 budi init --with cursor-extension  # install an extra integration during init
+budi import                   # one-time import of historical transcripts
 budi integrations list        # show what is installed vs available
 budi integrations install ... # install integrations later
 budi open                     # open local dashboard (legacy)
@@ -277,7 +275,7 @@ budi update                   # check for updates (auto-detects Homebrew)
 budi update --version <name>  # update to a specific version
 budi health                   # show session health vitals for most recent active session
 budi health --session <id>    # health vitals for a specific session
-budi uninstall                # remove hooks, status line, config, and data
+budi uninstall                # remove status line, config, and data
 budi uninstall --keep-data    # uninstall but keep analytics database
 ```
 
@@ -321,7 +319,7 @@ The scoring is intentionally conservative:
 - New sessions start **green** — the default is always positive. Vitals only turn yellow or red when there is clear evidence of a problem.
 - It measures the current working stretch, so a `/compact` resets context-based checks.
 - It looks at the active model stretch for cache reuse, so model switches do not poison the whole session.
-- Cost acceleration uses per-user-turn costs when hook data provides prompt boundaries, and falls back to per-reply costs otherwise.
+- Cost acceleration uses per-user-turn costs when prompt boundaries are available, and falls back to per-reply costs otherwise.
 - When `budi health` runs without `--session`, it picks the latest session by assistant activity first, then falls back to session timestamps.
 - It prefers concrete next steps over internal jargon.
 
@@ -342,7 +340,7 @@ Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on you
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The daemon also runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. Proxy traffic is attributed to repos, branches, and tickets via `X-Budi-Repo`/`X-Budi-Branch`/`X-Budi-Cwd` headers or automatic git resolution, with cost computed from provider pricing tables. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. Proxy traffic is attributed to repos, branches, and tickets via `X-Budi-Repo`/`X-Budi-Branch`/`X-Budi-Cwd` headers or automatic git resolution, with cost computed from provider pricing tables. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be backfilled via `budi import`. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
@@ -352,7 +350,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 | | budi | ccusage | Claude `/cost` |
 |---|---|---|---|
 | Multi-agent support | **Yes** (Claude Code + Cursor) | Claude Code only | Claude Code only |
-| Exact cost (incl. thinking tokens) | **Yes** (via OTEL) | No | Approximate |
+| Real-time cost via proxy | **Yes** | No | No |
 | Cost history | **Per-message + daily** | Per-session | Current session |
 | Web dashboard | **Yes** | No | No |
 | Status line + session health | **Yes** (with actionable tips) | No | No |
@@ -372,36 +370,24 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 │ budi CLI │ ──────────▶ │ budi-daemon  │ ───────────▶ │  budi.db │
 └──────────┘             │  (port 7878) │              └──────────┘
                          │              │                    ▲
-┌──────────┐    HTTP     │  - OTEL recv │    Pipeline       │
-│ Dashboard│ ──────────▶ │  - 30s sync  │ ──────────────────┘
-│ (legacy) │             │  - analytics │    Extract → Normalize
-└──────────┘             │  - hooks     │      → Enrich → Load
-                         │  - queue     │
-┌──────────┐             │  drainer     │
-│ ingest   │◀───────────▶│              │
-│ queue DB │   durable   └──────────────┘
-└──────────┘                    │
+┌──────────┐    HTTP     │  - analytics │    Pipeline       │
+│ Dashboard│ ──────────▶ │  - import    │ ──────────────────┘
+│ (legacy) │             │  (on demand) │    Extract → Normalize
+└──────────┘             └──────────────┘      → Enrich → Load
+                                │
                          ┌──────────────┐
 ┌──────────┐    proxy    │ budi proxy   │    upstream
 │ AI Agent │ ──────────▶ │  (port 9878) │ ──────────▶ Anthropic / OpenAI
 │ (CC/CX)  │  localhost  │  transparent │  API calls
 └──────────┘             │  pass-thru   │
                          └──────────────┘
-                          ▲   ▲   ▲   ▲
-             OTEL ────────┘   │   │   └───── Cursor API
-         (exact cost)         │   │       (usage events)
-                   JSONL ─────┘   │
-                 (transcripts)    │
-                                  │
-┌──────────┐  hooks    ┌──────────┐  hooks
-│ Claude   │ ──────────│ budi hook│──────── Cursor
-│ Code     │  (stdin)  │  (CLI)   │ (stdin)
-└──────────┘           └──────────┘
-  │
-  └── OTLP HTTP/JSON ──▶ POST /v1/logs (auto-configured)
+
+Historical import (budi import):
+  JSONL transcripts (Claude Code) ──┐
+  Usage API (Cursor) ───────────────┴──▶ Pipeline → SQLite
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. Realtime hooks/OTEL payloads are written to a durable local queue first, then drained into analytics in bounded retries. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user). For Cursor, Usage API sync is primary, with local transcript parsing as a fallback when API auth/network is unavailable.
+The daemon is the single source of truth — the CLI never opens the database directly. The **proxy** is the sole live data source: every LLM request flows through it, capturing tokens, cost, and attribution in real time. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be imported via `budi import` for one-time backfill.
 
 **Data model** — nine tables, seven data entities + two supporting:
 
@@ -409,8 +395,8 @@ The daemon is the single source of truth — the CLI never opens the database di
 |-------|------|
 | **messages** | Single cost entity — all token/cost data lives here (one row per API call) |
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
-| **hook_events** | Raw event log for tool stats and session metadata |
-| **otel_events** | Raw OpenTelemetry event storage for debugging/audit |
+| **hook_events** | Historical event log for tool stats and session metadata (read-only, ingestion removed) |
+| **otel_events** | Historical OpenTelemetry event storage (read-only, ingestion removed) |
 | **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status, repo, branch, ticket, cost) |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
@@ -438,7 +424,7 @@ budi is local-first, but you can now enforce tighter storage controls for raw pa
 
 | Env var | Default | Scope |
 |--------|---------|-------|
-| `BUDI_RETENTION_RAW_DAYS` | `30` | `hook_events.raw_json`, `otel_events.raw_json`, `sessions.raw_json` |
+| `BUDI_RETENTION_RAW_DAYS` | `30` | `sessions.raw_json` (and historical `hook_events.raw_json`, `otel_events.raw_json`) |
 | `BUDI_RETENTION_SESSION_METADATA_DAYS` | `90` | `sessions.user_email`, `sessions.workspace_root` |
 
 Use `off` to disable a retention window for a category.
@@ -455,55 +441,27 @@ Retention cleanup runs automatically after sync and queued realtime ingestion pr
 </details>
 
 <details>
-<summary>Hooks</summary>
+<summary>Hooks (removed in 8.0)</summary>
 
-Both Claude Code and Cursor support lifecycle hooks that budi uses for real-time event capture. Hooks are installed automatically by `budi init` into `~/.claude/settings.json` and `~/.cursor/hooks.json`. They are non-blocking (`async: true`) and wrapped with `|| true` so that budi can never interfere with your coding agent — even if budi crashes or is uninstalled.
-
-| Data | Claude Code | Cursor |
-|------|-------------|--------|
-| Session start/end | SessionStart, SessionEnd | sessionStart, sessionEnd |
-| Tool usage + duration | PostToolUse | postToolUse |
-| Context pressure | PreCompact | preCompact |
-| Subagent tracking | SubagentStop | subagentStop |
-| Prompt classification | UserPromptSubmit | — |
-| File modifications | — | afterFileEdit |
+Hook-based ingestion (`budi hook`) has been removed. The proxy (port 9878) is now the sole live data source. Historical hook event data remains in the `hook_events` table for querying but no new events are ingested.
 
 </details>
 
 <details>
-<summary>OpenTelemetry (Claude Code)</summary>
+<summary>OpenTelemetry (removed in 8.0)</summary>
 
-When Claude Code has telemetry enabled, it sends OTLP HTTP/JSON events to budi's daemon for every API request. This provides **exact cost data** including thinking tokens — closing the accuracy gap that JSONL-only parsing has (JSONL's `output_tokens` doesn't include thinking tokens).
-
-`budi init` automatically configures the following env vars in `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:7878",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "otlp"
-  }
-}
-```
-
-All telemetry stays local — it goes directly from Claude Code to budi's daemon on localhost. No data leaves your machine.
-
-**How the data merges:** Each API call produces data from three sources. OTEL provides exact cost and token counts (including thinking tokens). JSONL provides message context (parent UUID, working directory, git branch). Hooks provide session metadata (repo, branch, user email). Budi merges all three into a single message row — regardless of which source arrives first.
+OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) have been removed. The proxy captures real-time cost data directly. Historical OTEL data remains in the `otel_events` table for querying but no new events are ingested.
 
 **Cost confidence levels:**
 
 | Level | Source | Accuracy |
 |-------|--------|----------|
-| `otel_exact` | OTEL `api_request` event | Exact (includes thinking tokens) |
+| `proxy_estimated` | Proxy real-time capture | Estimated from response body / SSE stream |
+| `otel_exact` | Historical OTEL data (read-only) | Exact (includes thinking tokens) |
 | `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
 | `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
 
 Messages with `otel_exact` or `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
-
-**If you already use OTEL elsewhere:** If `OTEL_EXPORTER_OTLP_ENDPOINT` is already set to a non-localhost URL, `budi init` won't overwrite it. You can use an [OTEL Collector](https://opentelemetry.io/docs/collector/) with multiple exporters to send data to both budi and your existing endpoint.
 
 </details>
 
@@ -521,12 +479,9 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | POST | `/sync` | Sync recent data (last 30 days, loopback-only) |
 | POST | `/sync/all` | Load full transcript history (loopback-only) |
 | POST | `/sync/reset` | Wipe sync state + full re-sync (loopback-only) |
-| GET | `/sync/status` | Syncing flag + last_synced + ingest queue backlog/failed metrics |
-| POST | `/hooks/ingest` | Receive hook events |
-| GET | `/health/integrations` | Hooks/OTEL/statusline/extension status + DB stats |
+| GET | `/sync/status` | Syncing flag + last_synced |
+| GET | `/health/integrations` | Statusline/extension status + DB stats |
 | GET | `/health/check-update` | Check for updates via GitHub |
-| POST | `/v1/logs` | OTLP logs ingestion (durable-queued, then background processed) |
-| POST | `/v1/metrics` | OTLP metrics ingestion (stub for future use) |
 
 **Analytics:**
 
@@ -587,29 +542,23 @@ Windows equivalent:
 2. Kill stale daemon: `taskkill /IM budi-daemon.exe /F`
 3. Restart: `budi init`
 
-**Hooks not working:**
-1. Run `budi doctor` — it validates hook installation
-2. Make sure you restarted Claude Code / Cursor after `budi init`
-3. Re-install: `budi init` (safe to run multiple times)
-4. Check hook delivery errors in `<budi-home>/hook-debug.log` (usually `~/.local/share/budi/hook-debug.log`)
-
 **Status line not showing:**
 1. Restart Claude Code after `budi init`
 2. Check: `budi statusline` should output cost data
 
 **Cursor extension shows offline or stale session:**
-1. Run `budi doctor` to verify daemon + Cursor hooks
+1. Run `budi doctor` to verify daemon is running
 2. In Cursor, run **Budi: Refresh Status**
 3. If needed, reload Cursor window (`Developer: Reload Window`) after `budi init` or daemon URL changes
-4. Use **Budi: Select Session** when passively switching tabs (hooks track most recently interacted-with session)
+4. Use **Budi: Select Session** when passively switching between sessions
 
 ## Uninstall
 
 ```bash
-budi uninstall          # stops daemon, removes hooks, status line, config, and data
+budi uninstall          # stops daemon, removes status line, config, and data
 ```
 
-`budi uninstall` removes hooks, status line, config, and data but **not** the binaries themselves. Remove binaries separately:
+`budi uninstall` removes status line, config, and data but **not** the binaries themselves. Remove binaries separately:
 
 ```bash
 # Homebrew:
@@ -631,7 +580,7 @@ Options: `--keep-data` to preserve the analytics database and config, `--yes` to
 
 ## Exit codes
 
-`budi init` returns 0 on success, 2 on partial success (init completed but hooks had warnings), 1 on hard error.
+`budi init` returns 0 on success, 2 on partial success (init completed with warnings), 1 on hard error.
 
 ## License
 

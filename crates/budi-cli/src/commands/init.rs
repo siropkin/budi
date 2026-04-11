@@ -27,6 +27,7 @@ pub fn cmd_init(
     statusline_preset: Option<StatuslinePreset>,
     repo_root: Option<PathBuf>,
     no_daemon: bool,
+    _no_open: bool,
     no_sync: bool,
 ) -> Result<InitOutcome> {
     let repo_root = if local || repo_root.is_some() {
