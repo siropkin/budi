@@ -1,6 +1,6 @@
 # SOUL.md
 
-Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks tokens, costs, and usage per message. No cloud - everything on-machine.
+Local-first cost analytics for AI coding agents (Claude Code, Cursor). Tracks tokens, costs, and usage per message via proxy interception and transcript analysis. No cloud - everything on-machine.
 
 ## Build & Test
 
@@ -51,9 +51,9 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 
 ### Crates
 
-- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, OTEL ingestion, hooks, config, migrations
+- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, OTEL ingestion, hooks, proxy event storage, config, migrations
 - **budi-cli** - Thin HTTP client to the daemon. Commands: init, stats, sync, statusline, hook, doctor, open, update, uninstall, migrate, repair, health
-- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard, analytics API, hook ingestion, OTEL ingestion
+- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard, analytics API, hook ingestion, OTEL ingestion. Also runs the proxy server on port 9878
 
 ### Data flow
 
@@ -63,17 +63,23 @@ Sources (JSONL files, OTEL spans, Cursor API, Hooks)
   -> Pipeline: HookEnricher -> IdentityEnricher -> GitEnricher -> ToolEnricher -> CostEnricher -> TagEnricher
   -> SQLite (messages + tags + derived rollup tables)
   -> Dashboard / CLI stats / Statusline
+
+Proxy (agent -> localhost:9878 -> upstream provider)
+  -> Path-based routing (Anthropic /v1/messages, OpenAI /v1/chat/completions)
+  -> Transparent pass-through with metadata capture
+  -> SQLite (proxy_events table)
 ```
 
 Enricher order is critical - each depends on prior enrichers. Do not reorder.
 
 ### Database (SQLite, WAL mode, schema v21)
 
-Eight tables, six data entities + two supporting:
+Nine tables, seven data entities + two supporting:
 - **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation from hooks. Primary key field: id
 - **hook_events** - Raw event log for tool stats. One row per hook event
 - **otel_events** - Raw OpenTelemetry event storage for debugging/audit
+- **proxy_events** - Append-only log of proxied LLM API requests. Fields: timestamp, provider, model, input/output_tokens, duration_ms, status_code, is_streaming
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync
 - **message_rollups_hourly** - Derived hourly aggregates (provider/model/repo/branch/role dimensions) for low-latency analytics reads
@@ -83,6 +89,7 @@ Eight tables, six data entities + two supporting:
 
 | Source | Confidence | What it provides |
 |--------|-----------|-----------------|
+| **Proxy** (all agents) | `proxy` | Real-time per-request tokens from response body (non-streaming) or best-effort (streaming) |
 | **OTEL** (Claude Code) | `otel_exact` | Per-request tokens including thinking, exact cost |
 | **JSONL** (Claude Code) | `estimated` | Per-message tokens (no thinking), cost calculated from pricing |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents from Cursor's API |
@@ -97,6 +104,7 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
 - **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
 - **Hook system**: `budi hook` reads stdin JSON, POSTs to daemon. Fire-and-forget, <50ms
+- **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). Agents set `ANTHROPIC_BASE_URL=http://localhost:9878` or `OPENAI_BASE_URL=http://localhost:9878` to route through the proxy. Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. Captures metadata (model, tokens, duration, status) in `proxy_events` table without modifying the response. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
 
 ## Key files
 
@@ -112,12 +120,14 @@ OTEL and JSONL deduplicate: same API call matched by session_id + model + timest
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
-- `crates/budi-core/src/config.rs` - BudiConfig, AgentsConfig, StatuslineConfig, TagsConfig
+- `crates/budi-core/src/proxy.rs` - ProxyEvent types, proxy_events table schema and storage
+- `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
-- `crates/budi-daemon/src/main.rs` - HTTP server, ~37 routes
+- `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878), ~40 routes
 - `crates/budi-daemon/src/routes/hooks.rs` - /hooks/ingest, /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, tools, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/otel.rs` - /v1/logs and /v1/metrics OTLP ingestion endpoints
+- `crates/budi-daemon/src/routes/proxy.rs` - Proxy handlers for Anthropic Messages and OpenAI Chat Completions
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
 - `frontend/dashboard/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
 - `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`

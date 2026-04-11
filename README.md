@@ -43,6 +43,7 @@ No cloud. No uploads. Everything stays on your machine.
 ## What it does
 
 - Tracks tokens, costs, and usage per message across AI coding agents
+- **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time
 - **Exact cost** via OpenTelemetry for Claude Code (includes thinking tokens)
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
@@ -341,7 +342,7 @@ Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on you
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, syncs JSONL transcripts, and processes hook events — merging all sources into a single SQLite database. The daemon also runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. The CLI is a thin HTTP client — all queries go through the daemon.
 
 ## Details
 
@@ -379,7 +380,13 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 ┌──────────┐             │  drainer     │
 │ ingest   │◀───────────▶│              │
 │ queue DB │   durable   └──────────────┘
-└──────────┘
+└──────────┘                    │
+                         ┌──────────────┐
+┌──────────┐    proxy    │ budi proxy   │    upstream
+│ AI Agent │ ──────────▶ │  (port 9878) │ ──────────▶ Anthropic / OpenAI
+│ (CC/CX)  │  localhost  │  transparent │  API calls
+└──────────┘             │  pass-thru   │
+                         └──────────────┘
                           ▲   ▲   ▲   ▲
              OTEL ────────┘   │   │   └───── Cursor API
          (exact cost)         │   │       (usage events)
@@ -396,7 +403,7 @@ A lightweight Rust daemon (port 7878) receives real-time OpenTelemetry events, s
 
 The daemon is the single source of truth — the CLI never opens the database directly. Realtime hooks/OTEL payloads are written to a durable local queue first, then drained into analytics in bounded retries. Each message row is enriched from multiple sources: OTEL provides exact cost, JSONL provides context (parent messages, working directory), and hooks provide session metadata (repo, branch, user). For Cursor, Usage API sync is primary, with local transcript parsing as a fallback when API auth/network is unavailable.
 
-**Data model** — eight tables, six data entities + two supporting:
+**Data model** — nine tables, seven data entities + two supporting:
 
 | Table | Role |
 |-------|------|
@@ -404,6 +411,7 @@ The daemon is the single source of truth — the CLI never opens the database di
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
 | **hook_events** | Raw event log for tool stats and session metadata |
 | **otel_events** | Raw OpenTelemetry event storage for debugging/audit |
+| **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status) |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
 | **message_rollups_hourly** | Derived hourly aggregates (provider/model/repo/branch/role) for low-latency analytics reads |

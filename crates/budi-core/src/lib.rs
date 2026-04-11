@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod privacy;
 pub mod provider;
 pub mod providers;
+pub mod proxy;
 pub mod repo_id;
 pub mod tag_keys;
 pub mod update;
