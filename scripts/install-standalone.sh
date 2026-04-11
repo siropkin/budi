@@ -234,7 +234,7 @@ main() {
     "$BIN_DIR/budi" init || init_rc=$?
     if [ "$init_rc" -eq 0 ]; then
       log ""
-      log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+      log "Setup complete! Use 'budi launch <agent>' to start coding through the proxy, or run 'budi status' to check health."
     elif [ "$init_rc" -eq 2 ]; then
       log ""
       log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."

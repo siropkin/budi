@@ -683,9 +683,7 @@ fn stop_all_daemons() {
             .stderr(Stdio::null())
             .status();
     } else {
-        let _ = Command::new("pkill")
-            .args(["-f", "budi-daemon serve"])
-            .status();
+        let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
     }
 }
 

@@ -129,7 +129,7 @@ fn daemon_port_conflict_hint(port: u16) -> String {
         format!(
             "Another process may be using port {port}. \
              Check listeners with `lsof -i :{port}`, \
-             stop stale daemon processes with `pkill -f \"budi-daemon serve\"`, and rerun `budi init`.\n"
+             stop stale daemon processes with `pkill -f \"budi-daemon\"`, and rerun `budi init`.\n"
         )
     }
 }
@@ -351,9 +351,7 @@ fn kill_all_daemons() {
             .stderr(Stdio::null())
             .status();
     } else {
-        let _ = Command::new("pkill")
-            .args(["-f", "budi-daemon serve"])
-            .status();
+        let _ = Command::new("pkill").args(["-f", "budi-daemon"]).status();
     }
 }
 
@@ -367,7 +365,7 @@ fn force_kill_all_daemons() {
             .status();
     } else {
         let _ = Command::new("pkill")
-            .args(["-9", "-f", "budi-daemon serve"])
+            .args(["-9", "-f", "budi-daemon"])
             .status();
     }
 }

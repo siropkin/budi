@@ -134,7 +134,7 @@ fn stop_daemon() -> Result<bool> {
         Ok(output.status.success())
     } else {
         let output = Command::new("pkill")
-            .args(["-f", "budi-daemon serve"])
+            .args(["-f", "budi-daemon"])
             .output()
             .context("failed to run pkill")?;
         Ok(output.status.success())

@@ -141,7 +141,7 @@ try {
         if ($initExit -eq 2) {
             Log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
         } else {
-            Log "Setup complete! Restart Claude Code and Cursor to activate hooks."
+            Log "Setup complete! Use 'budi launch <agent>' to start coding through the proxy, or run 'budi status' to check health."
         }
     } else {
         Fail "budi init failed (exit code $initExit). Run 'budi doctor' to diagnose."
