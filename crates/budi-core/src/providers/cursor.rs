@@ -920,20 +920,6 @@ pub(crate) fn run_cursor_repairs(conn: &mut Connection) {
     // real workspace roots discovered in worker.log, then backfill repo/branch.
     repair_cursor_workspace_metadata(conn);
 
-    // Repair sessions whose started_at was set by a late-arriving hook instead
-    // of the earliest hook. Use MIN(hook_events.timestamp) as the true start.
-    let _ = conn.execute(
-        "UPDATE sessions SET started_at = (
-            SELECT MIN(h.timestamp) FROM hook_events h WHERE h.session_id = sessions.id
-         )
-         WHERE provider = 'cursor'
-           AND EXISTS (
-             SELECT 1 FROM hook_events h
-             WHERE h.session_id = sessions.id AND h.timestamp < sessions.started_at
-           )",
-        [],
-    );
-
     // Backfill orphaned messages (ingested before their session row existed).
     let sessions = load_session_contexts(conn);
     if !sessions.is_empty() {

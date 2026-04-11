@@ -102,7 +102,6 @@ fn build_router(app_state: AppState) -> Router {
         )
         .route("/analytics/providers", get(a::analytics_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
-        .route("/analytics/tools", get(a::analytics_tools))
         .route(
             "/analytics/cache-efficiency",
             get(a::analytics_cache_efficiency),
@@ -133,14 +132,6 @@ fn build_router(app_state: AppState) -> Router {
         .route(
             "/analytics/sessions/{session_id}/curve",
             get(a::analytics_session_message_curve),
-        )
-        .route(
-            "/analytics/sessions/{session_id}/hook-events",
-            get(a::analytics_session_hook_events),
-        )
-        .route(
-            "/analytics/sessions/{session_id}/otel-events",
-            get(a::analytics_session_otel_events),
         )
         .route(
             "/analytics/sessions/{session_id}/tags",

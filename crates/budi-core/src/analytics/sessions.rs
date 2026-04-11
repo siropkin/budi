@@ -605,63 +605,10 @@ impl std::str::FromStr for SessionMessageRoles {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionHookEventRow {
-    pub id: i64,
-    pub timestamp: String,
-    pub event: String,
-    pub provider: String,
-    pub session_id: Option<String>,
-    pub message_id: Option<String>,
-    pub link_confidence: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_use_id: Option<String>,
-    pub tool_duration_ms: Option<i64>,
-    pub mcp_server: Option<String>,
-    pub message_request_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_json: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionHookEventsParams<'a> {
-    pub linked_only: bool,
-    pub event: Option<&'a str>,
-    pub limit: usize,
-    pub offset: usize,
-    pub include_raw: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionOtelEventsParams {
-    pub linked_only: bool,
-    pub limit: usize,
-    pub offset: usize,
-    pub include_raw: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct OtelEventRow {
-    pub id: i64,
-    pub event_name: String,
-    pub timestamp: String,
-    pub timestamp_nano: Option<String>,
-    pub session_id: Option<String>,
-    pub message_id: Option<String>,
-    pub model: Option<String>,
-    pub cost_usd_reported: Option<f64>,
-    pub cost_cents_computed: Option<f64>,
-    pub processed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_json: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MessageDetail {
     pub message: MessageRow,
     pub tags: Vec<super::SessionTag>,
     pub tools: Vec<String>,
-    pub hook_events: Vec<SessionHookEventRow>,
-    pub otel_events: Vec<OtelEventRow>,
 }
 
 fn message_tools(conn: &Connection, message_uuid: &str) -> Result<Vec<String>> {
@@ -956,130 +903,6 @@ pub fn session_message_curve(
     Ok(rows)
 }
 
-pub fn session_hook_events(
-    conn: &Connection,
-    session_id: &str,
-    params: &SessionHookEventsParams<'_>,
-) -> Result<Vec<SessionHookEventRow>> {
-    let mut conditions = vec!["session_id = ?1".to_string()];
-    let mut bindings: Vec<String> = vec![session_id.to_string()];
-    if params.linked_only {
-        conditions.push("message_id IS NOT NULL".to_string());
-    }
-    if let Some(event) = params.event
-        && !event.trim().is_empty()
-    {
-        bindings.push(event.trim().to_string());
-        conditions.push(format!("event = ?{}", bindings.len()));
-    }
-    let where_clause = format!("WHERE {}", conditions.join(" AND "));
-    bindings.push(params.limit.min(500).to_string());
-    let limit_idx = bindings.len();
-    bindings.push(params.offset.to_string());
-    let offset_idx = bindings.len();
-
-    let raw_select = if params.include_raw {
-        "raw_json"
-    } else {
-        "NULL AS raw_json"
-    };
-    let sql = format!(
-        "SELECT id, timestamp, event, provider, session_id,
-                message_id, link_confidence, tool_name,
-                tool_use_id, tool_duration_ms, mcp_server,
-                message_request_id, {raw_select}
-         FROM hook_events
-         {where_clause}
-         ORDER BY timestamp DESC
-         LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
-    );
-    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bindings
-        .iter()
-        .map(|v| v as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(bind_refs.as_slice(), |row| {
-            Ok(SessionHookEventRow {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                event: row.get(2)?,
-                provider: row.get(3)?,
-                session_id: row.get(4)?,
-                message_id: row.get(5)?,
-                link_confidence: row.get(6)?,
-                tool_name: row.get(7)?,
-                tool_use_id: row.get(8)?,
-                tool_duration_ms: row.get(9)?,
-                mcp_server: row.get(10)?,
-                message_request_id: row.get(11)?,
-                raw_json: row.get(12)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
-}
-
-pub fn session_otel_events(
-    conn: &Connection,
-    session_id: &str,
-    params: &SessionOtelEventsParams,
-) -> Result<Vec<OtelEventRow>> {
-    let mut conditions = vec!["session_id = ?1".to_string()];
-    let mut bindings: Vec<String> = vec![session_id.to_string()];
-    if params.linked_only {
-        conditions.push("message_id IS NOT NULL".to_string());
-    }
-    let where_clause = format!("WHERE {}", conditions.join(" AND "));
-    bindings.push(params.limit.min(500).to_string());
-    let limit_idx = bindings.len();
-    bindings.push(params.offset.to_string());
-    let offset_idx = bindings.len();
-
-    let raw_select = if params.include_raw {
-        "raw_json"
-    } else {
-        "NULL AS raw_json"
-    };
-    let sql = format!(
-        "SELECT id, event_name, timestamp, timestamp_nano, session_id,
-                message_id, model, cost_usd_reported, cost_cents_computed,
-                processed, {raw_select}
-         FROM otel_events
-         {where_clause}
-         ORDER BY timestamp DESC, id DESC
-         LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
-    );
-    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bindings
-        .iter()
-        .map(|v| v as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(bind_refs.as_slice(), |row| {
-            let processed: i64 = row.get(9)?;
-            Ok(OtelEventRow {
-                id: row.get(0)?,
-                event_name: row.get(1)?,
-                timestamp: row.get(2)?,
-                timestamp_nano: row.get(3)?,
-                session_id: row.get(4)?,
-                message_id: row.get(5)?,
-                model: row.get(6)?,
-                cost_usd_reported: row.get(7)?,
-                cost_cents_computed: row.get(8)?,
-                processed: processed != 0,
-                raw_json: row.get(10)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
-}
-
 pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<MessageDetail>> {
     let message_result = conn.query_row(
         "SELECT id, session_id, timestamp, role, model,
@@ -1127,71 +950,9 @@ pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<Mess
     let tags = message_tags(conn, message_id)?;
     message.tags = tags.clone();
 
-    let hook_events: Vec<SessionHookEventRow> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, timestamp, event, provider, session_id,
-                    message_id, link_confidence, tool_name,
-                    tool_use_id, tool_duration_ms, mcp_server,
-                    message_request_id, raw_json
-             FROM hook_events
-             WHERE message_id = ?1
-             ORDER BY timestamp ASC, id ASC",
-        )?;
-        stmt.query_map(params![message_id], |row| {
-            Ok(SessionHookEventRow {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                event: row.get(2)?,
-                provider: row.get(3)?,
-                session_id: row.get(4)?,
-                message_id: row.get(5)?,
-                link_confidence: row.get(6)?,
-                tool_name: row.get(7)?,
-                tool_use_id: row.get(8)?,
-                tool_duration_ms: row.get(9)?,
-                mcp_server: row.get(10)?,
-                message_request_id: row.get(11)?,
-                raw_json: row.get(12)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect()
-    };
-
-    let otel_events: Vec<OtelEventRow> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, event_name, timestamp, timestamp_nano, session_id,
-                    message_id, model, cost_usd_reported, cost_cents_computed,
-                    processed, raw_json
-             FROM otel_events
-             WHERE message_id = ?1
-             ORDER BY timestamp ASC, id ASC",
-        )?;
-        stmt.query_map(params![message_id], |row| {
-            let processed: i64 = row.get(9)?;
-            Ok(OtelEventRow {
-                id: row.get(0)?,
-                event_name: row.get(1)?,
-                timestamp: row.get(2)?,
-                timestamp_nano: row.get(3)?,
-                session_id: row.get(4)?,
-                message_id: row.get(5)?,
-                model: row.get(6)?,
-                cost_usd_reported: row.get(7)?,
-                cost_cents_computed: row.get(8)?,
-                processed: processed != 0,
-                raw_json: row.get(10)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect()
-    };
-
     Ok(Some(MessageDetail {
         tools: message.tools.clone(),
         message,
         tags,
-        hook_events,
-        otel_events,
     }))
 }

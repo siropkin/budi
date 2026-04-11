@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 /// Expected schema version for the current binary.
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// Result of running schema repair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -136,6 +136,9 @@ fn run_version_migrations(conn: &Connection) -> Result<()> {
     if current_version(conn) == 20 {
         migrate_v20_to_v21(conn)?;
     }
+    if current_version(conn) == 21 {
+        migrate_v21_to_v22(conn)?;
+    }
     Ok(())
 }
 
@@ -193,8 +196,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
         );
         ",
     )?;
-    create_sessions_and_hook_events(conn)?;
-    create_otel_events(conn)?;
+    create_sessions(conn)?;
     ensure_rollup_schema(conn, false)?;
     create_indexes(conn)?;
     Ok(())
@@ -202,12 +204,8 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
 
 // ── Shared helpers ─────────────────────────────────────────────────────
 
-/// Create sessions and hook_events tables.
-///
-/// Note: `repo_id` and `git_branch` are denormalized on both `messages` (canonical
-/// for cost queries) and `sessions` (metadata context from any source).
-/// Messages are the source of truth for cost queries.
-fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
+/// Create sessions table (v22+, hook_events dropped).
+fn create_sessions(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS sessions (
@@ -228,30 +226,12 @@ fn create_sessions_and_hook_events(conn: &Connection) -> Result<()> {
             git_branch         TEXT,
             title              TEXT
         );
-
-        CREATE TABLE IF NOT EXISTS hook_events (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider            TEXT NOT NULL,
-            event               TEXT NOT NULL,
-            session_id          TEXT,
-            timestamp           TEXT NOT NULL,
-            model               TEXT,
-            tool_name           TEXT,
-            tool_duration_ms    INTEGER,
-            tool_call_count     INTEGER,
-            raw_json            TEXT,
-            mcp_server          TEXT,
-            message_id          TEXT,
-            message_request_id  TEXT,
-            tool_use_id         TEXT,
-            link_confidence     TEXT
-        );
         ",
     )?;
     Ok(())
 }
 
-/// Create otel_events table for raw OTEL event storage.
+/// Create otel_events table (used by v10→v11 migration; dropped in v22).
 fn create_otel_events(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -687,6 +667,21 @@ fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
     ensure_rollup_schema(conn, true)?;
     create_indexes(conn)?;
     conn.pragma_update(None, "user_version", 21u32)?;
+    Ok(())
+}
+
+/// Drop hook_events and otel_events tables. The proxy is now the sole live data
+/// source; these legacy tables are no longer needed.
+fn migrate_v21_to_v22(conn: &Connection) -> Result<()> {
+    tracing::info!("Migrating schema v21 → v22: dropping hook_events and otel_events tables");
+    conn.execute_batch(
+        "
+        DROP TABLE IF EXISTS hook_events;
+        DROP TABLE IF EXISTS otel_events;
+        ",
+    )?;
+    create_indexes(conn)?;
+    conn.pragma_update(None, "user_version", 22u32)?;
     Ok(())
 }
 
@@ -1659,24 +1654,6 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 
-        -- hook_events
-        CREATE INDEX IF NOT EXISTS idx_hook_events_session ON hook_events(session_id);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_timestamp ON hook_events(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_provider ON hook_events(provider);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_timestamp ON hook_events(event, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool ON hook_events(event, tool_name);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_session ON hook_events(event, session_id);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_mcp_server ON hook_events(mcp_server);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_tool_provider ON hook_events(event, tool_name, provider);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_mcp ON hook_events(event, mcp_server);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_event_session_ts ON hook_events(event, session_id, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_tool_use_id_partial ON hook_events(tool_use_id) WHERE tool_use_id IS NOT NULL;
-        CREATE INDEX IF NOT EXISTS idx_hook_events_message_request_id_partial ON hook_events(message_request_id) WHERE message_request_id IS NOT NULL;
-
-        -- otel_events
-        CREATE INDEX IF NOT EXISTS idx_otel_events_session ON otel_events(session_id);
-        CREATE INDEX IF NOT EXISTS idx_otel_events_timestamp ON otel_events(timestamp);
         ",
     )?;
 
@@ -1688,30 +1665,6 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions({sessions_id_col});
         "
     ))?;
-
-    if table_exists(conn, "hook_events")? {
-        if has_column(conn, "hook_events", "message_id")? {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_hook_events_message_id_ts ON hook_events(message_id, timestamp);",
-            )?;
-        } else if has_column(conn, "hook_events", "message_uuid")? {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_hook_events_message_ts ON hook_events(message_uuid, timestamp);",
-            )?;
-        }
-    }
-
-    if table_exists(conn, "otel_events")? {
-        if has_column(conn, "otel_events", "message_id")? {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_otel_events_message_id_ts ON otel_events(message_id, timestamp);",
-            )?;
-        } else if has_column(conn, "otel_events", "message_uuid")? {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_otel_events_message_ts ON otel_events(message_uuid, timestamp);",
-            )?;
-        }
-    }
 
     if table_exists(conn, "messages")? && table_exists(conn, "tags")? {
         conn.execute_batch(&format!(
@@ -1822,42 +1775,11 @@ fn expected_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
         "idx_messages_request_id".to_string(),
         "idx_sessions_provider".to_string(),
         "idx_sessions_started".to_string(),
-        "idx_hook_events_session".to_string(),
-        "idx_hook_events_timestamp".to_string(),
-        "idx_hook_events_event".to_string(),
-        "idx_hook_events_provider".to_string(),
-        "idx_hook_events_event_timestamp".to_string(),
-        "idx_hook_events_event_tool".to_string(),
-        "idx_hook_events_event_session".to_string(),
-        "idx_hook_events_mcp_server".to_string(),
-        "idx_hook_events_event_tool_provider".to_string(),
-        "idx_hook_events_event_mcp".to_string(),
-        "idx_hook_events_event_session_ts".to_string(),
-        "idx_hook_events_tool_use_id_partial".to_string(),
-        "idx_hook_events_message_request_id_partial".to_string(),
-        "idx_otel_events_session".to_string(),
-        "idx_otel_events_timestamp".to_string(),
         "idx_tags_message".to_string(),
         "idx_tags_msg_key_val".to_string(),
         "idx_sessions_id".to_string(),
         "idx_sessions_session_id".to_string(),
     ];
-
-    if table_exists(conn, "hook_events")? {
-        if has_column(conn, "hook_events", "message_id")? {
-            indexes.push("idx_hook_events_message_id_ts".to_string());
-        } else if has_column(conn, "hook_events", "message_uuid")? {
-            indexes.push("idx_hook_events_message_ts".to_string());
-        }
-    }
-
-    if table_exists(conn, "otel_events")? {
-        if has_column(conn, "otel_events", "message_id")? {
-            indexes.push("idx_otel_events_message_id_ts".to_string());
-        } else if has_column(conn, "otel_events", "message_uuid")? {
-            indexes.push("idx_otel_events_message_ts".to_string());
-        }
-    }
 
     if table_exists(conn, "messages")? && table_exists(conn, "tags")? {
         indexes.push("idx_message_tags_pair".to_string());
@@ -1928,79 +1850,6 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         added_columns.push("tags.message_id".to_string());
     }
 
-    if ensure_column(conn, "hook_events", "mcp_server", "mcp_server TEXT")? {
-        added_columns.push("hook_events.mcp_server".to_string());
-    }
-    if table_exists(conn, "hook_events")?
-        && has_column(conn, "hook_events", "message_uuid")?
-        && !has_column(conn, "hook_events", "message_id")?
-    {
-        conn.execute_batch("ALTER TABLE hook_events RENAME COLUMN message_uuid TO message_id;")?;
-        added_columns.push("hook_events.message_id".to_string());
-    }
-    if ensure_column(conn, "hook_events", "message_id", "message_id TEXT")? {
-        added_columns.push("hook_events.message_id".to_string());
-    }
-    if ensure_column(
-        conn,
-        "hook_events",
-        "message_request_id",
-        "message_request_id TEXT",
-    )? {
-        added_columns.push("hook_events.message_request_id".to_string());
-    }
-    if ensure_column(conn, "hook_events", "tool_use_id", "tool_use_id TEXT")? {
-        added_columns.push("hook_events.tool_use_id".to_string());
-    }
-    if ensure_column(
-        conn,
-        "hook_events",
-        "link_confidence",
-        "link_confidence TEXT",
-    )? {
-        added_columns.push("hook_events.link_confidence".to_string());
-    }
-    if ensure_column(
-        conn,
-        "otel_events",
-        "processed",
-        "processed INTEGER NOT NULL DEFAULT 0",
-    )? {
-        added_columns.push("otel_events.processed".to_string());
-    }
-    if table_exists(conn, "otel_events")?
-        && has_column(conn, "otel_events", "message_uuid")?
-        && !has_column(conn, "otel_events", "message_id")?
-    {
-        conn.execute_batch("ALTER TABLE otel_events RENAME COLUMN message_uuid TO message_id;")?;
-        added_columns.push("otel_events.message_id".to_string());
-    }
-    if ensure_column(conn, "otel_events", "message_id", "message_id TEXT")? {
-        added_columns.push("otel_events.message_id".to_string());
-    }
-    if ensure_column(conn, "otel_events", "timestamp_nano", "timestamp_nano TEXT")? {
-        added_columns.push("otel_events.timestamp_nano".to_string());
-    }
-    if ensure_column(conn, "otel_events", "model", "model TEXT")? {
-        added_columns.push("otel_events.model".to_string());
-    }
-    if ensure_column(
-        conn,
-        "otel_events",
-        "cost_usd_reported",
-        "cost_usd_reported REAL",
-    )? {
-        added_columns.push("otel_events.cost_usd_reported".to_string());
-    }
-    if ensure_column(
-        conn,
-        "otel_events",
-        "cost_cents_computed",
-        "cost_cents_computed REAL",
-    )? {
-        added_columns.push("otel_events.cost_cents_computed".to_string());
-    }
-
     let has_hourly_rollups = table_exists(conn, "message_rollups_hourly")?;
     let has_daily_rollups = table_exists(conn, "message_rollups_daily")?;
     let has_rollup_insert_trigger = trigger_exists(conn, "trg_messages_rollup_insert")?;
@@ -2049,6 +1898,56 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
+    /// `normalize_session_ids` (v15→v16) unions `hook_events` / `otel_events`. After v22 those
+    /// tables are absent on a fresh migrate; recreate minimal stubs when tests rewind
+    /// `user_version` to 15 on an otherwise current schema.
+    fn recreate_dropped_hook_otel_tables(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE hook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                event TEXT NOT NULL,
+                session_id TEXT,
+                timestamp TEXT NOT NULL,
+                model TEXT,
+                tool_name TEXT,
+                tool_duration_ms INTEGER,
+                tool_call_count INTEGER,
+                raw_json TEXT,
+                mcp_server TEXT
+            );
+            CREATE TABLE otel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_name TEXT NOT NULL,
+                session_id TEXT,
+                timestamp TEXT NOT NULL,
+                raw_json TEXT,
+                processed INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    fn hook_events_table_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_events')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn otel_events_table_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='otel_events')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     /// Simulate an old database, then migrate and verify it reaches
     /// the current SCHEMA_VERSION with all expected tables.
     #[test]
@@ -2081,12 +1980,8 @@ mod tests {
             // Verify core tables exist
             conn.execute_batch("SELECT count(*) FROM messages").unwrap();
             conn.execute_batch("SELECT count(*) FROM sessions").unwrap();
-            conn.execute_batch("SELECT count(*) FROM hook_events")
-                .unwrap();
             conn.execute_batch("SELECT count(*) FROM tags").unwrap();
             conn.execute_batch("SELECT count(*) FROM sync_state")
-                .unwrap();
-            conn.execute_batch("SELECT count(*) FROM otel_events")
                 .unwrap();
 
             // Verify old table was dropped
@@ -2169,9 +2064,18 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
 
-        // otel_events table should exist
-        conn.execute_batch("SELECT count(*) FROM otel_events")
+        // v21→v22 drops otel_events; migration chain must still complete.
+        let otel_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='otel_events')",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
+        assert!(
+            !otel_exists,
+            "otel_events should not exist at SCHEMA_VERSION"
+        );
     }
 
     /// Simulate a database with orphaned FK references (tags pointing to
@@ -2604,9 +2508,7 @@ mod tests {
         conn.execute("SELECT id FROM sessions LIMIT 0", [])
             .expect("sessions should have id column after full migration");
 
-        // Verify conversation_id was renamed to session_id in hook_events
-        conn.execute("SELECT session_id FROM hook_events LIMIT 0", [])
-            .expect("hook_events.session_id should exist");
+        // v22 drops hook_events; session/message linkage is verified via sessions only.
 
         // Verify original data is preserved
         let session_exists: bool = conn
@@ -2617,13 +2519,6 @@ mod tests {
             )
             .unwrap();
         assert!(session_exists, "original session should be preserved");
-
-        let hook_session: String = conn
-            .query_row("SELECT session_id FROM hook_events LIMIT 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(hook_session, "sess-a");
 
         // Verify backfill created a stub session for the orphan message
         let orphan_session_exists: bool = conn
@@ -2712,6 +2607,9 @@ mod tests {
         migrate_v20_to_v21(&conn).unwrap();
         assert_eq!(current_version(&conn), 21, "v20→v21 must set version to 21");
 
+        migrate_v21_to_v22(&conn).unwrap();
+        assert_eq!(current_version(&conn), 22, "v21→v22 must set version to 22");
+
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
     }
 
@@ -2719,6 +2617,7 @@ mod tests {
     fn migrate_v15_to_v16_normalizes_prefixed_cursor_session_ids() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
+        recreate_dropped_hook_otel_tables(&conn);
         conn.pragma_update(None, "user_version", 15u32).unwrap();
 
         let old_id = "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb";
@@ -2775,29 +2674,22 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let hook_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM hook_events WHERE session_id = ?1",
-                [new_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let otel_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM otel_events WHERE session_id = ?1",
-                [new_id],
-                |r| r.get(0),
-            )
-            .unwrap();
         assert_eq!(msg_count, 1);
-        assert_eq!(hook_count, 1);
-        assert_eq!(otel_count, 1);
+        assert!(
+            !hook_events_table_exists(&conn),
+            "v22 should drop hook_events after migration"
+        );
+        assert!(
+            !otel_events_table_exists(&conn),
+            "v22 should drop otel_events after migration"
+        );
     }
 
     #[test]
     fn migrate_v15_to_v16_merges_colliding_session_rows() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
+        recreate_dropped_hook_otel_tables(&conn);
         conn.pragma_update(None, "user_version", 15u32).unwrap();
 
         let old_id = "cursor-d99dfe22-d05c-4c78-8698-015d06e5dabb";
@@ -3015,6 +2907,7 @@ mod tests {
     fn migrate_v17_to_v18_adds_linkage_columns_and_indexes() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
+        recreate_dropped_hook_otel_tables(&conn);
 
         conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
         conn.execute_batch(
@@ -3060,48 +2953,21 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(current_version(&conn), SCHEMA_VERSION);
 
-        conn.execute("SELECT message_id FROM hook_events LIMIT 0", [])
-            .expect("hook_events.message_id should exist");
-        conn.execute("SELECT message_request_id FROM hook_events LIMIT 0", [])
-            .expect("hook_events.message_request_id should exist");
-        conn.execute("SELECT tool_use_id FROM hook_events LIMIT 0", [])
-            .expect("hook_events.tool_use_id should exist");
-        conn.execute("SELECT link_confidence FROM hook_events LIMIT 0", [])
-            .expect("hook_events.link_confidence should exist");
-
-        conn.execute("SELECT message_id FROM otel_events LIMIT 0", [])
-            .expect("otel_events.message_id should exist");
-        conn.execute("SELECT timestamp_nano FROM otel_events LIMIT 0", [])
-            .expect("otel_events.timestamp_nano should exist");
-        conn.execute("SELECT model FROM otel_events LIMIT 0", [])
-            .expect("otel_events.model should exist");
-        conn.execute("SELECT cost_usd_reported FROM otel_events LIMIT 0", [])
-            .expect("otel_events.cost_usd_reported should exist");
-        conn.execute("SELECT cost_cents_computed FROM otel_events LIMIT 0", [])
-            .expect("otel_events.cost_cents_computed should exist");
-
-        let has_hook_message_idx: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hook_events_message_id_ts')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let has_otel_message_idx: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_otel_events_message_id_ts')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(has_hook_message_idx);
-        assert!(has_otel_message_idx);
+        assert!(
+            !hook_events_table_exists(&conn),
+            "v22 drops hook_events after v17→v18 linkage migration runs in the chain"
+        );
+        assert!(
+            !otel_events_table_exists(&conn),
+            "v22 drops otel_events after v17→v18 linkage migration runs in the chain"
+        );
     }
 
     #[test]
     fn migrate_v17_to_v18_backfills_hook_and_otel_links() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
+        recreate_dropped_hook_otel_tables(&conn);
 
         conn.execute(
             "INSERT INTO messages (id, session_id, role, timestamp, model, request_id, cost_confidence, cost_cents, provider)
@@ -3169,41 +3035,24 @@ mod tests {
 
         migrate(&conn).unwrap();
 
-        let (message_request_id, tool_use_id, message_id, confidence): (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = conn
-            .query_row(
-                "SELECT message_request_id, tool_use_id, message_id, link_confidence
-                 FROM hook_events
-                 LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(message_request_id.as_deref(), Some("msg_123"));
-        assert_eq!(tool_use_id.as_deref(), Some("toolu_456"));
-        assert_eq!(message_id.as_deref(), Some("m-link"));
-        assert_eq!(confidence.as_deref(), Some("exact_request_id"));
+        assert_eq!(current_version(&conn), SCHEMA_VERSION);
+        assert!(
+            !hook_events_table_exists(&conn),
+            "legacy linkage tables are dropped at v22"
+        );
+        assert!(
+            !otel_events_table_exists(&conn),
+            "legacy linkage tables are dropped at v22"
+        );
 
-        let (otel_message_id, model, cost_cents_computed): (
-            Option<String>,
-            Option<String>,
-            Option<f64>,
-        ) = conn
+        let msg_exists: bool = conn
             .query_row(
-                "SELECT message_id, model, cost_cents_computed
-                 FROM otel_events
-                 LIMIT 1",
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = 'm-link')",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(otel_message_id.as_deref(), Some("m-link"));
-        assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
-        assert_eq!(cost_cents_computed, Some(7.5));
+        assert!(msg_exists, "core message row should survive full migration");
     }
 
     #[test]

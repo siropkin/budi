@@ -395,8 +395,6 @@ The daemon is the single source of truth — the CLI never opens the database di
 |-------|------|
 | **messages** | Single cost entity — all token/cost data lives here (one row per API call) |
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
-| **hook_events** | Historical event log for tool stats and session metadata (read-only, ingestion removed) |
-| **otel_events** | Historical OpenTelemetry event storage (read-only, ingestion removed) |
 | **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status, repo, branch, ticket, cost) |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
@@ -424,7 +422,7 @@ budi is local-first, but you can now enforce tighter storage controls for raw pa
 
 | Env var | Default | Scope |
 |--------|---------|-------|
-| `BUDI_RETENTION_RAW_DAYS` | `30` | `sessions.raw_json` (and historical `hook_events.raw_json`, `otel_events.raw_json`) |
+| `BUDI_RETENTION_RAW_DAYS` | `30` | `sessions.raw_json` |
 | `BUDI_RETENTION_SESSION_METADATA_DAYS` | `90` | `sessions.user_email`, `sessions.workspace_root` |
 
 Use `off` to disable a retention window for a category.
@@ -443,14 +441,14 @@ Retention cleanup runs automatically after sync and queued realtime ingestion pr
 <details>
 <summary>Hooks (removed in 8.0)</summary>
 
-Hook-based ingestion (`budi hook`) has been removed. The proxy (port 9878) is now the sole live data source. Historical hook event data remains in the `hook_events` table for querying but no new events are ingested.
+Hook-based ingestion (`budi hook`) and the `hook_events` table have been removed. The proxy (port 9878) is now the sole live data source.
 
 </details>
 
 <details>
 <summary>OpenTelemetry (removed in 8.0)</summary>
 
-OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) have been removed. The proxy captures real-time cost data directly. Historical OTEL data remains in the `otel_events` table for querying but no new events are ingested.
+OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. The proxy captures real-time cost data directly.
 
 **Cost confidence levels:**
 
@@ -499,7 +497,6 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | GET | `/analytics/providers` | Per-provider breakdown |
 | GET | `/analytics/activity` | Token activity over time |
 | GET | `/analytics/tags` | Cost breakdown by tag |
-| GET | `/analytics/tools` | Tool usage frequency and duration |
 | GET | `/analytics/statusline` | Status line data |
 | GET | `/analytics/cache-efficiency` | Cache hit rates and savings |
 | GET | `/analytics/session-cost-curve` | Cost per message by session length |
@@ -509,8 +506,6 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | GET | `/analytics/sessions/{id}` | Session metadata and aggregate stats |
 | GET | `/analytics/sessions/{id}/messages` | Messages for a specific session |
 | GET | `/analytics/sessions/{id}/curve` | Session input token growth curve |
-| GET | `/analytics/sessions/{id}/hook-events` | Hook events linked to a session |
-| GET | `/analytics/sessions/{id}/otel-events` | OTEL events linked to a session |
 | GET | `/analytics/sessions/{id}/tags` | Tags for a specific session |
 | GET | `/analytics/session-health` | Session health vitals and tips |
 | GET | `/analytics/session-audit` | Session attribution/linking audit stats |

@@ -118,10 +118,6 @@ pub fn newest_ingested_data_at(conn: &Connection) -> Result<Option<String>> {
 
 /// Reset sync state and re-ingested data so the next sync starts from scratch.
 /// Used by `budi sync --force` after schema/parser changes.
-///
-/// Preserves `hook_events` — they come from real-time stdin hooks and cannot be
-/// reconstructed from source files. Sessions are rebuilt from the preserved
-/// hook_events so Cursor session attribution survives the reset.
 pub fn reset_sync_state(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "DELETE FROM sync_state;
@@ -129,55 +125,6 @@ pub fn reset_sync_state(conn: &Connection) -> Result<()> {
          DELETE FROM messages;
          DELETE FROM sessions;",
     )?;
-    rebuild_sessions_from_hooks(conn)?;
-    Ok(())
-}
-
-/// Replay all hook_events to rebuild the sessions table.
-/// Re-parses each event's raw_json and calls `upsert_session`, preserving
-/// the original timestamp ordering so session metadata accumulates correctly.
-fn rebuild_sessions_from_hooks(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT raw_json, provider, timestamp FROM hook_events
-         WHERE session_id IS NOT NULL
-         ORDER BY timestamp ASC",
-    )?;
-
-    let rows: Vec<(Option<String>, String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .context("Failed to query hook_events for session rebuild")?
-        .filter_map(|r| {
-            r.inspect_err(|e| tracing::warn!("Failed to map hook_event row: {e}"))
-                .ok()
-        })
-        .collect();
-
-    let mut rebuilt = 0;
-    for (raw_json, _provider, stored_ts) in &rows {
-        let Some(raw_json) = raw_json.as_deref() else {
-            continue;
-        };
-        let json: serde_json::Value = match serde_json::from_str(raw_json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let mut event = match crate::hooks::parse_hook_event(&json) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        // Use the stored timestamp (when the hook was originally received)
-        // instead of Utc::now() which parse_hook_event would set.
-        if let Ok(ts) = stored_ts.parse::<chrono::DateTime<chrono::Utc>>() {
-            event.timestamp = ts;
-        }
-        if crate::hooks::upsert_session(conn, &event).is_ok() {
-            rebuilt += 1;
-        }
-    }
-
-    if rebuilt > 0 {
-        tracing::info!("Rebuilt sessions from {rebuilt} hook events");
-    }
     Ok(())
 }
 
@@ -568,131 +515,7 @@ pub fn ingest_messages_with_sync(
     Ok(count)
 }
 
-type MessageRelinkRow = (
-    Option<String>,
-    Option<String>,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<f64>,
-);
-
-fn relink_unlinked_events_for_message(conn: &Connection, message_id: &str) -> Result<()> {
-    let row: Option<MessageRelinkRow> = conn
-        .query_row(
-            "SELECT session_id, request_id, timestamp, role, cost_confidence, model, cost_cents
-             FROM messages
-             WHERE id = ?1",
-            params![message_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .ok();
-
-    let Some((session_id, request_id, timestamp, role, cost_confidence, model, cost_cents)) = row
-    else {
-        return Ok(());
-    };
-    let Some(session_id) = session_id.filter(|sid| !sid.trim().is_empty()) else {
-        return Ok(());
-    };
-
-    if let Some(request_id) = request_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        conn.execute(
-            "UPDATE hook_events
-             SET message_id = ?1,
-                 link_confidence = ?2
-             WHERE message_id IS NULL
-               AND session_id = ?3
-               AND message_request_id = ?4",
-            params![
-                message_id,
-                crate::hooks::HOOK_LINK_EXACT_REQUEST_ID,
-                session_id,
-                request_id
-            ],
-        )?;
-    }
-
-    let mut tool_stmt = conn.prepare(
-        "SELECT DISTINCT value
-         FROM tags
-         WHERE message_id = ?1
-           AND key = 'tool_use_id'
-           AND TRIM(value) <> ''",
-    )?;
-    let tool_use_ids: Vec<String> = tool_stmt
-        .query_map(params![message_id], |row| row.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-    for tool_use_id in tool_use_ids {
-        conn.execute(
-            "UPDATE hook_events
-             SET message_id = ?1,
-                 link_confidence = CASE
-                    WHEN link_confidence IS NULL OR TRIM(link_confidence) = '' OR link_confidence = ?2
-                    THEN ?3
-                    ELSE link_confidence
-                 END
-             WHERE message_id IS NULL
-               AND session_id = ?4
-               AND tool_use_id = ?5",
-            params![
-                message_id,
-                crate::hooks::HOOK_LINK_UNLINKED,
-                crate::hooks::HOOK_LINK_EXACT_TOOL_USE_ID,
-                session_id,
-                tool_use_id
-            ],
-        )?;
-    }
-
-    if role == "assistant"
-        && cost_confidence == "otel_exact"
-        && let Ok(event_ts) = DateTime::parse_from_rfc3339(&timestamp)
-    {
-        let event_ts = event_ts.with_timezone(&Utc);
-        let ts_lo = (event_ts - chrono::Duration::seconds(1)).to_rfc3339();
-        let ts_hi = (event_ts + chrono::Duration::seconds(1)).to_rfc3339();
-        let otel_id: Option<i64> = conn
-            .query_row(
-                "SELECT id
-                 FROM otel_events
-                 WHERE session_id = ?1
-                   AND message_id IS NULL
-                   AND timestamp BETWEEN ?2 AND ?3
-                 ORDER BY ABS(strftime('%s', timestamp) - strftime('%s', ?4)), id DESC
-                 LIMIT 1",
-                params![session_id, ts_lo, ts_hi, timestamp],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(otel_id) = otel_id {
-            conn.execute(
-                "UPDATE otel_events
-                 SET message_id = ?2,
-                     model = COALESCE(model, ?3),
-                     cost_cents_computed = COALESCE(cost_cents_computed, ?4)
-                 WHERE id = ?1",
-                params![otel_id, message_id, model, cost_cents],
-            )?;
-        }
-    }
-
+fn relink_unlinked_events_for_message(_conn: &Connection, _message_id: &str) -> Result<()> {
     Ok(())
 }
 

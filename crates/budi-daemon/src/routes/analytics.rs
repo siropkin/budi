@@ -802,72 +802,6 @@ pub struct SessionMessagesQueryParams {
     pub offset: Option<usize>,
 }
 
-#[derive(serde::Deserialize)]
-pub struct SessionHookEventsQueryParams {
-    pub linked_only: Option<bool>,
-    pub event: Option<String>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-    pub include_raw: Option<bool>,
-}
-
-#[derive(serde::Deserialize)]
-pub struct SessionOtelEventsQueryParams {
-    pub linked_only: Option<bool>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-    pub include_raw: Option<bool>,
-}
-
-pub async fn analytics_session_hook_events(
-    Path(session_id): Path<String>,
-    Query(params): Query<SessionHookEventsQueryParams>,
-) -> Result<Json<Vec<analytics::SessionHookEventRow>>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::session_hook_events(
-            &conn,
-            &session_id,
-            &analytics::SessionHookEventsParams {
-                linked_only: params.linked_only.unwrap_or(false),
-                event: params.event.as_deref(),
-                limit: params.limit.unwrap_or(50).min(500),
-                offset: params.offset.unwrap_or(0),
-                include_raw: params.include_raw.unwrap_or(false),
-            },
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_session_otel_events(
-    Path(session_id): Path<String>,
-    Query(params): Query<SessionOtelEventsQueryParams>,
-) -> Result<Json<Vec<analytics::OtelEventRow>>, (StatusCode, Json<serde_json::Value>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        analytics::session_otel_events(
-            &conn,
-            &session_id,
-            &analytics::SessionOtelEventsParams {
-                linked_only: params.linked_only.unwrap_or(false),
-                limit: params.limit.unwrap_or(50).min(500),
-                offset: params.offset.unwrap_or(0),
-                include_raw: params.include_raw.unwrap_or(false),
-            },
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
 pub async fn analytics_message_detail(
     Path(message_uuid): Path<String>,
 ) -> Result<Json<analytics::MessageDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -1006,27 +940,5 @@ pub async fn analytics_session_audit()
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
-    Ok(Json(result))
-}
-
-pub async fn analytics_tools(
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<budi_core::hooks::ToolStats>>, (StatusCode, Json<serde_json::Value>)> {
-    let filters = parse_dimension_filters(&params.filters);
-    let result = tokio::task::spawn_blocking(move || {
-        let db_path = analytics::db_path()?;
-        let conn = analytics::open_db(&db_path)?;
-        budi_core::hooks::query_tool_stats_with_filters(
-            &conn,
-            params.since.as_deref(),
-            params.until.as_deref(),
-            &filters,
-            params.limit.unwrap_or(20).min(200),
-        )
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
-
     Ok(Json(result))
 }

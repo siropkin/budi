@@ -214,18 +214,13 @@ pub fn sanitize_hook_raw_json(raw_json: &str, mode: PrivacyMode) -> Option<Strin
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetentionReport {
-    pub hook_raw_scrubbed: usize,
-    pub otel_raw_scrubbed: usize,
     pub session_raw_scrubbed: usize,
     pub session_metadata_scrubbed: usize,
 }
 
 impl RetentionReport {
     pub fn touched_rows(&self) -> usize {
-        self.hook_raw_scrubbed
-            + self.otel_raw_scrubbed
-            + self.session_raw_scrubbed
-            + self.session_metadata_scrubbed
+        self.session_raw_scrubbed + self.session_metadata_scrubbed
     }
 }
 
@@ -244,20 +239,6 @@ pub fn enforce_retention_with_policy(
 
     if let Some(days) = policy.raw_retention_days {
         let cutoff = retention_modifier(days);
-        report.hook_raw_scrubbed = conn.execute(
-            "UPDATE hook_events
-             SET raw_json = NULL
-             WHERE raw_json IS NOT NULL
-               AND julianday(timestamp) < julianday('now', ?1)",
-            params![cutoff],
-        )?;
-        report.otel_raw_scrubbed = conn.execute(
-            "UPDATE otel_events
-             SET raw_json = NULL
-             WHERE raw_json IS NOT NULL
-               AND julianday(timestamp) < julianday('now', ?1)",
-            params![cutoff],
-        )?;
         report.session_raw_scrubbed = conn.execute(
             "UPDATE sessions
              SET raw_json = NULL
@@ -283,10 +264,8 @@ pub fn enforce_retention_with_policy(
 
     if report.touched_rows() > 0 {
         tracing::info!(
-            "Privacy retention scrubbed {} rows (hook_raw={}, otel_raw={}, session_raw={}, session_metadata={})",
+            "Privacy retention scrubbed {} rows (session_raw={}, session_metadata={})",
             report.touched_rows(),
-            report.hook_raw_scrubbed,
-            report.otel_raw_scrubbed,
             report.session_raw_scrubbed,
             report.session_metadata_scrubbed
         );
@@ -352,32 +331,6 @@ mod tests {
         let fresh_ts = (Utc::now() - Duration::days(2)).to_rfc3339();
 
         conn.execute(
-            "INSERT INTO hook_events (provider, event, session_id, timestamp, raw_json)
-             VALUES ('claude_code', 'post_tool_use', 's-old', ?1, '{\"old\":true}')",
-            params![old_ts],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO hook_events (provider, event, session_id, timestamp, raw_json)
-             VALUES ('claude_code', 'post_tool_use', 's-new', ?1, '{\"new\":true}')",
-            params![fresh_ts],
-        )
-        .unwrap();
-
-        conn.execute(
-            "INSERT INTO otel_events (event_name, session_id, timestamp, raw_json, processed)
-             VALUES ('claude_code.api_request', 's-old', ?1, '{\"old\":true}', 1)",
-            params![old_ts],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO otel_events (event_name, session_id, timestamp, raw_json, processed)
-             VALUES ('claude_code.api_request', 's-new', ?1, '{\"new\":true}', 1)",
-            params![fresh_ts],
-        )
-        .unwrap();
-
-        conn.execute(
             "INSERT INTO sessions (id, provider, started_at, user_email, workspace_root, raw_json)
              VALUES ('s-old', 'claude_code', ?1, 'old@example.com', '/old/path', '{\"old\":true}')",
             params![old_ts],
@@ -396,27 +349,8 @@ mod tests {
             session_metadata_retention_days: Some(30),
         };
         let report = enforce_retention_with_policy(&conn, &policy).unwrap();
-        assert_eq!(report.hook_raw_scrubbed, 1);
-        assert_eq!(report.otel_raw_scrubbed, 1);
         assert_eq!(report.session_raw_scrubbed, 1);
         assert_eq!(report.session_metadata_scrubbed, 1);
-
-        let old_hook_raw: Option<String> = conn
-            .query_row(
-                "SELECT raw_json FROM hook_events WHERE session_id='s-old'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let new_hook_raw: Option<String> = conn
-            .query_row(
-                "SELECT raw_json FROM hook_events WHERE session_id='s-new'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(old_hook_raw.is_none());
-        assert!(new_hook_raw.is_some());
 
         let old_user_email: Option<String> = conn
             .query_row(
