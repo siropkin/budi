@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -674,91 +673,43 @@ fn install_cursor_hooks() -> Result<()> {
     Ok(())
 }
 
-static CURSOR_EXTENSION_VSIX: &[u8] =
-    include_bytes!("../../../../extensions/cursor-budi/cursor-budi.vsix");
-static CURSOR_EXTENSION_PACKAGE_JSON: &str =
-    include_str!("../../../../extensions/cursor-budi/package.json");
-
 fn install_cursor_extension(warnings: &mut Vec<String>) {
-    if CURSOR_EXTENSION_VSIX.is_empty() {
+    if is_cursor_extension_installed() {
+        println!("  Extension: Cursor extension already installed");
         return;
     }
 
     let cursor_cli = match find_cursor_cli() {
         Some(c) => c,
-        None => return,
-    };
-
-    let bundled_version = bundled_extension_version();
-    let installed_version = installed_extension_version(&cursor_cli);
-
-    if let (Some(installed), Some(bundled)) =
-        (installed_version.as_deref(), bundled_version.as_deref())
-        && compare_versions(installed, bundled) != Ordering::Less
-    {
-        println!("  Extension: Cursor extension already installed (v{installed})");
-        return;
-    }
-
-    let temp_dir = match create_secure_temp_dir("budi-vsix") {
-        Ok(path) => path,
-        Err(e) => {
-            warnings.push(format!("Cursor extension temp dir: {e}"));
+        None => {
+            println!(
+                "  Extension: Cursor CLI not found. \
+                 Install the budi extension from the VS Code Marketplace \
+                 or download from https://github.com/siropkin/budi/releases"
+            );
             return;
         }
     };
 
-    let vsix_path = temp_dir.join("cursor-budi.vsix");
-    if let Err(e) = fs::write(&vsix_path, CURSOR_EXTENSION_VSIX) {
-        warnings.push(format!("Cursor extension write temp file: {e}"));
-        let _ = fs::remove_dir_all(&temp_dir);
-        return;
-    }
-
+    // Try to install from VS Code Marketplace first
     let result = Command::new(&cursor_cli)
-        .args([
-            "--install-extension",
-            &vsix_path.to_string_lossy(),
-            "--force",
-        ])
+        .args(["--install-extension", "siropkin.budi", "--force"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
 
-    let _ = fs::remove_dir_all(&temp_dir);
-
     match result {
         Ok(status) if status.success() => {
-            if let Some(installed) = installed_version {
-                println!("  Extension: updated Cursor extension (from v{installed})");
-            } else {
-                println!("  Extension: installed Cursor extension");
-            }
+            println!("  Extension: installed Cursor extension from marketplace");
         }
-        Ok(_) => {
-            warnings.push("Cursor extension install failed".to_string());
-        }
-        Err(e) => {
-            warnings.push(format!("could not run cursor CLI: {e}"));
+        _ => {
+            warnings.push(
+                "Could not install Cursor extension from marketplace. \
+                 Install manually: https://github.com/siropkin/budi/releases"
+                    .to_string(),
+            );
         }
     }
-}
-
-fn create_secure_temp_dir(prefix: &str) -> io::Result<PathBuf> {
-    let base = std::env::temp_dir();
-    for _ in 0..16 {
-        let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let candidate = base.join(format!("{prefix}-{stamp}-{}", std::process::id()));
-        match fs::create_dir(&candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "Failed to allocate temp directory",
-    ))
 }
 
 /// Check if the `cursor` CLI is on PATH (or at the well-known macOS location).
@@ -778,68 +729,6 @@ pub fn find_cursor_cli() -> Option<String> {
             .map(|s| s.success())
             .unwrap_or(false)
     })
-}
-
-fn installed_extension_version(cursor_cli: &str) -> Option<String> {
-    let output = Command::new(cursor_cli)
-        .args(["--list-extensions", "--show-versions"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let out = String::from_utf8_lossy(&output.stdout);
-    out.lines()
-        .find_map(parse_extension_line)
-        .map(|(_, version)| version)
-}
-
-fn parse_extension_line(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("siropkin.budi") {
-        return None;
-    }
-    if let Some((name, version)) = trimmed.split_once('@') {
-        Some((name.to_string(), version.to_string()))
-    } else {
-        Some(("siropkin.budi".to_string(), String::new()))
-    }
-}
-
-fn bundled_extension_version() -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(CURSOR_EXTENSION_PACKAGE_JSON).ok()?;
-    parsed
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string())
-}
-
-fn compare_versions(a: &str, b: &str) -> Ordering {
-    let parse = |v: &str| -> Option<Vec<u64>> {
-        let core = v
-            .split_once('-')
-            .map(|(lhs, _)| lhs)
-            .unwrap_or(v)
-            .trim_start_matches('v');
-        if core.is_empty() {
-            return None;
-        }
-        let mut out = Vec::new();
-        for part in core.split('.') {
-            out.push(part.parse::<u64>().ok()?);
-        }
-        Some(out)
-    };
-    match (parse(a), parse(b)) {
-        (Some(mut av), Some(mut bv)) => {
-            let max_len = av.len().max(bv.len());
-            av.resize(max_len, 0);
-            bv.resize(max_len, 0);
-            av.cmp(&bv)
-        }
-        _ => a.cmp(b),
-    }
 }
 
 /// Check if the budi Cursor extension is installed.
@@ -933,22 +822,6 @@ fn is_legacy_cursor_hook(entry: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compare_versions_orders_semver_like_values() {
-        assert_eq!(compare_versions("1.2.3", "1.2.3"), Ordering::Equal);
-        assert_eq!(compare_versions("1.2.4", "1.2.3"), Ordering::Greater);
-        assert_eq!(compare_versions("1.2.3", "1.3.0"), Ordering::Less);
-        assert_eq!(compare_versions("v1.10.0", "1.9.9"), Ordering::Greater);
-    }
-
-    #[test]
-    fn parse_extension_line_extracts_name_and_version() {
-        let parsed = parse_extension_line("siropkin.budi@0.5.1").expect("parsed");
-        assert_eq!(parsed.0, "siropkin.budi");
-        assert_eq!(parsed.1, "0.5.1");
-        assert!(parse_extension_line("other.ext@1.0.0").is_none());
-    }
 
     #[test]
     fn apply_statusline_adds_new_statusline_when_missing() {

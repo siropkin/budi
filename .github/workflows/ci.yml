@@ -32,38 +32,6 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "20"
-
-      - name: Install Cursor extension dependencies
-        run: |
-          cd extensions/cursor-budi
-          npm ci
-
-      - name: Lint Cursor extension
-        run: |
-          cd extensions/cursor-budi
-          npm run lint
-
-      - name: Check Cursor extension formatting
-        run: |
-          cd extensions/cursor-budi
-          npm run format:check
-
-      - name: Test Cursor extension
-        run: |
-          cd extensions/cursor-budi
-          npm run test
-
-      - name: Build Cursor extension package
-        run: |
-          cd extensions/cursor-budi
-          npm run build
-          npx vsce package --no-dependencies -o cursor-budi.vsix
-          test -s cursor-budi.vsix
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -87,8 +55,6 @@ jobs:
           echo "Shell script syntax checks passed"
 
       - name: Build release binaries
-        env:
-          BUDI_REQUIRE_CURSOR_VSIX: "1"
         run: cargo build --workspace --release --locked
 
       - name: Smoke test binaries
@@ -113,7 +79,7 @@ jobs:
             echo "::error::Daemon did not become healthy within 5s"
             exit 1
           }
-          curl -sf "http://127.0.0.1:${SMOKE_PORT}/health" | jq -e '.ok == true'
+          curl -sf "http://127.0.0.1:${SMOKE_PORT}/health" | jq -e '.ok == true and .api_version >= 1'
           RESPONSE=$(curl -s -w '\n%{http_code}' "http://127.0.0.1:${SMOKE_PORT}/analytics/summary")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | sed '$d')
@@ -141,6 +107,37 @@ jobs:
           ! test -f "$RUNNER_TEMP/budi-bin/budi"
           ! test -f "$RUNNER_TEMP/budi-bin/budi-daemon"
           echo "Uninstall verified: binaries removed"
+
+  # Extension CI runs independently of the Rust workspace (ADR-0086 §4).
+  cursor-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: cd extensions/cursor-budi && npm ci
+
+      - name: Lint
+        run: cd extensions/cursor-budi && npm run lint
+
+      - name: Check formatting
+        run: cd extensions/cursor-budi && npm run format:check
+
+      - name: Test
+        run: cd extensions/cursor-budi && npm run test
+
+      - name: Build and package
+        run: |
+          cd extensions/cursor-budi
+          npm run build
+          npx vsce package --no-dependencies -o cursor-budi.vsix
+          test -s cursor-budi.vsix
 
   macos-build:
     runs-on: macos-14
@@ -220,12 +217,13 @@ jobs:
 
   ci-success:
     if: always()
-    needs: [rust-checks, macos-build, windows-build]
+    needs: [rust-checks, cursor-extension, macos-build, windows-build]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs passed
         run: |
           if [[ "${{ needs.rust-checks.result }}" != "success" ]] || \
+             [[ "${{ needs.cursor-extension.result }}" != "success" ]] || \
              [[ "${{ needs.macos-build.result }}" != "success" ]] || \
              [[ "${{ needs.windows-build.result }}" != "success" ]]; then
             echo "::error::One or more CI jobs failed"

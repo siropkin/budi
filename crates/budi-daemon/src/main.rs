@@ -394,6 +394,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["ok"], true);
         assert!(json["version"].is_string(), "health should include version");
+        assert!(
+            json["api_version"].is_u64(),
+            "health should include api_version"
+        );
     }
 
     #[tokio::test]

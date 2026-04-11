@@ -12,6 +12,10 @@ use crate::AppState;
 pub struct HealthResponse {
     pub ok: bool,
     pub version: &'static str,
+    /// Daemon management API version.  The Cursor extension checks this field
+    /// on startup and warns if its expected API version is unsupported.
+    /// Bump when a breaking change is made to any management API endpoint.
+    pub api_version: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -217,10 +221,15 @@ fn is_cursor_extension_installed(home: &str) -> bool {
         || cursor_extension_installed_via_filesystem(home)
 }
 
+/// Current daemon management API version.  Bump when a breaking change is
+/// made to any management API endpoint consumed by budi-cursor or the CLI.
+pub const API_VERSION: u32 = 1;
+
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
+        api_version: API_VERSION,
     })
 }
 

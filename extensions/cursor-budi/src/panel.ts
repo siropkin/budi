@@ -100,8 +100,16 @@ function buildHtml(
 <head>${styles()}</head>
 <body>
   <div class="container">
-    <p class="muted">budi daemon offline</p>
-    <p class="hint">Run <code>budi init</code> to start the daemon.</p>
+    <div class="card">
+      <div class="card-title">Getting Started</div>
+      <p class="muted">budi daemon is not running.</p>
+      <ol class="setup-steps">
+        <li>Install budi and run <code>budi init</code></li>
+        <li>In Cursor Settings &rarr; Models, set<br/><strong>Override OpenAI Base URL</strong> to:<br/><code>http://localhost:9878</code></li>
+        <li>Restart Cursor</li>
+      </ol>
+      <p class="hint">All AI requests will be tracked automatically through the local proxy.</p>
+    </div>
   </div>
 </body>
 </html>`;
@@ -427,6 +435,15 @@ function styles(): string {
     .hint {
       font-size: 12px;
       color: var(--vscode-descriptionForeground);
+    }
+    .setup-steps {
+      margin: 8px 0;
+      padding-left: 20px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .setup-steps li {
+      margin-bottom: 6px;
     }
     code {
       background: var(--vscode-textCodeBlock-background);
