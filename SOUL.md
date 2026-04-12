@@ -1,6 +1,6 @@
 # SOUL.md
 
-Local-first cost analytics for AI coding agents (Claude Code, Codex CLI, Cursor, Copilot CLI). Tracks tokens, costs, and usage per message via proxy interception. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be imported via `budi import`. No cloud — everything on-machine.
+Local-first cost analytics for AI coding agents (Claude Code, Codex CLI, Cursor, Copilot CLI). Tracks tokens, costs, and usage per message via proxy interception. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be imported via `budi import`. Optional cloud sync (disabled by default) pushes pre-aggregated daily rollups to a team dashboard — prompts, code, and responses never leave the machine (see [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md)).
 
 ## Build & Test
 
@@ -40,7 +40,7 @@ The monorepo contains three logical products planned for eventual extraction (se
 |---------|----------|------|
 | **budi-core** | `crates/`, `scripts/`, `homebrew/` | Rust workspace: daemon, CLI, core business logic. Stays in this repo. |
 | **budi-cursor** | `extensions/cursor-budi/` | VS Code/Cursor extension. Communicates with daemon over HTTP and `budi` CLI. Will be extracted to its own repo. |
-| **budi-cloud** | `frontend/dashboard/` + future cloud API | Local dashboard (moves to cloud repo) and cloud ingest API. Will be extracted to its own repo. |
+| **budi-cloud** | `frontend/dashboard/` + `cloud/` | Local dashboard + cloud ingest API (Next.js + Supabase). Will be extracted to its own repo. |
 
 Key coupling points today:
 - The daemon embeds the built dashboard from `crates/budi-daemon/static/dashboard-dist/`.
@@ -76,6 +76,17 @@ Sources (JSONL files, Cursor API)
 ```
 
 Enricher order is critical - each depends on prior enrichers. Do not reorder.
+
+```
+Cloud sync (optional, disabled by default):
+Local SQLite daily rollups
+  -> Daemon sync worker (R4.2) reads aggregates only
+  -> Builds sync envelope (ADR-0083 §2): daily_rollups + session_summaries
+  -> HTTPS POST to api.getbudi.dev/v1/ingest (Bearer budi_<key>)
+  -> Supabase Postgres (UPSERT, idempotent)
+  -> Manager dashboard at app.getbudi.dev (R4.3)
+Never uploaded: prompts, responses, code, file paths, email, raw payloads
+```
 
 ### Database (SQLite, WAL mode, schema v21)
 
@@ -133,6 +144,10 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
 - `frontend/dashboard/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
 - `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`
+- `cloud/src/app/api/v1/ingest/route.ts` - Cloud ingest API: POST /v1/ingest (sync payload from daemon, UPSERT daily rollups + session summaries)
+- `cloud/src/app/api/v1/ingest/status/route.ts` - Cloud ingest API: GET /v1/ingest/status (watermark + sync health for a device)
+- `cloud/src/lib/supabase/admin.ts` - Server-side Supabase client (service_role key, bypasses RLS)
+- `cloud/supabase/migrations/001_ingest_schema.sql` - Supabase schema: orgs, users, devices, daily_rollups, session_summaries + RLS policies (ADR-0083 §8)
 - `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
 - `extensions/cursor-budi/src/panel.ts` - Side panel webview (session details, vitals, session list)
 - `extensions/cursor-budi/src/budiClient.ts` - Daemon HTTP client + health aggregation logic

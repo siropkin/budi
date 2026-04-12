@@ -14,3 +14,7 @@
 *.scratch.*
 *.tmp
 *.temp
+
+# Cloud (Next.js) — see also cloud/.gitignore for cloud-specific ignores
+cloud/node_modules/
+cloud/.next/

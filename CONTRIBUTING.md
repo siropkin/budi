@@ -87,6 +87,16 @@ npm run test
 npm run build
 ```
 
+### Cloud (Next.js ingest API + dashboard)
+
+```bash
+cd cloud
+npm ci
+npm run build
+```
+
+For local development, copy `.env.local.example` to `.env.local` and fill in your Supabase project keys.
+
 ## Install locally
 
 ```bash
