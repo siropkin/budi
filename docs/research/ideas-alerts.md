@@ -36,7 +36,8 @@ scope = { tag = "model:*opus*" }
 
 - **AlertConfig**: name, description, metric, period, threshold, scope (optional filters)
 - **AlertState**: current_value, triggered (bool), triggered_at, acknowledged (bool)
-- No DB table needed initially — evaluate config against live queries each sync cycle
+- No DB table needed initially — evaluate config against rollup tables periodically
+- In 8.0, data arrives via proxy (real-time) and rollup triggers update aggregates — alerts evaluate against these
 
 ## Surfaces
 
@@ -51,3 +52,10 @@ scope = { tag = "model:*opus*" }
 - Per-team alerts (cloud tier)
 - Rate-of-change alerts ("spending 3x faster than yesterday")
 - Cloud-pushed budget policies (post-8.0, see ADR-0083 trade-offs)
+
+## 8.0 Alignment Notes
+
+- R5 issues #106 (warn-only) and #107 (hard blocking) implement the budget engine at the proxy layer
+- Per ADR-0083, budget evaluation and enforcement are **local-first** — the cloud provides visibility but not enforcement
+- Proxy-based alerts can react in real-time (per-request cost threshold), not just periodic rollup evaluation
+- Hard blocking (#107) means the proxy can reject requests when budget is exceeded — more powerful than alert-only
