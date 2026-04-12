@@ -469,6 +469,135 @@ pub fn budi_config_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".config/budi"))
 }
 
+// ---------------------------------------------------------------------------
+// Cloud config — loaded from `~/.config/budi/cloud.toml` (ADR-0083 §9)
+// ---------------------------------------------------------------------------
+
+pub const DEFAULT_CLOUD_ENDPOINT: &str = "https://api.getbudi.dev";
+pub const DEFAULT_CLOUD_SYNC_INTERVAL_SECONDS: u64 = 300;
+pub const DEFAULT_CLOUD_SYNC_RETRY_MAX_SECONDS: u64 = 300;
+
+/// Cloud sync configuration loaded from `~/.config/budi/cloud.toml`.
+/// Created by `budi cloud join` or `budi cloud init`.
+/// Cloud sync is **disabled by default** — requires explicit opt-in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudConfig {
+    pub enabled: bool,
+    pub api_key: Option<String>,
+    pub device_id: Option<String>,
+    pub org_id: Option<String>,
+    pub endpoint: String,
+    pub sync: CloudSyncConfig,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: None,
+            device_id: None,
+            org_id: None,
+            endpoint: DEFAULT_CLOUD_ENDPOINT.to_string(),
+            sync: CloudSyncConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudSyncConfig {
+    pub interval_seconds: u64,
+    pub retry_max_seconds: u64,
+}
+
+impl Default for CloudSyncConfig {
+    fn default() -> Self {
+        Self {
+            interval_seconds: DEFAULT_CLOUD_SYNC_INTERVAL_SECONDS,
+            retry_max_seconds: DEFAULT_CLOUD_SYNC_RETRY_MAX_SECONDS,
+        }
+    }
+}
+
+impl CloudConfig {
+    /// Whether cloud sync should run, respecting `BUDI_CLOUD_ENABLED` env override.
+    pub fn effective_enabled(&self) -> bool {
+        if let Ok(val) = env::var("BUDI_CLOUD_ENABLED") {
+            return val.trim().eq_ignore_ascii_case("true") || val.trim() == "1";
+        }
+        self.enabled
+    }
+
+    /// Effective API key, respecting `BUDI_CLOUD_API_KEY` env override.
+    pub fn effective_api_key(&self) -> Option<String> {
+        if let Ok(val) = env::var("BUDI_CLOUD_API_KEY") {
+            let trimmed = val.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+        self.api_key.clone()
+    }
+
+    /// Effective endpoint, respecting `BUDI_CLOUD_ENDPOINT` env override.
+    pub fn effective_endpoint(&self) -> String {
+        if let Ok(val) = env::var("BUDI_CLOUD_ENDPOINT") {
+            let trimmed = val.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+        self.endpoint.clone()
+    }
+
+    /// Returns true only if cloud sync is configured enough to run:
+    /// enabled, has api_key, has device_id, has org_id.
+    pub fn is_ready(&self) -> bool {
+        self.effective_enabled()
+            && self.effective_api_key().is_some()
+            && self.device_id.is_some()
+            && self.org_id.is_some()
+    }
+}
+
+/// Path to the cloud config file.
+pub fn cloud_config_path() -> Result<PathBuf> {
+    Ok(budi_config_dir()?.join("cloud.toml"))
+}
+
+/// Load cloud config. Returns default (disabled) if the file does not exist.
+pub fn load_cloud_config() -> CloudConfig {
+    let path = match cloud_config_path() {
+        Ok(p) => p,
+        Err(_) => return CloudConfig::default(),
+    };
+    if !path.exists() {
+        return CloudConfig::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to read {}: {e}", path.display());
+            return CloudConfig::default();
+        }
+    };
+    // The TOML file uses a top-level [cloud] section per ADR-0083 §9.
+    // We parse into a wrapper that extracts the [cloud] table.
+    #[derive(Deserialize)]
+    struct Wrapper {
+        #[serde(default)]
+        cloud: CloudConfig,
+    }
+    match toml::from_str::<Wrapper>(&raw) {
+        Ok(w) => w.cloud,
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            CloudConfig::default()
+        }
+    }
+}
+
 pub fn repo_paths(repo_root: &Path) -> Result<RepoPaths> {
     let repos_root = repos_root_dir()?;
     let repo_id = repo_storage_id(repo_root);
@@ -827,5 +956,87 @@ daemon_port = 7878
         let config: BudiConfig = toml::from_str(toml_str).unwrap();
         assert!(config.proxy.enabled);
         assert_eq!(config.proxy.port, 9878);
+    }
+
+    // --- Cloud config tests ---
+
+    #[test]
+    fn cloud_config_defaults() {
+        let config = CloudConfig::default();
+        assert!(!config.enabled);
+        assert!(config.api_key.is_none());
+        assert!(config.device_id.is_none());
+        assert!(config.org_id.is_none());
+        assert_eq!(config.endpoint, "https://api.getbudi.dev");
+        assert_eq!(config.sync.interval_seconds, 300);
+        assert_eq!(config.sync.retry_max_seconds, 300);
+    }
+
+    #[test]
+    fn cloud_config_parses_full_toml() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            cloud: CloudConfig,
+        }
+        let toml_str = r#"
+[cloud]
+enabled = true
+api_key = "budi_abc123"
+device_id = "dev_xyz"
+org_id = "org_test"
+endpoint = "https://custom.example.com"
+
+[cloud.sync]
+interval_seconds = 60
+retry_max_seconds = 120
+"#;
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        let config = w.cloud;
+        assert!(config.enabled);
+        assert_eq!(config.api_key.as_deref(), Some("budi_abc123"));
+        assert_eq!(config.device_id.as_deref(), Some("dev_xyz"));
+        assert_eq!(config.org_id.as_deref(), Some("org_test"));
+        assert_eq!(config.endpoint, "https://custom.example.com");
+        assert_eq!(config.sync.interval_seconds, 60);
+        assert_eq!(config.sync.retry_max_seconds, 120);
+    }
+
+    #[test]
+    fn cloud_config_is_ready_requires_all_fields() {
+        let mut config = CloudConfig::default();
+        assert!(!config.is_ready());
+
+        config.enabled = true;
+        assert!(!config.is_ready());
+
+        config.api_key = Some("budi_test".into());
+        assert!(!config.is_ready());
+
+        config.device_id = Some("dev_test".into());
+        assert!(!config.is_ready());
+
+        config.org_id = Some("org_test".into());
+        assert!(config.is_ready());
+    }
+
+    #[test]
+    fn cloud_config_partial_toml_uses_defaults() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            cloud: CloudConfig,
+        }
+        let toml_str = r#"
+[cloud]
+enabled = true
+api_key = "budi_test"
+"#;
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        let config = w.cloud;
+        assert!(config.enabled);
+        assert_eq!(config.api_key.as_deref(), Some("budi_test"));
+        assert_eq!(config.endpoint, "https://api.getbudi.dev");
+        assert_eq!(config.sync.interval_seconds, 300);
     }
 }
