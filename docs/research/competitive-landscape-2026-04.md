@@ -325,7 +325,7 @@ Comparison of top competitors across system modules. Budi 8.0 capabilities refle
 
 | Tool | MCP Server | VS Code Ext | Slack | Jira/Linear | GitHub/CI | Prometheus | Self-hosted |
 |------|-----------|-------------|-------|-------------|-----------|-----------|-------------|
-| **Budi** | **Yes (14 tools)** | **Yes (Cursor)** | **No** | **No** | **No** | **No** | **Yes (local-first)** |
+| **Budi** | **No (removed in 8.0)** | **Yes (Cursor)** | **No** | **No** | **No** | **No** | **Yes (local-first)** |
 | BurnRate | No | No | No | No | No | No | Local + cloud |
 | Splitrail | Yes (6 tools) | **Yes** | No | No | No | No | Local + cloud |
 | Agentlytics | Yes (4 tools) | No | No | No | No | No | Local |
@@ -401,7 +401,7 @@ Closest approaches:
 
 3. **Smart routing is the next frontier.** NadirClaw claims 40-70% cost reduction by routing simple prompts to cheaper/local models. This is "Vantage that saves money" vs "Vantage that tracks money." Consider for 9.0+.
 
-4. **MCP integration is becoming table stakes.** Splitrail, Vigilo, and even Vantage.sh have MCP servers. Budi already has one (14 tools) — keep it updated.
+4. **MCP integration is becoming table stakes.** Splitrail, Vigilo, and even Vantage.sh have MCP servers. Budi removed its MCP server in 8.0 (proxy-first simplification) — consider reintroducing if demand warrants it.
 
 5. **Nobody has solved team onboarding well.** Every tool with team features requires manual setup. `budi cloud join <invite-token>` is simpler than most — lean into this.
 
