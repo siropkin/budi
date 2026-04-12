@@ -253,6 +253,146 @@ Budi's R4 cloud round targets exactly this gap: manager dashboard with privacy-f
 
 ---
 
+## Capability Matrix
+
+Comparison of top competitors across system modules. Budi 8.0 capabilities reflect the proxy-first architecture (hooks and OTEL removed).
+
+### Data Ingestion
+
+| Tool | Live Ingestion | Method | Historical Import | Agents Supported |
+|------|---------------|--------|-------------------|-----------------|
+| **Budi** | **Yes** | **Proxy (transparent)** | **Yes (JSONL, Cursor API)** | **4 (CC, Codex, Cursor, Copilot)** |
+| BurnRate | Partial (local binary scan) | File parsing | Yes (JSONL) | 7 |
+| Splitrail | Yes | File watcher | Yes (JSONL) | 10+ |
+| Agentlytics | On-demand scan | File parsing + ConnectRPC | Yes | 16 |
+| Claudetop | Yes | CC hooks + file scan | Yes (JSONL) | 1 (CC) |
+| ccusage | No (on-demand) | JSONL parsing | Yes (JSONL) | 5 |
+| claude-view | Yes | File watcher + SSE | Yes (JSONL) | 1 (CC) |
+| VantageAI | Yes | CLI wrapper/proxy | No | 3 |
+| NadirClaw | Yes | Proxy (routing) | No | Any OpenAI-compat |
+| LiteLLM | Yes | Proxy/gateway | No | 100+ providers |
+| Helicone | Yes | Proxy + async SDK | No | 20+ providers |
+| Langfuse | Yes | SDK instrumentation | Via API backfill | Any (via SDK) |
+
+### Data Classification & Attribution
+
+| Tool | Repo | Branch | Ticket | Project | Custom Tags | Cost Confidence | Activity Type |
+|------|------|--------|--------|---------|-------------|-----------------|---------------|
+| **Budi** | **Yes (native)** | **Yes (native)** | **Yes (auto-detect)** | **Yes** | **Yes (auto + rules)** | **Yes (proxy/exact/estimated)** | **Yes** |
+| BurnRate | No | No | No | Yes (by session) | No | No | No |
+| Splitrail | No | No | No | No | No | No | No |
+| Agentlytics | No | No | No | Yes (by editor) | No | No | No |
+| Claudetop | No | Via plugin | Via plugin | Yes | Manual env var | No | No |
+| ccusage | No | No | No | Via `--instances` | No | No | No |
+| claude-view | Yes (filter) | Yes (filter) | No | Yes | No | No | Yes (AI phase) |
+| VantageAI | No | No | No | Per-feature | No | No | No |
+| NadirClaw | No | No | No | No | No | No | Tier (simple/mid/complex) |
+| LiteLLM | No | No | No | Per-key/team | Yes (tag budgets) | No | No |
+| Helicone | No | No | No | Custom properties | Yes | No | No |
+| Langfuse | No | No | No | Tags/metadata | Yes | No | No |
+
+### Budget Management
+
+| Tool | Daily Budget | Per-User | Per-Team | Hard Blocks | Slack Alerts | Email Alerts | Webhooks |
+|------|-------------|----------|----------|-------------|-------------|-------------|----------|
+| **Budi** | **Planned (R5)** | **Planned** | **No** | **Planned** | **No** | **No** | **No** |
+| BurnRate | Not documented | Enterprise | Enterprise | Not documented | No | No | No |
+| Claudetop | Yes (env var) | No | No | No (visual only) | No | No | No |
+| VantageAI | Yes ($99/mo) | No | Yes | No | No | No | No |
+| NadirClaw | Yes | No | No | Yes | Webhook | No | Yes |
+| LiteLLM | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** | Yes |
+| Helicone | Yes (graduated) | Via properties | No | No | **Yes** | **Yes** | No |
+| Langfuse | Cloud spend only | No | No | No | Yes (prompts) | No | No |
+
+### Analytics & Dashboard
+
+| Tool | Web Dashboard | CLI Analytics | Session Drill-down | Subagent Tree | Session Health | Team View |
+|------|-------------|--------------|-------------------|---------------|---------------|-----------|
+| **Budi** | **Yes (4 pages)** | **Yes (rich)** | **Yes** | **Yes** | **Yes (4 vitals)** | **Planned (R4)** |
+| BurnRate | Yes (SaaS) | No | Yes | **Yes** | No | Yes (paid) |
+| Splitrail | Yes (cloud) | Yes | No | No | No | Cloud leaderboard |
+| Agentlytics | Yes | No | Yes | No | No | Relay |
+| Claudetop | Yes (basic) | Yes | Yes (per-turn) | Yes (cost) | Partial (alerts) | No |
+| ccusage | No | Yes | Session report | No | No | No |
+| claude-view | **Yes (rich)** | No | **Yes (full)** | **Yes** | No | Teams dashboard |
+| VantageAI | Yes (SaaS) | No | No | No | Quality scores | Yes |
+| NadirClaw | Yes (basic) | Yes | No | No | No | No |
+| LiteLLM | Yes (admin) | No | No | No | No | Yes |
+| Helicone | **Yes** | No | Yes (traces) | Agent traces | No | Yes |
+| Langfuse | **Yes** | No | **Yes (traces)** | Agent traces | Evaluations | Yes |
+
+### Ecosystem Integrations
+
+| Tool | MCP Server | VS Code Ext | Slack | Jira/Linear | GitHub/CI | Prometheus | Self-hosted |
+|------|-----------|-------------|-------|-------------|-----------|-----------|-------------|
+| **Budi** | **Yes (14 tools)** | **Yes (Cursor)** | **No** | **No** | **No** | **No** | **Yes (local-first)** |
+| BurnRate | No | No | No | No | No | No | Local + cloud |
+| Splitrail | Yes (6 tools) | **Yes** | No | No | No | No | Local + cloud |
+| Agentlytics | Yes (4 tools) | No | No | No | No | No | Local |
+| Claudetop | No | No | No | No | Plugin | No | Local |
+| ccusage | Yes | No | No | No | No | No | Local |
+| claude-view | Yes (85 tools) | No | No | No | No | No | Local |
+| VantageAI | Yes | No | No | No | No | No | Cloud |
+| NadirClaw | No | No | Webhook | No | **GitHub Action** | **Yes** | Local |
+| LiteLLM | Yes (gateway) | No | **Yes** | No | No | **Yes** | **Self-host** |
+| Helicone | Yes | No | **Yes** | No | No | No | **Self-host** |
+| Langfuse | Yes | No | **Yes** | No | GitHub Actions | No | **Self-host** |
+
+### Advanced Features
+
+| Tool | Smart Routing | Caching | Rate Limiting | Efficiency Score | Context Optimization |
+|------|-------------|---------|--------------|-----------------|---------------------|
+| **Budi** | **No** | **No** | **No** | **No** | **No** |
+| NadirClaw | **Yes (core)** | LRU | Provider fallback | No | **Yes (30-70% savings)** |
+| LiteLLM | **Yes (4 modes)** | Redis | **Yes (GCRA)** | No | No |
+| Helicone | **Yes (3 modes)** | Exact + bucketed | **Yes (GCRA)** | No | No |
+| VantageAI | Prompt optimization | No | No | **Yes** | Yes (20-40% savings) |
+| Claudetop | No | No | No | No | Cache monitoring |
+
+---
+
+## Integration Whitespace Analysis
+
+### Ticket Management (Jira, Linear, GitHub Issues)
+
+**Nobody has this.** Not a single competitor integrates natively with ticket management systems.
+
+Closest approaches:
+- **Budi**: Auto-detects ticket IDs from branch names (e.g., `feature/PROJ-1234-add-auth` → `PROJ-1234`), stores as tag
+- **Claudetop**: Plugin extracts ticket from branch name (passive display only)
+- **LiteLLM/Helicone/Langfuse**: Custom properties could encode ticket IDs, but require manual instrumentation
+
+**Opportunity for Budi**: Enrich ticket IDs with metadata from Linear/Jira APIs:
+- Show ticket title alongside cost data (instead of just `PROJ-1234`)
+- "Cost per sprint" or "cost per epic" aggregation
+- "This epic has cost $450 across 12 sessions" in the cloud dashboard
+- Bi-directional: post cost summary as a comment on the ticket when a branch merges
+
+### Slack
+
+**Only gateway/platform tools have Slack integration** (LiteLLM, Helicone, Langfuse). None of the local-first coding agent tools do.
+
+**Opportunity for Budi**:
+- Budget alert notifications to team Slack channel
+- Daily/weekly cost digest: "Your team spent $X on AI this week. Top repos: ..."
+- Cloud dashboard links in Slack messages
+- Personal DM: "Your session just hit $15 — consider /compact"
+
+### Git / CI/CD Pipelines
+
+**Nearly nonexistent across all competitors.**
+- NadirClaw has a GitHub Action
+- Langfuse can trigger GitHub Actions on prompt changes
+- Claudetop has a CI status display plugin
+
+**Opportunity for Budi**:
+- **PR cost annotation**: GitHub Action that comments AI cost on PRs ("This PR used $23.50 of AI across 4 sessions")
+- **CI budget gate**: Fail CI if AI spend on a branch exceeds threshold (opt-in)
+- **Cost label**: Auto-label PRs with cost tier (e.g., `ai-cost:high` > $50)
+- **Sprint summary**: GitHub Action that posts weekly AI cost summary to a PR or issue
+
+---
+
 ## Strategic Takeaways for Roadmap Planning
 
 1. **The JSONL-parsing tier is saturated.** 20+ tools parse Claude Code JSONL files. Budi's proxy-first approach is a genuine moat — don't go back to competing on JSONL parsing.
@@ -266,3 +406,9 @@ Budi's R4 cloud round targets exactly this gap: manager dashboard with privacy-f
 5. **Nobody has solved team onboarding well.** Every tool with team features requires manual setup. `budi cloud join <invite-token>` is simpler than most — lean into this.
 
 6. **The enterprise FinOps platforms are coming down.** Vantage.sh added Cursor support and an MCP server. They'll keep expanding. Speed matters — ship the cloud alpha before they dominate the mid-market.
+
+7. **Ticket management integration is wide open.** Nobody connects AI cost to Jira/Linear tickets natively. Budi already auto-detects ticket IDs from branches — enriching with ticket metadata (title, sprint, epic) would be a unique differentiator.
+
+8. **Slack integration is expected for team tools.** Every gateway tool (LiteLLM, Helicone) has Slack alerts. Budi's cloud tier should have it for budget alerts and cost digests.
+
+9. **CI/CD integration is untapped.** PR cost annotations, budget gates, and sprint cost summaries through GitHub Actions would be novel — nobody does this today.
