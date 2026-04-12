@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod cloud_sync;
 pub mod config;
 pub mod cost;
 pub mod hooks;

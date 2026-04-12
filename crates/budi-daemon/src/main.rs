@@ -11,6 +11,8 @@ use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT, ProxyConfig};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod workers;
+
 mod routes;
 
 #[derive(Debug, Parser)]
@@ -238,6 +240,25 @@ async fn main() -> Result<()> {
                 tracing::error!("{message}");
                 anyhow::bail!("{message}");
             }
+        }
+    }
+
+    // --- Start cloud sync worker if configured ---
+    {
+        let cloud_config = budi_core::config::load_cloud_config();
+        if cloud_config.is_ready() {
+            if let Ok(db_path) = analytics::db_path() {
+                tracing::info!(
+                    endpoint = %cloud_config.effective_endpoint(),
+                    interval_s = cloud_config.sync.interval_seconds,
+                    "Starting cloud sync worker"
+                );
+                tokio::spawn(workers::cloud_sync::run(db_path, cloud_config));
+            }
+        } else if cloud_config.effective_enabled() {
+            tracing::warn!(
+                "Cloud sync enabled but not fully configured (missing api_key, device_id, or org_id)"
+            );
         }
     }
 

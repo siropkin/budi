@@ -413,7 +413,7 @@ The daemon is the single source of truth — the CLI never opens the database di
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
 | **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status, repo, branch, ticket, cost) |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
-| **sync_state** | Tracks incremental ingestion progress per file for progressive sync |
+| **sync_state** | Tracks incremental ingestion progress per file for progressive sync, plus cloud sync watermarks |
 | **message_rollups_hourly** | Derived hourly aggregates (provider/model/repo/branch/role) for low-latency analytics reads |
 | **message_rollups_daily** | Derived daily aggregates for summary/filter scans |
 

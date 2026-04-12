@@ -80,11 +80,15 @@ Enricher order is critical - each depends on prior enrichers. Do not reorder.
 ```
 Cloud sync (optional, disabled by default):
 Local SQLite daily rollups
-  -> Daemon sync worker (R4.2) reads aggregates only
+  -> Daemon background sync worker reads aggregates only
   -> Builds sync envelope (ADR-0083 §2): daily_rollups + session_summaries
-  -> HTTPS POST to api.getbudi.dev/v1/ingest (Bearer budi_<key>)
+  -> HTTPS-only POST to api.getbudi.dev/v1/ingest (Bearer budi_<key>)
+  -> Watermark tracking: only sends new/updated rollups since last confirmed sync
+  -> Retry with exponential backoff (1s -> 2s -> ... -> 5min cap) on 429/5xx
+  -> Auth failure (401) stops syncing; schema mismatch (422) pauses until update
   -> Supabase Postgres (UPSERT, idempotent)
   -> Manager dashboard at app.getbudi.dev (R4.3)
+Config: ~/.config/budi/cloud.toml ([cloud] section), env overrides BUDI_CLOUD_*
 Never uploaded: prompts, responses, code, file paths, email, raw payloads
 ```
 
@@ -95,7 +99,7 @@ Nine tables, seven data entities + two supporting:
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation. Primary key field: id
 - **proxy_events** - Append-only log of proxied LLM API requests. Fields: timestamp, provider, model, input/output_tokens, duration_ms, status_code, is_streaming, repo_id, git_branch, ticket_id, cost_cents. Successful proxy events are also inserted into `messages` (cost_confidence='proxy_estimated') so existing analytics surfaces work without modification
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
-- **sync_state** - Tracks incremental ingestion progress per file for progressive sync
+- **sync_state** - Tracks incremental ingestion progress per file for progressive sync. Also stores cloud sync watermarks (`__budi_cloud_sync__` keys) for idempotent cloud uploads
 - **message_rollups_hourly** - Derived hourly aggregates (provider/model/repo/branch/role dimensions) for low-latency analytics reads
 - **message_rollups_daily** - Derived daily aggregates for coarse-grained summaries and filter option scans
 
@@ -132,9 +136,11 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
-- `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig
+- `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
+- `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
-- `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878), ~40 routes
+- `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878) + cloud sync worker, ~40 routes
+- `crates/budi-daemon/src/workers/cloud_sync.rs` - Background cloud sync loop: configurable interval, backoff, auth/schema error handling
 - `crates/budi-daemon/src/routes/hooks.rs` - /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints (hook ingestion removed)
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/proxy.rs` - Proxy handlers for Anthropic Messages and OpenAI Chat Completions
