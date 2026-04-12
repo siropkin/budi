@@ -11,7 +11,7 @@
 brew install siropkin/budi/budi && budi init
 ```
 
-No cloud. No uploads. Everything stays on your machine.
+Everything stays on your machine by default. Optional cloud sync for team dashboards — only aggregated metrics, never prompts or code.
 
 <p align="center">
   <img src="assets/dashboard-overview.png" alt="budi dashboard — cost overview" width="800">
@@ -80,6 +80,7 @@ Quick validation matrix:
 - Rust changes: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
 - Dashboard changes: `cd frontend/dashboard && npm ci && npm run build`
 - Cursor extension changes: `cd extensions/cursor-budi && npm ci && npm run lint && npm run format:check && npm run test && npm run build`
+- Cloud changes: `cd cloud && npm ci && npm run build`
 
 To report a bug or request a feature, open a GitHub issue using the repository templates so maintainers get reproducible details quickly.
 
@@ -349,7 +350,9 @@ Health state appears in the status line, the Cursor extension panel, and the ses
 
 ## Privacy
 
-Budi is 100% local — no cloud, no uploads, no telemetry. All data stays on your machine (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
+Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
+
+**Cloud sync** (optional, disabled by default) pushes pre-aggregated daily rollups and session summaries to a team dashboard at `app.getbudi.dev`. Only numeric metrics (token counts, costs, model names, hashed repo IDs, branch names) cross the wire. Prompts, code, responses, file paths, email addresses, raw payloads, and tag values are structurally excluded from the sync payload — there is no "full upload" mode. See [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md) for the complete privacy contract.
 
 ## How it works
 
