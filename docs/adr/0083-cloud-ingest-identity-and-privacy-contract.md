@@ -363,7 +363,7 @@ enabled = false
 api_key = "budi_..."
 device_id = "dev_..."
 org_id = "org_..."
-endpoint = "https://cloud.budi.dev"
+endpoint = "https://api.getbudi.dev"
 
 [cloud.sync]
 interval_seconds = 300    # 5 minutes
