@@ -65,6 +65,10 @@ pub fn cmd_init(
         );
     }
     print_agents_summary(&agents_config);
+    let proxy_warnings = super::proxy_install::apply_auto_proxy_configuration(
+        &agents_config,
+        config.proxy.effective_port(),
+    );
 
     let selected_integrations = resolve_init_integrations(
         local,
@@ -94,7 +98,12 @@ pub fn cmd_init(
 
     let install_report =
         super::integrations::install_selected(&config, &selected_integrations, statusline_preset);
-    let integration_warnings = install_report.warnings;
+    let mut integration_warnings = install_report.warnings;
+    integration_warnings.extend(
+        proxy_warnings
+            .into_iter()
+            .map(|warning| format!("Auto-proxy config: {warning}")),
+    );
 
     if repo_root.is_none() {
         let mut prefs = super::integrations::load_preferences();
@@ -177,11 +186,10 @@ pub fn cmd_init(
     }
     println!();
     println!("  {bold}Next steps:{reset}");
-    println!("    1. Start coding:  `budi launch claude` or `budi launch codex`");
     println!(
-        "       {dim}For Cursor: set Override OpenAI Base URL to http://localhost:{} in Settings → Models{reset}",
-        config.proxy.effective_port()
+        "    1. Start coding as usual (`claude`, `codex`, `cursor`, `gh copilot`) — proxy is auto-configured"
     );
+    println!("       {dim}Need one-off bypass? Use `BUDI_BYPASS=1 budi launch <agent>`{reset}");
     println!(
         "    2. Import history: `budi import` {dim}(load past transcripts from Claude Code / Cursor){reset}"
     );
@@ -193,7 +201,9 @@ pub fn cmd_init(
             "  {dim}No integrations were installed. Use `budi integrations install ...` anytime.{reset}"
         );
     } else {
-        println!("  {dim}Restart Claude Code and Cursor to activate updated integrations.{reset}");
+        println!(
+            "  {dim}Restart your shell/IDE apps to pick up updated proxy and integration settings.{reset}"
+        );
     }
     println!();
 

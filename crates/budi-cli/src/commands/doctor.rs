@@ -256,14 +256,18 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
             Some(ref cfg) => {
                 let enabled: Vec<&str> = [
                     cfg.claude_code.enabled.then_some("Claude Code"),
+                    cfg.codex_cli.enabled.then_some("Codex CLI"),
                     cfg.cursor.enabled.then_some("Cursor"),
+                    cfg.copilot_cli.enabled.then_some("Copilot CLI"),
                 ]
                 .into_iter()
                 .flatten()
                 .collect();
                 let disabled: Vec<&str> = [
                     (!cfg.claude_code.enabled).then_some("Claude Code"),
+                    (!cfg.codex_cli.enabled).then_some("Codex CLI"),
                     (!cfg.cursor.enabled).then_some("Cursor"),
+                    (!cfg.copilot_cli.enabled).then_some("Copilot CLI"),
                 ]
                 .into_iter()
                 .flatten()
@@ -285,6 +289,28 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
                 println!(
                     "  {dim}-{reset} agents: no agents.toml found — all available agents enabled (legacy mode)"
                 );
+            }
+        }
+    }
+
+    // Auto-proxy configuration checks (shell profile + IDE config files)
+    {
+        let agents = budi_core::config::load_agents_config()
+            .unwrap_or_else(budi_core::config::AgentsConfig::all_enabled);
+        let proxy_issues =
+            super::proxy_install::doctor_auto_proxy_issues(&agents, config.proxy.effective_port());
+        if proxy_issues.is_empty() {
+            println!(
+                "  {green}\u{2713}{reset} auto-proxy config: shell profile and IDE settings look good"
+            );
+        } else {
+            println!(
+                "  {red}\u{2717}{reset} auto-proxy config: {} issue(s)",
+                proxy_issues.len()
+            );
+            for issue in proxy_issues {
+                println!("    - {issue}");
+                issues.push(issue);
             }
         }
     }

@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi launch claude      Launch Claude Code through the budi proxy\n  budi launch codex       Launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n  budi open               Open the local dashboard (legacy)\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -193,6 +193,16 @@ Examples:
         #[command(subcommand)]
         action: IntegrationAction,
     },
+    /// Enable proxy auto-configuration for one agent (claude, codex, cursor, copilot)
+    Enable {
+        /// Agent name or alias (claude, codex, cursor, copilot)
+        agent: String,
+    },
+    /// Disable proxy auto-configuration for one agent (claude, codex, cursor, copilot)
+    Disable {
+        /// Agent name or alias (claude, codex, cursor, copilot)
+        agent: String,
+    },
     /// Launch an AI agent through the budi proxy (e.g. budi launch claude)
     #[command(after_help = "\
 Supported agents:
@@ -207,6 +217,7 @@ Examples:
   budi launch codex -- --model o3
   budi launch copilot
   budi launch cursor
+  BUDI_BYPASS=1 budi launch codex
   budi launch claude --proxy-port 9999")]
     Launch {
         /// Agent to launch: claude, codex, copilot, cursor, gemini
@@ -397,6 +408,8 @@ fn main() -> Result<()> {
         }
         Commands::Status => commands::status::cmd_status(),
         Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
+        Commands::Enable { agent } => commands::proxy_install::cmd_enable(&agent),
+        Commands::Disable { agent } => commands::proxy_install::cmd_disable(&agent),
         Commands::Launch {
             agent,
             proxy_port,
