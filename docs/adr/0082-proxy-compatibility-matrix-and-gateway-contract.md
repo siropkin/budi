@@ -227,8 +227,8 @@ New env vars:
 ### Trade-offs
 
 - **Gemini CLI is deferred.** Users on Gemini CLI will not get proxy-based observability until a third protocol handler is built. They can still use budi for analytics on other agents.
-- **Cursor requires GUI configuration.** Unlike CLI agents, Cursor users cannot be onboarded with a single env var. The `budi init` / onboarding flow (R3) will need to provide Cursor-specific instructions.
-- **No silent fallback.** If the proxy is down, agents fail. This is intentional — silent fallback undermines the observability guarantee — but it means the proxy must be reliable. `budi doctor` and the Cursor extension health check (R3.2) mitigate this.
+- **Cursor requires config file patching.** Unlike CLI agents, Cursor uses GUI settings backed by a JSON config file. `budi init` patches this file directly when the user selects Cursor. `budi disable cursor` reverts the change.
+- **No silent fallback.** If the proxy is down, agents fail. This is intentional — silent fallback undermines the observability guarantee — but it means the proxy must be reliable. Daemon autostart (launchd/systemd) is a hard prerequisite. `budi doctor` and the Cursor extension health check (R3.2) mitigate this.
 - **No TLS.** Loopback traffic is unencrypted. This is fine for localhost but means the proxy cannot be used across machines. This matches the "local-first" design of budi 8.0.
 - **Token capture is best-effort.** Some providers may change their response format or omit usage fields. The proxy must not fail if token data is missing.
 
@@ -238,5 +238,5 @@ New env vars:
 - **R2.2** (streaming): Implements the SSE pass-through per the streaming behavior section.
 - **R2.3** (metadata persistence): Uses the attribution schema from section 7.
 - **R2.4** (fallback paths): Per ADR-0081, hook/OTEL/JSONL fallbacks are removed, not maintained. R2.4 should be re-scoped to "clean removal of legacy ingestion" rather than "keep fallbacks."
-- **R3.1** (CLI wrapper): Must set proxy env vars for each agent during `budi start` or `budi init`.
-- **R3.2** (Cursor bootstrap): Must guide the user through Cursor Settings UI to configure the override URL.
+- **R3.1** (CLI wrapper): `budi launch` remains available as an explicit alternative but is no longer the primary onboarding path. `budi init` injects env vars into the shell profile for selected CLI agents and patches config files for IDE agents (Cursor, Codex Desktop). `budi disable <agent>` reverses the changes. `BUDI_BYPASS=1` skips the proxy for a single session.
+- **R3.2** (Cursor bootstrap): `budi init` patches Cursor's settings.json directly when the user selects Cursor. No manual GUI configuration needed.
