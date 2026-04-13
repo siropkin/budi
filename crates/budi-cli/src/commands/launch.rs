@@ -8,6 +8,14 @@ use budi_core::config::{self, BudiConfig};
 use crate::commands::ansi;
 use crate::daemon;
 
+const PROXY_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "OPENAI_BASE_URL",
+    "COPILOT_PROVIDER_BASE_URL",
+    "COPILOT_PROVIDER_TYPE",
+];
+
 // ─── Agent Definitions (ADR-0082 §1) ────────────────────────────────────────
 
 /// Env-var builder for Claude Code (Tier 1, Anthropic Messages protocol).
@@ -167,6 +175,7 @@ pub fn cmd_launch(
 
     // Precedence per ADR-0082 §3: env > CLI flag > config > default
     let proxy_port = resolve_proxy_port(proxy_port_override, &config);
+    let bypass_proxy = bypass_requested();
 
     // ── GUI-only agents (Cursor) ─────────────────────────────────────────
 
@@ -185,17 +194,7 @@ pub fn cmd_launch(
         return Ok(());
     }
 
-    // ── Pre-flight checks ────────────────────────────────────────────────
-
-    if !config.proxy.effective_enabled() {
-        anyhow::bail!(
-            "Proxy is disabled. Enable it in config.toml:\n\n\
-             [proxy]\n\
-             enabled = true\n\n\
-             Or set BUDI_PROXY_ENABLED=true"
-        );
-    }
-
+    // ── Binary checks ─────────────────────────────────────────────────────
     if !binary_exists(agent.binary) {
         // Special case: codex CLI not found, check for Codex Desktop app
         if agent.name == "codex" {
@@ -234,16 +233,26 @@ pub fn cmd_launch(
         );
     }
 
-    // ── Start daemon (includes proxy) ────────────────────────────────────
+    // ── Proxy pre-flight (unless bypass requested) ───────────────────────
+    if !bypass_proxy {
+        if !config.proxy.effective_enabled() {
+            anyhow::bail!(
+                "Proxy is disabled. Enable it in config.toml:\n\n\
+                 [proxy]\n\
+                 enabled = true\n\n\
+                 Or set BUDI_PROXY_ENABLED=true"
+            );
+        }
 
-    daemon::ensure_daemon_running(repo_root.as_deref(), &config)?;
+        daemon::ensure_daemon_running(repo_root.as_deref(), &config)?;
 
-    if !proxy_port_is_listening(proxy_port) {
-        anyhow::bail!(
-            "Proxy port {proxy_port} is not listening.\n\
-             The daemon may have started without the proxy enabled.\n\
-             Check: budi doctor"
-        );
+        if !proxy_port_is_listening(proxy_port) {
+            anyhow::bail!(
+                "Proxy port {proxy_port} is not listening.\n\
+                 The daemon may have started without the proxy enabled.\n\
+                 Check: budi doctor"
+            );
+        }
     }
 
     // ── Copilot: warn if COPILOT_MODEL is not set ────────────────────────
@@ -258,22 +267,39 @@ pub fn cmd_launch(
 
     // ── Build and exec ───────────────────────────────────────────────────
 
-    let env_vars = (agent.env_vars.expect("launchable agent must have env_vars"))(proxy_port);
+    let env_vars = if bypass_proxy {
+        Vec::new()
+    } else {
+        (agent.env_vars.expect("launchable agent must have env_vars"))(proxy_port)
+    };
 
-    eprintln!(
-        "{green}✓{reset} Launching {bold}{}{reset} through budi proxy {dim}(port {proxy_port}){reset}",
-        agent.display_name
-    );
-    for (key, val) in &env_vars {
-        eprintln!("  {dim}{key}={val}{reset}");
+    if bypass_proxy {
+        eprintln!(
+            "{yellow}⚠{reset} Launching {bold}{}{reset} with proxy bypass {dim}(BUDI_BYPASS=1){reset}",
+            agent.display_name
+        );
+    } else {
+        eprintln!(
+            "{green}✓{reset} Launching {bold}{}{reset} through budi proxy {dim}(port {proxy_port}){reset}",
+            agent.display_name
+        );
+        for (key, val) in &env_vars {
+            eprintln!("  {dim}{key}={val}{reset}");
+        }
     }
     eprintln!();
 
     let mut cmd = Command::new(agent.binary);
     cmd.args(agent.binary_prefix_args);
     cmd.args(args);
-    for (key, val) in &env_vars {
-        cmd.env(key, val);
+    if bypass_proxy {
+        for key in PROXY_ENV_KEYS {
+            cmd.env_remove(key);
+        }
+    } else {
+        for (key, val) in &env_vars {
+            cmd.env(key, val);
+        }
     }
 
     // On Unix, exec() replaces the budi process with the agent.
@@ -308,6 +334,12 @@ fn resolve_proxy_port(cli_flag: Option<u16>, config: &BudiConfig) -> u16 {
         return port;
     }
     config.proxy.port
+}
+
+fn bypass_requested() -> bool {
+    std::env::var("BUDI_BYPASS")
+        .ok()
+        .is_some_and(|value| value.trim() == "1")
 }
 
 /// Check if a binary is available in PATH.

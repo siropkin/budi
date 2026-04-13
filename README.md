@@ -59,10 +59,10 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 | Agent | Tier | Status | How |
 |-------|------|--------|-----|
-| **Claude Code** | Tier 1 | Supported | `budi launch claude` — sets `ANTHROPIC_BASE_URL` automatically |
-| **Codex CLI** | Tier 1 | Supported | `budi launch codex` — sets `OPENAI_BASE_URL` automatically |
-| **Cursor** | Tier 2 | Supported | Proxy + GUI setting (`Override OpenAI Base URL` in Cursor Settings → Models) |
-| **Copilot CLI** | Tier 2 | Supported | `budi launch copilot` — sets `COPILOT_PROVIDER_BASE_URL` automatically |
+| **Claude Code** | Tier 1 | Supported | Auto-configured by `budi init` (shell profile env block) |
+| **Codex CLI** | Tier 1 | Supported | Auto-configured by `budi init` (shell profile env block + Codex Desktop config patch) |
+| **Cursor** | Tier 2 | Supported | Auto-configured by `budi init` (Cursor settings.json patch) |
+| **Copilot CLI** | Tier 2 | Supported | Auto-configured by `budi init` (shell profile env block) |
 | **Gemini CLI** | Tier 3 | Deferred | Different API format; not supported in v1 proxy |
 
 Tier 1 agents use simple env vars with high confidence. Tier 2 agents work but have onboarding caveats (GUI settings, proprietary env vars). See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full compatibility matrix.
@@ -144,7 +144,16 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon (port 7878) and proxy (port 9878), and **prompts you to choose which agents to track** (Claude Code, Cursor, Codex CLI, Copilot CLI) and **which integrations to install** (statusline, extension). Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`. After init, use `budi launch <agent>` to start CLI agents through the proxy with zero manual configuration, or configure Cursor's `Override OpenAI Base URL` to `http://localhost:9878`. **Restart Claude Code and Cursor** after install to activate config changes. Customize ports in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+`budi init` starts the daemon (port 7878) and proxy (port 9878), and **prompts you to choose which agents to track** (Claude Code, Cursor, Codex CLI, Copilot CLI) and **which integrations to install** (statusline, extension). Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`.
+
+During init, budi automatically applies proxy routing for selected agents:
+- CLI agents (Claude/Codex/Copilot): injects a managed env-var block into your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile`)
+- Cursor: patches Cursor settings.json with the proxy base URL
+- Codex Desktop: patches `~/.codex/config.toml` with `openai_base_url`
+
+`budi launch <agent>` still works as an explicit fallback. For a one-off bypass, run `BUDI_BYPASS=1 budi launch <agent>`.
+
+Restart your shell/IDE apps after init so updated settings take effect. Customize ports in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -165,11 +174,12 @@ Use this sequence if you want the fastest "did setup really work?" path:
    - Run `budi doctor` to check daemon, proxy, autostart service, and agent configuration
    - Run `budi status` for a quick overview of daemon, proxy, and today's cost
 5. **Generate your first data point**
-   - **CLI agents**: `budi launch claude` (or `codex`, `copilot`) — configures the proxy automatically, zero manual setup
-   - **Cursor**: open Cursor Settings → Models → set `Override OpenAI Base URL` to `http://localhost:9878`, then send a prompt
+   - Open your selected agent as usual (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt
+   - Optional explicit fallback: `budi launch <agent>`
+   - One-off bypass for explicit launch: `BUDI_BYPASS=1 budi launch <agent>`
    - Run `budi stats` and confirm non-zero usage
 6. **Restart apps once**
-   - Restart Claude Code and Cursor after `budi init` so statusline/extension changes take effect
+   - Restart your shell/IDE apps after `budi init` so proxy/integration changes take effect
 
 ### PATH and duplicate binary checks
 
@@ -540,7 +550,7 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 
 **No data after setup:**
 1. Run `budi status` to check daemon, proxy, and today's cost
-2. Verify your agent routes through the proxy: use `budi launch <agent>` for CLI agents, or check Cursor's `Override OpenAI Base URL` is set to `http://localhost:9878`
+2. Verify auto-proxy config with `budi doctor` (shell profile + Cursor/Codex settings)
 3. Send a prompt and check `budi stats` for non-zero usage
 4. For historical data: `budi import` (one-time backfill from Claude Code JSONL / Cursor Usage API)
 
