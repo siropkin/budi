@@ -38,6 +38,16 @@ The proxy is the sole live data source. Historical data (JSONL, Cursor API) is a
 - Proxy is transparent — no SDK, no per-agent integration code for live tracking
 - Adding a new agent = documenting its base URL configuration
 
+### Auto-proxy-install (8.0+)
+
+The proxy is installed automatically for agents the user selects during `budi init`. Users should not need to remember special launch commands — tracking starts the moment they open a terminal or IDE.
+
+- **CLI agents** (Claude Code, Codex, Copilot CLI, Gemini CLI): env vars injected into the user's shell profile (`~/.zshrc`, `~/.bashrc`) inside a `# >>> budi >>> ... # <<< budi <<<` guard block
+- **IDE agents** (Cursor, Codex Desktop): config files patched directly (`Override OpenAI Base URL` in Cursor's settings.json, `openai_base_url` in `~/.codex/config.toml`)
+- **Opt-out**: `budi disable <agent>` removes the env vars or reverts config changes
+- **Bypass**: `BUDI_BYPASS=1 <agent>` skips the proxy for a single session
+- **Prerequisite**: daemon autostart (launchd/systemd) is required — if env vars point to `localhost:9878` but the daemon isn't running, API calls fail
+
 ## 5. Local-First, Cloud-Optional
 
 Everything works without cloud. Cloud adds team visibility, not core functionality.
