@@ -442,6 +442,9 @@ fn forward_headers(
             if let Some(key) = headers.get("x-api-key") {
                 req = req.header("x-api-key", key);
             }
+            if let Some(auth) = headers.get(header::AUTHORIZATION) {
+                req = req.header(header::AUTHORIZATION, auth);
+            }
             if let Some(ver) = headers.get("anthropic-version") {
                 req = req.header("anthropic-version", ver);
             }
@@ -565,4 +568,127 @@ fn record_event_blocking(db_path: &std::path::Path, event: &ProxyEvent) -> anyho
         tracing::debug!("Failed to insert proxy message: {e}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_with_headers(
+        headers: &HeaderMap,
+        provider: ProxyProvider,
+    ) -> reqwest::header::HeaderMap {
+        let client = reqwest::Client::new();
+        let req = client.post("http://localhost/test");
+        let req = forward_headers(req, headers, provider);
+        let built = req.build().expect("failed to build request");
+        built.headers().clone()
+    }
+
+    #[test]
+    fn anthropic_forwards_x_api_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("sk-ant-test"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        let result = build_with_headers(&headers, ProxyProvider::Anthropic);
+        assert_eq!(result.get("x-api-key").unwrap(), "sk-ant-test");
+        assert_eq!(result.get("anthropic-version").unwrap(), "2023-06-01");
+        assert!(result.get(header::AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn anthropic_forwards_authorization_bearer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer oauth-token-123"),
+        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        let result = build_with_headers(&headers, ProxyProvider::Anthropic);
+        assert_eq!(
+            result.get(header::AUTHORIZATION).unwrap(),
+            "Bearer oauth-token-123"
+        );
+        assert_eq!(result.get("anthropic-version").unwrap(), "2023-06-01");
+        assert!(result.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn anthropic_forwards_both_auth_headers_when_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("sk-ant-test"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer oauth-token-123"),
+        );
+
+        let result = build_with_headers(&headers, ProxyProvider::Anthropic);
+        assert_eq!(result.get("x-api-key").unwrap(), "sk-ant-test");
+        assert_eq!(
+            result.get(header::AUTHORIZATION).unwrap(),
+            "Bearer oauth-token-123"
+        );
+    }
+
+    #[test]
+    fn anthropic_forwards_beta_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("sk-ant-test"));
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("messages-2024-04-04"),
+        );
+
+        let result = build_with_headers(&headers, ProxyProvider::Anthropic);
+        assert_eq!(result.get("anthropic-beta").unwrap(), "messages-2024-04-04");
+    }
+
+    #[test]
+    fn openai_forwards_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer sk-openai-test"),
+        );
+
+        let result = build_with_headers(&headers, ProxyProvider::OpenAi);
+        assert_eq!(
+            result.get(header::AUTHORIZATION).unwrap(),
+            "Bearer sk-openai-test"
+        );
+        assert!(result.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn content_type_forwarded_for_all_providers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+
+        for provider in [ProxyProvider::Anthropic, ProxyProvider::OpenAi] {
+            let result = build_with_headers(&headers, provider);
+            assert_eq!(
+                result.get(header::CONTENT_TYPE).unwrap(),
+                "application/json"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_header_forwarded_for_all_providers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
+
+        for provider in [ProxyProvider::Anthropic, ProxyProvider::OpenAi] {
+            let result = build_with_headers(&headers, provider);
+            assert_eq!(result.get(header::ACCEPT).unwrap(), "text/event-stream");
+        }
+    }
 }
