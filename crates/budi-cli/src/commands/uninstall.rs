@@ -104,11 +104,11 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
         }
     }
 
-    // Remove macOS LaunchAgents if present
-    #[cfg(target_os = "macos")]
+    // Remove autostart service (launchd / systemd / Task Scheduler)
     {
-        print!("Removing LaunchAgents... ");
-        match remove_launch_agents() {
+        let mechanism = budi_core::autostart::service_mechanism();
+        print!("Removing autostart service ({mechanism})... ");
+        match budi_core::autostart::uninstall_service() {
             Ok(true) => println!("{green}✓{reset} removed"),
             Ok(false) => println!("none found"),
             Err(e) => println!("{yellow}warning: {e}{reset}"),
@@ -307,31 +307,6 @@ fn remove_config() -> Result<bool> {
     }
     fs::remove_dir_all(&config_dir)?;
     Ok(true)
-}
-
-/// Remove macOS LaunchAgent plists for budi.
-#[cfg(target_os = "macos")]
-fn remove_launch_agents() -> Result<bool> {
-    let home = budi_core::config::home_dir()?;
-    let launch_agents_dir = home.join("Library/LaunchAgents");
-    if !launch_agents_dir.is_dir() {
-        return Ok(false);
-    }
-    let mut removed_any = false;
-    for entry in fs::read_dir(&launch_agents_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with("com.siropkin.budi.") && name_str.ends_with(".plist") {
-            // Try to unload first
-            let _ = Command::new("launchctl")
-                .args(["unload", &entry.path().to_string_lossy()])
-                .output();
-            fs::remove_file(entry.path())?;
-            removed_any = true;
-        }
-    }
-    Ok(removed_any)
 }
 
 fn print_binary_removal_hint() {

@@ -308,6 +308,26 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Autostart service check
+    {
+        let mechanism = budi_core::autostart::service_mechanism();
+        let status = budi_core::autostart::service_status();
+        match status {
+            budi_core::autostart::ServiceStatus::Running => {
+                println!("  {green}\u{2713}{reset} autostart: {status} ({mechanism})");
+            }
+            budi_core::autostart::ServiceStatus::Installed => {
+                let yellow = super::ansi("\x1b[33m");
+                println!("  {yellow}!{reset} autostart: {status} ({mechanism})");
+            }
+            budi_core::autostart::ServiceStatus::NotInstalled => {
+                println!("  {red}\u{2717}{reset} autostart: {status} ({mechanism})");
+                issues
+                    .push("Autostart service not installed. Run `budi init` to install it.".into());
+            }
+        }
+    }
+
     println!();
     if issues.is_empty() {
         println!("All checks passed.");
