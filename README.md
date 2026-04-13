@@ -11,7 +11,7 @@
 brew install siropkin/budi/budi && budi init
 ```
 
-Everything stays on your machine by default. Optional cloud sync for team dashboards — only aggregated metrics, never prompts or code.
+Everything stays on your machine by default. Optional cloud sync pushes aggregated daily cost metrics to a team dashboard at `app.getbudi.dev` — prompts, code, and responses never leave your machine.
 
 <p align="center">
   <img src="assets/dashboard-overview.png" alt="budi dashboard — cost overview" width="800">
@@ -46,7 +46,8 @@ Everything stays on your machine by default. Optional cloud sync for team dashbo
 - **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time — streaming responses pass through with no visible lag
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
-- Web dashboard at `http://localhost:7878/dashboard` (legacy — will be replaced by the Rich CLI and cloud dashboard)
+- Web dashboard at `http://localhost:7878/dashboard` (local, per-developer view)
+- **Cloud dashboard** at `app.getbudi.dev` — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, requires `budi cloud join`)
 - Live cost + health status line in Claude Code and Cursor
 - **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
