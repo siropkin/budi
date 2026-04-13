@@ -1,7 +1,7 @@
 # ADR-0086: Extraction Boundaries for budi-cursor and budi-cloud
 
 - **Date**: 2026-04-10
-- **Status**: Proposed
+- **Status**: Implemented
 - **Issue**: [#86](https://github.com/siropkin/budi/issues/86)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0081](./0081-product-contract-and-deprecation-policy.md), [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md), [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md)
@@ -180,29 +180,29 @@ Each item must be satisfied before R4.4 extraction is allowed.
 
 #### budi-cursor extraction prerequisites
 
-- [ ] **R3.2 shipped:** Minimal Cursor bootstrap and status flow is working.
-- [ ] **VSIX embedding removed:** CLI no longer uses `include_bytes!` for the vsix. Extension is installed via download or marketplace.
-- [ ] **`build.rs` cleaned:** No references to `../../extensions/cursor-budi/`.
-- [ ] **Daemon API versioned:** `/health` response includes `api_version` (or `min_api_version`) so the extension can detect incompatible daemons.
-- [ ] **Session tracking file documented:** `cursor-sessions.json` format is documented in this ADR (see Section 3.4) and stable.
-- [ ] **Extension CI independent:** Extension can be built, tested, and released without the Rust workspace.
-- [ ] **Extension README standalone:** `extensions/cursor-budi/README.md` is self-contained (install instructions reference budi-core as a prerequisite, not a sibling directory).
+- [x] **R3.2 shipped:** Minimal Cursor bootstrap and status flow is working.
+- [x] **VSIX embedding removed:** CLI no longer uses `include_bytes!` for the vsix. Extension is installed via download or marketplace.
+- [x] **`build.rs` cleaned:** No references to `../../extensions/cursor-budi/`.
+- [x] **Daemon API versioned:** `/health` response includes `api_version` (or `min_api_version`) so the extension can detect incompatible daemons.
+- [x] **Session tracking file documented:** `cursor-sessions.json` format is documented in this ADR (see Section 3.4) and stable.
+- [x] **Extension CI independent:** Extension can be built, tested, and released without the Rust workspace.
+- [x] **Extension README standalone:** `extensions/cursor-budi/README.md` is self-contained (install instructions reference budi-core as a prerequisite, not a sibling directory).
 
 #### budi-cloud extraction prerequisites
 
-- [ ] **R3.3 shipped:** Rich CLI is the primary local UX; dashboard removal does not leave a UX gap.
-- [ ] **R4.1–R4.3 shipped:** Cloud ingest API, sync worker, and dashboard alpha are working.
-- [ ] **Dashboard build decoupled:** `budi-daemon` no longer embeds `dashboard-dist/`. Dashboard serving routes are removed.
-- [ ] **`build-dashboard.sh` removed:** No scripts referencing `frontend/dashboard/`.
-- [ ] **Sync payload contract locked:** ADR-0083 sync envelope is implemented and tested.
-- [ ] **Cloud config separate:** `cloud.toml` is the only budi-core config that mentions cloud. The cloud service has its own deployment config.
-- [ ] **Cloud CI independent:** Cloud dashboard and API can be built, tested, and deployed without the Rust workspace.
+- [x] **R3.3 shipped:** Rich CLI is the primary local UX; dashboard removal does not leave a UX gap.
+- [x] **R4.1–R4.3 shipped:** Cloud ingest API, sync worker, and dashboard alpha are working.
+- [x] **Dashboard build decoupled:** `budi-daemon` no longer embeds `dashboard-dist/`. Dashboard serving routes are removed.
+- [x] **`build-dashboard.sh` removed:** No scripts referencing `frontend/dashboard/`.
+- [x] **Sync payload contract locked:** ADR-0083 sync envelope is implemented and tested.
+- [x] **Cloud config separate:** `cloud.toml` is the only budi-core config that mentions cloud. The cloud service has its own deployment config.
+- [x] **Cloud CI independent:** Cloud dashboard and API can be built, tested, and deployed without the Rust workspace.
 
 #### Shared prerequisites
 
-- [ ] **No circular dependencies:** budi-core does not import from budi-cursor or budi-cloud. (Already true today.)
-- [ ] **Version coordination strategy:** Decide whether budi-core and budi-cursor share version numbers or version independently. Recommendation: version independently with a `compatible_daemon_version` range in the extension package.json.
-- [ ] **Monorepo continues shipping:** Until extraction day, the monorepo can still build and release all three products from a single `cargo build` + npm pipeline.
+- [x] **No circular dependencies:** budi-core does not import from budi-cursor or budi-cloud. (Already true today.)
+- [x] **Version coordination strategy:** Decide whether budi-core and budi-cursor share version numbers or version independently. Recommendation: version independently with a `compatible_daemon_version` range in the extension package.json.
+- [x] **Monorepo continues shipping:** Until extraction day, the monorepo can still build and release all three products from a single `cargo build` + npm pipeline.
 
 ### 5. Extraction Mechanics (R4.4 Playbook)
 

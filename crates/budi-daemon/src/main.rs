@@ -64,7 +64,7 @@ fn build_proxy_router(proxy_state: ProxyState) -> Router {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, dashboard as d, hooks as h, require_loopback};
+    use routes::{analytics as a, hooks as h, require_loopback};
 
     let protected_routes = Router::new()
         .route("/sync", post(h::analytics_sync))
@@ -81,7 +81,7 @@ fn build_router(app_state: AppState) -> Router {
         .route_layer(from_fn(require_loopback));
 
     Router::new()
-        .route("/favicon.ico", get(d::favicon))
+        .route("/favicon.ico", get(h::favicon))
         .route("/health", get(h::health))
         .route("/health/integrations", get(h::health_integrations))
         .route("/health/check-update", get(h::health_check_update))
@@ -143,10 +143,6 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/messages/{message_uuid}/detail",
             get(a::analytics_message_detail),
         )
-        // Dashboard SPA shell + hashed static assets.
-        .route("/dashboard", get(d::dashboard))
-        .route("/dashboard/{*rest}", get(d::dashboard))
-        .route("/static/dashboard/{*path}", get(d::dashboard_asset))
         .merge(protected_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(app_state)
@@ -429,58 +425,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn dashboard_returns_html() {
-        let app = test_app();
-        let resp = app
-            .oneshot(Request::get("/dashboard").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(ct.contains("text/html"));
-    }
-
-    #[tokio::test]
-    async fn dashboard_deep_link_returns_html() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::get("/dashboard/sessions/some-session")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(ct.contains("text/html"));
-    }
-
-    #[tokio::test]
-    async fn dashboard_missing_asset_returns_404() {
-        let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::get("/static/dashboard/assets/not-found.js")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

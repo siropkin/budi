@@ -9,7 +9,6 @@ cargo build              # dev build
 cargo build --release    # release build
 cargo test               # all workspace tests
 cargo test -p budi-core  # core tests only
-./scripts/build-dashboard.sh  # build React dashboard bundle into daemon static assets
 ./scripts/install.sh     # build release + install to ~/.local/bin/
 ```
 
@@ -46,26 +45,19 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 
 ### Product boundaries
 
-The monorepo contains three logical products planned for eventual extraction (see [ADR-0086](docs/adr/0086-extraction-boundaries.md)):
+Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extraction-boundaries.md)):
 
-| Product | Location | Role |
-|---------|----------|------|
-| **budi-core** | `crates/`, `scripts/`, `homebrew/` | Rust workspace: daemon, CLI, core business logic. Stays in this repo. |
-| **budi-cursor** | `extensions/cursor-budi/` | VS Code/Cursor extension. Communicates with daemon over HTTP and `budi` CLI. Will be extracted to its own repo. |
-| **budi-cloud** | `frontend/dashboard/` + `cloud/` | Local dashboard + cloud dashboard + ingest API (Next.js + Supabase). Will be extracted to its own repo. |
-
-Key coupling points today:
-- The daemon embeds the built dashboard from `crates/budi-daemon/static/dashboard-dist/`.
-- CI builds all three products in a single workflow.
-- The CLI downloads the Cursor extension vsix from GitHub Releases at install time (no longer embedded via `include_bytes!`).
-
-These coupling points are documented with untangling plans in ADR-0086. New code should not introduce additional cross-product dependencies.
+| Product | Repo | Role |
+|---------|------|------|
+| **budi-core** | [`siropkin/budi`](https://github.com/siropkin/budi) | Rust workspace: daemon, CLI, core business logic |
+| **budi-cursor** | [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor) | VS Code/Cursor extension. Communicates with daemon over HTTP and `budi` CLI |
+| **budi-cloud** | [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud) | Cloud dashboard + ingest API (Next.js + Supabase) |
 
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations, autostart (platform-native daemon service management). Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, open, update, integrations, uninstall, migrate, repair
-- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard and analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, update, integrations, uninstall, migrate, repair
+- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
 ### Data flow
 
@@ -162,26 +154,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-cli/src/commands/sessions.rs` - `budi sessions` list and detail view (Rich CLI)
 - `crates/budi-cli/src/commands/status.rs` - `budi status` quick overview (daemon, proxy, today's cost)
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
-- `frontend/dashboard/` - React + Vite + Tailwind + shadcn-style dashboard app mounted at `/dashboard`
-- `crates/budi-daemon/static/dashboard-dist/` - Built dashboard bundle served under `/static/dashboard/*`
-- `cloud/src/app/api/v1/ingest/route.ts` - Cloud ingest API: POST /v1/ingest (sync payload from daemon, UPSERT daily rollups + session summaries)
-- `cloud/src/app/api/v1/ingest/status/route.ts` - Cloud ingest API: GET /v1/ingest/status (watermark + sync health for a device)
-- `cloud/src/lib/supabase/admin.ts` - Server-side Supabase client (service_role key, bypasses RLS)
-- `cloud/supabase/migrations/001_ingest_schema.sql` - Supabase schema: orgs, users, devices, daily_rollups, session_summaries + RLS policies (ADR-0083 §8)
-- `cloud/supabase/migrations/002_dashboard_schema.sql` - Dashboard schema extension: user display_name/email, invite_tokens table
-- `cloud/src/proxy.ts` - Next.js proxy: Supabase auth session refresh + route protection for /dashboard/*
-- `cloud/src/lib/supabase/server.ts` - Server-side Supabase client (cookie-based auth, RLS-aware)
-- `cloud/src/lib/supabase/client.ts` - Browser-side Supabase client for Client Components
-- `cloud/src/lib/dal.ts` - Dashboard data access layer: overview stats, daily activity, cost-by-user/model/repo/branch/ticket, sessions
-- `cloud/src/app/login/page.tsx` - Supabase Auth sign-in (GitHub, Google, magic link)
-- `cloud/src/app/auth/callback/route.ts` - OAuth callback: exchanges code for session, auto-creates budi user row
-- `cloud/src/app/dashboard/layout.tsx` - Dashboard layout with sidebar navigation + user menu
-- `cloud/src/app/dashboard/page.tsx` - Overview: summary cards + daily activity chart
-- `cloud/src/app/dashboard/settings/page.tsx` - Org settings, API key, team members, invite link generation
-- `cloud/src/app/invite/[token]/page.tsx` - Invite join flow: validates token, links user to org
-- `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
-- `extensions/cursor-budi/src/panel.ts` - Side panel webview (session details, vitals, session list)
-- `extensions/cursor-budi/src/budiClient.ts` - Daemon HTTP client + health aggregation logic
+<!-- budi-cursor and budi-cloud live in their own repos: siropkin/budi-cursor, siropkin/budi-cloud -->
 
 ## Dev notes
 
@@ -192,14 +165,8 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook_events table dropped in v22). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
-- **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.
-- **Cloud dashboard** (`cloud/`) is a Next.js 16 app deployed to app.getbudi.dev. Uses Supabase Auth (GitHub/Google/magic link) for web sign-in. The proxy (formerly middleware — renamed in Next.js 16) refreshes auth tokens and protects `/dashboard/*` routes. Auth users map to budi `users` rows via `id = auth.uid()`. Data access uses Supabase client with RLS (users see only their org's data). Dashboard pages: Overview (summary cards + daily activity chart), Team (cost by user), Models (cost by model/provider), Repos (cost by repo/branch/ticket), Sessions (session table), Settings (org + API key + invite link). Manager role sees all org data; member sees own data. The DAL (`cloud/src/lib/dal.ts`) aggregates `daily_rollups` and `session_summaries` tables — daily granularity only per ADR-0083.
-- **Local dashboard** is a React SPA at `/dashboard` with client-side routing:
-  - `/dashboard` (Overview) - Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
-  - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools
-  - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
-  - `/dashboard/settings` - Status, integrations, database info, paths, actions (sync/re-sync/migrate/check updates), help links
-- Dashboard frontend sources live in `frontend/dashboard/`; built assets are embedded from `crates/budi-daemon/static/dashboard-dist` (served at `/static/dashboard/*`)
+- **Cursor extension** ([siropkin/budi-cursor](https://github.com/siropkin/budi-cursor)): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.
+- **Cloud dashboard** ([siropkin/budi-cloud](https://github.com/siropkin/budi-cloud)) is a Next.js 16 app deployed to app.getbudi.dev. Uses Supabase Auth (GitHub/Google/magic link) for web sign-in. Dashboard pages: Overview, Team, Models, Repos, Sessions, Settings. Manager role sees all org data; member sees own data.
 - Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion)
 - Admin endpoints (loopback-only): `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration), `/admin/integrations/install` (integration installer orchestration)
 - Sync mutation endpoints (loopback-only): `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync)

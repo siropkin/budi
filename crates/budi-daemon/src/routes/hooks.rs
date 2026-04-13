@@ -1,6 +1,8 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::http::header;
+use axum::response::IntoResponse;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -219,6 +221,17 @@ fn cursor_extension_installed_via_filesystem(home: &str) -> bool {
 fn is_cursor_extension_installed(home: &str) -> bool {
     cursor_extension_installed_via_cli().unwrap_or(false)
         || cursor_extension_installed_via_filesystem(home)
+}
+
+pub async fn favicon() -> impl IntoResponse {
+    let svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1f4ca;</text></svg>";
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        svg,
+    )
 }
 
 /// Current daemon management API version.  Bump when a breaking change is

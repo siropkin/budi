@@ -146,8 +146,6 @@ pub fn cmd_init(
         install_autostart_service(&config);
     }
 
-    let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
-
     let bold_cyan = super::ansi("\x1b[1;36m");
     let bold = super::ansi("\x1b[1m");
     let dim = super::ansi("\x1b[90m");
@@ -194,7 +192,7 @@ pub fn cmd_init(
         "    2. Import history: `budi import` {dim}(load past transcripts from Claude Code / Cursor){reset}"
     );
     println!("    3. Health check:   `budi status`");
-    println!("    4. {dim}Local dashboard (legacy): {dashboard_url}{reset}");
+    println!("    4. Cloud dashboard:  https://app.getbudi.dev");
     println!();
     if selected_integrations.is_empty() {
         println!(
