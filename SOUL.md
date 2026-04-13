@@ -52,7 +52,7 @@ The monorepo contains three logical products planned for eventual extraction (se
 |---------|----------|------|
 | **budi-core** | `crates/`, `scripts/`, `homebrew/` | Rust workspace: daemon, CLI, core business logic. Stays in this repo. |
 | **budi-cursor** | `extensions/cursor-budi/` | VS Code/Cursor extension. Communicates with daemon over HTTP and `budi` CLI. Will be extracted to its own repo. |
-| **budi-cloud** | `frontend/dashboard/` + `cloud/` | Local dashboard + cloud ingest API (Next.js + Supabase). Will be extracted to its own repo. |
+| **budi-cloud** | `frontend/dashboard/` + `cloud/` | Local dashboard + cloud dashboard + ingest API (Next.js + Supabase). Will be extracted to its own repo. |
 
 Key coupling points today:
 - The daemon embeds the built dashboard from `crates/budi-daemon/static/dashboard-dist/`.
@@ -99,7 +99,7 @@ Local SQLite daily rollups
   -> Retry with exponential backoff (1s -> 2s -> ... -> 5min cap) on 429/5xx
   -> Auth failure (401) stops syncing; schema mismatch (422) pauses until update
   -> Supabase Postgres (UPSERT, idempotent)
-  -> Manager dashboard at app.getbudi.dev (R4.3)
+  -> Manager dashboard at app.getbudi.dev
 Config: ~/.config/budi/cloud.toml ([cloud] section), env overrides BUDI_CLOUD_*
 Never uploaded: prompts, responses, code, file paths, email, raw payloads
 ```
@@ -168,6 +168,17 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `cloud/src/app/api/v1/ingest/status/route.ts` - Cloud ingest API: GET /v1/ingest/status (watermark + sync health for a device)
 - `cloud/src/lib/supabase/admin.ts` - Server-side Supabase client (service_role key, bypasses RLS)
 - `cloud/supabase/migrations/001_ingest_schema.sql` - Supabase schema: orgs, users, devices, daily_rollups, session_summaries + RLS policies (ADR-0083 §8)
+- `cloud/supabase/migrations/002_dashboard_schema.sql` - Dashboard schema extension: user display_name/email, invite_tokens table
+- `cloud/src/proxy.ts` - Next.js proxy: Supabase auth session refresh + route protection for /dashboard/*
+- `cloud/src/lib/supabase/server.ts` - Server-side Supabase client (cookie-based auth, RLS-aware)
+- `cloud/src/lib/supabase/client.ts` - Browser-side Supabase client for Client Components
+- `cloud/src/lib/dal.ts` - Dashboard data access layer: overview stats, daily activity, cost-by-user/model/repo/branch/ticket, sessions
+- `cloud/src/app/login/page.tsx` - Supabase Auth sign-in (GitHub, Google, magic link)
+- `cloud/src/app/auth/callback/route.ts` - OAuth callback: exchanges code for session, auto-creates budi user row
+- `cloud/src/app/dashboard/layout.tsx` - Dashboard layout with sidebar navigation + user menu
+- `cloud/src/app/dashboard/page.tsx` - Overview: summary cards + daily activity chart
+- `cloud/src/app/dashboard/settings/page.tsx` - Org settings, API key, team members, invite link generation
+- `cloud/src/app/invite/[token]/page.tsx` - Invite join flow: validates token, links user to org
 - `extensions/cursor-budi/src/extension.ts` - Cursor extension entry point (status bar, commands, polling)
 - `extensions/cursor-budi/src/panel.ts` - Side panel webview (session details, vitals, session list)
 - `extensions/cursor-budi/src/budiClient.ts` - Daemon HTTP client + health aggregation logic
@@ -182,7 +193,8 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook_events table dropped in v22). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** (`extensions/cursor-budi/`): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.
-- **Dashboard** is a React SPA at `/dashboard` with client-side routing:
+- **Cloud dashboard** (`cloud/`) is a Next.js 16 app deployed to app.getbudi.dev. Uses Supabase Auth (GitHub/Google/magic link) for web sign-in. The proxy (formerly middleware — renamed in Next.js 16) refreshes auth tokens and protects `/dashboard/*` routes. Auth users map to budi `users` rows via `id = auth.uid()`. Data access uses Supabase client with RLS (users see only their org's data). Dashboard pages: Overview (summary cards + daily activity chart), Team (cost by user), Models (cost by model/provider), Repos (cost by repo/branch/ticket), Sessions (session table), Settings (org + API key + invite link). Manager role sees all org data; member sees own data. The DAL (`cloud/src/lib/dal.ts`) aggregates `daily_rollups` and `session_summaries` tables — daily granularity only per ADR-0083.
+- **Local dashboard** is a React SPA at `/dashboard` with client-side routing:
   - `/dashboard` (Overview) - Summary cards (cost/tokens/messages), activity timeline, agents/models, projects/branches, tickets/activity types
   - `/dashboard/insights` - Cost confidence, cache efficiency, session cost curve (split: cost + count), speed mode, subagent vs main, tools
   - `/dashboard/sessions` - Session list with sort/search/pagination, drill-down to `/dashboard/sessions/:id` with session meta, tags, health panel (vitals + tips), input token growth chart, message table
