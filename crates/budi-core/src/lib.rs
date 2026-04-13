@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod autostart;
 pub mod cloud_sync;
 pub mod config;
 pub mod cost;

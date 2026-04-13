@@ -158,10 +158,11 @@ Use this sequence if you want the fastest "did setup really work?" path:
    - Homebrew: `brew install siropkin/budi/budi` then `budi init`
    - Standalone installers and `./scripts/install.sh` already run `budi init` for you
 2. **Choose agents and integrations** during `budi init` (recommended defaults are safe)
+   - `budi init` also installs a platform-native autostart service (launchd on macOS, systemd on Linux, Task Scheduler on Windows) so the daemon restarts automatically after reboots
 3. **Import historical data** (optional)
    - Run `budi import` to backfill from Claude Code JSONL transcripts and Cursor Usage API
 4. **Confirm health**
-   - Run `budi doctor` to check daemon, proxy, and agent configuration
+   - Run `budi doctor` to check daemon, proxy, autostart service, and agent configuration
    - Run `budi status` for a quick overview of daemon, proxy, and today's cost
 5. **Generate your first data point**
    - **CLI agents**: `budi launch claude` (or `codex`, `copilot`) — configures the proxy automatically, zero manual setup
@@ -553,6 +554,9 @@ Windows equivalent:
 2. Kill stale daemon: `taskkill /IM budi-daemon.exe /F`
 3. Restart: `budi init`
 
+**Daemon doesn't survive reboots:**
+Run `budi doctor` — if the autostart check shows "not installed", run `budi init` to install the platform-native service (launchd on macOS, systemd on Linux, Task Scheduler on Windows).
+
 **Proxy not reachable (agent gets connection refused on port 9878):**
 1. Run `budi doctor` to check proxy health
 2. Check if port 9878 is in use by another process: `lsof -i :9878`
@@ -571,10 +575,10 @@ Windows equivalent:
 ## Uninstall
 
 ```bash
-budi uninstall          # stops daemon, removes status line, config, and data
+budi uninstall          # stops daemon, removes autostart service, status line, config, and data
 ```
 
-`budi uninstall` removes status line, config, and data but **not** the binaries themselves. Remove binaries separately:
+`budi uninstall` removes the autostart service, status line, config, and data but **not** the binaries themselves. Remove binaries separately:
 
 ```bash
 # Homebrew:

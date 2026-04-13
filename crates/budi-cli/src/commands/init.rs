@@ -132,6 +132,9 @@ pub fn cmd_init(
         println!("  Daemon: starting...");
         ensure_daemon_running(repo_root.as_deref(), &config)?;
         println!("  Daemon: running on {}", config.daemon_base_url());
+
+        // Install autostart service so daemon survives reboots
+        install_autostart_service(&config);
     }
 
     let dashboard_url = format!("{}/dashboard", config.daemon_base_url());
@@ -549,4 +552,40 @@ fn brew_has_budi() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Install the platform-native autostart service (launchd / systemd / Task Scheduler).
+fn install_autostart_service(config: &config::BudiConfig) {
+    let daemon_bin = match crate::daemon::resolve_daemon_binary() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{}  Warning:{} could not resolve daemon binary for autostart: {e}",
+                super::ansi("\x1b[33m"),
+                super::ansi("\x1b[0m"),
+            );
+            return;
+        }
+    };
+
+    match budi_core::autostart::install_service(
+        &daemon_bin,
+        &config.daemon_host,
+        config.daemon_port,
+    ) {
+        Ok(()) => {
+            let mechanism = budi_core::autostart::service_mechanism();
+            println!("  Autostart: installed ({mechanism})");
+        }
+        Err(e) => {
+            eprintln!(
+                "{}  Warning:{} autostart setup failed: {e}",
+                super::ansi("\x1b[33m"),
+                super::ansi("\x1b[0m"),
+            );
+            eprintln!(
+                "  The daemon will not auto-restart after reboot. Run `budi init` again to retry."
+            );
+        }
+    }
 }

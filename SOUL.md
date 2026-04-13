@@ -26,6 +26,18 @@ budi init
 
 After upgrading: the first CLI command now verifies daemon version and auto-restarts stale daemons when needed. If automatic restart fails, stop the old process manually, then run `budi init` or `budi sync`. On Unix you can use `pkill -f budi-daemon`; on Windows use `taskkill /IM budi-daemon.exe /F` if needed.
 
+## Daemon autostart
+
+`budi init` installs a platform-native user-level service so the daemon starts automatically at login and restarts on crash:
+
+| Platform | Mechanism | Service file |
+|----------|-----------|-------------|
+| macOS | launchd LaunchAgent | `~/Library/LaunchAgents/dev.getbudi.budi-daemon.plist` |
+| Linux | systemd user service | `~/.config/systemd/user/budi-daemon.service` |
+| Windows | Task Scheduler | `BudiDaemon` task (created via `schtasks`) |
+
+`budi uninstall` removes the service. `budi doctor` reports service installation status. See ADR-0087 §8 for design rationale.
+
 ## Platforms
 
 macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to replace an existing listener on the same port. Windows uses PowerShell **`Get-NetTCPConnection`** and **`taskkill`** for the same behavior. Unsupported or minimal environments may skip automatic takeover - stop the old daemon manually if the new one cannot bind.
@@ -51,7 +63,7 @@ These coupling points are documented with untangling plans in ADR-0086. New code
 
 ### Crates
 
-- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations. Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
+- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations, autostart (platform-native daemon service management). Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
 - **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, open, update, integrations, uninstall, migrate, repair
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves dashboard and analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
@@ -137,6 +149,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
 - `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
+- `crates/budi-core/src/autostart.rs` - Platform-native daemon autostart: launchd (macOS), systemd (Linux), Task Scheduler (Windows). Install/uninstall/status.
 - `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878) + cloud sync worker, ~40 routes
