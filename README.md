@@ -18,7 +18,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 </p>
 
 <details>
-<summary>More dashboard pages</summary>
+<summary>More screenshots</summary>
 
 **Insights** — cache efficiency, session cost curve, tool usage, subagent costs
 
@@ -32,12 +32,6 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
   <img src="assets/dashboard-sessions.png" alt="budi sessions" width="800">
 </p>
 
-**Settings** — integration status, database info, sync controls
-
-<p align="center">
-  <img src="assets/dashboard-settings.png" alt="budi settings" width="800">
-</p>
-
 </details>
 
 ## What it does
@@ -46,8 +40,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 - **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time — streaming responses pass through with no visible lag
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
-- Web dashboard at `http://localhost:7878/dashboard` (local, per-developer view)
-- **Cloud dashboard** at `app.getbudi.dev` — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, requires `budi cloud join`)
+- **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, requires `budi cloud join`)
 - Live cost + health status line in Claude Code and Cursor
 - **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
@@ -76,12 +69,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, quality checks, and PR w
 Architecture and module boundaries are documented in [SOUL.md](SOUL.md).
 Architecture decision records live in [`docs/adr/`](docs/adr/).
 
-Quick validation matrix:
+Quick validation: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
 
-- Rust changes: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
-- Dashboard changes: `cd frontend/dashboard && npm ci && npm run build`
-- Cursor extension changes: `cd extensions/cursor-budi && npm ci && npm run lint && npm run format:check && npm run test && npm run build`
-- Cloud changes: `cd cloud && npm ci && npm run build`
+Cursor extension and cloud dashboard live in their own repos: [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor), [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud).
 
 To report a bug or request a feature, open a GitHub issue using the repository templates so maintainers get reproducible details quickly.
 
@@ -225,12 +215,8 @@ The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 �
 **Manual install** (if auto-install was skipped or you want to rebuild):
 
 ```bash
-cd extensions/cursor-budi
-npm ci
-npm run lint
-npm run format:check
-npm run test
-npm run build
+git clone https://github.com/siropkin/budi-cursor.git && cd budi-cursor
+npm ci && npm run build
 npx vsce package --no-dependencies -o cursor-budi.vsix
 cursor --install-extension cursor-budi.vsix --force
 ```
@@ -298,7 +284,6 @@ budi sync --force                  # re-ingest all data from scratch (use after 
 budi repair                        # repair schema drift + run migration checks
 budi update                        # check for updates (auto-detects Homebrew)
 budi update --version <name>       # update to a specific version
-budi open                          # open local dashboard (legacy)
 budi integrations list             # show what is installed vs available
 budi integrations install ...      # install integrations later
 budi uninstall                     # remove status line, config, and data
@@ -380,7 +365,7 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 | Multi-agent support | **Yes** (Claude Code, Codex CLI, Cursor, Copilot CLI) | Claude Code only | Claude Code only |
 | Real-time cost via proxy | **Yes** | No | No |
 | Cost history | **Per-message + daily** | Per-session | Current session |
-| Web dashboard | **Yes** | No | No |
+| Cloud dashboard | **Yes** ([app.getbudi.dev](https://app.getbudi.dev)) | No | No |
 | Status line + session health | **Yes** (with actionable tips) | No | No |
 | Per-repo breakdown | **Yes** | No | No |
 | Cost attribution (branch/ticket) | **Yes** | No | No |
@@ -398,10 +383,10 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 │ budi CLI │ ──────────▶ │ budi-daemon  │ ───────────▶ │  budi.db │
 └──────────┘             │  (port 7878) │              └──────────┘
                          │              │                    ▲
-┌──────────┐    HTTP     │  - analytics │    Pipeline       │
-│ Dashboard│ ──────────▶ │  - import    │ ──────────────────┘
-│ (legacy) │             │  (on demand) │    Extract → Normalize
-└──────────┘             └──────────────┘      → Enrich → Load
+                         │  - analytics │    Pipeline       │
+                         │  - import    │ ──────────────────┘
+                         │  (on demand) │    Extract → Normalize
+                         └──────────────┘      → Enrich → Load
                                 │
                          ┌──────────────┐
 ┌──────────┐    proxy    │ budi proxy   │    upstream

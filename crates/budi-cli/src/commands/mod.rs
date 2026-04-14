@@ -11,7 +11,6 @@ pub mod import;
 pub mod init;
 pub mod integrations;
 pub mod launch;
-pub mod open;
 pub mod proxy_install;
 pub mod repair;
 pub mod sessions;

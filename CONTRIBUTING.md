@@ -5,7 +5,6 @@ Thanks for helping improve budi.
 ## Prerequisites
 
 - Rust stable toolchain (`rustup`, `cargo`)
-- Node.js 20+ and npm (for dashboard and Cursor extension work)
 - `gh` CLI (required when validating release-install flows with `scripts/install.sh --from-release`)
 
 ## Quick start
@@ -40,62 +39,13 @@ To mirror CI exactly for formatting, use:
 cargo fmt --all -- --check
 ```
 
-### Dashboard frontend (`frontend/dashboard`)
-
-```bash
-cd frontend/dashboard
-npm ci
-npm run build
-```
-
-`npm run build` compiles the React app and writes static assets to `crates/budi-daemon/static/dashboard-dist`, which are embedded/served by `budi-daemon`.
-
-From repo root you can also run:
-
-```bash
-./scripts/build-dashboard.sh
-```
-
-One-liner to rebuild dashboard assets and run daemon locally (foreground):
-
-```bash
-(cd frontend/dashboard && npm ci && npm run build) && CARGO_INCREMENTAL=0 cargo run -p budi-daemon -- serve
-```
-
-`CARGO_INCREMENTAL=0` avoids noisy incremental-cache warnings on some machines.
-
-For local dashboard UI development (hot reload + API proxy):
-
-```bash
-# terminal A (repo root)
-cargo run -p budi-daemon -- serve
-
-# terminal B
-cd frontend/dashboard
-npm ci
-npm run dev
-```
-
 ### Cursor extension
 
-```bash
-cd extensions/cursor-budi
-npm ci
-npm run lint
-npm run format:check
-npm run test
-npm run build
-```
+See [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor).
 
 ### Cloud (Next.js ingest API + dashboard)
 
-```bash
-cd cloud
-npm ci
-npm run build
-```
-
-For local development, copy `.env.local.example` to `.env.local` and fill in your Supabase project keys.
+See [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud).
 
 ## Install locally
 
@@ -138,8 +88,6 @@ Issue templates are available in the repository to keep reports actionable.
 
 - [ ] Change is scoped and described clearly.
 - [ ] `cargo fmt`, `clippy`, and tests pass locally.
-- [ ] Dashboard frontend build passes (`cd frontend/dashboard && npm run build`) if dashboard code changed.
-- [ ] Extension lint/format/test/build checks pass if extension code changed.
 - [ ] Docs were updated for user-visible behavior changes.
 - [ ] Migration or compatibility impact is noted (if relevant).
 - [ ] Follow-up work is captured explicitly (issue or PR TODO) if not included in this PR.
@@ -159,7 +107,6 @@ If a review issue leads to "no code changes needed", still include a small artif
 ## Contributor troubleshooting quick hits
 
 - **`budi` and `budi-daemon` mismatch**: keep one install source on `PATH`; run `budi doctor`.
-- **Dashboard looks stale after frontend edits**: rebuild via `./scripts/build-dashboard.sh`, then restart daemon.
 - **Cursor extension status stale/offline**: run `budi doctor`, then `Budi: Refresh Status` or reload Cursor window.
 
 ## Adding support for a new agent
