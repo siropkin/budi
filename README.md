@@ -347,9 +347,19 @@ Health state appears in the status line, the Cursor extension panel, and the ses
 
 ## Privacy
 
-Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi only stores metadata: timestamps, token counts, model names, and costs. It **never** reads, stores, or transmits file contents, prompt text, or AI responses.
+Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). The proxy forwards your requests to the upstream LLM provider and back, but budi only **stores** metadata locally: timestamps, token counts, model names, and costs. Prompts, code, and AI responses pass through the proxy and are never written to disk or retained by budi.
 
-**Cloud sync** (optional, disabled by default) pushes pre-aggregated daily rollups and session summaries to a team dashboard at `app.getbudi.dev`. Only numeric metrics (token counts, costs, model names, hashed repo IDs, branch names) cross the wire. Prompts, code, responses, file paths, email addresses, raw payloads, and tag values are structurally excluded from the sync payload — there is no "full upload" mode. See [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md) for the complete privacy contract.
+**Cloud sync** (optional, disabled by default) pushes pre-aggregated daily rollups and session summaries to a team dashboard at `app.getbudi.dev`. Only numeric metrics cross the wire: token counts, costs, model names, hashed repo IDs, branch names, and ticket IDs. Prompts, code, responses, file paths, email addresses, raw payloads, and tag values are structurally excluded from the sync payload — there is no "full upload" mode.
+
+Cloud sync details:
+- **Transport**: HTTPS only — the daemon refuses to sync over plain HTTP
+- **Direction**: Push-only — the cloud never initiates connections to your machine; there is no webhook, pull, or remote command channel
+- **Granularity**: Daily aggregates; no per-message, per-hour, or real-time streaming views
+- **Retention**: 90 days in the cloud alpha
+- **Team model**: Manager/member roles for small teams (1–20 developers)
+- **Auth**: API key auth for daemon sync; Supabase Auth (GitHub, Google, magic link) for the web dashboard. No SSO/SAML in v1
+
+See [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md) for the complete privacy contract.
 
 ## How it works
 
@@ -369,7 +379,7 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 | Status line + session health | **Yes** (with actionable tips) | No | No |
 | Per-repo breakdown | **Yes** | No | No |
 | Cost attribution (branch/ticket) | **Yes** | No | No |
-| Privacy | 100% local | Local | Built-in |
+| Privacy | Local-first (optional cloud sync for aggregated metrics only) | Local | Built-in |
 | Setup | `budi init` | `npx ccusage` | Built-in |
 | Built with | Rust | TypeScript | — |
 

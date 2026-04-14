@@ -93,7 +93,7 @@ Local SQLite daily rollups
   -> Supabase Postgres (UPSERT, idempotent)
   -> Manager dashboard at app.getbudi.dev
 Config: ~/.config/budi/cloud.toml ([cloud] section), env overrides BUDI_CLOUD_*
-Never uploaded: prompts, responses, code, file paths, email, raw payloads
+Never uploaded: prompts, responses, code, file paths, email, raw payloads, tag values
 ```
 
 ### Database (SQLite, WAL mode, schema v21)
