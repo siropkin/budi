@@ -278,9 +278,7 @@ budi health --session <id>         # health vitals for a specific session
 ```bash
 budi doctor                        # check health: daemon, proxy, database, config
 budi doctor --deep                 # run full SQLite integrity_check (slower)
-budi sync                          # sync recent data (last 30 days)
-budi sync --all                    # load full history (all time)
-budi sync --force                  # re-ingest all data from scratch (use after upgrades)
+budi import --force                # re-ingest all data from scratch (use after upgrades)
 budi repair                        # repair schema drift + run migration checks
 budi update                        # check for updates (auto-detects Homebrew)
 budi update --version <name>       # update to a specific version

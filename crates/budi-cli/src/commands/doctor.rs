@@ -217,7 +217,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
             let target = sv.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
             if !exists {
                 println!("  {red}\u{2717}{reset} database: not created yet");
-                issues.push("No database. Run `budi sync` to create it.".into());
+                issues.push("No database. Run `budi import` to create it.".into());
             } else if current == target {
                 println!("  {green}\u{2713}{reset} database schema: v{}", current);
             } else {
@@ -244,7 +244,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
                     "  {red}\u{2717}{reset} database: not found at {}",
                     db_path.display()
                 );
-                issues.push("Database not found. Run `budi sync` to create it.".into());
+                issues.push("Database not found. Run `budi import` to create it.".into());
             }
         }
     }
