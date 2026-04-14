@@ -473,7 +473,7 @@ pub fn budi_config_dir() -> Result<PathBuf> {
 // Cloud config — loaded from `~/.config/budi/cloud.toml` (ADR-0083 §9)
 // ---------------------------------------------------------------------------
 
-pub const DEFAULT_CLOUD_ENDPOINT: &str = "https://api.getbudi.dev";
+pub const DEFAULT_CLOUD_ENDPOINT: &str = "https://app.getbudi.dev";
 pub const DEFAULT_CLOUD_SYNC_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_CLOUD_SYNC_RETRY_MAX_SECONDS: u64 = 300;
 
@@ -967,7 +967,7 @@ daemon_port = 7878
         assert!(config.api_key.is_none());
         assert!(config.device_id.is_none());
         assert!(config.org_id.is_none());
-        assert_eq!(config.endpoint, "https://api.getbudi.dev");
+        assert_eq!(config.endpoint, "https://app.getbudi.dev");
         assert_eq!(config.sync.interval_seconds, 300);
         assert_eq!(config.sync.retry_max_seconds, 300);
     }
@@ -1036,7 +1036,7 @@ api_key = "budi_test"
         let config = w.cloud;
         assert!(config.enabled);
         assert_eq!(config.api_key.as_deref(), Some("budi_test"));
-        assert_eq!(config.endpoint, "https://api.getbudi.dev");
+        assert_eq!(config.endpoint, "https://app.getbudi.dev");
         assert_eq!(config.sync.interval_seconds, 300);
     }
 }

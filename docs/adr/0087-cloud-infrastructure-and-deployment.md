@@ -29,7 +29,7 @@ Two Supabase projects separate development from production:
 | Project | Purpose | Used by |
 |---------|---------|---------|
 | `budi-dev` | Development and staging | Preview deployments, local development, CI tests |
-| `budi-prod` | Production | `app.getbudi.dev` and `api.getbudi.dev` |
+| `budi-prod` | Production | `app.getbudi.dev` |
 
 Both projects share the same schema (managed via versioned migration files in the `budi-cloud` repo). Supabase free tier is sufficient for the cloud alpha (1-20 developers per ADR-0083 §6).
 
@@ -44,7 +44,7 @@ One Vercel project (`budi-cloud`) with automatic environments:
 | Environment | Trigger | Supabase target | URL |
 |-------------|---------|-----------------|-----|
 | Preview | Push to any PR branch | `budi-dev` | `*.vercel.app` (auto-generated) |
-| Production | Push to `main` | `budi-prod` | `app.getbudi.dev` / `api.getbudi.dev` |
+| Production | Push to `main` | `budi-prod` | `app.getbudi.dev` |
 
 Vercel environment variables connect each deployment to the correct Supabase project:
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (client-side)
@@ -57,12 +57,11 @@ Vercel environment variables connect each deployment to the correct Supabase pro
 | Subdomain | Purpose | Hosting | Repo |
 |-----------|---------|---------|------|
 | `getbudi.dev` | Marketing / landing page | Vercel | `siropkin/getbudi.dev` |
-| `app.getbudi.dev` | Cloud dashboard (manager/member views) | Vercel | `siropkin/budi-cloud` |
-| `api.getbudi.dev` | Cloud ingest API (daemon sync target) | Vercel API routes | `siropkin/budi-cloud` |
+| `app.getbudi.dev` | Cloud dashboard + ingest API (via `/v1/*` rewrite) | Vercel | `siropkin/budi-cloud` |
 
 **DNS setup**: Either transfer nameservers from GoDaddy to Vercel (simplest — Vercel manages all DNS) or add CNAME records pointing subdomains to `cname.vercel-dns.com`. Vercel handles TLS certificates automatically.
 
-**ADR-0083 update**: §9 specifies `endpoint = "https://cloud.budi.dev"` as the default cloud endpoint. This ADR updates it to `https://api.getbudi.dev`.
+**ADR-0083 update**: §9 specifies `endpoint = "https://cloud.budi.dev"` as the default cloud endpoint. This ADR updates it to `https://app.getbudi.dev` (the `api.getbudi.dev` subdomain was never created; `app.getbudi.dev` serves both the dashboard and the ingest API via Next.js rewrites).
 
 ### 4. Web Authentication (Dashboard Users)
 
@@ -188,7 +187,7 @@ Before R4 implementation can begin, the repository owner must complete these man
 4. Configure environment variables: preview → dev Supabase keys, production → prod Supabase keys
 
 **Domain setup**:
-1. In Vercel: add custom domains `getbudi.dev`, `app.getbudi.dev`, `api.getbudi.dev`
+1. In Vercel: add custom domains `getbudi.dev`, `app.getbudi.dev`
 2. In GoDaddy: update nameservers to Vercel's (displayed in Vercel domain settings), OR add CNAME records as Vercel instructs
 3. Wait for DNS propagation and verify in Vercel
 
@@ -234,8 +233,8 @@ Before R4 implementation can begin, the repository owner must complete these man
 
 ### Downstream Impact
 
-- **#100 (R4.1)**: Ingest API implemented as Next.js API routes in `budi-cloud`, targeting `api.getbudi.dev`. Supabase schema applied via migration files.
-- **#101 (R4.2)**: Sync worker pushes to `https://api.getbudi.dev/v1/ingest` (updated from ADR-0083 §9 default).
+- **#100 (R4.1)**: Ingest API implemented as Next.js API routes in `budi-cloud`, served at `app.getbudi.dev`. Supabase schema applied via migration files.
+- **#101 (R4.2)**: Sync worker pushes to `https://app.getbudi.dev/v1/ingest` (updated from ADR-0083 §9 default).
 - **#102 (R4.3)**: Dashboard deployed at `app.getbudi.dev`, uses Supabase Auth with GitHub + Google providers.
 - **#103 (R4.4)**: Extraction creates `budi-cursor` and `budi-cloud` repos with independent CI and publishing.
 - **#108 (R5.3)**: Release readiness includes daemon autostart across all platforms.
