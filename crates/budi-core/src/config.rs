@@ -79,7 +79,7 @@ impl AgentsConfig {
     pub fn is_agent_enabled(&self, provider_name: &str) -> bool {
         match provider_name {
             "claude_code" => self.claude_code.enabled,
-            "codex_cli" => self.codex_cli.enabled,
+            "codex" | "codex_cli" => self.codex_cli.enabled,
             "cursor" => self.cursor.enabled,
             "copilot_cli" => self.copilot_cli.enabled,
             _ => false,
@@ -855,6 +855,7 @@ format = "{today} | {week} | {branch}"
         assert!(!config.cursor.enabled);
         assert!(!config.copilot_cli.enabled);
         assert!(!config.is_agent_enabled("claude_code"));
+        assert!(!config.is_agent_enabled("codex"));
         assert!(!config.is_agent_enabled("codex_cli"));
         assert!(!config.is_agent_enabled("cursor"));
         assert!(!config.is_agent_enabled("copilot_cli"));
@@ -864,6 +865,7 @@ format = "{today} | {week} | {branch}"
     fn agents_config_all_enabled() {
         let config = AgentsConfig::all_enabled();
         assert!(config.is_agent_enabled("claude_code"));
+        assert!(config.is_agent_enabled("codex"));
         assert!(config.is_agent_enabled("codex_cli"));
         assert!(config.is_agent_enabled("cursor"));
         assert!(config.is_agent_enabled("copilot_cli"));

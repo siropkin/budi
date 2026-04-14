@@ -42,7 +42,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, requires `budi cloud join`)
 - Live cost + health status line in Claude Code and Cursor
-- **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Cursor Usage API)
+- **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Codex Desktop/CLI sessions, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
 
 ## Platforms
@@ -61,7 +61,7 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 Tier 1 agents use simple env vars with high confidence. Tier 2 agents work but have onboarding caveats (GUI settings, proprietary env vars). See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full compatibility matrix.
 
-All agents also support one-time historical import via `budi import` (Claude Code JSONL transcripts, Cursor Usage API).
+All agents also support one-time historical import via `budi import` (Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Cursor Usage API).
 
 ## Contributing
 
@@ -160,7 +160,7 @@ Use this sequence if you want the fastest "did setup really work?" path:
 2. **Choose agents and integrations** during `budi init` (recommended defaults are safe)
    - `budi init` also installs a platform-native autostart service (launchd on macOS, systemd on Linux, Task Scheduler on Windows) so the daemon restarts automatically after reboots
 3. **Import historical data** (optional)
-   - Run `budi import` to backfill from Claude Code JSONL transcripts and Cursor Usage API
+   - Run `budi import` to backfill from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, and Cursor Usage API
 4. **Confirm health**
    - Run `budi doctor` to check daemon, proxy, autostart service, and agent configuration
    - Run `budi status` for a quick overview of daemon, proxy, and today's cost
@@ -405,10 +405,11 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 
 Historical import (budi import):
   JSONL transcripts (Claude Code) ──┐
-  Usage API (Cursor) ───────────────┴──▶ Pipeline → SQLite
+  JSONL sessions (Codex) ───────────┼──▶ Pipeline → SQLite
+  Usage API (Cursor) ───────────────┘
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. The **proxy** is the sole live data source: every LLM request flows through it, capturing tokens, cost, and attribution in real time. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be imported via `budi import` for one-time backfill.
+The daemon is the single source of truth — the CLI never opens the database directly. The **proxy** is the sole live data source: every LLM request flows through it, capturing tokens, cost, and attribution in real time. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, and Cursor Usage API can be imported via `budi import` for one-time backfill.
 
 **Data model** — nine tables, seven data entities + two supporting:
 
@@ -546,7 +547,7 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 1. Run `budi status` to check daemon, proxy, and today's cost
 2. Verify auto-proxy config with `budi doctor` (shell profile + Cursor/Codex settings)
 3. Send a prompt and check `budi stats` for non-zero usage
-4. For historical data: `budi import` (one-time backfill from Claude Code JSONL / Cursor Usage API)
+4. For historical data: `budi import` (one-time backfill from Claude Code JSONL, Codex sessions, Cursor Usage API)
 
 **Daemon won't start:**
 1. Check if port 7878 is in use: `lsof -i :7878`
