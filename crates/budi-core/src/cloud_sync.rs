@@ -554,8 +554,8 @@ mod tests {
 
     #[test]
     fn https_enforcement() {
-        assert!(validate_https_endpoint("https://api.getbudi.dev").is_ok());
-        assert!(validate_https_endpoint("http://api.getbudi.dev").is_err());
+        assert!(validate_https_endpoint("https://app.getbudi.dev").is_ok());
+        assert!(validate_https_endpoint("http://app.getbudi.dev").is_err());
         assert!(validate_https_endpoint("ftp://example.com").is_err());
     }
 
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn empty_payload_detected() {
         let result = send_sync_envelope(
-            "https://api.getbudi.dev",
+            "https://app.getbudi.dev",
             "budi_test",
             &SyncEnvelope {
                 schema_version: 1,

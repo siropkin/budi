@@ -86,7 +86,7 @@ Cloud sync (optional, disabled by default):
 Local SQLite daily rollups
   -> Daemon background sync worker reads aggregates only
   -> Builds sync envelope (ADR-0083 §2): daily_rollups + session_summaries
-  -> HTTPS-only POST to api.getbudi.dev/v1/ingest (Bearer budi_<key>)
+  -> HTTPS-only POST to app.getbudi.dev/v1/ingest (Bearer budi_<key>)
   -> Watermark tracking: only sends new/updated rollups since last confirmed sync
   -> Retry with exponential backoff (1s -> 2s -> ... -> 5min cap) on 429/5xx
   -> Auth failure (401) stops syncing; schema mismatch (422) pauses until update
