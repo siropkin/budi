@@ -25,7 +25,7 @@ pub enum ProxyProvider {
 impl ProxyProvider {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Anthropic => "anthropic",
+            Self::Anthropic => "claude_code",
             Self::OpenAi => "openai",
         }
     }
@@ -150,11 +150,7 @@ pub fn compute_proxy_cost_cents(
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
 ) -> f64 {
-    let provider_name = match provider {
-        ProxyProvider::Anthropic => "claude_code",
-        ProxyProvider::OpenAi => "openai",
-    };
-    let pricing = crate::provider::pricing_for_model(model, provider_name);
+    let pricing = crate::provider::pricing_for_model(model, provider.as_str());
     pricing.calculate_cost_cents(
         input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens.unwrap_or(0).max(0) as u64,
@@ -400,7 +396,7 @@ mod tests {
     fn proxy_event_with_null_tokens() {
         let conn = test_db();
         let mut event = test_event();
-        event.provider = "anthropic".to_string();
+        event.provider = "claude_code".to_string();
         event.model = "claude-sonnet-4-6".to_string();
         event.input_tokens = None;
         event.output_tokens = None;
@@ -418,7 +414,7 @@ mod tests {
 
     #[test]
     fn proxy_provider_display() {
-        assert_eq!(ProxyProvider::Anthropic.as_str(), "anthropic");
+        assert_eq!(ProxyProvider::Anthropic.as_str(), "claude_code");
         assert_eq!(ProxyProvider::OpenAi.as_str(), "openai");
     }
 
