@@ -715,7 +715,11 @@ fn install_cursor_extension(warnings: &mut Vec<String>) {
 /// Check if the `cursor` CLI is on PATH (or at the well-known macOS location).
 pub fn find_cursor_cli() -> Option<String> {
     let candidates = if cfg!(target_os = "macos") {
-        vec!["cursor".to_string(), "/usr/local/bin/cursor".to_string()]
+        vec![
+            "cursor".to_string(),
+            "/usr/local/bin/cursor".to_string(),
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor".to_string(),
+        ]
     } else {
         vec!["cursor".to_string()]
     };
