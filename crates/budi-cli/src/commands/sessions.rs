@@ -47,6 +47,8 @@ pub fn cmd_sessions(
     }
 
     for s in &sessions.sessions {
+        let short_id = if s.id.len() >= 8 { &s.id[..8] } else { &s.id };
+
         let time = s
             .started_at
             .as_deref()
@@ -85,7 +87,7 @@ pub fn cmd_sessions(
         };
 
         println!(
-            "  {health} {dim}{time}{reset}  {bold}{:>6}{reset}  {:<20}  {:<12}  {:>6} msgs  {yellow}{:>8}{reset}",
+            "  {health} {dim}{time}{reset}  {bold}{:>6}{reset}  {dim}{short_id}{reset}  {:<20}  {:<12}  {:>6} msgs  {yellow}{:>8}{reset}",
             duration,
             format!("{model_short}{model_extra}"),
             repo,
