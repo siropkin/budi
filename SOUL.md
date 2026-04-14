@@ -55,7 +55,7 @@ Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extra
 
 ### Crates
 
-- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations, autostart (platform-native daemon service management). Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
+- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Codex, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations, autostart (platform-native daemon service management). Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
 - **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, update, integrations, uninstall, migrate, repair
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
@@ -72,7 +72,7 @@ Proxy (agent -> localhost:9878 -> upstream provider)
   -> SQLite (proxy_events table + messages table for unified analytics)
 
 Historical import (budi import):
-Sources (JSONL files, Cursor API)
+Sources (Claude Code JSONL, Codex sessions, Cursor API)
   -> Providers discover + parse -> ParsedMessage structs
   -> Pipeline: IdentityEnricher -> GitEnricher -> ToolEnricher -> CostEnricher -> TagEnricher
   -> SQLite (messages + tags + derived rollup tables)
@@ -113,6 +113,7 @@ Nine tables, seven data entities + two supporting:
 |--------|-----------|-----------------|
 | **Proxy** (all agents) | `proxy_estimated` | Real-time per-request tokens from response body (non-streaming) or SSE tee/tap extraction (streaming). Attribution via `X-Budi-Repo`, `X-Budi-Branch`, `X-Budi-Cwd` headers or git-resolved from cwd. Falls back to `Unassigned` repo |
 | **JSONL** (Claude Code) | `estimated` | Per-message tokens (no thinking), cost calculated from pricing. Used by `budi import` for historical backfill |
+| **JSONL** (Codex) | `estimated` | Per-API-call tokens from `token_count` events in `~/.codex/sessions/`. Used by `budi import` for historical backfill |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents from Cursor's API. Used by `budi import` for historical backfill |
 
 Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingestion has been removed. The proxy is the sole live data source.
@@ -137,6 +138,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-core/src/hooks.rs` - Prompt classification and migration helpers (hook_events table dropped in v22)
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
+- `crates/budi-core/src/providers/codex.rs` - Codex provider (Codex Desktop/CLI transcript import from `~/.codex/sessions/`, OpenAI model pricing)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
 - `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
 - `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
