@@ -443,6 +443,31 @@ pub fn session_list_with_filters(
     })
 }
 
+/// Resolve a (possibly short) session ID prefix to the full session ID.
+///
+/// Returns `Ok(Some(full_id))` when exactly one session matches the prefix,
+/// `Ok(None)` when no session matches, or an error when the prefix is ambiguous
+/// (matches more than one session).
+pub fn resolve_session_id(conn: &Connection, prefix: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT session_id FROM (
+             SELECT id AS session_id FROM sessions WHERE id LIKE ?1 || '%'
+             UNION
+             SELECT session_id FROM messages WHERE session_id LIKE ?1 || '%'
+         ) LIMIT 2",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map(params![prefix], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    match ids.len() {
+        0 => Ok(None),
+        1 => Ok(Some(ids.into_iter().next().unwrap())),
+        _ => anyhow::bail!(
+            "ambiguous session prefix '{prefix}' — matches multiple sessions; use more characters"
+        ),
+    }
+}
+
 /// Get a single session summary row for session detail metadata.
 pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<SessionListEntry>> {
     let row = conn.query_row(

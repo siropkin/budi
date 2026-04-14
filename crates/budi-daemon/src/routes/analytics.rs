@@ -697,10 +697,27 @@ pub async fn analytics_sessions(
     Ok(Json(result))
 }
 
+/// Resolve a session ID prefix to its full ID, returning appropriate HTTP errors.
+async fn resolve_sid(prefix: String) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let pfx = prefix.clone();
+    let resolved = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::resolve_session_id(&conn, &pfx)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+    match resolved {
+        Some(full_id) => Ok(full_id),
+        None => Err(not_found(format!("session '{prefix}' not found"))),
+    }
+}
+
 pub async fn analytics_session_detail(
     Path(session_id): Path<String>,
 ) -> Result<Json<analytics::SessionListEntry>, (StatusCode, Json<serde_json::Value>)> {
-    let sid = session_id.clone();
+    let sid = resolve_sid(session_id.clone()).await?;
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -719,10 +736,11 @@ pub async fn analytics_session_detail(
 pub async fn analytics_session_tags(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<analytics::SessionTag>>, (StatusCode, Json<serde_json::Value>)> {
+    let sid = resolve_sid(session_id).await?;
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        let tags = analytics::session_tags(&conn, &session_id)?;
+        let tags = analytics::session_tags(&conn, &sid)?;
         Ok::<_, anyhow::Error>(
             tags.into_iter()
                 .map(|(k, v)| analytics::SessionTag { key: k, value: v })
@@ -739,6 +757,7 @@ pub async fn analytics_session_messages(
     Path(session_id): Path<String>,
     Query(params): Query<SessionMessagesQueryParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
+    let sid = resolve_sid(session_id).await?;
     let roles = match params.roles.as_deref() {
         None => analytics::SessionMessageRoles::Assistant,
         Some(raw) => raw
@@ -759,7 +778,7 @@ pub async fn analytics_session_messages(
         let conn = analytics::open_db(&db_path)?;
         analytics::session_message_list(
             &conn,
-            &session_id,
+            &sid,
             &analytics::SessionMessageListParams {
                 roles,
                 sort_by: params.sort_by.as_deref(),
@@ -778,10 +797,11 @@ pub async fn analytics_session_messages(
 pub async fn analytics_session_message_curve(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<analytics::SessionMessageCurvePoint>>, (StatusCode, Json<serde_json::Value>)> {
+    let sid = resolve_sid(session_id).await?;
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_message_curve(&conn, &session_id)
+        analytics::session_message_curve(&conn, &sid)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
