@@ -211,21 +211,6 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn sync(&self, migrate: bool) -> Result<Value> {
-        let timeout = if migrate { 600 } else { 60 };
-        self.sync_with_params(migrate, timeout)
-    }
-
-    fn sync_with_params(&self, migrate: bool, timeout_secs: u64) -> Result<Value> {
-        self.sync_request(|| {
-            self.client
-                .post(format!("{}/sync", self.base_url))
-                .json(&serde_json::json!({ "migrate": migrate }))
-                .timeout(Duration::from_secs(timeout_secs))
-                .send()
-        })
-    }
-
     pub fn history(&self) -> Result<Value> {
         self.sync_request(|| {
             self.client

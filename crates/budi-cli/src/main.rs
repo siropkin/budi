@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi import             Import historical transcripts from disk\n  budi sync               Sync recent transcripts (last 30 days)\n  budi sync --force       Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -110,16 +110,6 @@ Examples:
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
     },
-    /// Sync recent transcripts (last 30 days). Use --all for full history, --force to re-ingest from scratch.
-    Sync {
-        /// Load full transcript history (all time — may take a while)
-        #[arg(long, conflicts_with = "force")]
-        all: bool,
-        /// Force re-sync: clears all data and re-ingests from scratch.
-        /// Use after upgrading budi when the cost calculation has changed.
-        #[arg(long, conflicts_with = "all")]
-        force: bool,
-    },
     /// Update budi to the latest version
     Update {
         /// Skip confirmation prompt
@@ -142,8 +132,14 @@ Examples:
     Migrate,
     /// Repair schema drift and run migration checks
     Repair,
-    /// Import historical transcripts from Claude Code and Cursor into the analytics database
-    Import,
+    /// Import historical transcripts from Claude Code and Cursor into the analytics database.
+    /// Use --force to clear all data and re-ingest from scratch (e.g. after upgrades).
+    Import {
+        /// Clear all data and re-ingest from scratch.
+        /// Use after upgrading budi when the cost calculation has changed.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
     /// Show session health vitals (context drag, cache efficiency, thrashing, cost acceleration)
     Health {
         /// Session ID to check (default: most recent session)
@@ -347,15 +343,6 @@ fn main() -> Result<()> {
                 json_output,
             )
         }
-        Commands::Sync { all, force } => {
-            if force {
-                commands::sync::cmd_force_sync()
-            } else if all {
-                commands::sync::cmd_history()
-            } else {
-                commands::sync::cmd_sync()
-            }
-        }
         Commands::Update { yes, version } => commands::update::cmd_update(yes, version),
         Commands::Uninstall { keep_data, yes } => {
             commands::uninstall::cmd_uninstall(keep_data, yes)
@@ -380,7 +367,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Repair => commands::repair::cmd_repair(),
-        Commands::Import => commands::import::cmd_import(),
+        Commands::Import { force } => commands::import::cmd_import(force),
         Commands::Health { session } => commands::health::cmd_health(session),
         Commands::Statusline { install, format } => {
             if install {
@@ -446,8 +433,12 @@ mod tests {
         assert!(lower.contains("init"));
         assert!(lower.contains("doctor"));
         assert!(lower.contains("stats"));
-        assert!(lower.contains("sync"));
+        assert!(lower.contains("import"));
         assert!(lower.contains("repair"));
+        assert!(
+            !lower.contains("\n  sync"),
+            "sync command should be removed"
+        );
     }
 
     #[test]

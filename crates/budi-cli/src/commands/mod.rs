@@ -17,7 +17,6 @@ pub mod sessions;
 pub mod stats;
 pub mod status;
 pub mod statusline;
-pub mod sync;
 pub mod uninstall;
 pub mod update;
 

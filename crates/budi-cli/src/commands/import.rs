@@ -5,13 +5,21 @@ use anyhow::Result;
 
 use crate::client::DaemonClient;
 
-pub fn cmd_import() -> Result<()> {
+pub fn cmd_import(force: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
 
-    print!("Importing historical transcripts (this may take a while)...");
+    if force {
+        print!("Force re-importing all data (this may take a while)...");
+    } else {
+        print!("Importing historical transcripts (this may take a while)...");
+    }
     let _ = std::io::stdout().flush();
     let start = Instant::now();
-    let result = client.history()?;
+    let result = if force {
+        client.sync_reset()?
+    } else {
+        client.history()?
+    };
     let elapsed = start.elapsed().as_secs_f64();
     println!(" done in {:.1}s", elapsed);
 

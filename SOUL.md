@@ -23,7 +23,7 @@ budi init
 
 **Important**: Install **`budi` and `budi-daemon` from the same build** and keep **only one copy on PATH** (do not mix Homebrew with `~/.local/bin` or another prefix). Version mismatch breaks daemon restarts; `budi init` warns if multiple binaries are found.
 
-After upgrading: the first CLI command now verifies daemon version and auto-restarts stale daemons when needed. If automatic restart fails, stop the old process manually, then run `budi init` or `budi sync`. On Unix you can use `pkill -f budi-daemon`; on Windows use `taskkill /IM budi-daemon.exe /F` if needed.
+After upgrading: the first CLI command now verifies daemon version and auto-restarts stale daemons when needed. If automatic restart fails, stop the old process manually, then run `budi init`. On Unix you can use `pkill -f budi-daemon`; on Windows use `taskkill /IM budi-daemon.exe /F` if needed.
 
 ## Daemon autostart
 
@@ -123,7 +123,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - **Source of truth vs derived**: `messages` remains canonical; rollup tables are derived caches maintained incrementally via SQLite triggers during ingest/update/delete
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
-- **Sync split**: `budi sync` = 30-day window (fast), `budi sync --all` = full history
+- **Historical import**: `budi import` = full history backfill, `budi import --force` = clear all data and re-ingest from scratch
 - **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). `budi init` auto-installs proxy routing for selected agents: shell-profile env block for Claude Code/Codex/Copilot, Cursor settings patch (`openai.baseUrl`), and Codex Desktop config patch (`openai_base_url` in `~/.codex/config.toml`). `budi enable <agent>` / `budi disable <agent>` toggle this configuration. `budi launch <agent>` remains an explicit fallback launcher, and `BUDI_BYPASS=1 budi launch <agent>` skips proxy injection for one run. Gemini CLI is deferred (Tier 3, different API format). Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. SSE streaming responses are passed through chunk-by-chunk with no buffering; a tee/tap on the byte stream extracts token metadata (input/output tokens) from SSE events without modifying the data. Non-streaming responses are buffered and parsed for usage data. Duration is measured from request start to stream end (not to first headers). Mid-stream failures and client disconnects are handled gracefully — partial metadata is recorded via Drop. No read timeout on streaming; non-streaming uses 300s. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
 
 ## Key files

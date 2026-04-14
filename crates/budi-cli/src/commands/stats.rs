@@ -451,7 +451,7 @@ fn cmd_stats_branch_detail(
         }
         None => {
             println!("  No data found for branch '{}'.", branch);
-            println!("  Tip: run `budi sync` first if you haven't synced recently.");
+            println!("  Tip: run `budi import` first if you haven't imported data yet.");
             println!("  Run `budi stats --branches` to see available branches.");
         }
     }
