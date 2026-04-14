@@ -142,8 +142,8 @@ const COST_ACCEL_MIN_REQUESTS: usize = 6;
 pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<SessionHealth> {
     let sid = match session_id {
         Some(s) => s.to_string(),
-        None => conn
-            .query_row(
+        None => {
+            match conn.query_row(
                 "WITH latest_assistant AS (
                      SELECT session_id, MAX(timestamp) AS last_assistant_at
                      FROM messages
@@ -160,9 +160,27 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
                      s.id DESC
                  LIMIT 1",
                 [],
-                |row| row.get(0),
-            )
-            .context("No sessions found")?,
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(id) => id,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Ok(SessionHealth {
+                        state: "green".to_string(),
+                        message_count: 0,
+                        total_cost_cents: 0.0,
+                        vitals: SessionVitals {
+                            context_drag: None,
+                            cache_efficiency: None,
+                            thrashing: None,
+                            cost_acceleration: None,
+                        },
+                        tip: "No sessions yet".to_string(),
+                        details: vec![],
+                    });
+                }
+                Err(e) => return Err(e).context("Failed to query latest session"),
+            }
+        }
     };
 
     let provider_str: String = conn
