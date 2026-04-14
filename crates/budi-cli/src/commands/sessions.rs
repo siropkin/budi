@@ -58,11 +58,6 @@ pub fn cmd_sessions(
             })
             .unwrap_or_else(|| "--".to_string());
 
-        let duration = s
-            .duration_ms
-            .map(format_duration_ms)
-            .unwrap_or_else(|| "--".to_string());
-
         let model = s.models.first().map(|m| m.as_str()).unwrap_or("--");
         let model_short = shorten_model(model);
         let model_extra = if s.models.len() > 1 {
@@ -85,11 +80,10 @@ pub fn cmd_sessions(
         };
 
         println!(
-            "  {health} {dim}{time}{reset}  {bold}{:>6}{reset}  {:<20}  {:<12}  {:>6} msgs  {yellow}{:>8}{reset}",
-            duration,
+            "  {health} {dim}{time}{reset}  {dim}{}{reset}  {:<20}  {:<12}  {yellow}{:>8}{reset}",
+            &s.id,
             format!("{model_short}{model_extra}"),
             repo,
-            s.message_count,
             format_cost_cents(s.cost_cents),
         );
     }
