@@ -737,7 +737,7 @@ mod tests {
                 daily_rollups: vec![DailyRollupRecord {
                     bucket_day: "2026-04-10".into(),
                     role: "assistant".into(),
-                    provider: "anthropic".into(),
+                    provider: "claude_code".into(),
                     model: "claude-sonnet-4-6".into(),
                     repo_id: "sha256:abc".into(),
                     git_branch: "main".into(),
