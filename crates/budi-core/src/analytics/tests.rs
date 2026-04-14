@@ -3375,3 +3375,14 @@ fn health_cursor_multi_reply_session_not_false_red() {
         "multi-reply Cursor session should not be false red"
     );
 }
+
+#[test]
+fn health_no_sessions_returns_green() {
+    let conn = test_db();
+    let h = session_health(&conn, None).unwrap();
+    assert_eq!(h.state, "green");
+    assert_eq!(h.message_count, 0);
+    assert_eq!(h.total_cost_cents, 0.0);
+    assert_eq!(h.tip, "No sessions yet");
+    assert!(h.details.is_empty());
+}
