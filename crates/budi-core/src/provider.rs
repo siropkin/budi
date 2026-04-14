@@ -57,6 +57,7 @@ impl ModelPricing {
 pub fn pricing_for_model(model: &str, provider: &str) -> ModelPricing {
     match provider {
         "codex" => crate::providers::codex::codex_pricing_for_model(model),
+        "copilot_cli" => crate::providers::copilot::copilot_pricing_for_model(model),
         "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
         _ => crate::providers::claude_code::claude_pricing_for_model(model),
     }
@@ -103,6 +104,7 @@ pub fn all_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(crate::providers::claude_code::ClaudeCodeProvider),
         Box::new(crate::providers::codex::CodexProvider),
+        Box::new(crate::providers::copilot::CopilotProvider),
         Box::new(crate::providers::cursor::CursorProvider),
     ]
 }
