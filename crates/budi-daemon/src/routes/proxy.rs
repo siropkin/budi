@@ -141,6 +141,8 @@ async fn proxy_request(
                 &model,
                 None,
                 None,
+                None,
+                None,
                 duration_ms,
                 502,
                 is_streaming,
@@ -174,6 +176,8 @@ async fn proxy_request(
             line_buf: Vec::new(),
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             recorded: false,
         };
         let body = Body::from_stream(tap);
@@ -199,6 +203,8 @@ async fn proxy_request(
                 &model,
                 None,
                 None,
+                None,
+                None,
                 duration_ms,
                 502,
                 is_streaming,
@@ -214,18 +220,25 @@ async fn proxy_request(
 
     let duration_ms = start.elapsed().as_millis() as i64;
 
-    let (input_tokens, output_tokens) = if status.is_success() {
+    let tokens = if status.is_success() {
         extract_response_tokens(&resp_bytes, provider)
     } else {
-        (None, None)
+        ResponseTokens {
+            input: None,
+            output: None,
+            cache_creation: None,
+            cache_read: None,
+        }
     };
 
     record_event(
         &state,
         provider,
         &model,
-        input_tokens,
-        output_tokens,
+        tokens.input,
+        tokens.output,
+        tokens.cache_creation,
+        tokens.cache_read,
         duration_ms,
         status.as_u16(),
         is_streaming,
@@ -261,6 +274,8 @@ struct SseTapStream {
     line_buf: Vec<u8>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
     recorded: bool,
 }
 
@@ -323,6 +338,20 @@ impl SseTapStream {
                 {
                     self.input_tokens = Some(n);
                 }
+                // message_start → .message.usage.cache_creation_input_tokens
+                if let Some(n) = json
+                    .pointer("/message/usage/cache_creation_input_tokens")
+                    .and_then(|v| v.as_i64())
+                {
+                    self.cache_creation_input_tokens = Some(n);
+                }
+                // message_start → .message.usage.cache_read_input_tokens
+                if let Some(n) = json
+                    .pointer("/message/usage/cache_read_input_tokens")
+                    .and_then(|v| v.as_i64())
+                {
+                    self.cache_read_input_tokens = Some(n);
+                }
                 // message_delta → .usage.output_tokens
                 if let Some(n) = json
                     .pointer("/usage/output_tokens")
@@ -335,6 +364,22 @@ impl SseTapStream {
                     && let Some(n) = json.pointer("/usage/input_tokens").and_then(|v| v.as_i64())
                 {
                     self.input_tokens = Some(n);
+                }
+                // Fallback: .usage.cache_creation_input_tokens
+                if self.cache_creation_input_tokens.is_none()
+                    && let Some(n) = json
+                        .pointer("/usage/cache_creation_input_tokens")
+                        .and_then(|v| v.as_i64())
+                {
+                    self.cache_creation_input_tokens = Some(n);
+                }
+                // Fallback: .usage.cache_read_input_tokens
+                if self.cache_read_input_tokens.is_none()
+                    && let Some(n) = json
+                        .pointer("/usage/cache_read_input_tokens")
+                        .and_then(|v| v.as_i64())
+                {
+                    self.cache_read_input_tokens = Some(n);
                 }
             }
             ProxyProvider::OpenAi => {
@@ -364,6 +409,8 @@ impl SseTapStream {
             &self.model,
             self.input_tokens,
             self.output_tokens,
+            self.cache_creation_input_tokens,
+            self.cache_read_input_tokens,
             duration_ms,
             self.status_code,
             true,
@@ -401,31 +448,52 @@ fn extract_request_metadata(body: &[u8]) -> (String, bool) {
     (model, is_streaming)
 }
 
-fn extract_response_tokens(body: &[u8], provider: ProxyProvider) -> (Option<i64>, Option<i64>) {
+/// Extracted token counts from an API response.
+struct ResponseTokens {
+    input: Option<i64>,
+    output: Option<i64>,
+    cache_creation: Option<i64>,
+    cache_read: Option<i64>,
+}
+
+fn extract_response_tokens(body: &[u8], provider: ProxyProvider) -> ResponseTokens {
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
-        Err(_) => return (None, None),
+        Err(_) => {
+            return ResponseTokens {
+                input: None,
+                output: None,
+                cache_creation: None,
+                cache_read: None,
+            };
+        }
     };
     let usage = parsed.get("usage");
     match provider {
-        ProxyProvider::Anthropic => {
-            let input = usage
+        ProxyProvider::Anthropic => ResponseTokens {
+            input: usage
                 .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_i64());
-            let output = usage
+                .and_then(|v| v.as_i64()),
+            output: usage
                 .and_then(|u| u.get("output_tokens"))
-                .and_then(|v| v.as_i64());
-            (input, output)
-        }
-        ProxyProvider::OpenAi => {
-            let input = usage
+                .and_then(|v| v.as_i64()),
+            cache_creation: usage
+                .and_then(|u| u.get("cache_creation_input_tokens"))
+                .and_then(|v| v.as_i64()),
+            cache_read: usage
+                .and_then(|u| u.get("cache_read_input_tokens"))
+                .and_then(|v| v.as_i64()),
+        },
+        ProxyProvider::OpenAi => ResponseTokens {
+            input: usage
                 .and_then(|u| u.get("prompt_tokens"))
-                .and_then(|v| v.as_i64());
-            let output = usage
+                .and_then(|v| v.as_i64()),
+            output: usage
                 .and_then(|u| u.get("completion_tokens"))
-                .and_then(|v| v.as_i64());
-            (input, output)
-        }
+                .and_then(|v| v.as_i64()),
+            cache_creation: None,
+            cache_read: None,
+        },
     }
 }
 
@@ -505,6 +573,8 @@ fn record_event(
     model: &str,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
     duration_ms: i64,
     status_code: u16,
     is_streaming: bool,
@@ -512,7 +582,14 @@ fn record_event(
     session_id: &str,
 ) {
     let cost_cents = if status_code < 400 {
-        budi_core::proxy::compute_proxy_cost_cents(provider, model, input_tokens, output_tokens)
+        budi_core::proxy::compute_proxy_cost_cents(
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
     } else {
         0.0
     };
@@ -523,6 +600,8 @@ fn record_event(
         model: model.to_string(),
         input_tokens,
         output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
         duration_ms,
         status_code,
         is_streaming,
@@ -540,6 +619,8 @@ fn record_event(
         duration_ms = event.duration_ms,
         input_tokens = ?event.input_tokens,
         output_tokens = ?event.output_tokens,
+        cache_creation_input_tokens = ?event.cache_creation_input_tokens,
+        cache_read_input_tokens = ?event.cache_read_input_tokens,
         streaming = event.is_streaming,
         repo_id = %event.repo_id,
         git_branch = %event.git_branch,

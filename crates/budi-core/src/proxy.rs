@@ -149,13 +149,15 @@ pub fn compute_proxy_cost_cents(
     model: &str,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
 ) -> f64 {
     let pricing = crate::provider::pricing_for_model(model, provider.as_str());
     pricing.calculate_cost_cents(
         input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens.unwrap_or(0).max(0) as u64,
-        0,
-        0,
+        cache_creation_input_tokens.unwrap_or(0).max(0) as u64,
+        cache_read_input_tokens.unwrap_or(0).max(0) as u64,
         0,
         None,
         0,
@@ -170,6 +172,10 @@ pub struct ProxyEvent {
     pub model: String,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// Cache tokens written (Anthropic `cache_creation_input_tokens`).
+    pub cache_creation_input_tokens: Option<i64>,
+    /// Cache tokens read (Anthropic `cache_read_input_tokens`).
+    pub cache_read_input_tokens: Option<i64>,
     pub duration_ms: i64,
     pub status_code: u16,
     pub is_streaming: bool,
@@ -222,6 +228,8 @@ pub fn ensure_proxy_schema(conn: &Connection) -> Result<()> {
         ("ticket_id", "TEXT NOT NULL DEFAULT ''"),
         ("cost_cents", "REAL NOT NULL DEFAULT 0.0"),
         ("session_id", "TEXT NOT NULL DEFAULT ''"),
+        ("cache_creation_input_tokens", "INTEGER"),
+        ("cache_read_input_tokens", "INTEGER"),
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE proxy_events ADD COLUMN {col} {def};"));
     }
@@ -236,15 +244,18 @@ pub fn insert_proxy_event(conn: &Connection, event: &ProxyEvent) -> Result<i64> 
     conn.execute(
         "INSERT INTO proxy_events (
             timestamp, provider, model, input_tokens, output_tokens,
+            cache_creation_input_tokens, cache_read_input_tokens,
             duration_ms, status_code, is_streaming,
             repo_id, git_branch, ticket_id, cost_cents, session_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             event.timestamp,
             event.provider,
             event.model,
             event.input_tokens,
             event.output_tokens,
+            event.cache_creation_input_tokens,
+            event.cache_read_input_tokens,
             event.duration_ms,
             event.status_code as i64,
             event.is_streaming as i64,
@@ -281,7 +292,7 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
             input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens,
             repo_id, git_branch, cost_cents, cost_confidence
-        ) VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, 0, 0, ?7, ?8, ?9, 'proxy_estimated')",
+        ) VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'proxy_estimated')",
         params![
             uuid,
             event.timestamp,
@@ -289,6 +300,8 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
             event.provider,
             event.input_tokens.unwrap_or(0),
             event.output_tokens.unwrap_or(0),
+            event.cache_creation_input_tokens.unwrap_or(0),
+            event.cache_read_input_tokens.unwrap_or(0),
             repo_id,
             git_branch,
             event.cost_cents,
@@ -339,6 +352,8 @@ mod tests {
             model: "gpt-4o".to_string(),
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             duration_ms: 1200,
             status_code: 200,
             is_streaming: false,
@@ -476,13 +491,42 @@ mod tests {
             "claude-sonnet-4-6",
             Some(100_000),
             Some(50_000),
+            None,
+            None,
         );
         assert!(cost > 0.0, "cost should be positive for non-zero tokens");
     }
 
     #[test]
+    fn compute_proxy_cost_with_cache_tokens() {
+        // Without cache tokens
+        let cost_no_cache = compute_proxy_cost_cents(
+            ProxyProvider::Anthropic,
+            "claude-opus-4-6",
+            Some(1_000),
+            Some(500),
+            None,
+            None,
+        );
+        // With cache tokens
+        let cost_with_cache = compute_proxy_cost_cents(
+            ProxyProvider::Anthropic,
+            "claude-opus-4-6",
+            Some(1_000),
+            Some(500),
+            Some(50_000),
+            Some(100_000),
+        );
+        assert!(
+            cost_with_cache > cost_no_cache,
+            "cost with cache tokens ({cost_with_cache}) should exceed cost without ({cost_no_cache})"
+        );
+    }
+
+    #[test]
     fn compute_proxy_cost_zero_tokens() {
-        let cost = compute_proxy_cost_cents(ProxyProvider::OpenAi, "gpt-4o", None, None);
+        let cost =
+            compute_proxy_cost_cents(ProxyProvider::OpenAi, "gpt-4o", None, None, None, None);
         assert!((cost - 0.0).abs() < f64::EPSILON);
     }
 
@@ -566,5 +610,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn proxy_event_stores_cache_tokens() {
+        let conn = test_db();
+        let mut event = test_event();
+        event.cache_creation_input_tokens = Some(5000);
+        event.cache_read_input_tokens = Some(80000);
+        let id = insert_proxy_event(&conn, &event).unwrap();
+
+        let (cache_create, cache_read): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT cache_creation_input_tokens, cache_read_input_tokens
+                 FROM proxy_events WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cache_create, Some(5000));
+        assert_eq!(cache_read, Some(80000));
+    }
+
+    #[test]
+    fn proxy_message_stores_cache_tokens() {
+        let conn = test_db_with_messages();
+        let mut event = test_event();
+        event.cache_creation_input_tokens = Some(3000);
+        event.cache_read_input_tokens = Some(60000);
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+
+        let (cache_create, cache_read): (i64, i64) = conn
+            .query_row(
+                "SELECT cache_creation_tokens, cache_read_tokens
+                 FROM messages WHERE id = ?1",
+                params![uuid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cache_create, 3000);
+        assert_eq!(cache_read, 60000);
     }
 }
