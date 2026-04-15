@@ -580,6 +580,29 @@ mod tests {
         addr
     }
 
+    /// Poll the database until `query` returns a row, with 50ms intervals up to 2s.
+    /// Returns the mapped result from the row, or panics on timeout.
+    async fn poll_proxy_event<T, F>(db_path: &std::path::Path, query: &str, map_row: F) -> T
+    where
+        F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T> + Copy,
+    {
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let conn = rusqlite::Connection::open(db_path).unwrap();
+            budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+            match conn.query_row(query, [], map_row) {
+                Ok(val) => return val,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => panic!("unexpected DB error: {e}"),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("timed out waiting for proxy_events row (query: {query})");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     struct ProxyTestHarness {
         app: Router,
         db_path: PathBuf,
@@ -662,18 +685,11 @@ mod tests {
         );
         assert!(text.contains("Hello"), "content delta should pass through");
 
-        // Wait for spawn_blocking event recording
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let (input, output, streaming): (Option<i64>, Option<i64>, i64) = conn
-            .query_row(
-                "SELECT input_tokens, output_tokens, is_streaming FROM proxy_events ORDER BY id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+        let (input, output, streaming): (Option<i64>, Option<i64>, i64) = poll_proxy_event(
+            &h.db_path,
+            "SELECT input_tokens, output_tokens, is_streaming FROM proxy_events ORDER BY id DESC LIMIT 1",
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).await;
         assert_eq!(input, Some(25), "input_tokens from message_start");
         assert_eq!(output, Some(15), "output_tokens from message_delta");
         assert_eq!(streaming, 1);
@@ -716,17 +732,11 @@ mod tests {
             "terminal event should pass through"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let (input, output): (Option<i64>, Option<i64>) = conn
-            .query_row(
-                "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (input, output): (Option<i64>, Option<i64>) = poll_proxy_event(
+            &h.db_path,
+            "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).await;
         assert_eq!(input, Some(10), "prompt_tokens from usage");
         assert_eq!(output, Some(20), "completion_tokens from usage");
     }
@@ -773,17 +783,11 @@ mod tests {
             .unwrap();
         let _ = resp.into_body().collect().await.unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let duration_ms: i64 = conn
-            .query_row(
-                "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let duration_ms: i64 = poll_proxy_event(
+            &h.db_path,
+            "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
+            |row| row.get(0),
+        ).await;
         assert!(
             duration_ms >= 200,
             "duration_ms ({duration_ms}) should reflect stream end, not header time"
