@@ -119,7 +119,7 @@ Examples:
         #[arg(long)]
         version: Option<String>,
     },
-    /// Remove budi hooks, status line, and data (keeps binaries)
+    /// Remove budi configuration, integrations, and data (keeps binaries)
     Uninstall {
         /// Keep the analytics database and data
         #[arg(long)]
