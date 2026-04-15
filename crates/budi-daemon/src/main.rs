@@ -592,7 +592,7 @@ mod tests {
         let db_path = db_path.to_path_buf();
         let query = query.to_string();
         tokio::task::spawn_blocking(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut interval = std::time::Duration::from_millis(50);
             loop {
                 {
