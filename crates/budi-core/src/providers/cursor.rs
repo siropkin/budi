@@ -874,14 +874,12 @@ fn sync_from_usage_api(
     };
 
     let api_calls = fetched.pages_fetched.max(1) as usize;
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
     if fetched.pages_fetched > 1 {
-        let diagnostic = format!(
+        tracing::info!(
             "Cursor Usage API returned {} pages in one sync tick (watermark catch-up active)",
             fetched.pages_fetched
         );
-        tracing::info!("{diagnostic}");
-        warnings.push(diagnostic);
     }
 
     if fetched.events.is_empty() {
