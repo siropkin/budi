@@ -598,7 +598,6 @@ mod tests {
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => panic!("unexpected DB error: {e}"),
                 }
-                // conn is dropped here — releases SQLite file lock before sleeping
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!("timed out waiting for proxy_events row (query: {query})");
