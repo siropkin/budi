@@ -348,8 +348,10 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
             }
             budi_core::autostart::ServiceStatus::NotInstalled => {
                 println!("  {red}\u{2717}{reset} autostart: {status} ({mechanism})");
-                issues
-                    .push("Autostart service not installed. Run `budi init` to install it.".into());
+                issues.push(
+                    "Autostart service not installed. Run `budi autostart install` to install it."
+                        .into(),
+                );
             }
         }
     }

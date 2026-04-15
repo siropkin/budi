@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -197,6 +197,16 @@ Examples:
         /// Agent name or alias (claude, codex, cursor, copilot)
         agent: String,
     },
+    /// Manage the daemon autostart service (launchd / systemd / Task Scheduler)
+    #[command(after_help = "\
+Examples:
+  budi autostart status      Check if autostart is installed and running
+  budi autostart install     Install the autostart service
+  budi autostart uninstall   Remove the autostart service")]
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartAction,
+    },
     /// Launch an AI agent through the budi proxy (e.g. budi launch claude)
     #[command(after_help = "\
 Supported agents:
@@ -244,6 +254,16 @@ enum IntegrationAction {
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutostartAction {
+    /// Show whether the autostart service is installed and running
+    Status,
+    /// Install the autostart service (daemon starts at login)
+    Install,
+    /// Remove the autostart service
+    Uninstall,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -394,6 +414,11 @@ fn main() -> Result<()> {
         Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
         Commands::Enable { agent } => commands::proxy_install::cmd_enable(&agent),
         Commands::Disable { agent } => commands::proxy_install::cmd_disable(&agent),
+        Commands::Autostart { action } => match action {
+            AutostartAction::Status => commands::autostart::cmd_autostart_status(),
+            AutostartAction::Install => commands::autostart::cmd_autostart_install(),
+            AutostartAction::Uninstall => commands::autostart::cmd_autostart_uninstall(),
+        },
         Commands::Launch {
             agent,
             proxy_port,
@@ -435,10 +460,19 @@ mod tests {
         assert!(lower.contains("stats"));
         assert!(lower.contains("import"));
         assert!(lower.contains("repair"));
+        assert!(lower.contains("autostart"));
         assert!(
             !lower.contains("\n  sync"),
             "sync command should be removed"
         );
+    }
+
+    #[test]
+    fn cli_parses_autostart_subcommands() {
+        for sub in &["status", "install", "uninstall"] {
+            Cli::try_parse_from(["budi", "autostart", sub])
+                .unwrap_or_else(|_| panic!("budi autostart {sub} should parse"));
+        }
     }
 
     #[test]

@@ -278,6 +278,9 @@ budi health --session <id>         # health vitals for a specific session
 ```bash
 budi doctor                        # check health: daemon, proxy, database, config
 budi doctor --deep                 # run full SQLite integrity_check (slower)
+budi autostart status              # check daemon autostart service
+budi autostart install             # install the autostart service
+budi autostart uninstall           # remove the autostart service
 budi import --force                # re-ingest all data from scratch (use after upgrades)
 budi repair                        # repair schema drift + run migration checks
 budi update                        # check for updates (auto-detects Homebrew)
@@ -561,7 +564,7 @@ Windows equivalent:
 3. Restart: `budi init`
 
 **Daemon doesn't survive reboots:**
-Run `budi doctor` — if the autostart check shows "not installed", run `budi init` to install the platform-native service (launchd on macOS, systemd on Linux, Task Scheduler on Windows).
+Run `budi autostart status` — if it shows "not installed", run `budi autostart install` to install the platform-native service (launchd on macOS, systemd on Linux, Task Scheduler on Windows). `budi init` also installs the autostart service.
 
 **Proxy not reachable (agent gets connection refused on port 9878):**
 1. Run `budi doctor` to check proxy health

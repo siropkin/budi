@@ -35,7 +35,7 @@ After upgrading: the first CLI command now verifies daemon version and auto-rest
 | Linux | systemd user service | `~/.config/systemd/user/budi-daemon.service` |
 | Windows | Task Scheduler | `BudiDaemon` task (created via `schtasks`) |
 
-`budi uninstall` removes the service. `budi doctor` reports service installation status. See ADR-0087 §8 for design rationale.
+`budi autostart status` checks service state, `budi autostart install` installs the service, `budi autostart uninstall` removes it. `budi uninstall` also removes the service. `budi doctor` reports service installation status. See ADR-0087 §8 for design rationale.
 
 ## Platforms
 
@@ -56,7 +56,7 @@ Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extra
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Codex, Copilot CLI, Cursor), pipeline (enrichment), cost calculation, proxy event storage, config, migrations, autostart (platform-native daemon service management). Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed)
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, update, integrations, uninstall, migrate, repair
+- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, update, integrations, autostart, uninstall, migrate, repair
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API. Also runs the proxy server on port 9878. The proxy is the sole live data source; transcript import is user-initiated via `budi import`
 
 ### Data flow
