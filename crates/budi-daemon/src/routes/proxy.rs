@@ -711,9 +711,15 @@ fn record_event(
     );
 
     let db_path = state.analytics_db_path.clone();
+    #[cfg(test)]
+    let record_tx = state.record_tx.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = record_event_blocking(&db_path, &event) {
             tracing::warn!("Failed to record proxy event: {e}");
+        }
+        #[cfg(test)]
+        if let Some(tx) = &record_tx {
+            let _ = tx.send(());
         }
     });
 }

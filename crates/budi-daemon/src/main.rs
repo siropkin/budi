@@ -50,6 +50,10 @@ pub struct ProxyState {
     pub anthropic_upstream: String,
     pub openai_upstream: String,
     pub analytics_db_path: PathBuf,
+    /// Test-only channel: `record_event` signals here after the DB write
+    /// completes, allowing tests to await it instead of polling.
+    #[cfg(test)]
+    pub record_tx: Option<std::sync::mpsc::Sender<()>>,
 }
 
 fn build_proxy_router(proxy_state: ProxyState) -> Router {
@@ -206,6 +210,8 @@ async fn main() -> Result<()> {
             anthropic_upstream: proxy_config.anthropic_upstream.clone(),
             openai_upstream: proxy_config.openai_upstream.clone(),
             analytics_db_path,
+            #[cfg(test)]
+            record_tx: None,
         };
 
         if let Ok(db_path) = analytics::db_path()
@@ -396,6 +402,7 @@ mod tests {
             anthropic_upstream: "http://127.0.0.1:19999".to_string(),
             openai_upstream: "http://127.0.0.1:19999".to_string(),
             analytics_db_path: db_path,
+            record_tx: None,
         };
         build_proxy_router(proxy_state)
     }
@@ -581,9 +588,29 @@ mod tests {
         addr
     }
 
+    /// Wait for `record_event`'s `spawn_blocking` DB write to complete via
+    /// the test channel, then read the result. This avoids polling/timeout
+    /// flakiness entirely — the channel provides a deterministic signal.
+    fn wait_for_record_then_query<T, F>(
+        rx: &std::sync::mpsc::Receiver<()>,
+        db_path: &std::path::Path,
+        query: &str,
+        map_row: F,
+    ) -> T
+    where
+        F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("timed out waiting for record_event to complete");
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+        conn.query_row(query, [], map_row).unwrap()
+    }
+
     struct ProxyTestHarness {
         app: Router,
         db_path: PathBuf,
+        record_rx: std::sync::mpsc::Receiver<()>,
     }
 
     fn proxy_with_upstream(upstream: &str) -> ProxyTestHarness {
@@ -596,19 +623,22 @@ mod tests {
         let db_path = tmp.join("analytics.db");
         let _ = std::fs::remove_file(&db_path);
 
+        let (tx, rx) = std::sync::mpsc::channel();
         let proxy_state = ProxyState {
             http_client: reqwest::Client::new(),
             anthropic_upstream: upstream.to_string(),
             openai_upstream: upstream.to_string(),
             analytics_db_path: db_path.clone(),
+            record_tx: Some(tx),
         };
         ProxyTestHarness {
             app: build_proxy_router(proxy_state),
             db_path,
+            record_rx: rx,
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proxy_streams_anthropic_sse_and_extracts_tokens() {
         let sse_body = [
             "event: message_start\n",
@@ -663,24 +693,19 @@ mod tests {
         );
         assert!(text.contains("Hello"), "content delta should pass through");
 
-        // Wait for spawn_blocking event recording
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let (input, output, streaming): (Option<i64>, Option<i64>, i64) = conn
-            .query_row(
+        let (input, output, streaming): (Option<i64>, Option<i64>, i64) =
+            wait_for_record_then_query(
+                &h.record_rx,
+                &h.db_path,
                 "SELECT input_tokens, output_tokens, is_streaming FROM proxy_events ORDER BY id DESC LIMIT 1",
-                [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+            );
         assert_eq!(input, Some(25), "input_tokens from message_start");
         assert_eq!(output, Some(15), "output_tokens from message_delta");
         assert_eq!(streaming, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proxy_streams_openai_sse_and_extracts_tokens() {
         let sse_body = [
             "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
@@ -717,22 +742,17 @@ mod tests {
             "terminal event should pass through"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let (input, output): (Option<i64>, Option<i64>) = conn
-            .query_row(
-                "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (input, output): (Option<i64>, Option<i64>) = wait_for_record_then_query(
+            &h.record_rx,
+            &h.db_path,
+            "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
         assert_eq!(input, Some(10), "prompt_tokens from usage");
         assert_eq!(output, Some(20), "completion_tokens from usage");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proxy_sse_duration_reflects_stream_end() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -774,17 +794,12 @@ mod tests {
             .unwrap();
         let _ = resp.into_body().collect().await.unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let conn = rusqlite::Connection::open(&h.db_path).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let duration_ms: i64 = conn
-            .query_row(
-                "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let duration_ms: i64 = wait_for_record_then_query(
+            &h.record_rx,
+            &h.db_path,
+            "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
+            |row| row.get(0),
+        );
         assert!(
             duration_ms >= 200,
             "duration_ms ({duration_ms}) should reflect stream end, not header time"
