@@ -1,73 +1,27 @@
 name: Bug report
-description: Report a reproducible problem in budi
+description: Report a problem in budi
 title: "bug: "
 labels:
   - bug
 body:
   - type: textarea
-    id: summary
+    id: description
     attributes:
-      label: Summary
-      description: What went wrong?
-      placeholder: A clear and short description of the bug.
+      label: What happened?
+      placeholder: Describe the bug — what you did, what you expected, and what happened instead.
     validations:
       required: true
-  - type: textarea
-    id: expected
-    attributes:
-      label: Expected behavior
-      placeholder: What did you expect to happen?
-    validations:
-      required: true
-  - type: textarea
-    id: actual
-    attributes:
-      label: Actual behavior
-      placeholder: What happened instead?
-    validations:
-      required: true
-  - type: textarea
-    id: reproduce
-    attributes:
-      label: Reproduction steps
-      description: Provide exact steps, commands, and inputs.
-      placeholder: |
-        1. Run ...
-        2. Open ...
-        3. Observe ...
-    validations:
-      required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Logs or output
-      description: Paste relevant command output, stack traces, or screenshots.
-      render: shell
-  - type: textarea
-    id: diagnostics
-    attributes:
-      label: Diagnostic checks run
-      description: Share `budi doctor` output and any relevant validation commands already tried.
-      placeholder: |
-        - budi doctor:
-        - budi sync:
-        - additional checks:
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Include OS, budi version, install method, and Rust/Node versions if relevant.
+      description: "Output of: uname -s && budi --version"
       placeholder: |
-        - OS:
-        - budi version:
-        - Install method:
-        - Rust:
-        - Node:
-    validations:
-      required: true
+        macOS / Linux
+        budi 0.x.x
   - type: textarea
-    id: impact
+    id: logs
     attributes:
-      label: Impact and urgency
-      description: Who is blocked and how severe is the issue?
-      placeholder: Affects all new installs / blocks release / minor annoyance, etc.
+      label: Logs or output
+      description: Paste any relevant output, errors, or screenshots.
+      render: shell

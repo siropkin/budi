@@ -1,5 +1,5 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
   - name: Q&A and usage questions
     url: https://github.com/siropkin/budi/discussions
-    about: Please use Discussions for questions and troubleshooting that are not confirmed bugs.
+    about: Use Discussions for questions and troubleshooting that are not confirmed bugs.

@@ -1,51 +1,13 @@
 name: Feature request
-description: Suggest a new capability or workflow improvement
+description: Suggest an improvement or new feature
 title: "feat: "
 labels:
   - enhancement
 body:
   - type: textarea
-    id: problem
+    id: description
     attributes:
-      label: Problem statement
-      description: What user problem are you trying to solve?
-      placeholder: The current behavior makes it hard to...
+      label: What would you like?
+      placeholder: Describe the problem you're trying to solve and/or the feature you'd like to see.
     validations:
       required: true
-  - type: textarea
-    id: proposal
-    attributes:
-      label: Proposed solution
-      description: Describe the change you want.
-      placeholder: Add a command/API/UI change that...
-    validations:
-      required: true
-  - type: textarea
-    id: alternatives
-    attributes:
-      label: Alternatives considered
-      description: What other approaches did you evaluate?
-  - type: textarea
-    id: scope
-    attributes:
-      label: Scope and non-goals
-      description: Clarify what should be in/out of scope for the first implementation.
-      placeholder: |
-        In scope:
-        Out of scope:
-  - type: textarea
-    id: success
-    attributes:
-      label: Success criteria
-      description: How will we know this is complete and working?
-      placeholder: |
-        - [ ] ...
-        - [ ] ...
-    validations:
-      required: true
-  - type: textarea
-    id: validation
-    attributes:
-      label: Suggested validation
-      description: Which checks should pass (tests, lint, manual flow) before this is considered done?
-      placeholder: cargo test target, dashboard build path, extension checks, etc.
