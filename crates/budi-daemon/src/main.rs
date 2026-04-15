@@ -59,6 +59,7 @@ fn build_proxy_router(proxy_state: ProxyState) -> Router {
         .route("/v1/messages", post(p::anthropic_messages))
         .route("/v1/chat/completions", post(p::openai_chat_completions))
         .route("/v1/models", get(p::openai_models))
+        .layer(from_fn(p::catch_proxy_panic))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .with_state(proxy_state)
 }
