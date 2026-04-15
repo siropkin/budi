@@ -236,6 +236,7 @@ fn cmd_stats_multi_agent(
     let dim = ansi("\x1b[90m");
     let cyan = ansi("\x1b[36m");
     let yellow = ansi("\x1b[33m");
+    let green = ansi("\x1b[32m");
     let reset = ansi("\x1b[0m");
 
     println!();
@@ -250,7 +251,6 @@ fn cmd_stats_multi_agent(
     for ps in providers {
         let total_tokens =
             ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
-        // Use ground-truth cost_cents when available, fall back to estimated
         let cost = if ps.total_cost_cents > 0.0 {
             ps.total_cost_cents / 100.0
         } else {
@@ -266,7 +266,6 @@ fn cmd_stats_multi_agent(
     }
     println!();
 
-    // Show combined summary
     let (since, until) = period_date_range(period);
     let summary = client.summary(since.as_deref(), until.as_deref(), None)?;
 
@@ -280,6 +279,26 @@ fn cmd_stats_multi_agent(
         format_tokens(summary.total_input_tokens),
         format_tokens(summary.total_output_tokens),
     );
+
+    let est = client.cost(since.as_deref(), until.as_deref(), None)?;
+    println!();
+    println!(
+        "  {bold}Est. cost{reset}    {yellow}{}{reset}",
+        format_cost(est.total_cost)
+    );
+    println!(
+        "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
+        format_cost(est.input_cost),
+        format_cost(est.output_cost),
+        format_cost(est.cache_write_cost),
+        format_cost(est.cache_read_cost)
+    );
+    if est.cache_savings > 0.0 {
+        println!(
+            "  {green}  cache savings {}{reset}",
+            format_cost(est.cache_savings)
+        );
+    }
 
     println!();
     Ok(())
