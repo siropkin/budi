@@ -198,10 +198,22 @@ pub fn cmd_init(
         println!(
             "  {dim}No integrations were installed. Use `budi integrations install ...` anytime.{reset}"
         );
-    } else {
+    }
+
+    let has_cli_agents = agents_config.claude_code.enabled
+        || agents_config.codex_cli.enabled
+        || agents_config.copilot_cli.enabled;
+    if has_cli_agents {
+        let yellow = super::ansi("\x1b[33m");
         println!(
-            "  {dim}Restart your shell/IDE apps to pick up updated proxy and integration settings.{reset}"
+            "  {yellow}\u{26a0}  Restart your terminal{reset} {dim}(or `source ~/.zshrc`){reset} {yellow}to activate proxy routing for CLI agents.{reset}"
         );
+        println!("     {dim}Already-running sessions are NOT going through the proxy yet.{reset}");
+        println!(
+            "     {dim}For immediate proxy routing without restart: budi launch <agent>{reset}"
+        );
+    } else if !selected_integrations.is_empty() {
+        println!("  {dim}Restart Cursor/IDE apps to pick up updated proxy settings.{reset}");
     }
     println!();
 

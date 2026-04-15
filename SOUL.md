@@ -164,7 +164,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 
 - CLI never touches SQLite directly - all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
-- `budi init` prompts for per-agent enablement (Claude Code, Codex CLI, Cursor, Copilot CLI), persists choices to `~/.config/budi/agents.toml`, and auto-configures proxy routing for enabled agents (shell profile + Cursor/Codex settings). `budi enable/disable <agent>` updates this config later. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility.
+- `budi init` prompts for per-agent enablement (Claude Code, Codex CLI, Cursor, Copilot CLI), persists choices to `~/.config/budi/agents.toml`, and auto-configures proxy routing for enabled agents (shell profile + Cursor/Codex settings). `budi enable/disable <agent>` updates this config later. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility. After configuring CLI agents (Claude, Codex, Copilot), both `budi init` and `budi enable` warn that a shell restart is required for proxy env vars to take effect and suggest `budi launch <agent>` for immediate routing. `budi doctor` detects when proxy env vars are configured in the shell profile but not set in the current process.
 - `budi init` configures integrations (statusline, extension) for enabled agents
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries

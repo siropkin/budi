@@ -44,6 +44,12 @@ impl ManagedAgent {
             Self::Copilot => "Copilot CLI",
         }
     }
+
+    /// CLI agents whose proxy routing depends on shell-profile env vars.
+    /// These require a shell restart after `budi enable` / `budi init`.
+    fn uses_shell_profile(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex | Self::Copilot)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +99,24 @@ fn set_agent_enabled(agent_name: &str, enabled: bool) -> Result<()> {
             println!("  - {warning}");
         }
     }
+
+    if enabled && managed.uses_shell_profile() {
+        let yellow = super::ansi("\x1b[33m");
+        let dim = super::ansi("\x1b[90m");
+        let reset = super::ansi("\x1b[0m");
+        println!();
+        println!(
+            "{yellow}\u{26a0}  Restart your terminal{reset} {dim}(or `source ~/.zshrc`){reset} {yellow}to activate proxy routing.{reset}"
+        );
+        println!(
+            "   Already-running {} sessions are NOT going through the proxy.",
+            managed.display_name()
+        );
+        println!(
+            "   For immediate proxy routing without restart: {dim}budi launch {agent_name}{reset}"
+        );
+    }
+
     Ok(())
 }
 
@@ -187,28 +211,34 @@ pub fn doctor_auto_proxy_issues(agents: &config::AgentsConfig, proxy_port: u16) 
     let has_cli_agents =
         agents.claude_code.enabled || agents.codex_cli.enabled || agents.copilot_cli.enabled;
 
+    let mut profile_has_claude = false;
+    let mut profile_has_codex = false;
+    let mut profile_has_copilot = false;
+
     match detect_shell_profile_path(&home) {
         Some(path) => {
             let raw = fs::read_to_string(&path).unwrap_or_default();
             let block = extract_block(&raw, SHELL_BLOCK_START, SHELL_BLOCK_END);
             if has_cli_agents {
                 if let Some(block_text) = block {
-                    if agents.claude_code.enabled && !block_text.contains("ANTHROPIC_BASE_URL") {
+                    profile_has_claude = block_text.contains("ANTHROPIC_BASE_URL");
+                    profile_has_codex = block_text.contains("OPENAI_BASE_URL");
+                    profile_has_copilot = block_text.contains("COPILOT_PROVIDER_BASE_URL")
+                        && block_text.contains("COPILOT_PROVIDER_TYPE");
+
+                    if agents.claude_code.enabled && !profile_has_claude {
                         issues.push(format!(
                             "Claude proxy env var missing in {}. Run `budi enable claude`.",
                             path.display()
                         ));
                     }
-                    if agents.codex_cli.enabled && !block_text.contains("OPENAI_BASE_URL") {
+                    if agents.codex_cli.enabled && !profile_has_codex {
                         issues.push(format!(
                             "Codex proxy env var missing in {}. Run `budi enable codex`.",
                             path.display()
                         ));
                     }
-                    if agents.copilot_cli.enabled
-                        && (!block_text.contains("COPILOT_PROVIDER_BASE_URL")
-                            || !block_text.contains("COPILOT_PROVIDER_TYPE"))
-                    {
+                    if agents.copilot_cli.enabled && !profile_has_copilot {
                         issues.push(format!(
                             "Copilot proxy env vars missing in {}. Run `budi enable copilot`.",
                             path.display()
@@ -287,6 +317,34 @@ pub fn doctor_auto_proxy_issues(agents: &config::AgentsConfig, proxy_port: u16) 
             "Cursor settings {} still has budi proxy settings while Cursor is disabled.",
             cursor_path.display()
         ));
+    }
+
+    // Detect shell-profile env vars configured but not active in the current process.
+    // Only warn when the shell profile block IS correctly configured — otherwise the
+    // "block missing" / "var missing in block" messages above already cover it.
+    let env_checks: &[(&str, bool, &str, &str)] = &[
+        (
+            "ANTHROPIC_BASE_URL",
+            profile_has_claude,
+            "Claude Code",
+            "claude",
+        ),
+        ("OPENAI_BASE_URL", profile_has_codex, "Codex", "codex"),
+        (
+            "COPILOT_PROVIDER_BASE_URL",
+            profile_has_copilot,
+            "Copilot CLI",
+            "copilot",
+        ),
+    ];
+    for &(var, profile_configured, agent_display, agent_cmd) in env_checks {
+        if profile_configured && std::env::var(var).is_err() {
+            issues.push(format!(
+                "{var} is configured in shell profile but not set in current shell. \
+                 Restart your terminal to activate proxy routing for {agent_display}, \
+                 or use `budi launch {agent_cmd}`."
+            ));
+        }
     }
 
     issues
