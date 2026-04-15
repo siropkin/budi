@@ -144,7 +144,7 @@ During init, budi automatically applies proxy routing for selected agents:
 
 `budi launch <agent>` still works as an explicit fallback. For a one-off bypass, run `BUDI_BYPASS=1 budi launch <agent>`.
 
-Restart your shell/IDE apps after init so updated settings take effect. Customize ports in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+**Important:** After `budi init` or `budi enable`, restart your terminal so the shell-profile proxy env vars take effect for CLI agents (Claude Code, Codex, Copilot). Already-running sessions are NOT going through the proxy until the shell is restarted. For immediate proxy routing without restart, use `budi launch <agent>`. `budi doctor` detects when proxy env vars are configured but not active in the current shell. Customize ports in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -169,8 +169,10 @@ Use this sequence if you want the fastest "did setup really work?" path:
    - Optional explicit fallback: `budi launch <agent>`
    - One-off bypass for explicit launch: `BUDI_BYPASS=1 budi launch <agent>`
    - Run `budi stats` and confirm non-zero usage
-6. **Restart apps once**
-   - Restart your shell/IDE apps after `budi init` so proxy/integration changes take effect
+6. **Restart your terminal**
+   - CLI agents (Claude Code, Codex, Copilot) need a new shell session to pick up proxy env vars
+   - Or use `budi launch <agent>` for immediate proxy routing without restarting
+   - `budi doctor` warns if proxy env vars are configured but not active in the current shell
 
 ### PATH and duplicate binary checks
 
@@ -550,8 +552,9 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 **No data after setup:**
 1. Run `budi status` to check daemon, proxy, and today's cost
 2. Verify auto-proxy config with `budi doctor` (shell profile + Cursor/Codex settings)
-3. Send a prompt and check `budi stats` for non-zero usage
-4. For historical data: `budi import` (one-time backfill from Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage API)
+3. If `budi doctor` reports proxy env vars not set in current shell, restart your terminal or use `budi launch <agent>` for immediate routing
+4. Send a prompt and check `budi stats` for non-zero usage
+5. For historical data: `budi import` (one-time backfill from Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage API)
 
 **Daemon won't start:**
 1. Check if port 7878 is in use: `lsof -i :7878`
