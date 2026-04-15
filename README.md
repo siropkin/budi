@@ -267,6 +267,7 @@ budi stats --models                # model usage breakdown
 budi stats --projects              # repos ranked by cost
 budi stats --branches              # branches ranked by cost
 budi stats --branch <name>         # cost for a specific branch
+budi stats --provider codex        # filter stats to a single provider
 budi stats --tag ticket_id         # cost per ticket
 budi stats --tag ticket_prefix     # cost per team prefix
 budi sessions                      # list recent sessions with cost and health
