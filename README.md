@@ -40,7 +40,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 - **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time — streaming responses pass through with no visible lag
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
-- **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, requires `budi cloud join`)
+- **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, opt-in via `~/.config/budi/cloud.toml`)
 - Live cost + health status line in Claude Code and Cursor
 - **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
@@ -244,6 +244,20 @@ budi integrations install --with cursor-extension
 ```
 
 **Restart Claude Code and Cursor** after updating to pick up any changes.
+
+## Cloud sync (optional)
+
+Cloud sync is disabled by default. To enable it, sign up at [app.getbudi.dev](https://app.getbudi.dev), copy your API key from Settings, and create `~/.config/budi/cloud.toml`:
+
+```toml
+[cloud]
+enabled = true
+api_key = "budi_your_key_here"
+```
+
+The daemon picks up the config on next restart (`budi init`). Only pre-aggregated daily rollups are synced — prompts, code, and responses never leave your machine. See the [Privacy](#privacy) section for full details.
+
+Environment variable overrides: `BUDI_CLOUD_ENABLED=true`, `BUDI_CLOUD_API_KEY=budi_...`, `BUDI_CLOUD_ENDPOINT=https://...`.
 
 ## CLI
 

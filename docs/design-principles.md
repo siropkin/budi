@@ -55,4 +55,4 @@ Everything works without cloud. Cloud adds team visibility, not core functionali
 - All analytics, budgets, and health vitals are computed locally
 - Cloud receives only what's needed for team aggregation
 - No cloud-to-daemon command channel (budgets are local)
-- `budi cloud join` is explicit opt-in, never automatic
+- Cloud sync is explicit opt-in via `cloud.toml`, never automatic

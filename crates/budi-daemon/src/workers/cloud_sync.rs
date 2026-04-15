@@ -23,7 +23,7 @@ pub async fn run(db_path: PathBuf, config: CloudConfig) {
         if auth_failed {
             tracing::warn!(
                 "Cloud sync stopped: authentication failed. \
-                 Run `budi cloud login` to re-authenticate."
+                 Check api_key in ~/.config/budi/cloud.toml."
             );
             // Sleep long and re-check config in case user re-authenticates
             tokio::time::sleep(Duration::from_secs(retry_max)).await;
