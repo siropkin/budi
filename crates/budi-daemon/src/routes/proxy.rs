@@ -14,13 +14,39 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::IntoResponse;
-use futures_util::Stream;
+use futures_util::{FutureExt, Stream};
 use serde_json::Value;
 
 use budi_core::proxy::{ProxyAttribution, ProxyEvent, ProxyProvider};
 
 use crate::ProxyState;
+
+/// Middleware that catches panics in proxy handlers to prevent the daemon from
+/// silently exiting. Panics are logged and converted to 500 responses.
+pub async fn catch_proxy_panic(req: Request<Body>, next: Next) -> Response<Body> {
+    match std::panic::AssertUnwindSafe(next.run(req))
+        .catch_unwind()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            tracing::error!("Proxy handler panicked: {msg}");
+            build_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &proxy_error_json(&format!("internal proxy error: {msg}")),
+            )
+        }
+    }
+}
 
 const HEADER_BUDI_REPO: &str = "x-budi-repo";
 const HEADER_BUDI_BRANCH: &str = "x-budi-branch";
@@ -424,14 +450,29 @@ async fn read_body(req: Request<Body>) -> Result<axum::body::Bytes, Response<Bod
     let body = req.into_body();
     match axum::body::to_bytes(body, MAX_BODY_SIZE).await {
         Ok(bytes) => Ok(bytes),
-        Err(_) => Err(build_error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            &proxy_error_json("request body exceeds 16 MiB limit"),
-        )),
+        Err(e) => {
+            tracing::warn!("Failed to read request body: {e}");
+            Err(build_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &proxy_error_json("request body exceeds 16 MiB limit"),
+            ))
+        }
     }
 }
 
+/// Threshold above which we avoid parsing the full body as a Value tree.
+/// Parsing a 15 MiB JSON into serde_json::Value can allocate 50+ MiB of heap,
+/// leading to OOM kills on memory-constrained systems (#274).
+const METADATA_FULL_PARSE_LIMIT: usize = 8 * 1024;
+
 fn extract_request_metadata(body: &[u8]) -> (String, bool) {
+    if body.len() <= METADATA_FULL_PARSE_LIMIT {
+        return extract_metadata_full(body);
+    }
+    extract_metadata_prefix(body)
+}
+
+fn extract_metadata_full(body: &[u8]) -> (String, bool) {
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (String::new(), false),
@@ -446,6 +487,46 @@ fn extract_request_metadata(body: &[u8]) -> (String, bool) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     (model, is_streaming)
+}
+
+/// Extract `model` and `stream` from a large body by scanning only the first
+/// 4 KiB. Both fields appear near the start of standard API request JSON.
+/// Avoids the multi-MiB Value allocation that can OOM-kill the daemon.
+fn extract_metadata_prefix(body: &[u8]) -> (String, bool) {
+    let prefix = &body[..body.len().min(4096)];
+    let text = String::from_utf8_lossy(prefix);
+
+    let model = extract_json_string_value(&text, "model").unwrap_or_default();
+    let is_streaming = extract_json_bool_value(&text, "stream").unwrap_or(false);
+    (model, is_streaming)
+}
+
+fn extract_json_string_value(text: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = text.find(&pattern)?;
+    let after_key = &text[key_pos + pattern.len()..];
+    let after_colon = after_key.trim_start();
+    let after_colon = after_colon.strip_prefix(':')?;
+    let after_colon = after_colon.trim_start();
+    let after_colon = after_colon.strip_prefix('"')?;
+    let end = after_colon.find('"')?;
+    Some(after_colon[..end].to_string())
+}
+
+fn extract_json_bool_value(text: &str, key: &str) -> Option<bool> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = text.find(&pattern)?;
+    let after_key = &text[key_pos + pattern.len()..];
+    let after_colon = after_key.trim_start();
+    let after_colon = after_colon.strip_prefix(':')?;
+    let after_colon = after_colon.trim_start();
+    if after_colon.starts_with("true") {
+        Some(true)
+    } else if after_colon.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Extracted token counts from an API response.
@@ -664,6 +745,44 @@ mod tests {
         let req = forward_headers(req, headers, provider);
         let built = req.build().expect("failed to build request");
         built.headers().clone()
+    }
+
+    #[test]
+    fn extract_metadata_small_body() {
+        let body =
+            br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let (model, stream) = extract_request_metadata(body);
+        assert_eq!(model, "gpt-4o");
+        assert!(stream);
+    }
+
+    #[test]
+    fn extract_metadata_large_body_uses_prefix_scan() {
+        let mut body = br#"{"model":"claude-sonnet-4-6","stream":false,"messages":[{"role":"user","content":""#.to_vec();
+        body.extend(vec![b'x'; 10 * 1024 * 1024]);
+        body.extend(br#""}]}"#);
+        let (model, stream) = extract_request_metadata(&body);
+        assert_eq!(model, "claude-sonnet-4-6");
+        assert!(!stream);
+    }
+
+    #[test]
+    fn extract_metadata_large_body_streaming() {
+        let mut body =
+            br#"{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":""#
+                .to_vec();
+        body.extend(vec![b'A'; 12 * 1024 * 1024]);
+        body.extend(br#""}],"max_tokens":1}"#);
+        let (model, stream) = extract_request_metadata(&body);
+        assert_eq!(model, "gpt-4o-mini");
+        assert!(stream);
+    }
+
+    #[test]
+    fn extract_metadata_invalid_json() {
+        let (model, stream) = extract_request_metadata(b"not json");
+        assert_eq!(model, "");
+        assert!(!stream);
     }
 
     #[test]
