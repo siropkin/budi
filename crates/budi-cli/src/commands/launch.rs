@@ -96,16 +96,15 @@ const AGENTS: &[AgentDef] = &[
         binary_prefix_args: &[],
         env_vars: None,
         instructions: Some(
-            "Cursor cannot be launched via CLI wrapper — it requires GUI configuration.\n\
+            "Cursor is auto-configured by `budi init` (openai.baseUrl in settings.json).\n\
+             To verify: budi doctor\n\
              \n\
-             To route Cursor through the budi proxy:\n\
+             If you need to reconfigure manually:\n\
              \n\
              1. Open Cursor Settings\n\
              2. Go to Models\n\
              3. Set \"Override OpenAI Base URL\" to: http://localhost:{port}\n\
-             4. Restart Cursor\n\
-             \n\
-             The proxy is running and ready to accept connections.",
+             4. Restart Cursor",
         ),
         unsupported_msg: None,
     },
@@ -180,12 +179,6 @@ pub fn cmd_launch(
     // ── GUI-only agents (Cursor) ─────────────────────────────────────────
 
     if let Some(tpl) = agent.instructions {
-        eprintln!(
-            "{bold}{}{reset} requires manual configuration.",
-            agent.display_name
-        );
-        eprintln!();
-
         // Still start the daemon so the proxy is ready
         daemon::ensure_daemon_running(repo_root.as_deref(), &config)?;
         eprintln!("{green}✓{reset} Proxy running on port {proxy_port}");
@@ -492,9 +485,11 @@ mod tests {
     }
 
     #[test]
-    fn cursor_instructions_contain_port_placeholder() {
+    fn cursor_instructions_reflect_auto_proxy_install() {
         let agent = find_agent("cursor").unwrap();
         let instructions = agent.instructions.unwrap();
         assert!(instructions.contains("{port}"));
+        assert!(instructions.contains("auto-configured by `budi init`"));
+        assert!(instructions.contains("budi doctor"));
     }
 }
