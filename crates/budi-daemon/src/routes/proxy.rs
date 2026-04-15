@@ -749,7 +749,8 @@ mod tests {
 
     #[test]
     fn extract_metadata_small_body() {
-        let body = br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let body =
+            br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
         let (model, stream) = extract_request_metadata(body);
         assert_eq!(model, "gpt-4o");
         assert!(stream);
@@ -767,7 +768,9 @@ mod tests {
 
     #[test]
     fn extract_metadata_large_body_streaming() {
-        let mut body = br#"{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":""#.to_vec();
+        let mut body =
+            br#"{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":""#
+                .to_vec();
         body.extend(vec![b'A'; 12 * 1024 * 1024]);
         body.extend(br#""}],"max_tokens":1}"#);
         let (model, stream) = extract_request_metadata(&body);
