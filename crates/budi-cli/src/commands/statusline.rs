@@ -237,19 +237,12 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         .map(|s| (s.as_str(), &values))
         .collect();
 
-    // Session-aware link target: session details if session exists, otherwise main dashboard
-    let budi_url = session_id
-        .as_ref()
-        .map(|sid| {
-            let encoded = sid
-                .replace('%', "%25")
-                .replace('/', "%2F")
-                .replace(' ', "%20")
-                .replace('#', "%23")
-                .replace('?', "%3F");
-            format!("{}/dashboard/sessions/{}", base, encoded)
-        })
-        .unwrap_or_else(|| format!("{}/dashboard", base));
+    let cloud_base = budi_core::config::DEFAULT_CLOUD_ENDPOINT;
+    let budi_url = if session_id.is_some() {
+        format!("{cloud_base}/dashboard/sessions")
+    } else {
+        format!("{cloud_base}/dashboard")
+    };
 
     match format {
         StatuslineFormat::Json => {
