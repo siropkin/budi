@@ -238,61 +238,6 @@ parse_args() {
   done
 }
 
-build_cursor_extension_vsix() {
-  local extension_dir="$REPO_ROOT/extensions/cursor-budi"
-  local vsix_path="$extension_dir/cursor-budi.vsix"
-  local log_file
-  log_file="$(mktemp -t budi-cursor-extension.XXXXXX.log)"
-
-  (
-    set +e
-    cd "$extension_dir" || exit 10
-
-    if [[ -f package-lock.json ]]; then
-      npm ci --silent --no-audit --no-fund
-    else
-      npm install --silent --no-audit --no-fund
-    fi
-    local npm_install_rc=$?
-    [[ "$npm_install_rc" -eq 0 ]] || exit "$npm_install_rc"
-
-    npm run build --silent
-    local npm_build_rc=$?
-    [[ "$npm_build_rc" -eq 0 ]] || exit "$npm_build_rc"
-
-    npm run package --silent
-    exit $?
-  ) >"$log_file" 2>&1
-  local extension_rc=$?
-
-  if [[ "$extension_rc" -eq 0 ]]; then
-    rm -f "$log_file"
-    return 0
-  fi
-
-  local fallback_desc=""
-  if [[ -s "$vsix_path" ]]; then
-    fallback_desc="using existing cursor-budi.vsix"
-  else
-    : > "$vsix_path"
-    fallback_desc="created empty cursor-budi.vsix (auto-install disabled)"
-  fi
-
-  if [[ "$extension_rc" -eq 137 ]]; then
-    log "WARN: Cursor extension build was killed (exit 137; likely resource pressure); $fallback_desc"
-  else
-    log "WARN: Cursor extension build failed (exit $extension_rc); $fallback_desc"
-  fi
-  log "WARN: Cursor extension diagnostics (last 20 lines):"
-  while IFS= read -r line; do
-    log "WARN:   $line"
-  done < <(tail -n 20 "$log_file")
-  log "WARN: Hint: run 'cd $extension_dir && npm ci && npm run build && npm run package' to debug packaging."
-
-  rm -f "$log_file"
-  return 0
-}
-
 main() {
   parse_args "$@"
 
@@ -315,25 +260,6 @@ main() {
       BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
     else
       if [[ "$SKIP_BUILD" -eq 0 ]]; then
-        # Build dashboard frontend bundle so daemon embeds current assets.
-        if command -v npm >/dev/null 2>&1; then
-          log "Building dashboard frontend..."
-          "$REPO_ROOT/scripts/build-dashboard.sh"
-        elif [[ ! -f "$REPO_ROOT/crates/budi-daemon/static/dashboard-dist/index.html" ]]; then
-          fail "npm not found and no prebuilt dashboard bundle present at crates/budi-daemon/static/dashboard-dist"
-        else
-          log "npm not found — using checked-in dashboard bundle"
-        fi
-
-        # Build Cursor extension (.vsix) before cargo build so it gets embedded.
-        # This is best-effort: install should still succeed even if packaging cannot run.
-        if command -v npm >/dev/null 2>&1; then
-          log "Building Cursor extension..."
-          build_cursor_extension_vsix
-        else
-          log "npm not found — skipping Cursor extension build (extension auto-install will be disabled)"
-        fi
-
         log "Building workspace with cargo ($PROFILE profile)"
         local lock_args=()
         if [[ -f "$REPO_ROOT/Cargo.lock" ]]; then
