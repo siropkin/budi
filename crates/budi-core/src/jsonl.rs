@@ -6,6 +6,11 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+/// Default timestamp for subagent entries that omit the field.
+fn epoch() -> DateTime<Utc> {
+    DateTime::from_timestamp(0, 0).expect("epoch is valid")
+}
+
 /// Top-level entry from a Claude Code JSONL transcript line.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -19,11 +24,33 @@ pub(crate) enum TranscriptEntry {
     Other,
 }
 
+/// Subagent JSONL lines may use `"role"` instead of `"type"` as the
+/// discriminator, and place `model`/`usage` directly at top-level rather
+/// than inside a `message` wrapper. This struct handles that flat layout.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlatAssistantEntry {
+    pub uuid: Option<String>,
+    pub role: Option<String>,
+    pub model: Option<String>,
+    pub session_id: Option<String>,
+    #[serde(default = "epoch")]
+    pub timestamp: DateTime<Utc>,
+    pub cwd: Option<String>,
+    pub git_branch: Option<String>,
+    pub parent_uuid: Option<String>,
+    pub usage: Option<TokenUsage>,
+    pub content: Option<Vec<serde_json::Value>>,
+    pub id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UserEntry {
     pub uuid: String,
     pub session_id: Option<String>,
+    /// Optional for subagent transcripts which may omit timestamp.
+    #[serde(default = "epoch")]
     pub timestamp: DateTime<Utc>,
     pub cwd: Option<String>,
     pub git_branch: Option<String>,
@@ -48,6 +75,8 @@ pub(crate) enum UserContent {
 pub(crate) struct AssistantEntry {
     pub uuid: String,
     pub session_id: Option<String>,
+    /// Optional for subagent transcripts which may omit timestamp.
+    #[serde(default = "epoch")]
     pub timestamp: DateTime<Utc>,
     pub cwd: Option<String>,
     pub git_branch: Option<String>,
@@ -215,6 +244,9 @@ fn extract_assistant_tool_metadata(
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
+/// Tries the standard wrapper format first (`type` discriminator with nested
+/// `message`), then falls back to a flat format used by subagent transcripts
+/// (top-level `role`, `model`, `usage`).
 fn parse_line(line: &str) -> Option<ParsedMessage> {
     let line = line.trim();
     if line.is_empty() {
@@ -222,9 +254,8 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
     }
     let entry: TranscriptEntry = match serde_json::from_str(line) {
         Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("JSONL parse error (skipping line): {e}");
-            return None;
+        Err(_) => {
+            return parse_flat_line(line);
         }
     };
     match entry {
@@ -321,6 +352,78 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
             })
         }
         TranscriptEntry::Other => None,
+    }
+}
+
+/// Fallback parser for subagent JSONL lines that use a flat format with
+/// `"role"` instead of `"type"` and top-level `model`/`usage` fields.
+fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
+    let flat: FlatAssistantEntry = serde_json::from_str(line).ok()?;
+    let role = flat.role.as_deref()?;
+    let uuid = flat.uuid?;
+
+    match role {
+        "assistant" => {
+            if flat.model.as_deref() == Some("<synthetic>") {
+                return None;
+            }
+            let usage = flat.usage.as_ref();
+            let (tool_names, tool_use_ids) = extract_assistant_tool_metadata(flat.content.as_ref());
+            let cache_1h = usage
+                .and_then(|u| u.cache_creation.as_ref())
+                .map(|cc| cc.ephemeral_1h_input_tokens)
+                .unwrap_or(0);
+            let web_searches = usage
+                .and_then(|u| u.server_tool_use.as_ref())
+                .map(|s| s.web_search_requests)
+                .unwrap_or(0);
+            Some(ParsedMessage {
+                uuid,
+                session_id: crate::identity::normalize_optional_session_id(
+                    flat.session_id.as_deref(),
+                ),
+                timestamp: flat.timestamp,
+                cwd: flat.cwd,
+                role: "assistant".to_string(),
+                model: flat.model,
+                input_tokens: usage.and_then(|u| u.input_tokens).unwrap_or(0),
+                output_tokens: usage.and_then(|u| u.output_tokens).unwrap_or(0),
+                cache_creation_tokens: usage
+                    .and_then(|u| u.cache_creation_input_tokens)
+                    .unwrap_or(0),
+                cache_read_tokens: usage.and_then(|u| u.cache_read_input_tokens).unwrap_or(0),
+                git_branch: flat.git_branch,
+                repo_id: None,
+                provider: "claude_code".to_string(),
+                cost_cents: None,
+                session_title: None,
+                parent_uuid: flat.parent_uuid,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "estimated".to_string(),
+                request_id: flat.id,
+                speed: usage.and_then(|u| u.speed.clone()),
+                cache_creation_1h_tokens: cache_1h,
+                web_search_requests: web_searches,
+                prompt_category: None,
+                tool_names,
+                tool_use_ids,
+            })
+        }
+        "user" => Some(ParsedMessage {
+            uuid,
+            session_id: crate::identity::normalize_optional_session_id(flat.session_id.as_deref()),
+            timestamp: flat.timestamp,
+            cwd: flat.cwd,
+            role: "user".to_string(),
+            model: None,
+            git_branch: flat.git_branch,
+            parent_uuid: flat.parent_uuid,
+            provider: "claude_code".to_string(),
+            cost_confidence: "n/a".to_string(),
+            ..Default::default()
+        }),
+        _ => None,
     }
 }
 
@@ -550,5 +653,86 @@ mod tests {
 
         let (msgs, _) = parse_transcript(content, 0);
         assert_eq!(msgs.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Subagent transcript format tests (#205)
+    // Subagent JSONL uses a flat format: top-level `role`, `model`, `usage`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_subagent_assistant_flat_format() {
+        let line = r#"{"role":"assistant","model":"claude-opus-4-6","id":"msg_sub1","uuid":"sub-a1","usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":8577}}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(msg.input_tokens, 3);
+        assert_eq!(msg.output_tokens, 2);
+        assert_eq!(msg.cache_read_tokens, 8577);
+        assert_eq!(msg.uuid, "sub-a1");
+        assert_eq!(msg.request_id.as_deref(), Some("msg_sub1"));
+    }
+
+    #[test]
+    fn parse_subagent_user_flat_format() {
+        let line = r#"{"role":"user","uuid":"sub-u1","sessionId":"s1"}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.uuid, "sub-u1");
+        assert_eq!(msg.session_id.as_deref(), Some("s1"));
+        assert_eq!(msg.input_tokens, 0);
+    }
+
+    #[test]
+    fn parse_subagent_without_timestamp_uses_epoch() {
+        let line = r#"{"role":"assistant","model":"claude-haiku-4-5","uuid":"sub-a2","usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.timestamp, epoch());
+        assert_eq!(msg.input_tokens, 10);
+    }
+
+    #[test]
+    fn parse_subagent_skips_synthetic_model() {
+        let line = r#"{"role":"assistant","model":"<synthetic>","uuid":"sub-synth","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        assert!(parse_line(line).is_none());
+    }
+
+    #[test]
+    fn parse_subagent_skips_unknown_role() {
+        let line = r#"{"role":"system","uuid":"sub-sys","model":"x"}"#;
+        assert!(parse_line(line).is_none());
+    }
+
+    #[test]
+    fn parse_transcript_mixed_main_and_subagent() {
+        let content = concat!(
+            r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1","timestamp":"2026-03-25T00:00:01.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"hey"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}},"uuid":"a1","timestamp":"2026-03-25T00:00:02.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"role":"assistant","model":"claude-haiku-4-5","id":"msg_sub","uuid":"sub-a1","usage":{"input_tokens":3,"output_tokens":2}}"#,
+            "\n",
+        );
+        let (msgs, _) = parse_transcript(content, 0);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[2].model.as_deref(), Some("claude-haiku-4-5"));
+    }
+
+    /// Subagent messages with same UUID as main messages are deduped by
+    /// request_id in parse_transcript.
+    #[test]
+    fn subagent_dedup_by_request_id_with_main() {
+        let content = concat!(
+            r#"{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-6","id":"shared_req","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":50}},"uuid":"a1","timestamp":"2026-03-25T00:00:01.000Z","sessionId":"s1"}"#,
+            "\n",
+            r#"{"role":"assistant","model":"claude-opus-4-6","id":"shared_req","uuid":"sub-a1","usage":{"input_tokens":10,"output_tokens":50}}"#,
+            "\n",
+        );
+        let (msgs, _) = parse_transcript(content, 0);
+        assert_eq!(msgs.len(), 1, "duplicate request_id should be deduped");
     }
 }
