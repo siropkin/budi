@@ -132,7 +132,7 @@ Examples:
     Migrate,
     /// Repair schema drift and run migration checks
     Repair,
-    /// Import historical transcripts from Claude Code and Cursor into the analytics database.
+    /// Import historical transcripts from Claude Code, Codex, Copilot CLI, and Cursor into the analytics database.
     /// Use --force to clear all data and re-ingest from scratch (e.g. after upgrades).
     Import {
         /// Clear all data and re-ingest from scratch.

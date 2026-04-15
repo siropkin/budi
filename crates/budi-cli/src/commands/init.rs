@@ -189,7 +189,7 @@ pub fn cmd_init(
     );
     println!("       {dim}Need one-off bypass? Use `BUDI_BYPASS=1 budi launch <agent>`{reset}");
     println!(
-        "    2. Import history: `budi import` {dim}(load past transcripts from Claude Code / Cursor){reset}"
+        "    2. Import history: `budi import` {dim}(load past transcripts from Claude Code / Codex / Copilot / Cursor){reset}"
     );
     println!("    3. Health check:   `budi status`");
     println!("    4. Cloud dashboard:  https://app.getbudi.dev");
