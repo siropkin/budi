@@ -478,7 +478,7 @@ pub const DEFAULT_CLOUD_SYNC_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_CLOUD_SYNC_RETRY_MAX_SECONDS: u64 = 300;
 
 /// Cloud sync configuration loaded from `~/.config/budi/cloud.toml`.
-/// Created by `budi cloud join` or `budi cloud init`.
+/// Created by editing `~/.config/budi/cloud.toml` (see README § Cloud sync).
 /// Cloud sync is **disabled by default** — requires explicit opt-in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

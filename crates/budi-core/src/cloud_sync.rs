@@ -6,7 +6,7 @@
 //!
 //! The sync worker runs as a background task in the daemon on a configurable
 //! interval (default 300s). It is disabled by default and requires explicit
-//! opt-in via `budi cloud join` or `cloud.toml` configuration.
+//! opt-in via `~/.config/budi/cloud.toml` configuration.
 
 use std::path::Path;
 use std::time::Duration;
