@@ -682,11 +682,7 @@ fn install_cursor_extension(warnings: &mut Vec<String>) {
     let cursor_cli = match find_cursor_cli() {
         Some(c) => c,
         None => {
-            println!(
-                "  Extension: Could not verify Cursor extension status \
-                 (Cursor CLI not found). The extension may already be \
-                 installed — check Cursor's extension list."
-            );
+            println!("  Extension: skipped (Cursor CLI not found)");
             return;
         }
     };
