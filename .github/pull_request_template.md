@@ -14,8 +14,6 @@
 - [ ] `cargo fmt --all`
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] `cargo test --workspace --locked`
-- [ ] If extension changed: `cd extensions/cursor-budi && npm run lint && npm run format:check && npm run test && npm run build`
-- [ ] If dashboard changed: `cd frontend/dashboard && npm ci && npm run build`
 
 Validation evidence:
 

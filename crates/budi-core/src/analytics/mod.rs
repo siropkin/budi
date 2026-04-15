@@ -117,7 +117,7 @@ pub fn newest_ingested_data_at(conn: &Connection) -> Result<Option<String>> {
 }
 
 /// Reset sync state and re-ingested data so the next sync starts from scratch.
-/// Used by `budi sync --force` after schema/parser changes.
+/// Used by `budi import --force` after schema/parser changes.
 pub fn reset_sync_state(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "DELETE FROM sync_state;
