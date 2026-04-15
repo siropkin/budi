@@ -249,7 +249,7 @@ The cloud alpha (R4) supports one org size: **small team** (1–20 developers).
 | Member onboarding | Developer runs `budi cloud join <invite-token>`, which registers the device and stores the API key locally. |
 | Roles | `manager` (view dashboard, manage members, create/revoke invite links) and `member` (sync data, view own data). |
 | Dashboard access | Manager sees aggregated cost data across the org: by day, by user/device, by repo, by model, by ticket. Member sees only their own data. |
-| Data granularity | Dashboard shows daily granularity. No per-message, per-hour, or real-time streaming views in v1. |
+| Data granularity | Dashboard shows daily granularity for cost aggregations. Session summaries provide per-session metadata (start/end time, duration, totals) but no per-message detail. No per-hour or real-time streaming views in v1. |
 | Retention | Cloud retains synced data for 90 days in v1. Configurable in later versions. |
 | Multi-org | Not supported in v1. A user belongs to exactly one org. |
 | SSO / SAML | Not supported in v1. API key auth only. |
@@ -400,7 +400,7 @@ New env vars:
 
 ### Trade-offs
 
-- **Daily granularity only.** Managers cannot see real-time or hourly breakdowns in the cloud dashboard. This is intentional — hourly data can reveal individual work patterns too precisely, and the privacy benefit outweighs the analytics cost. Hourly data remains available locally via the Rich CLI.
+- **Daily granularity for cost aggregations.** Managers cannot see real-time or hourly cost breakdowns in the cloud dashboard. Session summaries (§2) provide per-session metadata (timestamps, duration, totals) but no per-message detail — this is sub-daily but not content-revealing. Hourly cost data remains available locally via the Rich CLI.
 - **No per-message visibility in the cloud.** The cloud sees totals per day per model per branch, not individual requests. This limits debugging capability but preserves the privacy contract.
 - **No tag sync.** Tag values are user-defined and could contain sensitive information. Tags remain local-only. Managers can see cost by model/repo/branch/ticket but not by custom tag.
 - **Single org per user.** Consultants working for multiple clients cannot aggregate across orgs. Multi-org support is a post-8.0 concern.
