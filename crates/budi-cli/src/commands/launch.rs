@@ -197,21 +197,21 @@ pub fn cmd_launch(
     // ── Binary checks ─────────────────────────────────────────────────────
     if !binary_exists(agent.binary) {
         // Special case: codex CLI not found, check for Codex Desktop app
-        if agent.name == "codex" {
-            #[cfg(target_os = "macos")]
-            if std::path::Path::new("/Applications/Codex.app").exists() {
-                eprintln!(
-                    "{yellow}Codex Desktop detected but Codex CLI is not installed.{reset}\n\
-                     \n\
-                     To route Codex Desktop through the budi proxy, add to ~/.codex/config.toml:\n\
-                     \n\
-                     openai_base_url = \"http://localhost:{proxy_port}\"\n\
-                     \n\
-                     Then restart Codex Desktop.",
-                    proxy_port = resolve_proxy_port(proxy_port_override, &config),
-                );
-                return Ok(());
-            }
+        if agent.name == "codex" && codex_desktop_detected() {
+            // Start the daemon so the proxy is ready (like the Cursor path)
+            daemon::ensure_daemon_running(repo_root.as_deref(), &config)?;
+            eprintln!("{green}✓{reset} Proxy running on port {proxy_port}");
+            eprintln!();
+            eprintln!(
+                "{yellow}Codex Desktop detected but Codex CLI is not installed.{reset}\n\
+                 \n\
+                 To route Codex Desktop through the budi proxy, add to ~/.codex/config.toml:\n\
+                 \n\
+                 openai_base_url = \"http://localhost:{proxy_port}\"\n\
+                 \n\
+                 Then restart Codex Desktop.",
+            );
+            return Ok(());
         }
 
         anyhow::bail!(
@@ -340,6 +340,21 @@ fn bypass_requested() -> bool {
     std::env::var("BUDI_BYPASS")
         .ok()
         .is_some_and(|value| value.trim() == "1")
+}
+
+/// Check if Codex Desktop is installed (cross-platform).
+///
+/// macOS: `/Applications/Codex.app`
+/// All platforms: `~/.codex` directory (created by Codex Desktop on first run)
+fn codex_desktop_detected() -> bool {
+    #[cfg(target_os = "macos")]
+    if std::path::Path::new("/Applications/Codex.app").exists() {
+        return true;
+    }
+    // Codex Desktop creates ~/.codex on all platforms
+    budi_core::config::home_dir()
+        .map(|home| home.join(".codex").is_dir())
+        .unwrap_or(false)
 }
 
 /// Check if a binary is available in PATH.
