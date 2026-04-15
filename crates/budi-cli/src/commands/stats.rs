@@ -504,6 +504,11 @@ fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: boo
 
     let yellow = ansi("\x1b[33m");
 
+    let has_duplicate_models = {
+        let mut seen = std::collections::HashSet::new();
+        models.iter().any(|m| !seen.insert(&m.model))
+    };
+
     let max_msgs = models
         .iter()
         .map(|m| m.message_count)
@@ -515,9 +520,14 @@ fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: boo
         let bar: String = "█".repeat(bar_len);
         let total_tok =
             m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
+        let label = if has_duplicate_models {
+            format!("{} ({})", m.model, m.provider)
+        } else {
+            m.model.clone()
+        };
         println!(
-            "    {bold}{:<30}{reset} {:>5} msgs  {:>8} tok  {yellow}{:>8}{reset}  {cyan}{}{reset}",
-            m.model,
+            "    {bold}{:<40}{reset} {:>5} msgs  {:>8} tok  {yellow}{:>8}{reset}  {cyan}{}{reset}",
+            label,
             m.message_count,
             format_tokens(total_tok),
             format_cost_cents(m.cost_cents),
