@@ -580,31 +580,39 @@ mod tests {
         addr
     }
 
-    /// Poll the database until `query` returns a row. Uses exponential
-    /// backoff (50ms → 100ms → 200ms, capped) up to 10s to handle slow
-    /// Windows CI where `spawn_blocking` DB writes can take several seconds.
+    /// Wait for the DB write spawned by `record_event` to complete. Runs
+    /// the poll loop inside `spawn_blocking` so it uses OS-level sleep
+    /// instead of tokio sleep — this avoids async runtime contention that
+    /// starves the writer's `spawn_blocking` task on Windows CI.
     async fn poll_proxy_event<T, F>(db_path: &std::path::Path, query: &str, map_row: F) -> T
     where
-        F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T> + Copy,
+        T: Send + 'static,
+        F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T> + Send + Copy + 'static,
     {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut interval_ms = 50u64;
-        loop {
-            {
-                let conn = rusqlite::Connection::open(db_path).unwrap();
-                budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-                match conn.query_row(query, [], map_row) {
-                    Ok(val) => return val,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                    Err(e) => panic!("unexpected DB error: {e}"),
+        let db_path = db_path.to_path_buf();
+        let query = query.to_string();
+        tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut interval = std::time::Duration::from_millis(50);
+            loop {
+                {
+                    let conn = rusqlite::Connection::open(&db_path).unwrap();
+                    budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+                    match conn.query_row(&query, [], map_row) {
+                        Ok(val) => return val,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                        Err(e) => panic!("unexpected DB error: {e}"),
+                    }
                 }
+                if std::time::Instant::now() >= deadline {
+                    panic!("timed out waiting for proxy_events row (query: {query})");
+                }
+                std::thread::sleep(interval);
+                interval = (interval * 2).min(std::time::Duration::from_millis(500));
             }
-            if tokio::time::Instant::now() >= deadline {
-                panic!("timed out waiting for proxy_events row (query: {query})");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-            interval_ms = (interval_ms * 2).min(500);
-        }
+        })
+        .await
+        .unwrap()
     }
 
     struct ProxyTestHarness {
