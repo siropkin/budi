@@ -683,9 +683,9 @@ fn install_cursor_extension(warnings: &mut Vec<String>) {
         Some(c) => c,
         None => {
             println!(
-                "  Extension: Cursor CLI not found. \
-                 Install the budi extension from the VS Code Marketplace \
-                 or download from https://github.com/siropkin/budi/releases"
+                "  Extension: Could not verify Cursor extension status \
+                 (Cursor CLI not found). The extension may already be \
+                 installed — check Cursor's extension list."
             );
             return;
         }
