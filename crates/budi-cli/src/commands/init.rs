@@ -321,9 +321,21 @@ fn resolve_init_integrations(
     }
 
     filter_integrations_by_agents(&mut selected, agents_config);
-    selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeHooks);
-    selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeOtel);
-    selected.remove(&super::integrations::IntegrationComponent::CursorHooks);
+
+    let removed: Vec<_> = selected
+        .iter()
+        .copied()
+        .filter(|c| c.is_removed_surface())
+        .collect();
+    for c in removed {
+        selected.remove(&c);
+        eprintln!(
+            "{}  Note:{} {} was removed in 8.0 and was skipped.",
+            super::ansi("\x1b[33m"),
+            super::ansi("\x1b[0m"),
+            c.display_name(),
+        );
+    }
 
     Ok(selected)
 }

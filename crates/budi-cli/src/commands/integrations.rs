@@ -16,9 +16,12 @@ use serde_json::{Value, json};
 #[clap(rename_all = "kebab-case")]
 #[serde(rename_all = "kebab-case")]
 pub enum IntegrationComponent {
+    #[value(skip)]
     ClaudeCodeHooks,
+    #[value(skip)]
     ClaudeCodeOtel,
     ClaudeCodeStatusline,
+    #[value(skip)]
     CursorHooks,
     CursorExtension,
 }
@@ -34,7 +37,7 @@ impl IntegrationComponent {
         }
     }
 
-    fn is_removed_surface(self) -> bool {
+    pub fn is_removed_surface(self) -> bool {
         matches!(
             self,
             Self::ClaudeCodeHooks | Self::ClaudeCodeOtel | Self::CursorHooks
