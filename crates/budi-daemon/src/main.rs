@@ -634,7 +634,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proxy_streams_anthropic_sse_and_extracts_tokens() {
         let sse_body = [
             "event: message_start\n",
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(streaming, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proxy_streams_openai_sse_and_extracts_tokens() {
         let sse_body = [
             "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(output, Some(20), "completion_tokens from usage");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proxy_sse_duration_reflects_stream_end() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
