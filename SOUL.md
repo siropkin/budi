@@ -96,7 +96,7 @@ Config: ~/.config/budi/cloud.toml ([cloud] section), env overrides BUDI_CLOUD_*
 Never uploaded: prompts, responses, code, file paths, email, raw payloads, tag values
 ```
 
-### Database (SQLite, WAL mode, schema v21)
+### Database (SQLite, WAL mode, schema v1)
 
 Nine tables, seven data entities + two supporting:
 - **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
@@ -142,7 +142,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 - `crates/budi-core/src/providers/codex.rs` - Codex provider (Codex Desktop/CLI transcript import from `~/.codex/sessions/`, OpenAI model pricing)
 - `crates/budi-core/src/providers/copilot.rs` - Copilot CLI provider (transcript import from `~/.copilot/session-state/`, delegates pricing to Claude/OpenAI based on model)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
-- `crates/budi-core/src/migration.rs` - Schema v21, all migration paths
+- `crates/budi-core/src/migration.rs` - Schema v1, all migration paths
 - `crates/budi-core/src/proxy.rs` - ProxyEvent types with attribution (repo, branch, ticket, cost), proxy_events and messages table storage, ProxyAttribution resolution from headers/git
 - `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
 - `crates/budi-core/src/autostart.rs` - Platform-native daemon autostart: launchd (macOS), systemd (Linux), Task Scheduler (Windows). Install/uninstall/status.
