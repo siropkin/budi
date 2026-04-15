@@ -580,26 +580,31 @@ mod tests {
         addr
     }
 
-    /// Poll the database until `query` returns a row, with 50ms intervals up to 2s.
-    /// Returns the mapped result from the row, or panics on timeout.
+    /// Poll the database until `query` returns a row. Uses exponential
+    /// backoff (50ms → 100ms → 200ms, capped) up to 10s to handle slow
+    /// Windows CI where `spawn_blocking` DB writes can take several seconds.
     async fn poll_proxy_event<T, F>(db_path: &std::path::Path, query: &str, map_row: F) -> T
     where
         F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T> + Copy,
     {
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut interval_ms = 50u64;
         loop {
-            let conn = rusqlite::Connection::open(db_path).unwrap();
-            budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-            match conn.query_row(query, [], map_row) {
-                Ok(val) => return val,
-                Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                Err(e) => panic!("unexpected DB error: {e}"),
+            {
+                let conn = rusqlite::Connection::open(db_path).unwrap();
+                budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
+                match conn.query_row(query, [], map_row) {
+                    Ok(val) => return val,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                    Err(e) => panic!("unexpected DB error: {e}"),
+                }
+                // conn is dropped here — releases SQLite file lock before sleeping
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!("timed out waiting for proxy_events row (query: {query})");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+            interval_ms = (interval_ms * 2).min(500);
         }
     }
 
@@ -736,7 +741,8 @@ mod tests {
             &h.db_path,
             "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
             |row| Ok((row.get(0)?, row.get(1)?)),
-        ).await;
+        )
+        .await;
         assert_eq!(input, Some(10), "prompt_tokens from usage");
         assert_eq!(output, Some(20), "completion_tokens from usage");
     }
@@ -787,7 +793,8 @@ mod tests {
             &h.db_path,
             "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
             |row| row.get(0),
-        ).await;
+        )
+        .await;
         assert!(
             duration_ms >= 200,
             "duration_ms ({duration_ms}) should reflect stream end, not header time"
