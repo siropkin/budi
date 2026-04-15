@@ -62,17 +62,10 @@ pub fn cmd_stats(
     tag: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    // Validate --provider early with a helpful error message
-    const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor"];
-    if let Some(ref p) = provider
-        && !KNOWN_PROVIDERS.contains(&p.as_str())
-    {
-        anyhow::bail!(
-            "Unknown provider '{}'. Available providers: {}",
-            p,
-            KNOWN_PROVIDERS.join(", ")
-        );
-    }
+    // Normalize and validate --provider early with a helpful error message.
+    // Canonical names match the `provider` column in SQLite; aliases are
+    // user-friendly shortcuts that resolve to their canonical form.
+    let provider = provider.map(|p| normalize_provider(&p)).transpose()?;
 
     let client = DaemonClient::connect().context(
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
@@ -554,6 +547,35 @@ pub use super::format_cost;
 
 pub fn format_cost_cents(cents: f64) -> String {
     format_cost(cents / 100.0)
+}
+
+/// Resolve a user-supplied provider name to its canonical DB value.
+///
+/// Canonical names: `claude_code`, `cursor`, `codex`, `copilot_cli`, `openai`.
+/// Accepted aliases: `copilot` → `copilot_cli`, `anthropic` → `claude_code`.
+fn normalize_provider(input: &str) -> Result<String> {
+    const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor", "codex", "copilot_cli", "openai"];
+
+    if KNOWN_PROVIDERS.contains(&input) {
+        return Ok(input.to_string());
+    }
+
+    match input {
+        "copilot" => Ok("copilot_cli".to_string()),
+        "anthropic" => Ok("claude_code".to_string()),
+        _ => {
+            let all: Vec<&str> = KNOWN_PROVIDERS
+                .iter()
+                .copied()
+                .chain(["copilot", "anthropic"])
+                .collect();
+            anyhow::bail!(
+                "Unknown provider '{}'. Available providers: {}",
+                input,
+                all.join(", ")
+            );
+        }
+    }
 }
 
 fn cmd_stats_tags(
