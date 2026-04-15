@@ -368,8 +368,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 return None;
             }
             let usage = flat.usage.as_ref();
-            let (tool_names, tool_use_ids) =
-                extract_assistant_tool_metadata(flat.content.as_ref());
+            let (tool_names, tool_use_ids) = extract_assistant_tool_metadata(flat.content.as_ref());
             let cache_1h = usage
                 .and_then(|u| u.cache_creation.as_ref())
                 .map(|cc| cc.ephemeral_1h_input_tokens)
@@ -413,9 +412,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
         }
         "user" => Some(ParsedMessage {
             uuid,
-            session_id: crate::identity::normalize_optional_session_id(
-                flat.session_id.as_deref(),
-            ),
+            session_id: crate::identity::normalize_optional_session_id(flat.session_id.as_deref()),
             timestamp: flat.timestamp,
             cwd: flat.cwd,
             role: "user".to_string(),
