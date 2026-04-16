@@ -173,11 +173,10 @@ fn sanitize_sensitive_json_value(value: &mut Value, mode: PrivacyMode) {
 
 fn hash_json_field(value: &mut Value) {
     match value {
-        Value::String(s) => {
-            if !s.trim().is_empty() {
-                *s = hash_sensitive_value(s);
-            }
+        Value::String(s) if !s.trim().is_empty() => {
+            *s = hash_sensitive_value(s);
         }
+        Value::String(_) => {}
         Value::Array(items) => {
             for item in items {
                 if let Value::String(s) = item
