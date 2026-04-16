@@ -105,6 +105,7 @@ pub struct SessionListEntry {
     pub git_branches: Vec<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cost_confidence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -395,6 +396,10 @@ pub fn session_list_with_filters(
                      ) sub) as git_branches_csv,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
+                    CASE
+                        WHEN SUM(CASE WHEN m.cost_confidence LIKE '%estimated%' THEN 1 ELSE 0 END) > 0 THEN 'estimated'
+                        ELSE COALESCE(MAX(m.cost_confidence), 'exact')
+                    END as cost_confidence,
                     COALESCE(s.duration_ms,
                         CAST((julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400000 AS INTEGER)
                     ) as duration_ms,
@@ -408,7 +413,7 @@ pub fn session_list_with_filters(
          SELECT COUNT(*) OVER() as total,
                 sa.session_id, sa.started_at, sa.ended_at, sa.duration_ms,
                 sa.msg_count, sa.cost, sa.models_csv, sa.provider,
-                sa.repo_ids_csv, sa.git_branches_csv, sa.inp, sa.outp, sa.title
+                sa.repo_ids_csv, sa.git_branches_csv, sa.inp, sa.outp, sa.cost_confidence, sa.title
          FROM session_agg sa
          ORDER BY {order_expr}
          LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -430,8 +435,9 @@ pub fn session_list_with_filters(
                 git_branches: parse_string_list_csv(row.get(10)?),
                 input_tokens: row.get(11)?,
                 output_tokens: row.get(12)?,
+                cost_confidence: row.get(13)?,
                 health_state: None,
-                title: row.get(13)?,
+                title: row.get(14)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -557,6 +563,10 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                      ) sub) as git_branches_csv,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
+                    CASE
+                        WHEN SUM(CASE WHEN m.cost_confidence LIKE '%estimated%' THEN 1 ELSE 0 END) > 0 THEN 'estimated'
+                        ELSE COALESCE(MAX(m.cost_confidence), 'exact')
+                    END as cost_confidence,
                     MAX(s.title) as title
              FROM (SELECT ?1 AS session_id) sid
              LEFT JOIN sessions s ON s.id = sid.session_id
@@ -566,7 +576,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
          )
          SELECT session_id, started_at, ended_at, duration_ms, msg_count, cost,
                 models_csv, provider, repo_ids_csv, git_branches_csv,
-                inp, outp, title
+                inp, outp, cost_confidence, title
          FROM session_agg",
         params![session_id],
         |row| {
@@ -583,8 +593,9 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                 git_branches: parse_string_list_csv(row.get(9)?),
                 input_tokens: row.get(10)?,
                 output_tokens: row.get(11)?,
+                cost_confidence: row.get(12)?,
                 health_state: None,
-                title: row.get(12)?,
+                title: row.get(13)?,
             })
         },
     );
