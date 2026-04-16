@@ -1,7 +1,7 @@
 # ADR-0082: Proxy Compatibility Matrix and Local Gateway Contract
 
 - **Date**: 2026-04-10
-- **Status**: Proposed
+- **Status**: Implemented
 - **Issue**: [#82](https://github.com/siropkin/budi/issues/82)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0081](./0081-product-contract-and-deprecation-policy.md)
