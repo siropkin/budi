@@ -14,20 +14,23 @@ brew install siropkin/budi/budi && budi init
 Everything stays on your machine by default. Optional cloud sync pushes aggregated daily cost metrics to a team dashboard at `app.getbudi.dev` — prompts, code, and responses never leave your machine.
 
 <p align="center">
-  <img src="assets/dashboard-overview.png" alt="budi dashboard — cost overview" width="800">
+  <img src="assets/demo.gif" alt="budi CLI demo" width="800">
 </p>
 
 <details>
-<summary>More screenshots</summary>
+<summary>Cloud Dashboard Screenshots</summary>
 
-**Insights** — cache efficiency, session cost curve, tool usage, subagent costs
-
+**Overview** — team-wide cost visibility
 <p align="center">
-  <img src="assets/dashboard-insights.png" alt="budi insights" width="800">
+  <img src="assets/dashboard-overview.png" alt="budi dashboard — cost overview" width="800">
 </p>
 
-**Sessions** — searchable session list with drill-down to individual messages and session health
+**Repos & Tickets** — cost breakdown by project, branch, and ticket
+<p align="center">
+  <img src="assets/dashboard-repos.png" alt="budi repos" width="800">
+</p>
 
+**Sessions** — recent sessions across the team
 <p align="center">
   <img src="assets/dashboard-sessions.png" alt="budi sessions" width="800">
 </p>
