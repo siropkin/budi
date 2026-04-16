@@ -66,6 +66,12 @@ Tier 1 agents use simple env vars with high confidence. Tier 2 agents work but h
 
 All agents also support one-time historical import via `budi import` (Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API).
 
+## Ecosystem
+
+- **[budi](https://github.com/siropkin/budi)** — The core Rust daemon and CLI tool (you are here)
+- **[budi-cloud](https://github.com/siropkin/budi-cloud)** — Cloud dashboard and ingest API for team-wide cost visibility
+- **[budi-cursor](https://github.com/siropkin/budi-cursor)** — VS Code/Cursor extension for live status bar and health panel
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, quality checks, and PR workflow.
@@ -73,8 +79,6 @@ Architecture and module boundaries are documented in [SOUL.md](SOUL.md).
 Architecture decision records live in [`docs/adr/`](docs/adr/).
 
 Quick validation: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
-
-Cursor extension and cloud dashboard live in their own repos: [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor), [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud).
 
 To report a bug or request a feature, open a GitHub issue using the repository templates so maintainers get reproducible details quickly.
 
