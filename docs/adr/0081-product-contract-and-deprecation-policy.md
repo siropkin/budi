@@ -1,7 +1,7 @@
 # ADR-0081: 8.0 Product Contract and Deprecation Policy
 
 - **Date**: 2026-04-10
-- **Status**: Proposed
+- **Status**: Implemented
 - **Issue**: [#81](https://github.com/siropkin/budi/issues/81)
 - **Milestone**: 8.0.0
 

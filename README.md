@@ -496,20 +496,24 @@ Hook-based ingestion (`budi hook`) and the `hook_events` table have been removed
 </details>
 
 <details>
-<summary>OpenTelemetry (removed in 8.0)</summary>
+<summary>Cost confidence levels</summary>
 
-OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. The proxy captures real-time cost data directly.
-
-**Cost confidence levels:**
+Every message carries a `cost_confidence` tag that indicates how the cost was derived:
 
 | Level | Source | Accuracy |
 |-------|--------|----------|
 | `proxy_estimated` | Proxy real-time capture | Estimated from response body / SSE stream |
-| `otel_exact` | Historical OTEL data (read-only) | Exact (includes thinking tokens) |
 | `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
 | `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
 
-Messages with `otel_exact` or `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
+Messages with `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
+
+</details>
+
+<details>
+<summary>OpenTelemetry (removed in 8.0)</summary>
+
+OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. The proxy (port 9878) captures real-time cost data directly.
 
 </details>
 
