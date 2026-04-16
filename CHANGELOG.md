@@ -1,6 +1,6 @@
 # Changelog
 
-## 8.0.0 — 2026-04-XX
+## 8.0.0 — 2026-04-16
 
 Budi 8.0 is a ground-up rearchitecture: proxy-first live cost tracking replaces the old hook/OTEL/file-sync ingestion model, the Cursor extension and cloud dashboard are extracted into independent repos, and a new optional cloud layer gives managers team-wide AI cost visibility — all while keeping prompts, code, and responses strictly local.
 
