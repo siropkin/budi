@@ -316,6 +316,7 @@ pub struct UsageSummary {
     pub total_output_tokens: u64,
     pub total_cache_creation_tokens: u64,
     pub total_cache_read_tokens: u64,
+    pub total_cost_cents: f64,
 }
 
 /// Query a usage summary, optionally filtered by date range.
@@ -340,7 +341,8 @@ pub fn usage_summary(
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0)
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
          FROM messages {}",
         where_clause
     );
@@ -352,17 +354,20 @@ pub fn usage_summary(
         total_output,
         total_cache_create,
         total_cache_read,
-    ): (u64, u64, u64, u64, u64, u64, u64) = conn.query_row(&sql, param_refs.as_slice(), |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-            r.get(6)?,
-        ))
-    })?;
+        total_cost_cents,
+    ): (u64, u64, u64, u64, u64, u64, u64, f64) =
+        conn.query_row(&sql, param_refs.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?;
 
     Ok(UsageSummary {
         total_messages,
@@ -372,6 +377,7 @@ pub fn usage_summary(
         total_output_tokens: total_output,
         total_cache_creation_tokens: total_cache_create,
         total_cache_read_tokens: total_cache_read,
+        total_cost_cents,
     })
 }
 
@@ -423,7 +429,8 @@ fn usage_summary_from_rollups(
             COALESCE(SUM(input_tokens), 0),
             COALESCE(SUM(output_tokens), 0),
             COALESCE(SUM(cache_creation_tokens), 0),
-            COALESCE(SUM(cache_read_tokens), 0)
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cost_cents), 0.0)
          FROM {} {where_clause}",
         rollup_table(window.level)
     );
@@ -439,17 +446,20 @@ fn usage_summary_from_rollups(
         total_output,
         total_cache_create,
         total_cache_read,
-    ): (u64, u64, u64, u64, u64, u64, u64) = conn.query_row(&sql, param_refs.as_slice(), |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-            r.get(6)?,
-        ))
-    })?;
+        total_cost_cents,
+    ): (u64, u64, u64, u64, u64, u64, u64, f64) =
+        conn.query_row(&sql, param_refs.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?;
 
     Ok(UsageSummary {
         total_messages,
@@ -459,6 +469,7 @@ fn usage_summary_from_rollups(
         total_output_tokens: total_output,
         total_cache_creation_tokens: total_cache_create,
         total_cache_read_tokens: total_cache_read,
+        total_cost_cents,
     })
 }
 
@@ -530,7 +541,8 @@ pub fn usage_summary_with_filters(
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0)
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cost_cents), 0.0)
          FROM messages {}",
         where_clause
     );
@@ -542,17 +554,20 @@ pub fn usage_summary_with_filters(
         total_output,
         total_cache_create,
         total_cache_read,
-    ): (u64, u64, u64, u64, u64, u64, u64) = conn.query_row(&sql, param_refs.as_slice(), |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-            r.get(6)?,
-        ))
-    })?;
+        total_cost_cents,
+    ): (u64, u64, u64, u64, u64, u64, u64, f64) =
+        conn.query_row(&sql, param_refs.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?;
 
     Ok(UsageSummary {
         total_messages,
@@ -562,6 +577,7 @@ pub fn usage_summary_with_filters(
         total_output_tokens: total_output,
         total_cache_creation_tokens: total_cache_create,
         total_cache_read_tokens: total_cache_read,
+        total_cost_cents,
     })
 }
 
