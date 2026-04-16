@@ -120,7 +120,7 @@ The agent's API key in the request header determines authentication with the ups
 
 | Failure mode | Proxy behavior |
 |--------------|---------------|
-| Upstream returns HTTP error (4xx/5xx) | Pass the error response through to the client unmodified. Log the status code and model for analytics. |
+| Upstream returns HTTP error (4xx/5xx) | Pass the error response through to the client unmodified. Log the status code and model for analytics. (e.g. invalid API key returns `401 Unauthorized` from upstream). |
 | Upstream is unreachable (DNS, connect timeout) | Return `502 Bad Gateway` with a JSON body: `{"error": {"type": "proxy_error", "message": "..."}}`. Log the failure. |
 | Proxy itself crashes or is not running | The agent gets `ECONNREFUSED` on the proxy port. The agent's own error handling applies. The proxy does not implement automatic fallback to direct connections — that would silently bypass observability. |
 | Malformed request from agent | Return `400 Bad Request`. Do not forward to upstream. |
