@@ -98,11 +98,26 @@ impl Pipeline {
                 }
 
                 // Activity tag from prompt_category (propagated from user msg).
+                // R1.2 (#222) also emits source/confidence as sibling tags so
+                // aggregates in `activity_cost*` can render explainable
+                // labels per-activity instead of a global fallback.
                 if let Some(ref cat) = msg.prompt_category {
                     msg_tags.push(Tag {
                         key: tk::ACTIVITY.to_string(),
                         value: cat.clone(),
                     });
+                    if let Some(ref src) = msg.prompt_category_source {
+                        msg_tags.push(Tag {
+                            key: tk::ACTIVITY_SOURCE.to_string(),
+                            value: src.clone(),
+                        });
+                    }
+                    if let Some(ref conf) = msg.prompt_category_confidence {
+                        msg_tags.push(Tag {
+                            key: tk::ACTIVITY_CONFIDENCE.to_string(),
+                            value: conf.clone(),
+                        });
+                    }
                 }
             }
 
@@ -112,15 +127,19 @@ impl Pipeline {
     }
 }
 
-/// Propagate git_branch, repo_id, cwd, and prompt_category from earlier messages
-/// to later messages within the same session. Each message inherits from the most
-/// recent preceding message in the same session that has the field set.
+/// Propagate git_branch, repo_id, cwd, prompt_category, and the R1.2
+/// (#222) classification source/confidence fields from earlier messages to
+/// later messages within the same session. Each message inherits from the
+/// most recent preceding message in the same session that has the field
+/// set.
 fn propagate_session_context(messages: &mut [ParsedMessage]) {
     struct Ctx {
         branch: Option<String>,
         repo: Option<String>,
         cwd: Option<String>,
         category: Option<String>,
+        category_source: Option<String>,
+        category_confidence: Option<String>,
     }
     let mut session_ctx: std::collections::HashMap<String, Ctx> = std::collections::HashMap::new();
     for msg in messages.iter_mut() {
@@ -135,6 +154,8 @@ fn propagate_session_context(messages: &mut [ParsedMessage]) {
             repo: None,
             cwd: None,
             category: None,
+            category_source: None,
+            category_confidence: None,
         });
 
         if let Some(b) = &msg.git_branch {
@@ -163,9 +184,27 @@ fn propagate_session_context(messages: &mut [ParsedMessage]) {
                 // Activity classification can change mid-session.
                 // Keep the latest non-empty prompt_category and propagate it forward.
                 ctx.category = Some(cat.clone());
+                // Source / confidence move as a unit with the category. If
+                // the latest user message produced a category but no source
+                // / confidence (e.g. legacy ingest), fall through to `rule`
+                // / `medium` so downstream queries still get a label.
+                ctx.category_source = msg
+                    .prompt_category_source
+                    .clone()
+                    .or_else(|| Some(crate::hooks::SOURCE_RULE.to_string()));
+                ctx.category_confidence = msg
+                    .prompt_category_confidence
+                    .clone()
+                    .or_else(|| Some(crate::hooks::CONF_MEDIUM.to_string()));
             }
         } else if let Some(ref cat) = ctx.category {
             msg.prompt_category = Some(cat.clone());
+            if msg.prompt_category_source.is_none() {
+                msg.prompt_category_source = ctx.category_source.clone();
+            }
+            if msg.prompt_category_confidence.is_none() {
+                msg.prompt_category_confidence = ctx.category_confidence.clone();
+            }
         }
     }
 }
@@ -354,6 +393,8 @@ mod tests {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            prompt_category_source: None,
+            prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
         }

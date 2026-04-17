@@ -204,16 +204,36 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
     the same data contract.
 
 - **`activity`** — promoted to a first-class CLI dimension in 8.1 (R1.0.4,
-  [#305](https://github.com/siropkin/budi/issues/305)). The pipeline emits
-  an `activity` tag for every assistant message whose session has a
+  [#305](https://github.com/siropkin/budi/issues/305)); strengthened in
+  R1.2 ([#222](https://github.com/siropkin/budi/issues/222)). The pipeline
+  emits an `activity` tag for every assistant message whose session has a
   classified prompt category (bugfix, refactor, testing, feature, review,
-  ops, question, writing). Values come from the rule-based
-  `hooks::classify_prompt` and are propagated across the session by
-  `propagate_session_context`, so every assistant message in a classified
-  session carries exactly one `activity` tag. R1.0 surfaces every
-  aggregate as `source = "rule"` / `confidence = "medium"`; R1.2 (#222)
-  will refine these per-aggregate as the classifier learns additional
-  signals, without changing the wire format. Surfaces:
+  ops, question, writing, **docs**). Values come from the rule-based
+  `hooks::classify_prompt_detailed` and are propagated across the session
+  by `propagate_session_context`, so every assistant message in a
+  classified session carries exactly one `activity` tag. R1.2 also emits
+  two companion tags — `activity_source` (`rule` when derived from the
+  rule-based classifier; reserved for future `header` / `hint` sources)
+  and `activity_confidence` (`high` when anchored by a leading
+  action phrase with a strong keyword hit, `medium` for a clear single
+  keyword hit, `low` when the match is weak or based on fallback
+  heuristics). Precedence: a leading question-anchor phrase ("explain",
+  "what is", "how do I") wins over generic `bugfix` keywords unless the
+  prompt also starts with a bugfix action ("fix the error"). Coverage
+  extends beyond Claude Code JSONL ingestion to:
+    - **Cursor JSONL ingestion** — user prompts are classified at parse
+      time in `providers::cursor::parse_cursor_line`.
+    - **Proxy live path** — the daemon route calls
+      `budi_core::proxy::classify_request_body` on the request body
+      before forwarding, extracts the last user turn in-memory, and
+      records only the derived `(activity, source, confidence)` triple
+      as tags. Per [ADR-0083](docs/adr/0083-privacy-constraints.md) no
+      prompt text is persisted on the proxy path.
+  Analytics recompute the dominant `activity_source` /
+  `activity_confidence` per activity from the stored tags (most frequent
+  value wins, ties broken alphabetically), falling back to R1.0 defaults
+  (`rule` / `medium`) only when an activity has no companion tags yet
+  (pre-R1.2 data). Surfaces:
   - `budi stats --activities` — list ranked by cost, with `(untagged)`
     bucket for messages that never matched a classification rule (short
     prompts, slash commands, metadata-only messages).

@@ -200,6 +200,20 @@ pub struct ProxyEvent {
     /// otherwise generate a best-effort ID per ADR-0082 §8.
     #[serde(default)]
     pub session_id: String,
+    /// Activity label derived from the last user prompt in the request body
+    /// (R1.2, #222). Empty when the body contained no user text or the
+    /// prompt did not match any classifier rule. ADR-0083 privacy:
+    /// classification runs in-memory — no prompt content is persisted.
+    #[serde(default)]
+    pub activity: String,
+    /// Classifier source, e.g. `"rule"`. Stable label set defined in
+    /// `crate::hooks`. Empty when `activity` is empty.
+    #[serde(default)]
+    pub activity_source: String,
+    /// Classifier confidence, one of `"high"`, `"medium"`, `"low"`. Empty
+    /// when `activity` is empty.
+    #[serde(default)]
+    pub activity_confidence: String,
 }
 
 /// Ensure the `proxy_events` table exists in the analytics database.
@@ -390,7 +404,97 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
         }
     }
 
+    // R1.2 (#222): write activity classification tags alongside the row.
+    // The classifier runs on the prompt in-memory at the proxy route; no
+    // prompt content is stored — we only persist the derived label.
+    if !event.activity.is_empty() {
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
+            params![uuid, crate::tag_keys::ACTIVITY, event.activity],
+        )?;
+        if !event.activity_source.is_empty() {
+            conn.execute(
+                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
+                params![
+                    uuid,
+                    crate::tag_keys::ACTIVITY_SOURCE,
+                    event.activity_source
+                ],
+            )?;
+        }
+        if !event.activity_confidence.is_empty() {
+            conn.execute(
+                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
+                params![
+                    uuid,
+                    crate::tag_keys::ACTIVITY_CONFIDENCE,
+                    event.activity_confidence
+                ],
+            )?;
+        }
+    }
+
     Ok(uuid)
+}
+
+/// Classify the last user prompt in an Anthropic or OpenAI request body.
+///
+/// The classifier runs in-memory. No prompt content is stored — only the
+/// derived `(category, source, confidence)` triple is returned so the
+/// proxy route can attach it to the recorded `ProxyEvent`.
+///
+/// Returns `None` when the body is not valid JSON, has no user message, or
+/// the last user message text does not match any rule in the classifier.
+/// Large bodies short-circuit at `MAX_CLASSIFY_BYTES` so we never pay to
+/// deserialize a full multi-megabyte prompt; truncated prefix still produces
+/// the same label in the common case.
+pub fn classify_request_body(body: &[u8]) -> Option<(String, String, String)> {
+    const MAX_CLASSIFY_BYTES: usize = 128 * 1024;
+    let slice = if body.len() > MAX_CLASSIFY_BYTES {
+        &body[..MAX_CLASSIFY_BYTES]
+    } else {
+        body
+    };
+    let value: serde_json::Value = serde_json::from_slice(slice).ok()?;
+    let messages = value.get("messages")?.as_array()?;
+    // Walk in reverse to pick the most recent user turn.
+    for msg in messages.iter().rev() {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "user" {
+            continue;
+        }
+        let text = extract_user_text(msg.get("content")?)?;
+        if let Some(c) = crate::hooks::classify_prompt_detailed(&text) {
+            return Some((c.category, c.source.to_string(), c.confidence.to_string()));
+        }
+        // First user message found but unclassifiable — stop, don't fall
+        // back to a prior assistant turn.
+        return None;
+    }
+    None
+}
+
+fn extract_user_text(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            let text = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    serde_json::Value::String(s) => Some(s.as_str()),
+                    serde_json::Value::Object(_) => b.get("text").and_then(|v| v.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Merge the incoming event's attribution with whatever the rest of the
@@ -495,6 +599,9 @@ mod tests {
             ticket_id: String::new(),
             cost_cents: 0.0,
             session_id: String::new(),
+            activity: String::new(),
+            activity_source: String::new(),
+            activity_confidence: String::new(),
         }
     }
 
@@ -743,6 +850,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn insert_proxy_message_writes_activity_tags() {
+        let conn = test_db_with_messages();
+        let mut event = test_event();
+        event.activity = "bugfix".to_string();
+        event.activity_source = "rule".to_string();
+        event.activity_confidence = "high".to_string();
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM tags WHERE message_id = ?1 ORDER BY key")
+            .unwrap();
+        let tags: Vec<(String, String)> = stmt
+            .query_map(params![uuid], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                ("activity".to_string(), "bugfix".to_string()),
+                ("activity_confidence".to_string(), "high".to_string()),
+                ("activity_source".to_string(), "rule".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_request_body_openai_last_user_turn_wins() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "add a login button"},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": "fix the crash in the login flow please"}
+            ]
+        })
+        .to_string();
+        let (cat, source, confidence) = classify_request_body(body.as_bytes()).expect("classifies");
+        assert_eq!(cat, "bugfix");
+        assert_eq!(source, "rule");
+        assert!(!confidence.is_empty());
+    }
+
+    #[test]
+    fn classify_request_body_anthropic_content_blocks() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "refactor the authentication module to be async"}
+                ]}
+            ]
+        })
+        .to_string();
+        let (cat, _, _) = classify_request_body(body.as_bytes()).expect("classifies");
+        assert_eq!(cat, "refactor");
+    }
+
+    #[test]
+    fn classify_request_body_returns_none_for_non_json() {
+        assert!(classify_request_body(b"not json").is_none());
+    }
+
+    #[test]
+    fn classify_request_body_returns_none_without_user() {
+        let body = serde_json::json!({
+            "messages": [{"role": "assistant", "content": "hi"}]
+        })
+        .to_string();
+        assert!(classify_request_body(body.as_bytes()).is_none());
     }
 
     #[test]
