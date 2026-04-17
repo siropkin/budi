@@ -6,6 +6,7 @@ use budi_core::config;
 use serde_json::Value;
 
 pub mod autostart;
+pub mod cloud;
 pub mod doctor;
 pub mod health;
 pub mod import;

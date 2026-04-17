@@ -8,6 +8,7 @@
 
 ### Added
 
+- **`budi cloud sync` and `budi cloud status`** (R2.1, #225) — the pre-8.0 `budi sync` command was removed in #175 when transcript ingestion consolidated into `budi import`, leaving cloud sync running only as an async daemon worker (#101). The new `budi cloud` namespace restores a discoverable self-serve path: `budi cloud sync` pushes queued local rollups and session summaries to the cloud on demand and reports records upserted, watermark, and endpoint; `budi cloud status` reports whether sync is enabled, when it last succeeded, and how many records are queued locally. Both commands honor `--format text|json` in line with `budi stats` / `budi sessions`. Backed by new `POST /cloud/sync` (loopback-only) and `GET /cloud/status` daemon endpoints; a shared `cloud_syncing` `AtomicBool` prevents the manual command and the background worker from double-posting.
 - **`budi doctor` sessions-visibility check** — reports assistant-messages vs returned-session counts for the `today`, `7d`, and `30d` windows and flags a hard error if any window has activity but zero returned sessions (#302).
 - **`messages.timestamp` / `session_id` attribution contract** documented in `SOUL.md` so future providers cannot silently regress R1.0 (#302).
 - **`BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM` env overrides** on the proxy (mirroring the existing `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` pattern) so local end-to-end tests and air-gapped deployments can redirect proxy traffic without editing on-disk config.

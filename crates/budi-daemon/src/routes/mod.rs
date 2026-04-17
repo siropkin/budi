@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod cloud;
 pub mod hooks;
 pub mod proxy;
 

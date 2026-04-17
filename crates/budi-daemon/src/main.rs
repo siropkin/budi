@@ -42,6 +42,10 @@ enum Commands {
 pub struct AppState {
     pub syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub integrations_installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Guards manual and background cloud sync runs so they cannot overlap.
+    /// Owned by the `/cloud/sync` route (see `routes::cloud`) and the
+    /// background worker in `workers::cloud_sync`.
+    pub cloud_syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -69,12 +73,13 @@ fn build_proxy_router(proxy_state: ProxyState) -> Router {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, hooks as h, require_loopback};
+    use routes::{analytics as a, cloud as c, hooks as h, require_loopback};
 
     let protected_routes = Router::new()
         .route("/sync", post(h::analytics_sync))
         .route("/sync/all", post(h::analytics_history))
         .route("/sync/reset", post(h::analytics_sync_reset))
+        .route("/cloud/sync", post(c::cloud_sync))
         .route("/admin/providers", get(a::analytics_registered_providers))
         .route("/admin/schema", get(a::analytics_schema_version))
         .route("/admin/migrate", post(a::analytics_migrate))
@@ -91,6 +96,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/health/integrations", get(h::health_integrations))
         .route("/health/check-update", get(h::health_check_update))
         .route("/sync/status", get(h::sync_status))
+        .route("/cloud/status", get(routes::cloud::cloud_status))
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))
         .route("/analytics/projects", get(a::analytics_projects))
@@ -195,9 +201,11 @@ async fn main() -> Result<()> {
     // take over without manual intervention (e.g. after `cargo build && cp`).
     kill_existing_daemon(port);
 
+    let cloud_syncing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let app_state = AppState {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cloud_syncing: cloud_syncing.clone(),
     };
 
     let app = build_router(app_state);
@@ -271,7 +279,11 @@ async fn main() -> Result<()> {
                     interval_s = cloud_config.sync.interval_seconds,
                     "Starting cloud sync worker"
                 );
-                tokio::spawn(workers::cloud_sync::run(db_path, cloud_config));
+                tokio::spawn(workers::cloud_sync::run(
+                    db_path,
+                    cloud_config,
+                    cloud_syncing.clone(),
+                ));
             }
         } else if cloud_config.effective_enabled() {
             tracing::warn!(
@@ -405,6 +417,7 @@ mod tests {
         build_router(AppState {
             syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cloud_syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -496,6 +509,40 @@ mod tests {
             .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 4], 43434))));
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn cloud_sync_route_blocks_non_loopback_client() {
+        let app = test_app();
+        let mut req = Request::post("/cloud/sync").body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 4], 43434))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn cloud_status_route_public_and_reports_shape() {
+        let app = test_app();
+        let resp = app
+            .oneshot(Request::get("/cloud/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.get("enabled").is_some(),
+            "cloud/status should include `enabled`"
+        );
+        assert!(
+            json.get("ready").is_some(),
+            "cloud/status should include `ready`"
+        );
+        assert!(
+            json.get("endpoint").is_some(),
+            "cloud/status should include `endpoint`"
+        );
     }
 
     #[tokio::test]

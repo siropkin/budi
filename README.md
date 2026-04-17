@@ -310,6 +310,8 @@ budi health --session <id>         # health vitals for a specific session
 ```bash
 budi doctor                        # check health: daemon, proxy, database, config
 budi doctor --deep                 # run full SQLite integrity_check (slower)
+budi cloud status                  # cloud sync readiness + last-synced-at + queued records
+budi cloud sync                    # push queued local rollups/sessions to the cloud now
 budi autostart status              # check daemon autostart service
 budi autostart install             # install the autostart service
 budi autostart uninstall           # remove the autostart service

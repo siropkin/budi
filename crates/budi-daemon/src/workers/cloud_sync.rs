@@ -5,13 +5,21 @@
 //! Never blocks terminal execution.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use budi_core::cloud_sync::{self, SyncResult};
 use budi_core::config::CloudConfig;
 
 /// Run the cloud sync worker loop. Designed to be spawned with `tokio::spawn`.
-pub async fn run(db_path: PathBuf, config: CloudConfig) {
+///
+/// The `cloud_syncing` flag is shared with the manual `POST /cloud/sync`
+/// route so a user-triggered flush and the interval-based worker never run
+/// concurrently. If the flag is already set when the interval fires, the
+/// worker skips that tick — the manual invocation will advance the
+/// watermarks.
+pub async fn run(db_path: PathBuf, config: CloudConfig, cloud_syncing: Arc<AtomicBool>) {
     let interval = Duration::from_secs(config.sync.interval_seconds);
     let retry_max = config.sync.retry_max_seconds;
     let mut consecutive_failures: u32 = 0;
@@ -47,10 +55,28 @@ pub async fn run(db_path: PathBuf, config: CloudConfig) {
             continue;
         }
 
+        // If a manual `budi cloud sync` (or a previous tick) is still
+        // running, skip this interval rather than contend — watermarks make
+        // this safe and avoid double-posting the same records.
+        if cloud_syncing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("Cloud sync skipped: another sync already in progress");
+            tokio::time::sleep(interval).await;
+            continue;
+        }
+
         // Normal sync tick
         let db = db_path.clone();
         let cfg = config.clone();
-        let result = tokio::task::spawn_blocking(move || cloud_sync::sync_tick(&db, &cfg)).await;
+        let flag = cloud_syncing.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let res = cloud_sync::sync_tick(&db, &cfg);
+            flag.store(false, Ordering::SeqCst);
+            res
+        })
+        .await;
 
         match result {
             Ok(SyncResult::Success(resp)) => {
