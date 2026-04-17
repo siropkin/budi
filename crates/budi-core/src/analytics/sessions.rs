@@ -187,6 +187,68 @@ pub fn session_visibility(conn: &Connection) -> Result<Vec<SessionVisibilityWind
 }
 
 // ---------------------------------------------------------------------------
+// Branch Attribution (doctor diagnostics — #303)
+// ---------------------------------------------------------------------------
+
+/// Per-provider counts of assistant rows in the last 7 days that are missing
+/// the branch/repo/cwd attribution fields. Drives the `budi doctor`
+/// branch-attribution check so a regression of #303 is visible the same way
+/// #302's session-visibility mismatch is.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BranchAttributionProvider {
+    pub provider: String,
+    pub total_assistant: u64,
+    pub missing_branch: u64,
+    pub missing_repo: u64,
+    pub missing_cwd: u64,
+}
+
+impl BranchAttributionProvider {
+    /// Share of rows (0.0..=1.0) in this provider that have no `git_branch`.
+    pub fn missing_branch_ratio(&self) -> f64 {
+        if self.total_assistant == 0 {
+            0.0
+        } else {
+            self.missing_branch as f64 / self.total_assistant as f64
+        }
+    }
+}
+
+/// 7-day branch-attribution health per provider.
+///
+/// We deliberately scope to 7 days: it is long enough that short outages
+/// (laptop off overnight) do not starve the check, and short enough that a
+/// regression surfaces within a day of a new bad build landing.
+pub fn branch_attribution_stats(conn: &Connection) -> Result<Vec<BranchAttributionProvider>> {
+    let since = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(provider, 'claude_code') AS p,
+                COUNT(*) AS total,
+                SUM(CASE WHEN git_branch IS NULL OR git_branch = '' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN repo_id IS NULL OR repo_id = '' OR repo_id = 'Unassigned' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN cwd IS NULL OR cwd = '' THEN 1 ELSE 0 END)
+         FROM messages
+         WHERE role = 'assistant' AND timestamp >= ?1
+         GROUP BY p
+         ORDER BY total DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![since], |row| {
+            Ok(BranchAttributionProvider {
+                provider: row.get(0)?,
+                total_assistant: row.get::<_, i64>(1)? as u64,
+                missing_branch: row.get::<_, i64>(2)? as u64,
+                missing_repo: row.get::<_, i64>(3)? as u64,
+                missing_cwd: row.get::<_, i64>(4)? as u64,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
 // Session List
 // ---------------------------------------------------------------------------
 
