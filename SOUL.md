@@ -32,6 +32,7 @@ Shell-driven end-to-end tests live under `scripts/e2e/`. They exercise the full 
 ```bash
 cargo build --release                                 # once per change
 bash scripts/e2e/test_302_sessions_visibility.sh      # regression guard for #302
+bash scripts/e2e/test_303_branch_attribution.sh       # regression guard for #303
 ```
 
 Each script is a single self-contained bash file that:
@@ -168,11 +169,37 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   `copilot`). `COALESCE(provider, 'claude_code')` is the legacy fallback for
   pre-8.0 rows; new writes MUST set it explicitly.
 - **`git_branch`** — written without the `refs/heads/` prefix
-  (`session_list_with_filters` strips it defensively for older rows).
+  (`session_list_with_filters` strips it defensively for older rows). Live
+  proxy ingest resolves the branch in this priority order
+  (`ProxyAttribution::resolve` in `crates/budi-core/src/proxy.rs`):
+  1. **`X-Budi-Branch` header** — set by an integration shim that knows the
+     client's git state (e.g. a future agent wrapper).
+  2. **`X-Budi-Cwd` header** → `git rev-parse --abbrev-ref HEAD` — the proxy
+     shells out to git against the client-supplied cwd.
+  3. **Session-level propagation in `insert_proxy_message`** (R1.0.2, #303)
+     — if the incoming event has no branch, the insert path looks up the
+     most recent message in the same session that does and adopts it; if
+     the incoming event does resolve a branch, earlier NULL-branch rows in
+     the same session are backfilled in the same transaction. This mirrors
+     the batch pipeline's `propagate_session_context` on the live path so
+     that once a session learns its branch, every row in that session
+     reflects it.
+  4. **`Unassigned` repo + empty branch** — last-resort fallback. Rows in
+     this state surface as `(untagged)` in `budi stats --branches`.
 
-`budi doctor` runs a sessions-visibility check for the `today`, `7d`, and
-`30d` windows and fails with a link to #302 if any window has assistant rows
-but zero returned sessions.
+  A detached HEAD (`git rev-parse --abbrev-ref HEAD` == `"HEAD"`) is
+  explicitly normalized to empty so that worktrees, mid-rebase sessions, and
+  CI runs do not pollute the branches list with a bogus `HEAD` bucket.
+
+`budi doctor` runs two attribution checks:
+
+- **Session visibility** for the `today`, `7d`, and `30d` windows (R1.0.1,
+  #302) — fails when a window has assistant rows but zero returned sessions.
+- **Branch attribution (7d, per provider)** (R1.0.2, #303) — yellow at >10%
+  of assistant rows missing `git_branch`, red at >50%. A red result points
+  at a broken attribution path for that provider (no headers, no resolvable
+  cwd, session propagation not rescuing the session) even if overall cost
+  numbers look healthy.
 
 ### Key concepts
 

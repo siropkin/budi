@@ -337,6 +337,54 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Branch attribution: catch a recurrence of R1.0.2 (#303) where live
+    // proxy traffic lands in the database without `git_branch`, collapsing
+    // `budi stats --branches` into `(untagged)`. A single provider with a
+    // significant missing-branch ratio points at a broken attribution path
+    // for that provider even if totals are healthy overall.
+    if let Ok(db_path) = budi_core::analytics::db_path()
+        && db_path.exists()
+        && let Ok(conn) = budi_core::analytics::open_db(&db_path)
+    {
+        match budi_core::analytics::branch_attribution_stats(&conn) {
+            Ok(stats) if stats.is_empty() => {
+                println!("  {dim}-{reset} branch attribution (7d): no assistant activity yet");
+            }
+            Ok(stats) => {
+                let yellow = super::ansi("\x1b[33m");
+                let mut any_red = false;
+                for row in &stats {
+                    let pct = row.missing_branch_ratio() * 100.0;
+                    let mark = if pct > 50.0 {
+                        any_red = true;
+                        format!("{red}\u{2717}{reset}")
+                    } else if pct > 10.0 {
+                        format!("{yellow}!{reset}")
+                    } else {
+                        format!("{green}\u{2713}{reset}")
+                    };
+                    println!(
+                        "  {mark} branch attribution ({}, 7d): assistant={} missing_branch={} ({:.0}%) missing_repo={} missing_cwd={}",
+                        row.provider,
+                        row.total_assistant,
+                        row.missing_branch,
+                        pct,
+                        row.missing_repo,
+                        row.missing_cwd,
+                    );
+                }
+                if any_red {
+                    issues.push(
+                        "Branch attribution is broken for at least one provider (>50% of assistant rows have no git_branch). `budi stats --branches` will show `(untagged)`. See #303.".into(),
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  {dim}-{reset} branch attribution: could not compute ({e})");
+            }
+        }
+    }
+
     // Auto-proxy configuration checks (shell profile + IDE config files)
     {
         let agents = budi_core::config::load_agents_config()

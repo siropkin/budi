@@ -102,15 +102,24 @@ impl ProxyAttribution {
 }
 
 /// Resolve the current git branch for a directory.
+///
+/// Returns an empty string if `cwd` is not a git repo OR the repo is in
+/// detached-HEAD state (`git rev-parse --abbrev-ref HEAD` returns the literal
+/// `"HEAD"` in that case, which would pollute the branch attribution bucket).
+/// Callers treat empty as "no branch" and fall through to `propagate_session_context`
+/// or `Unassigned`. See #303 hypothesis #3.
 fn resolve_git_branch(cwd: &std::path::Path) -> String {
-    std::process::Command::new("git")
+    let raw = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Detached HEAD: git reports the literal "HEAD". Drop it so we never show
+    // a bogus `HEAD` branch bucket in `budi stats --branches`.
+    if raw == "HEAD" { String::new() } else { raw }
 }
 
 /// Extract a numeric-only ticket ID from a branch name per ADR-0082 §9.
@@ -273,18 +282,31 @@ pub fn insert_proxy_event(conn: &Connection, event: &ProxyEvent) -> Result<i64> 
 /// surfaces (dashboard, CLI, statusline) can query it without modification.
 ///
 /// Returns the generated message UUID on success.
+///
+/// ## Session-level branch propagation (#303)
+///
+/// The live proxy ingest path does **not** go through `Pipeline::process` (that
+/// is used by batch `budi import`), so `propagate_session_context` never ran on
+/// proxied rows. When the first turns of a session landed without a branch (the
+/// very common case — agents do not set `X-Budi-*` headers, client cwd is not
+/// yet known, etc.) every later assistant reply in the same session also got
+/// `git_branch = NULL`, and `budi stats --branches` collapsed them into the
+/// `(untagged)` bucket.
+///
+/// This function mirrors the pipeline's per-session carry-forward directly in
+/// SQL so live ingest matches batch ingest:
+///
+/// - If the incoming event has an empty `git_branch` but another message in
+///   the same session already has one, inherit it.
+/// - If the incoming event has a `git_branch` but earlier same-session rows
+///   are empty, backfill them. This covers the "first message lacked context,
+///   later one resolved it" race described in the ticket.
+/// - Same pattern for `repo_id`.
+///
+/// The propagation runs inside a single connection scope so a concurrent
+/// writer on another session is unaffected.
 pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<String> {
     let uuid = format!("proxy-{}", uuid::Uuid::new_v4());
-    let repo_id = if event.repo_id.is_empty() {
-        None
-    } else {
-        Some(&event.repo_id)
-    };
-    let git_branch = if event.git_branch.is_empty() {
-        None
-    } else {
-        Some(&event.git_branch)
-    };
 
     // Attribution: session_id must be written alongside other message columns.
     // `session_list_with_filters` filters out rows with NULL/empty `session_id`,
@@ -298,6 +320,13 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
     } else {
         Some(event.session_id.as_str())
     };
+
+    // Session-level propagation: if this row lacks branch/repo but a prior row
+    // in the same session has one, adopt it before inserting. See fn doc above.
+    let (repo_id, git_branch) = resolve_session_attribution(conn, session_id, event);
+
+    let repo_id_param = repo_id.as_deref();
+    let git_branch_param = git_branch.as_deref();
 
     conn.execute(
         "INSERT OR IGNORE INTO messages (
@@ -316,11 +345,37 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
             event.output_tokens.unwrap_or(0),
             event.cache_creation_input_tokens.unwrap_or(0),
             event.cache_read_input_tokens.unwrap_or(0),
-            repo_id,
-            git_branch,
+            repo_id_param,
+            git_branch_param,
             event.cost_cents,
         ],
     )?;
+
+    // Backfill earlier same-session rows whose branch/repo was NULL at write
+    // time. This catches the exact race in #303: the first few proxy turns of
+    // a session land before any attribution is resolved, then a later turn
+    // arrives with a cwd-derived branch. Without backfill, the early turns
+    // stay in `(untagged)` forever.
+    if let Some(sid) = session_id {
+        if let Some(ref branch) = git_branch {
+            conn.execute(
+                "UPDATE messages SET git_branch = ?1
+                 WHERE session_id = ?2
+                   AND (git_branch IS NULL OR git_branch = '')
+                   AND id != ?3",
+                params![branch, sid, uuid],
+            )?;
+        }
+        if let Some(ref repo) = repo_id {
+            conn.execute(
+                "UPDATE messages SET repo_id = ?1
+                 WHERE session_id = ?2
+                   AND (repo_id IS NULL OR repo_id = '' OR repo_id = 'Unassigned')
+                   AND id != ?3",
+                params![repo, sid, uuid],
+            )?;
+        }
+    }
 
     if !event.ticket_id.is_empty() {
         conn.execute(
@@ -336,6 +391,70 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
     }
 
     Ok(uuid)
+}
+
+/// Merge the incoming event's attribution with whatever the rest of the
+/// session already knows. Used by `insert_proxy_message` to propagate
+/// `git_branch` / `repo_id` forward in a session (#303).
+///
+/// Returns `(repo_id, git_branch)` where each field is either:
+/// - the event's value if non-empty, or
+/// - the latest non-empty value observed on any prior message in the same
+///   session, or
+/// - `None` / `Unassigned` fallback if neither is known yet.
+fn resolve_session_attribution(
+    conn: &Connection,
+    session_id: Option<&str>,
+    event: &ProxyEvent,
+) -> (Option<String>, Option<String>) {
+    let event_repo = if event.repo_id.is_empty() || event.repo_id == UNASSIGNED_REPO {
+        None
+    } else {
+        Some(event.repo_id.clone())
+    };
+    let event_branch = if event.git_branch.is_empty() {
+        None
+    } else {
+        Some(event.git_branch.clone())
+    };
+
+    if event_repo.is_some() && event_branch.is_some() {
+        return (event_repo, event_branch);
+    }
+    let Some(sid) = session_id else {
+        return (event_repo, event_branch);
+    };
+
+    // Find the most recent message in this session that has the field we are
+    // missing. We intentionally look across both directions (earlier and later
+    // by timestamp) because a batch import or a restarted daemon may have
+    // inserted the context row either way.
+    let session_branch: Option<String> = event_branch.clone().or_else(|| {
+        conn.query_row(
+            "SELECT git_branch FROM messages
+             WHERE session_id = ?1
+               AND git_branch IS NOT NULL AND git_branch != ''
+             ORDER BY timestamp DESC LIMIT 1",
+            params![sid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    });
+    let session_repo: Option<String> = event_repo.clone().or_else(|| {
+        conn.query_row(
+            "SELECT repo_id FROM messages
+             WHERE session_id = ?1
+               AND repo_id IS NOT NULL AND repo_id != '' AND repo_id != 'Unassigned'
+             ORDER BY timestamp DESC LIMIT 1",
+            params![sid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    });
+
+    (session_repo, session_branch)
 }
 
 #[cfg(test)]
@@ -709,6 +828,210 @@ mod tests {
             )
             .unwrap();
         assert!(stored.is_none(), "empty session_id must be stored as NULL");
+    }
+
+    // Regression tests for #303 — branch attribution on live proxy ingest.
+
+    /// `ProxyAttribution::resolve` must populate the branch when the caller
+    /// supplies a cwd that points at a git worktree, even without headers.
+    /// This is the fallback path exercised by the new socket-PID lookup and by
+    /// `budi launch` callers.
+    /// Create a throwaway directory path for a single test. Caller is
+    /// expected to create/remove the directory themselves — kept out of a
+    /// shared helper so tests can be moved into dedicated integration files
+    /// later without a cross-crate helper crate dependency.
+    fn unique_test_dir(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "budi-proxy-303-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
+    fn attribution_resolve_populates_branch_from_cwd_git_repo() {
+        let repo = unique_test_dir("branch-ok");
+        // `git init -b` exists on 2.28+. Fall back to renaming main so we run
+        // on older git too (older git in CI images still honors checkout -b).
+        git(&repo, &["init", "-q"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        git(&repo, &["checkout", "-q", "-b", "PROJ-42-feature"]);
+
+        let attr = ProxyAttribution::resolve(None, None, repo.to_str());
+        assert_eq!(attr.git_branch, "PROJ-42-feature");
+        assert_eq!(attr.ticket_id, "PROJ-42");
+        assert_ne!(
+            attr.repo_id, UNASSIGNED_REPO,
+            "cwd-based git resolution must also populate repo_id"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Detached HEAD is explicitly treated as "no branch" — we must never emit
+    /// the literal string `HEAD` as a branch, otherwise `budi stats --branches`
+    /// accumulates a bogus `HEAD` bucket for worktrees, CI runs, and mid-rebase
+    /// sessions.
+    #[test]
+    fn attribution_resolve_detached_head_yields_empty_branch() {
+        let repo = unique_test_dir("detached");
+        git(&repo, &["init", "-q"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        );
+        let sha = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let sha = String::from_utf8(sha.stdout).unwrap().trim().to_string();
+        git(&repo, &["checkout", "-q", &sha]);
+
+        let attr = ProxyAttribution::resolve(None, None, repo.to_str());
+        assert!(
+            attr.git_branch.is_empty(),
+            "detached HEAD must not leak as a literal 'HEAD' branch, got: {:?}",
+            attr.git_branch
+        );
+        assert_eq!(attr.ticket_id, "Unassigned");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Later messages in a session inherit the branch set by an earlier
+    /// message in the same session, matching the pipeline's
+    /// `propagate_session_context` behavior but on the live ingest path.
+    #[test]
+    fn insert_proxy_message_inherits_branch_from_earlier_session_message() {
+        let conn = test_db_with_messages();
+
+        let mut first = test_event();
+        first.session_id = "sess-propagate".to_string();
+        first.timestamp = "2026-04-10T10:00:00Z".to_string();
+        first.repo_id = "github.com/test/repo".to_string();
+        first.git_branch = "PROJ-42-feature".to_string();
+        insert_proxy_message(&conn, &first).unwrap();
+
+        // Second turn in the same session arrives with no attribution — this
+        // is the common case when headers are missing and cwd could not be
+        // resolved for that particular request.
+        let mut second = test_event();
+        second.session_id = "sess-propagate".to_string();
+        second.timestamp = "2026-04-10T10:00:05Z".to_string();
+        let uuid = insert_proxy_message(&conn, &second).unwrap();
+
+        let (branch, repo): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT git_branch, repo_id FROM messages WHERE id = ?1",
+                params![uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(branch.as_deref(), Some("PROJ-42-feature"));
+        assert_eq!(repo.as_deref(), Some("github.com/test/repo"));
+    }
+
+    /// The opposite direction: a late-arriving event that finally resolves a
+    /// branch must retroactively fill earlier rows of the same session that
+    /// went in without one. This is the race called out in #303.
+    #[test]
+    fn insert_proxy_message_backfills_earlier_session_rows_when_branch_appears() {
+        let conn = test_db_with_messages();
+
+        let mut first = test_event();
+        first.session_id = "sess-backfill".to_string();
+        first.timestamp = "2026-04-10T10:00:00Z".to_string();
+        let first_uuid = insert_proxy_message(&conn, &first).unwrap();
+
+        let mut second = test_event();
+        second.session_id = "sess-backfill".to_string();
+        second.timestamp = "2026-04-10T10:00:05Z".to_string();
+        second.repo_id = "github.com/test/repo".to_string();
+        second.git_branch = "PROJ-42-feature".to_string();
+        insert_proxy_message(&conn, &second).unwrap();
+
+        let (branch, repo): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT git_branch, repo_id FROM messages WHERE id = ?1",
+                params![first_uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            branch.as_deref(),
+            Some("PROJ-42-feature"),
+            "earlier message must be backfilled with the later session branch"
+        );
+        assert_eq!(repo.as_deref(), Some("github.com/test/repo"));
+    }
+
+    /// Backfill must be scoped to the affected session — sibling sessions
+    /// keep their own attribution (including their own missing state).
+    #[test]
+    fn insert_proxy_message_backfill_is_scoped_to_session() {
+        let conn = test_db_with_messages();
+
+        let mut a = test_event();
+        a.session_id = "sess-a".to_string();
+        a.timestamp = "2026-04-10T10:00:00Z".to_string();
+        let a_uuid = insert_proxy_message(&conn, &a).unwrap();
+
+        let mut b = test_event();
+        b.session_id = "sess-b".to_string();
+        b.timestamp = "2026-04-10T10:00:01Z".to_string();
+        b.git_branch = "OTHER-9-fix".to_string();
+        insert_proxy_message(&conn, &b).unwrap();
+
+        let branch: Option<String> = conn
+            .query_row(
+                "SELECT git_branch FROM messages WHERE id = ?1",
+                params![a_uuid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            branch.is_none(),
+            "session A must not inherit session B's branch, got: {branch:?}"
+        );
     }
 
     #[test]

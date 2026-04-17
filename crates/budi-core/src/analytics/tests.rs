@@ -1800,6 +1800,65 @@ fn session_visibility_flags_mismatch_when_all_rows_missing_session_id() {
     assert!(today.has_mismatch());
 }
 
+/// Regression for #303 — `budi doctor` must see when live proxy traffic
+/// lands in the last 7 days without `git_branch`, which is exactly what
+/// makes `budi stats --branches` collapse into `(untagged)`.
+#[test]
+fn branch_attribution_stats_reports_missing_branch_within_7d() {
+    let conn = test_db();
+    let now = chrono::Utc::now();
+
+    // Two claude_code rows without a branch, one with.
+    for (id, branch) in [
+        ("m-no-1", None::<&str>),
+        ("m-no-2", None),
+        ("m-ok-1", Some("PROJ-1-feat")),
+    ] {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+                                   input_tokens, output_tokens, cache_creation_tokens,
+                                   cache_read_tokens, git_branch, cost_cents, cost_confidence)
+             VALUES (?1, ?2, 'assistant', ?3, 'claude-sonnet-4-6',
+                     'claude_code', 1, 1, 0, 0, ?4, 0.1, 'proxy_estimated')",
+            params![
+                id,
+                format!("sess-{id}"),
+                (now - chrono::Duration::hours(1)).to_rfc3339(),
+                branch,
+            ],
+        )
+        .unwrap();
+    }
+
+    // One openai row, outside the 7-day window. Must be excluded.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+                               input_tokens, output_tokens, cache_creation_tokens,
+                               cache_read_tokens, git_branch, cost_cents, cost_confidence)
+         VALUES ('old-1', 'sess-old', 'assistant', ?1, 'gpt-4o',
+                 'openai', 1, 1, 0, 0, NULL, 0.1, 'proxy_estimated')",
+        params![(now - chrono::Duration::days(30)).to_rfc3339()],
+    )
+    .unwrap();
+
+    let stats = branch_attribution_stats(&conn).unwrap();
+    assert_eq!(
+        stats.len(),
+        1,
+        "only claude_code should appear in 7d window, got: {stats:?}"
+    );
+    let claude = &stats[0];
+    assert_eq!(claude.provider, "claude_code");
+    assert_eq!(claude.total_assistant, 3);
+    assert_eq!(claude.missing_branch, 2);
+    // 2/3 ≈ 66.7% — should breach the 50% red threshold.
+    assert!(
+        claude.missing_branch_ratio() > 0.5,
+        "2 of 3 rows missing a branch must breach the red threshold, got {}",
+        claude.missing_branch_ratio()
+    );
+}
+
 /// `messages.timestamp` contract — every provider must write an RFC3339 UTC
 /// string that string-compares correctly against the CLI's `since`/`until`
 /// bounds. This regression test exercises the exact formats emitted by the
