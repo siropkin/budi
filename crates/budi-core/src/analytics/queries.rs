@@ -2379,11 +2379,12 @@ pub fn activity_cost_with_filters(
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
+    let label_lookup = load_activity_classification_labels(conn, since, until)?;
     let mut stmt = conn.prepare(&sql)?;
     let rows: Vec<ActivityCost> = stmt
         .query_map(param_refs.as_slice(), |row| {
             let activity: String = row.get(0)?;
-            let (source, confidence) = activity_classification_labels(&activity);
+            let (source, confidence) = activity_classification_labels(&activity, &label_lookup);
             Ok(ActivityCost {
                 activity,
                 session_count: row.get(1)?,
@@ -2530,7 +2531,8 @@ pub fn activity_cost_single(
         .filter_map(|r| r.ok())
         .collect();
 
-    let (source, confidence) = activity_classification_labels(activity);
+    let label_lookup = load_activity_classification_labels(conn, since, until)?;
+    let (source, confidence) = activity_classification_labels(activity, &label_lookup);
     Ok(Some(ActivityCostDetail {
         activity: activity.to_string(),
         session_count: sess,
@@ -2547,14 +2549,122 @@ pub fn activity_cost_single(
     }))
 }
 
-/// Return the `(source, confidence)` labels for an activity aggregate.
+/// Build a `activity -> (source, confidence)` lookup for the current window
+/// by reading the sibling `activity_source` and `activity_confidence` tags
+/// emitted by the pipeline (R1.2, #222). When an aggregate has multiple
+/// values for a label (e.g. a mix of `high` and `medium` confidence rows)
+/// the dominant value wins, with ties broken by alphabetical order so the
+/// result is deterministic across DBs.
 ///
-/// R1.0 has a single producer (rule-based `classify_prompt`), so every
-/// tagged value shares the same labels. `(untagged)` reports empty strings
-/// so callers can render `--` without having to special-case it.
-fn activity_classification_labels(activity: &str) -> (&'static str, &'static str) {
+/// Missing sibling tags fall back to the R1.0 defaults
+/// (`source = "rule"`, `confidence = "medium"`) so legacy rows keep a
+/// reasonable label without needing a reindex.
+fn load_activity_classification_labels(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<std::collections::HashMap<String, (String, String)>> {
+    use std::collections::HashMap;
+
+    let mut conditions = vec!["m.role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{}", param_values.len()));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    let sql = format!(
+        "WITH activity_per_msg AS (
+             SELECT t.message_id, t.value AS activity
+             FROM tags t
+             JOIN messages m ON m.id = t.message_id
+             {where_clause}
+             AND t.key = '{ACTIVITY_TAG_KEY}'
+         ),
+         source_counts AS (
+             SELECT ap.activity, COALESCE(ts.value, '{ACTIVITY_SOURCE_RULE}') AS source,
+                    COUNT(*) AS c
+             FROM activity_per_msg ap
+             LEFT JOIN tags ts
+               ON ts.message_id = ap.message_id AND ts.key = 'activity_source'
+             GROUP BY ap.activity, source
+         ),
+         conf_counts AS (
+             SELECT ap.activity, COALESCE(tc.value, '{ACTIVITY_CONFIDENCE_MEDIUM}') AS confidence,
+                    COUNT(*) AS c
+             FROM activity_per_msg ap
+             LEFT JOIN tags tc
+               ON tc.message_id = ap.message_id AND tc.key = 'activity_confidence'
+             GROUP BY ap.activity, confidence
+         ),
+         dominant_source AS (
+             SELECT activity, source
+             FROM (
+                 SELECT activity, source, c,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY activity
+                            ORDER BY c DESC, source ASC
+                        ) AS rn
+                 FROM source_counts
+             )
+             WHERE rn = 1
+         ),
+         dominant_conf AS (
+             SELECT activity, confidence
+             FROM (
+                 SELECT activity, confidence, c,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY activity
+                            ORDER BY c DESC, confidence ASC
+                        ) AS rn
+                 FROM conf_counts
+             )
+             WHERE rn = 1
+         )
+         SELECT ds.activity, ds.source, dc.confidence
+         FROM dominant_source ds
+         JOIN dominant_conf dc ON dc.activity = ds.activity"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: HashMap<String, (String, String)> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let activity: String = row.get(0)?;
+            let source: String = row.get(1)?;
+            let confidence: String = row.get(2)?;
+            Ok((activity, (source, confidence)))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Pick the source/confidence labels for a given activity aggregate.
+/// `(untagged)` reports empty strings so callers can render `--` without
+/// special-casing it. Other activities fall back to the R1.0 defaults
+/// (`rule` / `medium`) if no per-activity labels were loaded for this
+/// window.
+fn activity_classification_labels<'a>(
+    activity: &str,
+    lookup: &'a std::collections::HashMap<String, (String, String)>,
+) -> (&'a str, &'a str) {
     if activity == UNTAGGED_DIMENSION {
         ("", "")
+    } else if let Some((src, conf)) = lookup.get(activity) {
+        (src.as_str(), conf.as_str())
     } else {
         (ACTIVITY_SOURCE_RULE, ACTIVITY_CONFIDENCE_MEDIUM)
     }

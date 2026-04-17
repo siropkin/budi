@@ -277,6 +277,8 @@ fn parse_token_count(
         cache_creation_1h_tokens: 0,
         web_search_requests: 0,
         prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
     })

@@ -136,6 +136,20 @@ async fn proxy_request(
         (String::new(), false)
     };
 
+    // R1.2 (#222): classify the last user prompt in the request body before
+    // we hand the bytes to the upstream request. Only the derived label
+    // triple is persisted downstream — raw prompt text never leaves this
+    // function.
+    let activity = if !body_bytes.is_empty() {
+        budi_core::proxy::classify_request_body(&body_bytes).unwrap_or((
+            String::new(),
+            String::new(),
+            String::new(),
+        ))
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
     let upstream_url = format!("{}{}", upstream_base_url(&state, provider), path);
     let mut upstream_req = state.http_client.request(method, &upstream_url);
     // ADR-0082 §5: no read timeout on streaming responses. The stream ends
@@ -174,6 +188,7 @@ async fn proxy_request(
                 is_streaming,
                 &attribution,
                 &session_id,
+                &activity,
             );
             return build_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -199,6 +214,7 @@ async fn proxy_request(
             state,
             attribution,
             session_id,
+            activity,
             line_buf: Vec::new(),
             input_tokens: None,
             output_tokens: None,
@@ -236,6 +252,7 @@ async fn proxy_request(
                 is_streaming,
                 &attribution,
                 &session_id,
+                &activity,
             );
             return build_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -270,6 +287,7 @@ async fn proxy_request(
         is_streaming,
         &attribution,
         &session_id,
+        &activity,
     );
 
     let mut response = Response::builder().status(status);
@@ -297,6 +315,7 @@ struct SseTapStream {
     state: ProxyState,
     attribution: ProxyAttribution,
     session_id: String,
+    activity: (String, String, String),
     line_buf: Vec<u8>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -442,6 +461,7 @@ impl SseTapStream {
             true,
             &self.attribution,
             &self.session_id,
+            &self.activity,
         );
     }
 }
@@ -661,6 +681,7 @@ fn record_event(
     is_streaming: bool,
     attribution: &ProxyAttribution,
     session_id: &str,
+    activity: &(String, String, String),
 ) {
     let cost_cents = if status_code < 400 {
         budi_core::proxy::compute_proxy_cost_cents(
@@ -691,6 +712,9 @@ fn record_event(
         ticket_id: attribution.ticket_id.clone(),
         cost_cents,
         session_id: session_id.to_string(),
+        activity: activity.0.clone(),
+        activity_source: activity.1.clone(),
+        activity_confidence: activity.2.clone(),
     };
 
     tracing::info!(

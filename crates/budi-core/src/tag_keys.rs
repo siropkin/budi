@@ -18,6 +18,14 @@ pub const COST_CONFIDENCE: &str = "cost_confidence";
 pub const COMPOSER_MODE: &str = "composer_mode";
 pub const PERMISSION_MODE: &str = "permission_mode";
 pub const ACTIVITY: &str = "activity";
+/// Classifier that emitted the activity label for a given message. Stable
+/// values: `rule` (default rule-based heuristics) and, reserved for later
+/// use, `header` (explicit proxy header override). See `hooks.rs` and
+/// ADR-0088 §5.
+pub const ACTIVITY_SOURCE: &str = "activity_source";
+/// Confidence of the activity label for a given message. Stable values:
+/// `high`, `medium`, `low`. See `hooks.rs`.
+pub const ACTIVITY_CONFIDENCE: &str = "activity_confidence";
 pub const USER_EMAIL: &str = "user_email";
 pub const DURATION: &str = "duration";
 pub const TOOL: &str = "tool";

@@ -826,6 +826,8 @@ fn usage_events_to_messages(
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
                 prompt_category: None,
+                prompt_category_source: None,
+                prompt_category_confidence: None,
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
             }
@@ -1248,6 +1250,43 @@ struct CursorEntry {
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     cwd: Option<String>,
+    /// Nested message envelope. Cursor transcripts wrap user/assistant text
+    /// inside `message.content` (same shape as the Anthropic wire format).
+    /// We only look at user entries to classify the prompt; assistant text
+    /// is not used. See R1.2 (#222).
+    message: Option<CursorMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CursorMessage {
+    content: Option<CursorMessageContent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CursorMessageContent {
+    Text(String),
+    Blocks(Vec<serde_json::Value>),
+}
+
+/// Extract plain text from a Cursor message content payload. Returns `None`
+/// when the payload is empty. Only textual blocks are read; code blocks and
+/// tool-use payloads are ignored so the classifier only sees prompt prose.
+fn cursor_prompt_text(message: Option<&CursorMessage>) -> Option<String> {
+    let content = message.and_then(|m| m.content.as_ref())?;
+    let text = match content {
+        CursorMessageContent::Text(s) => s.clone(),
+        CursorMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1327,34 +1366,53 @@ fn parse_cursor_line(
     tool_names.dedup();
 
     match role {
-        "user" | "human" => Some(ParsedMessage {
-            uuid,
-            session_id: Some(msg_session_id),
-            timestamp,
-            cwd: msg_cwd,
-            role: "user".to_string(),
-            model: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            git_branch: git_branch.clone(),
-            repo_id: None,
-            provider: "cursor".to_string(),
-            cost_cents: None,
-            session_title: None,
-            parent_uuid: None,
-            user_name: None,
-            machine_name: None,
-            cost_confidence: "n/a".to_string(),
-            request_id: request_id.clone(),
-            speed: None,
-            cache_creation_1h_tokens: 0,
-            web_search_requests: 0,
-            prompt_category: None,
-            tool_names: Vec::new(),
-            tool_use_ids: Vec::new(),
-        }),
+        "user" | "human" => {
+            // R1.2 (#222): classify Cursor user prompts so the `activity`
+            // taxonomy is populated for Cursor history too. The classifier
+            // runs on prompt text in-memory only; no content is stored.
+            let classification = cursor_prompt_text(entry.message.as_ref())
+                .as_deref()
+                .and_then(crate::hooks::classify_prompt_detailed);
+            let (prompt_category, prompt_category_source, prompt_category_confidence) =
+                match classification {
+                    Some(c) => (
+                        Some(c.category),
+                        Some(c.source.to_string()),
+                        Some(c.confidence.to_string()),
+                    ),
+                    None => (None, None, None),
+                };
+            Some(ParsedMessage {
+                uuid,
+                session_id: Some(msg_session_id),
+                timestamp,
+                cwd: msg_cwd,
+                role: "user".to_string(),
+                model: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: git_branch.clone(),
+                repo_id: None,
+                provider: "cursor".to_string(),
+                cost_cents: None,
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "n/a".to_string(),
+                request_id: request_id.clone(),
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+                prompt_category,
+                prompt_category_source,
+                prompt_category_confidence,
+                tool_names: Vec::new(),
+                tool_use_ids: Vec::new(),
+            })
+        }
         "assistant" | "ai" | "model" => {
             let usage = entry.usage.as_ref();
             Some(ParsedMessage {
@@ -1382,6 +1440,8 @@ fn parse_cursor_line(
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
                 prompt_category: None,
+                prompt_category_source: None,
+                prompt_category_confidence: None,
                 tool_names,
                 tool_use_ids: Vec::new(),
             })

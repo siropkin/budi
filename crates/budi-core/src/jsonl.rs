@@ -169,6 +169,14 @@ pub struct ParsedMessage {
     /// Classified activity type from user prompt text (e.g. "bugfix", "feature").
     /// Set during JSONL parsing or from hook events. Propagated user→assistant in pipeline.
     pub prompt_category: Option<String>,
+    /// Classifier source for `prompt_category` (e.g. `"rule"`). See
+    /// `crate::hooks::SOURCE_*` constants. Propagated alongside
+    /// `prompt_category`. Added in R1.2 (#222).
+    pub prompt_category_source: Option<String>,
+    /// Classifier confidence for `prompt_category` (one of `"high"`,
+    /// `"medium"`, `"low"`). See `crate::hooks::CONF_*` constants.
+    /// Propagated alongside `prompt_category`. Added in R1.2 (#222).
+    pub prompt_category_confidence: Option<String>,
     /// Tool names used by this assistant message (may contain multiple values).
     pub tool_names: Vec<String>,
     /// Tool-use block IDs emitted by assistant content blocks.
@@ -202,6 +210,8 @@ impl Default for ParsedMessage {
             cache_creation_1h_tokens: 0,
             web_search_requests: 0,
             prompt_category: None,
+            prompt_category_source: None,
+            prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
         }
@@ -272,9 +282,18 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 }
                 None => None,
             });
-            let prompt_category = prompt_text
+            let classification = prompt_text
                 .as_deref()
-                .and_then(crate::hooks::classify_prompt);
+                .and_then(crate::hooks::classify_prompt_detailed);
+            let (prompt_category, prompt_category_source, prompt_category_confidence) =
+                match classification {
+                    Some(c) => (
+                        Some(c.category),
+                        Some(c.source.to_string()),
+                        Some(c.confidence.to_string()),
+                    ),
+                    None => (None, None, None),
+                };
             Some(ParsedMessage {
                 uuid: u.uuid,
                 session_id: crate::identity::normalize_optional_session_id(u.session_id.as_deref()),
@@ -300,6 +319,8 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 cache_creation_1h_tokens: 0,
                 web_search_requests: 0,
                 prompt_category,
+                prompt_category_source,
+                prompt_category_confidence,
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
             })
@@ -347,6 +368,8 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 cache_creation_1h_tokens: cache_1h,
                 web_search_requests: web_searches,
                 prompt_category: None,
+                prompt_category_source: None,
+                prompt_category_confidence: None,
                 tool_names,
                 tool_use_ids,
             })
@@ -406,6 +429,8 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 cache_creation_1h_tokens: cache_1h,
                 web_search_requests: web_searches,
                 prompt_category: None,
+                prompt_category_source: None,
+                prompt_category_confidence: None,
                 tool_names,
                 tool_use_ids,
             })
