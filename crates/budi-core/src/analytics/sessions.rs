@@ -335,6 +335,17 @@ pub struct SessionListEntry {
     pub health_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Rule-based session → work outcome. One of
+    /// `committed`, `branch_merged`, `no_commit`, `unknown`. Only
+    /// populated by the `session_detail` endpoint; list surfaces skip
+    /// it to avoid running `git` once per row. See
+    /// `budi_core::work_outcome` and R1.5 (#293).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_outcome: Option<String>,
+    /// One-line rationale explaining which rule fired. Never contains
+    /// file names or commit messages (ADR-0083).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_outcome_rationale: Option<String>,
 }
 
 /// Paginated session list result.
@@ -698,6 +709,8 @@ pub fn session_list_with_filters(
                 cost_confidence: row.get(13)?,
                 health_state: None,
                 title: row.get(14)?,
+                work_outcome: None,
+                work_outcome_rationale: None,
             })
         })?
         .filter_map(|r| r.ok())
@@ -856,15 +869,86 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                 cost_confidence: row.get(12)?,
                 health_state: None,
                 title: row.get(13)?,
+                work_outcome: None,
+                work_outcome_rationale: None,
             })
         },
     );
 
     match row {
-        Ok(entry) => Ok(Some(entry)),
+        Ok(mut entry) => {
+            // R1.5 (#293): try to attach a rule-based work outcome.
+            // Pulled out into a helper so the SQL stays readable and
+            // the derivation can fail open to `None` when we lack the
+            // information to correlate with local git state.
+            if let Some((label, rationale)) = derive_session_work_outcome(conn, &entry) {
+                entry.work_outcome = Some(label);
+                entry.work_outcome_rationale = Some(rationale);
+            }
+            Ok(Some(entry))
+        }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Resolve a session to a best-guess cwd by looking at the most common
+/// non-empty `cwd` field recorded on its messages. We prefer assistant
+/// messages (they carry the strongest provider-level attribution), but
+/// fall back to any message if none are available. Returns `None` when
+/// the session has no stored cwd — we deliberately do not guess a path
+/// from `repo_id` because `repo_id` is a normalized remote URL, not a
+/// filesystem path.
+fn session_cwd(conn: &Connection, session_id: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT cwd, COUNT(*) AS n
+             FROM messages
+             WHERE session_id = ?1 AND cwd IS NOT NULL AND cwd != ''
+             GROUP BY cwd
+             ORDER BY (role = 'assistant') DESC, n DESC
+             LIMIT 1",
+        )
+        .ok()?;
+    stmt.query_row(params![session_id], |row| row.get::<_, String>(0))
+        .ok()
+}
+
+/// Apply the rule-based session → work outcome derivation to a session
+/// list entry. Returns `None` when the inputs cannot support any rule
+/// — callers then leave `work_outcome` / `work_outcome_rationale`
+/// absent instead of showing `unknown` for rows we never even tried to
+/// correlate.
+fn derive_session_work_outcome(
+    conn: &Connection,
+    entry: &SessionListEntry,
+) -> Option<(String, String)> {
+    let branch = entry.git_branches.iter().find(|b| !b.is_empty())?.clone();
+    let cwd = session_cwd(conn, &entry.id)?;
+    let repo_root = crate::repo_id::repo_root_for(std::path::Path::new(&cwd))?;
+
+    let started = entry.started_at.as_deref().and_then(parse_rfc3339)?;
+    let ended = entry
+        .ended_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or(started);
+
+    let inputs = crate::work_outcome::WorkOutcomeInputs {
+        repo_root: &repo_root,
+        branch: &branch,
+        started_at: started,
+        ended_at: ended,
+        grace: None,
+    };
+    let outcome = crate::work_outcome::derive_work_outcome(&inputs);
+    Some((outcome.label.as_str().to_string(), outcome.rationale))
+}
+
+fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 // ---------------------------------------------------------------------------

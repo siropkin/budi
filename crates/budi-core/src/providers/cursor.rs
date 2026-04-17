@@ -831,6 +831,7 @@ fn usage_events_to_messages(
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
                 tool_files: Vec::new(),
+                tool_outcomes: Vec::new(),
             }
         })
         .collect()
@@ -1429,6 +1430,7 @@ fn parse_cursor_line(
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
                 tool_files: Vec::new(),
+                tool_outcomes: Vec::new(),
             })
         }
         "assistant" | "ai" | "model" => {
@@ -1463,6 +1465,7 @@ fn parse_cursor_line(
                 tool_names,
                 tool_use_ids: Vec::new(),
                 tool_files,
+                tool_outcomes: Vec::new(),
             })
         }
         _ => None,
