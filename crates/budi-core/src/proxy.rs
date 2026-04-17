@@ -800,6 +800,7 @@ mod tests {
                 sort_asc: false,
                 limit: 50,
                 offset: 0,
+                ticket: None,
             },
             &crate::analytics::DimensionFilters::default(),
         )

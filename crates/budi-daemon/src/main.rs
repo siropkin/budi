@@ -107,6 +107,11 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/branches/{branch}",
             get(a::analytics_branch_detail),
         )
+        .route("/analytics/tickets", get(a::analytics_tickets))
+        .route(
+            "/analytics/tickets/{ticket_id}",
+            get(a::analytics_ticket_detail),
+        )
         .route("/analytics/providers", get(a::analytics_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route(

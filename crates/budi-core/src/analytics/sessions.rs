@@ -170,6 +170,7 @@ pub fn session_visibility(conn: &Connection) -> Result<Vec<SessionVisibilityWind
                 sort_asc: false,
                 limit: 1,
                 offset: 0,
+                ticket: None,
             },
         )?;
         let returned_sessions = paginated.total_count;
@@ -291,6 +292,11 @@ pub struct SessionListParams<'a> {
     pub sort_asc: bool,
     pub limit: usize,
     pub offset: usize,
+    /// Restrict the result to sessions that have at least one assistant
+    /// message tagged with this `ticket_id`. Promoted to a first-class
+    /// session filter in 8.1 so `budi sessions --ticket PAVA-2057` works
+    /// the same way `--branch` does for branches.
+    pub ticket: Option<&'a str>,
 }
 
 fn parse_models_csv(raw: Option<String>) -> Vec<String> {
@@ -411,6 +417,19 @@ pub fn session_list_with_filters(
         ));
     }
     apply_session_dimension_filters(&mut conditions, &mut param_values, filters);
+    if let Some(ticket) = p.ticket
+        && !ticket.is_empty()
+    {
+        // Restrict to assistant messages that carry the requested `ticket_id`
+        // tag. Mirrors how `branches`/`projects` filter via DimensionFilters,
+        // but tickets live in `tags` (not on the message row), so we use
+        // EXISTS instead of a column predicate.
+        param_values.push(ticket.to_string());
+        let idx = param_values.len();
+        conditions.push(format!(
+            "EXISTS (SELECT 1 FROM tags tk WHERE tk.message_id = m.id AND tk.key = 'ticket_id' AND tk.value = ?{idx})"
+        ));
+    }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     // Count total matching sessions using only the filter params (no limit/offset)
