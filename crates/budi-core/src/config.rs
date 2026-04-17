@@ -367,6 +367,35 @@ impl ProxyConfig {
         }
         self.enabled
     }
+
+    /// Resolve the effective Anthropic upstream URL, respecting env var override.
+    ///
+    /// `BUDI_ANTHROPIC_UPSTREAM` lets local e2e tests and air-gapped deployments
+    /// redirect proxy traffic to a mock or internal endpoint without editing
+    /// on-disk config. Mirrors `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED`.
+    pub fn effective_anthropic_upstream(&self) -> String {
+        if let Ok(val) = env::var("BUDI_ANTHROPIC_UPSTREAM") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        self.anthropic_upstream.clone()
+    }
+
+    /// Resolve the effective OpenAI upstream URL, respecting env var override.
+    ///
+    /// `BUDI_OPENAI_UPSTREAM` is the OpenAI-side counterpart to
+    /// `BUDI_ANTHROPIC_UPSTREAM`.
+    pub fn effective_openai_upstream(&self) -> String {
+        if let Ok(val) = env::var("BUDI_OPENAI_UPSTREAM") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        self.openai_upstream.clone()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -947,6 +976,54 @@ port = 9878
         let config: BudiConfig = toml::from_str(toml_str).unwrap();
         assert!(config.proxy.enabled);
         assert_eq!(config.proxy.port, 9878);
+    }
+
+    #[test]
+    fn proxy_config_effective_upstreams_prefer_env_vars() {
+        // Uses `unsafe` in 2024-edition Rust: mutating process env from tests is
+        // intrinsically racy. We isolate by using a mutex over just these two vars
+        // and clearing them before/after.
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+
+        let config = ProxyConfig::default();
+
+        unsafe {
+            env::remove_var("BUDI_ANTHROPIC_UPSTREAM");
+            env::remove_var("BUDI_OPENAI_UPSTREAM");
+        }
+        assert_eq!(
+            config.effective_anthropic_upstream(),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(config.effective_openai_upstream(), "https://api.openai.com");
+
+        unsafe {
+            env::set_var("BUDI_ANTHROPIC_UPSTREAM", "http://127.0.0.1:19333");
+            env::set_var("BUDI_OPENAI_UPSTREAM", "http://127.0.0.1:19444");
+        }
+        assert_eq!(
+            config.effective_anthropic_upstream(),
+            "http://127.0.0.1:19333"
+        );
+        assert_eq!(config.effective_openai_upstream(), "http://127.0.0.1:19444");
+
+        // Empty / whitespace-only overrides fall back to config value.
+        unsafe {
+            env::set_var("BUDI_ANTHROPIC_UPSTREAM", "   ");
+            env::set_var("BUDI_OPENAI_UPSTREAM", "");
+        }
+        assert_eq!(
+            config.effective_anthropic_upstream(),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(config.effective_openai_upstream(), "https://api.openai.com");
+
+        unsafe {
+            env::remove_var("BUDI_ANTHROPIC_UPSTREAM");
+            env::remove_var("BUDI_OPENAI_UPSTREAM");
+        }
     }
 
     #[test]

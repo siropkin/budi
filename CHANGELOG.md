@@ -10,6 +10,8 @@
 
 - **`budi doctor` sessions-visibility check** — reports assistant-messages vs returned-session counts for the `today`, `7d`, and `30d` windows and flags a hard error if any window has activity but zero returned sessions (#302).
 - **`messages.timestamp` / `session_id` attribution contract** documented in `SOUL.md` so future providers cannot silently regress R1.0 (#302).
+- **`BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM` env overrides** on the proxy (mirroring the existing `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` pattern) so local end-to-end tests and air-gapped deployments can redirect proxy traffic without editing on-disk config.
+- **Local end-to-end test harness** in `scripts/e2e/` — the first script, `test_302_sessions_visibility.sh`, boots a real `budi-daemon` + mock upstream + CLI against an isolated `$HOME` and pins the #302 fix. See `scripts/e2e/README.md` for conventions and the new "Local end-to-end tests" section in `SOUL.md`.
 
 ## 8.0.0 — 2026-04-16
 
