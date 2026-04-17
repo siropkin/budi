@@ -9,6 +9,7 @@ use super::ansi;
 pub fn cmd_sessions(
     period: StatsPeriod,
     search: Option<&str>,
+    ticket: Option<&str>,
     limit: usize,
     json_output: bool,
 ) -> Result<()> {
@@ -17,7 +18,7 @@ pub fn cmd_sessions(
     )?;
 
     let (since, until) = period_date_range(period);
-    let sessions = client.sessions(since.as_deref(), until.as_deref(), search, limit, 0)?;
+    let sessions = client.sessions(since.as_deref(), until.as_deref(), search, ticket, limit, 0)?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -33,11 +34,20 @@ pub fn cmd_sessions(
     let reset = ansi("\x1b[0m");
 
     println!();
-    println!(
-        "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}({} total){reset}",
-        period_label(period),
-        sessions.total_count
-    );
+    if let Some(t) = ticket {
+        println!(
+            "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}(ticket: {}, {} total){reset}",
+            period_label(period),
+            t,
+            sessions.total_count
+        );
+    } else {
+        println!(
+            "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}({} total){reset}",
+            period_label(period),
+            sessions.total_count
+        );
+    }
     println!("  {dim}{}{reset}", "─".repeat(80));
 
     if sessions.sessions.is_empty() {

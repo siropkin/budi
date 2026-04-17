@@ -65,9 +65,9 @@ enum Commands {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --models, or --tag)
+    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --tickets, --ticket, --models, or --tag)
     #[command(
-        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "models", "tag"])),
+        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "tickets", "ticket", "models", "tag"])),
         after_help = "\
 Examples:
   budi stats                       Today's cost summary (default)
@@ -76,6 +76,9 @@ Examples:
   budi stats --branches            Branches ranked by cost (today)
   budi stats --branch main         Cost details for a specific branch
   budi stats --branch main --repo github.com/acme/app
+  budi stats --tickets             Tickets ranked by cost (today)
+  budi stats --ticket ENG-123      Cost details for a specific ticket
+  budi stats --ticket ENG-123 --repo github.com/acme/app
   budi stats --projects -p all     All-time project costs
   budi stats --tag activity        Cost by activity type
   budi stats --provider cursor     Filter to Cursor only
@@ -94,8 +97,18 @@ Examples:
         /// Show cost for a specific branch
         #[arg(long)]
         branch: Option<String>,
-        /// Optional repository filter for --branch (recommended when branch names repeat)
-        #[arg(long, requires = "branch")]
+        /// Show tickets ranked by cost (sourced from the `ticket_id` tag).
+        /// Mirrors `--branches` so ticket attribution is a first-class CLI
+        /// dimension alongside branches and repos.
+        #[arg(long, default_value_t = false)]
+        tickets: bool,
+        /// Show cost details for a specific ticket id (e.g. ENG-123).
+        /// Mirrors `--branch <NAME>` and includes a per-branch breakdown
+        /// of where the ticket was worked on.
+        #[arg(long, value_name = "ID")]
+        ticket: Option<String>,
+        /// Optional repository filter for --branch or --ticket (recommended when branch/ticket names repeat across repos)
+        #[arg(long)]
         repo: Option<String>,
         /// Show model usage breakdown
         #[arg(long, default_value_t = false)]
@@ -152,6 +165,7 @@ Examples:
   budi sessions                    Recent sessions (today)
   budi sessions -p week            This week's sessions
   budi sessions --search claude    Filter by search term
+  budi sessions --ticket ENG-123   Sessions tagged with a ticket
   budi sessions <session-id>       Show detail for a specific session
   budi sessions --format json      JSON output for scripting")]
     Sessions {
@@ -164,6 +178,11 @@ Examples:
         /// Filter sessions by search term (model, repo, branch, provider)
         #[arg(long)]
         search: Option<String>,
+        /// Filter sessions by ticket id (e.g. ENG-123). Matches the
+        /// `ticket_id` tag emitted by the git enricher when the branch name
+        /// contains a recognised ID.
+        #[arg(long, value_name = "ID")]
+        ticket: Option<String>,
         /// Max sessions to show (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -344,6 +363,8 @@ fn main() -> Result<()> {
             projects,
             branches,
             branch,
+            tickets,
+            ticket,
             repo,
             models,
             provider,
@@ -356,6 +377,8 @@ fn main() -> Result<()> {
                 projects,
                 branches,
                 branch,
+                tickets,
+                ticket,
                 repo,
                 models,
                 provider,
@@ -400,6 +423,7 @@ fn main() -> Result<()> {
             session_id,
             period,
             search,
+            ticket,
             limit,
             format,
         } => {
@@ -407,7 +431,13 @@ fn main() -> Result<()> {
             if let Some(id) = session_id {
                 commands::sessions::cmd_session_detail(&id, json_output)
             } else {
-                commands::sessions::cmd_sessions(period, search.as_deref(), limit, json_output)
+                commands::sessions::cmd_sessions(
+                    period,
+                    search.as_deref(),
+                    ticket.as_deref(),
+                    limit,
+                    json_output,
+                )
             }
         }
         Commands::Status => commands::status::cmd_status(),
@@ -481,6 +511,82 @@ mod tests {
         match cli.command {
             Commands::Doctor { deep, .. } => assert!(deep),
             _ => panic!("expected doctor command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_tickets_flag() {
+        let cli =
+            Cli::try_parse_from(["budi", "stats", "--tickets"]).expect("budi stats --tickets");
+        match cli.command {
+            Commands::Stats {
+                tickets, ticket, ..
+            } => {
+                assert!(tickets);
+                assert!(ticket.is_none());
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_ticket_value_flag() {
+        let cli = Cli::try_parse_from(["budi", "stats", "--ticket", "PAVA-2057"])
+            .expect("budi stats --ticket PAVA-2057");
+        match cli.command {
+            Commands::Stats {
+                tickets, ticket, ..
+            } => {
+                assert!(!tickets);
+                assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_stats_view_flags_are_mutually_exclusive() {
+        // --tickets vs --ticket
+        assert!(Cli::try_parse_from(["budi", "stats", "--tickets", "--ticket", "X-1"]).is_err());
+        // --tickets vs --branches
+        assert!(Cli::try_parse_from(["budi", "stats", "--tickets", "--branches"]).is_err());
+        // --ticket vs --branch
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--ticket", "X-1", "--branch", "main"]).is_err()
+        );
+        // --tickets vs --models
+        assert!(Cli::try_parse_from(["budi", "stats", "--tickets", "--models"]).is_err());
+    }
+
+    #[test]
+    fn cli_stats_ticket_accepts_repo_filter() {
+        let cli = Cli::try_parse_from([
+            "budi",
+            "stats",
+            "--ticket",
+            "PAVA-2057",
+            "--repo",
+            "siropkin/budi",
+        ])
+        .expect("budi stats --ticket --repo");
+        match cli.command {
+            Commands::Stats { ticket, repo, .. } => {
+                assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
+                assert_eq!(repo.as_deref(), Some("siropkin/budi"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_sessions_ticket_flag() {
+        let cli = Cli::try_parse_from(["budi", "sessions", "--ticket", "PAVA-2057"])
+            .expect("budi sessions --ticket parses");
+        match cli.command {
+            Commands::Sessions { ticket, .. } => {
+                assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
+            }
+            _ => panic!("expected sessions command"),
         }
     }
 }

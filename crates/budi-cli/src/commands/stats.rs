@@ -56,6 +56,8 @@ pub fn cmd_stats(
     projects: bool,
     branches: bool,
     branch: Option<String>,
+    tickets: bool,
+    ticket: Option<String>,
     repo: Option<String>,
     models: bool,
     provider: Option<String>,
@@ -67,12 +69,29 @@ pub fn cmd_stats(
     // user-friendly shortcuts that resolve to their canonical form.
     let provider = provider.map(|p| normalize_provider(&p)).transpose()?;
 
+    // `--repo` is a filter for `--branch` or `--ticket` — surface the
+    // misuse early instead of silently ignoring it. Clap's `requires` only
+    // takes a single arg, so the cross-flag check lives here.
+    if repo.is_some() && branch.is_none() && ticket.is_none() {
+        anyhow::bail!(
+            "--repo requires either --branch <NAME> or --ticket <ID> to scope the filter"
+        );
+    }
+
     let client = DaemonClient::connect().context(
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
     )?;
 
     if let Some(ref tag_filter) = tag {
         return cmd_stats_tags(&client, period, tag_filter, json_output);
+    }
+
+    if let Some(ref tk) = ticket {
+        return cmd_stats_ticket_detail(&client, period, tk, repo.as_deref(), json_output);
+    }
+
+    if tickets {
+        return cmd_stats_tickets(&client, period, json_output);
     }
 
     if let Some(ref br) = branch {
@@ -465,6 +484,161 @@ fn cmd_stats_branch_detail(
             println!("  No data found for branch '{}'.", branch);
             println!("  Tip: run `budi import` first if you haven't imported data yet.");
             println!("  Run `budi stats --branches` to see available branches.");
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// `--tickets` view: tickets ranked by cost. Mirrors `cmd_stats_branches`.
+///
+/// The list always carries an `(untagged)` row so users can see how much
+/// activity is *not* attributed to a ticket — that bucket should shrink as
+/// teams adopt ticket-bearing branch names.
+fn cmd_stats_tickets(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let tickets = client.tickets(since.as_deref(), until.as_deref(), 30)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&tickets)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let cyan = ansi("\x1b[36m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!(
+        "  {bold_cyan} Tickets{reset} — {bold}{}{reset}",
+        period_label
+    );
+    println!("  {dim}{}{reset}", "─".repeat(60));
+
+    if tickets.is_empty() {
+        println!("  No ticket data for this period.");
+        println!("  Tip: branch names need to contain a ticket id (e.g. PAVA-123).");
+        println!();
+        return Ok(());
+    }
+
+    let max_cost = tickets
+        .iter()
+        .map(|t| t.cost_cents)
+        .fold(0.0_f64, f64::max)
+        .max(0.01);
+    for t in &tickets {
+        let bar_len = ((t.cost_cents / max_cost) * 16.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
+        let branch_label = if t.top_branch.is_empty() {
+            "--".to_string()
+        } else {
+            t.top_branch.clone()
+        };
+        println!(
+            "    {bold}{:<24}{reset} {yellow}{:>8}{reset}  {dim}{:<24}{reset}  {cyan}{}{reset}",
+            t.ticket_id,
+            format_cost_cents(t.cost_cents),
+            branch_label,
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+/// `--ticket <ID>` detail view. Mirrors `cmd_stats_branch_detail`, plus a
+/// per-branch breakdown so the user can see which branches charged cost to
+/// the ticket (handy for stacked PRs / multi-branch work).
+fn cmd_stats_ticket_detail(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    ticket: &str,
+    repo: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let result = client.ticket_detail(ticket, repo, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!(
+        "  {bold_cyan} Ticket{reset} {bold}{}{reset} — {dim}{}{reset}",
+        ticket, period_label
+    );
+    if let Some(repo_id) = repo {
+        println!("  {bold}Repo filter{reset} {}", repo_id);
+    }
+    println!("  {dim}{}{reset}", "─".repeat(50));
+
+    match result {
+        Some(t) => {
+            if !t.repo_id.is_empty() {
+                println!("  {bold}Repo{reset}       {}", t.repo_id);
+            }
+            if !t.ticket_prefix.is_empty() {
+                println!("  {bold}Prefix{reset}     {}", t.ticket_prefix);
+            }
+            println!("  {bold}Sessions{reset}   {}", t.session_count);
+            println!("  {bold}Messages{reset}   {}", t.message_count);
+            println!(
+                "  {bold}Input{reset}      {}",
+                format_tokens(t.input_tokens)
+            );
+            println!(
+                "  {bold}Output{reset}     {}",
+                format_tokens(t.output_tokens)
+            );
+            println!(
+                "  {bold}Est. cost{reset}  {yellow}{}{reset}",
+                format_cost_cents(t.cost_cents)
+            );
+
+            if !t.branches.is_empty() {
+                println!();
+                println!("  {bold}Branches{reset}");
+                for br in &t.branches {
+                    let repo_label = if br.repo_id.is_empty() {
+                        "--".to_string()
+                    } else {
+                        br.repo_id
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&br.repo_id)
+                            .to_string()
+                    };
+                    println!(
+                        "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}",
+                        br.git_branch,
+                        format_cost_cents(br.cost_cents),
+                        repo_label
+                    );
+                }
+            }
+        }
+        None => {
+            println!("  No data found for ticket '{}'.", ticket);
+            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Run `budi stats --tickets` to see available tickets.");
         }
     }
 

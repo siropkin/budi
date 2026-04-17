@@ -1681,6 +1681,430 @@ fn tag_stats_branch_from_messages(
 }
 
 // ---------------------------------------------------------------------------
+// Ticket Cost
+// ---------------------------------------------------------------------------
+
+/// Per-ticket aggregate cost row used by `GET /analytics/tickets`
+/// and the `budi stats --tickets` CLI view.
+///
+/// Tickets are sourced from the `ticket_id` tag emitted by `GitEnricher`
+/// when a recognised ID appears in `git_branch`. Messages with no `ticket_id`
+/// tag collapse into a single `(untagged)` bucket so the total stays whole.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TicketCost {
+    pub ticket_id: String,
+    /// Prefix of the ticket id, e.g. `ENG` for `ENG-123`. Empty when
+    /// the value has no `-` (covers the `(untagged)` row).
+    pub ticket_prefix: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+    /// Dominant branch (highest cost) carrying this ticket. Empty for the
+    /// `(untagged)` row.
+    #[serde(default)]
+    pub top_branch: String,
+    /// Dominant repo (highest cost) carrying this ticket. Empty for the
+    /// `(untagged)` row.
+    #[serde(default)]
+    pub top_repo_id: String,
+}
+
+/// Per-branch breakdown attached to a single ticket detail response.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TicketBranchBreakdown {
+    pub git_branch: String,
+    pub repo_id: String,
+    pub message_count: u64,
+    pub session_count: u64,
+    pub cost_cents: f64,
+}
+
+/// Detail payload for `GET /analytics/tickets/{ticket_id}` and
+/// `budi stats --ticket <ID>`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TicketCostDetail {
+    pub ticket_id: String,
+    pub ticket_prefix: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+    /// Dominant repo (or empty when ambiguous / unattributed).
+    pub repo_id: String,
+    /// Per-branch attribution for cost charged to this ticket.
+    pub branches: Vec<TicketBranchBreakdown>,
+}
+
+const TICKET_TAG_KEY: &str = "ticket_id";
+
+/// Query cost grouped by ticket, sorted by cost descending. Includes an
+/// `(untagged)` bucket for assistant messages that have no `ticket_id` tag.
+pub fn ticket_cost(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TicketCost>> {
+    let filters = DimensionFilters::default();
+    ticket_cost_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn ticket_cost_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<TicketCost>> {
+    // Tagged path: join messages → tags(ticket_id) and split cost
+    // proportionally when one message carries multiple ticket IDs (rare,
+    // but matches the existing tag_stats behaviour for fairness).
+    let mut conditions = vec!["m.role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    if let Some(s) = since {
+        idx += 1;
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{idx}"));
+    }
+    if let Some(u) = until {
+        idx += 1;
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{idx}"));
+    }
+    let model_expr = normalized_model_expr("m.model");
+    let project_expr = normalized_project_expr("m.repo_id");
+    let branch_expr = normalized_branch_expr("m.git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(m.provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    // Build the (untagged) UNION clause — assistant messages that have no
+    // ticket_id tag at all, after dimension/date filters.
+    let untagged_conditions: Vec<String> = conditions
+        .iter()
+        .map(|c| c.replace("m.role = 'assistant'", "m2.role = 'assistant'"))
+        .collect();
+    // The above only renames the role predicate; date and dimension predicates
+    // already reference `m.*` columns, so re-alias the table prefix as well.
+    let untagged_conditions: Vec<String> = untagged_conditions
+        .into_iter()
+        .map(|c| c.replace("m.", "m2."))
+        .collect();
+    let untagged_where = format!("WHERE {}", untagged_conditions.join(" AND "));
+
+    let limit_param_idx = param_values.len() + 1;
+    param_values.push(limit.to_string());
+
+    let sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = '{TICKET_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         tagged AS (
+             SELECT t.value AS ticket_id,
+                    m.session_id,
+                    m.repo_id,
+                    m.git_branch,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.cache_read_tokens,
+                    m.cache_creation_tokens,
+                    m.cost_cents,
+                    mvc.n_values
+             FROM tags t
+             JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+             JOIN messages m ON m.id = t.message_id
+             {where_clause}
+             AND t.key = '{TICKET_TAG_KEY}'
+         ),
+         per_ticket AS (
+             SELECT ticket_id,
+                    COUNT(DISTINCT session_id) AS sess,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(input_tokens / n_values), 0) AS inp,
+                    COALESCE(SUM(output_tokens / n_values), 0) AS outp,
+                    COALESCE(SUM(cache_read_tokens / n_values), 0) AS cache_r,
+                    COALESCE(SUM(cache_creation_tokens / n_values), 0) AS cache_c,
+                    COALESCE(SUM(cost_cents / n_values), 0.0) AS cost
+             FROM tagged
+             GROUP BY ticket_id
+         ),
+         top_branch AS (
+             SELECT ticket_id,
+                    CASE
+                        WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(git_branch, ''), 12)
+                        ELSE COALESCE(git_branch, '')
+                    END AS branch_value,
+                    SUM(cost_cents / n_values) AS branch_cost
+             FROM tagged
+             GROUP BY ticket_id, branch_value
+         ),
+         top_branch_pick AS (
+             SELECT ticket_id, branch_value
+             FROM (
+                 SELECT ticket_id, branch_value, branch_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ticket_id
+                            ORDER BY branch_cost DESC, branch_value ASC
+                        ) AS rn
+                 FROM top_branch
+                 WHERE branch_value != ''
+             )
+             WHERE rn = 1
+         ),
+         top_repo AS (
+             SELECT ticket_id,
+                    COALESCE(repo_id, '') AS repo_value,
+                    SUM(cost_cents / n_values) AS repo_cost
+             FROM tagged
+             GROUP BY ticket_id, repo_value
+         ),
+         top_repo_pick AS (
+             SELECT ticket_id, repo_value
+             FROM (
+                 SELECT ticket_id, repo_value, repo_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ticket_id
+                            ORDER BY repo_cost DESC, repo_value ASC
+                        ) AS rn
+                 FROM top_repo
+                 WHERE repo_value != '' AND repo_value != 'unknown'
+             )
+             WHERE rn = 1
+         )
+         SELECT pt.ticket_id,
+                pt.sess, pt.cnt,
+                pt.inp, pt.outp, pt.cache_r, pt.cache_c, pt.cost,
+                COALESCE(tbp.branch_value, '') AS top_branch,
+                COALESCE(trp.repo_value, '') AS top_repo
+         FROM per_ticket pt
+         LEFT JOIN top_branch_pick tbp ON tbp.ticket_id = pt.ticket_id
+         LEFT JOIN top_repo_pick trp ON trp.ticket_id = pt.ticket_id
+
+         UNION ALL
+
+         SELECT '{UNTAGGED_DIMENSION}' AS ticket_id,
+                COUNT(DISTINCT m2.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m2.input_tokens), 0) AS inp,
+                COALESCE(SUM(m2.output_tokens), 0) AS outp,
+                COALESCE(SUM(m2.cache_read_tokens), 0) AS cache_r,
+                COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
+                COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
+                '' AS top_branch,
+                '' AS top_repo
+         FROM messages m2
+         {untagged_where}
+         AND NOT EXISTS (
+             SELECT 1 FROM tags t2
+             WHERE t2.message_id = m2.id AND t2.key = '{TICKET_TAG_KEY}'
+         )
+
+         ORDER BY cost DESC
+         LIMIT ?{limit_param_idx}",
+    );
+
+    // (untagged) sub-query reuses the same positional date/dimension params,
+    // so the param list is shared 1:1.
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<TicketCost> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let ticket_id: String = row.get(0)?;
+            let ticket_prefix = ticket_prefix_of(&ticket_id);
+            Ok(TicketCost {
+                ticket_id,
+                ticket_prefix,
+                session_count: row.get(1)?,
+                message_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cost_cents: row.get(7)?,
+                top_branch: row.get(8)?,
+                top_repo_id: row.get(9)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        // Drop the (untagged) row when it carries zero cost AND zero messages
+        // to avoid noise on a freshly-imported DB.
+        .filter(|tc| !(tc.ticket_id == UNTAGGED_DIMENSION && tc.message_count == 0))
+        .collect();
+
+    Ok(rows)
+}
+
+/// Detail view for a single ticket: totals, dominant repo, and per-branch
+/// breakdown. Returns `None` when no assistant messages carry the ticket
+/// in the requested window.
+pub fn ticket_cost_single(
+    conn: &Connection,
+    ticket_id: &str,
+    repo_id: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Option<TicketCostDetail>> {
+    let mut conditions = vec![
+        "m.role = 'assistant'".to_string(),
+        "t.key = ?1".to_string(),
+        "t.value = ?2".to_string(),
+    ];
+    let mut param_values: Vec<String> = vec![TICKET_TAG_KEY.to_string(), ticket_id.to_string()];
+    let mut idx = 2usize;
+
+    if let Some(repo) = repo_id {
+        idx += 1;
+        param_values.push(repo.to_string());
+        conditions.push(format!("COALESCE(m.repo_id, '') = ?{idx}"));
+    }
+    if let Some(s) = since {
+        idx += 1;
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{idx}"));
+    }
+    if let Some(u) = until {
+        idx += 1;
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{idx}"));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    // Totals. Use the same proportional split on multi-value ticket tags.
+    let totals_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         )
+         SELECT COUNT(DISTINCT m.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m.input_tokens / mvc.n_values), 0) AS inp,
+                COALESCE(SUM(m.output_tokens / mvc.n_values), 0) AS outp,
+                COALESCE(SUM(m.cache_read_tokens / mvc.n_values), 0) AS cache_r,
+                COALESCE(SUM(m.cache_creation_tokens / mvc.n_values), 0) AS cache_c,
+                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost,
+                CASE WHEN COUNT(DISTINCT COALESCE(m.repo_id, '')) = 1
+                     THEN COALESCE(MIN(m.repo_id), '')
+                     ELSE '' END AS repo
+         FROM tags t
+         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+         JOIN messages m ON m.id = t.message_id
+         {where_clause}",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&totals_sql)?;
+    let totals = stmt.query_row(param_refs.as_slice(), |row| {
+        Ok((
+            row.get::<_, u64>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, u64>(2)?,
+            row.get::<_, u64>(3)?,
+            row.get::<_, u64>(4)?,
+            row.get::<_, u64>(5)?,
+            row.get::<_, f64>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    });
+    let (sess, cnt, inp, outp, cache_r, cache_c, cost, repo) = match totals {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if cnt == 0 {
+        return Ok(None);
+    }
+
+    // Per-branch breakdown — same proportional split.
+    let branches_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         )
+         SELECT COALESCE(NULLIF(
+                    CASE
+                        WHEN COALESCE(m.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(m.git_branch, ''), 12)
+                        ELSE COALESCE(m.git_branch, '')
+                    END,
+                    ''
+                ), '{UNTAGGED_DIMENSION}') AS branch_value,
+                COALESCE(m.repo_id, '') AS repo_value,
+                COUNT(DISTINCT m.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+         FROM tags t
+         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+         JOIN messages m ON m.id = t.message_id
+         {where_clause}
+         GROUP BY branch_value, repo_value
+         ORDER BY cost DESC, branch_value ASC",
+    );
+    let mut stmt = conn.prepare(&branches_sql)?;
+    let branches: Vec<TicketBranchBreakdown> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(TicketBranchBreakdown {
+                git_branch: row.get(0)?,
+                repo_id: row.get(1)?,
+                session_count: row.get(2)?,
+                message_count: row.get(3)?,
+                cost_cents: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Some(TicketCostDetail {
+        ticket_prefix: ticket_prefix_of(ticket_id),
+        ticket_id: ticket_id.to_string(),
+        session_count: sess,
+        message_count: cnt,
+        input_tokens: inp,
+        output_tokens: outp,
+        cache_read_tokens: cache_r,
+        cache_creation_tokens: cache_c,
+        cost_cents: cost,
+        repo_id: repo,
+        branches,
+    }))
+}
+
+fn ticket_prefix_of(ticket: &str) -> String {
+    ticket
+        .split_once('-')
+        .map(|(prefix, _)| prefix.to_string())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Model Usage
 // ---------------------------------------------------------------------------
 

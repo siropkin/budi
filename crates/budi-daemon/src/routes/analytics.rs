@@ -511,6 +511,77 @@ pub async fn analytics_branch_detail(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tickets — first-class CLI dimension wired in 8.1 (#304)
+// ---------------------------------------------------------------------------
+
+/// `GET /analytics/tickets` query params. Mirrors `ListParams` so the same
+/// `--provider`/`--model`/`--repo` slicing offered by `--branches` is also
+/// available for `--tickets`.
+#[derive(serde::Deserialize)]
+pub struct TicketListParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
+}
+
+#[derive(serde::Deserialize)]
+pub struct TicketDetailParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub repo_id: Option<String>,
+}
+
+pub async fn analytics_tickets(
+    Query(params): Query<TicketListParams>,
+) -> Result<Json<Vec<analytics::TicketCost>>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::ticket_cost_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+pub async fn analytics_ticket_detail(
+    Path(ticket_id): Path<String>,
+    Query(params): Query<TicketDetailParams>,
+) -> Result<Json<analytics::TicketCostDetail>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::ticket_cost_single(
+            &conn,
+            &ticket_id,
+            params.repo_id.as_deref(),
+            params.since.as_deref(),
+            params.until.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    match result {
+        Some(detail) => Ok(Json(detail)),
+        None => Err(not_found("ticket not found")),
+    }
+}
+
 pub async fn analytics_schema_version()
 -> Result<Json<SchemaVersionResponse>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<SchemaVersionResponse> {
@@ -648,6 +719,9 @@ pub struct SessionsQueryParams {
     pub sort_asc: Option<bool>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// Filter to sessions tagged with the given `ticket_id` (e.g. `ENG-123`).
+    /// Wired in by 8.1 so `budi sessions --ticket <ID>` mirrors `--branch`.
+    pub ticket: Option<String>,
     #[serde(flatten)]
     pub filters: DimensionParams,
 }
@@ -678,6 +752,7 @@ pub async fn analytics_sessions(
                 sort_asc: params.sort_asc.unwrap_or(false),
                 limit: params.limit.unwrap_or(50).min(200),
                 offset: params.offset.unwrap_or(0),
+                ticket: params.ticket.as_deref(),
             },
             &filters,
         )?;

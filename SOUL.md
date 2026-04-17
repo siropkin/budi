@@ -191,6 +191,18 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   explicitly normalized to empty so that worktrees, mid-rebase sessions, and
   CI runs do not pollute the branches list with a bogus `HEAD` bucket.
 
+- **`ticket_id`** — promoted to a first-class CLI dimension in 8.1 (R1.0.3,
+  #304). The git enricher emits a `ticket_id` tag (and `ticket_prefix`)
+  whenever `git_branch` matches the recognised pattern (e.g. `ENG-123`),
+  so ticket attribution rides on top of the branch attribution rules above
+  with no extra wiring. Surfaces:
+  - `budi stats --tickets` — list ranked by cost, with `(untagged)` bucket.
+  - `budi stats --ticket <ID>` — detail view with per-branch breakdown.
+  - `budi sessions --ticket <ID>` — sessions tagged with the ticket.
+  - `GET /analytics/tickets` and `/analytics/tickets/{ticket_id}` mirror
+    `/analytics/branches{/branch}` so future cloud/dashboard work can adopt
+    the same data contract.
+
 `budi doctor` runs two attribution checks:
 
 - **Session visibility** for the `today`, `7d`, and `30d` windows (R1.0.1,

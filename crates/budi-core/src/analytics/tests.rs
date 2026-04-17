@@ -1629,6 +1629,7 @@ fn session_list_returns_sessions() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
     )
     .unwrap();
@@ -1661,6 +1662,7 @@ fn session_list_uses_structured_models_array() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
     )
     .unwrap();
@@ -1723,6 +1725,7 @@ fn session_list_returns_session_for_today_window_with_local_midnight_utc_since()
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
         &DimensionFilters::default(),
     )
@@ -1898,6 +1901,7 @@ fn session_list_window_compares_correctly_across_provider_timestamp_formats() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
         &DimensionFilters::default(),
     )
@@ -1919,6 +1923,7 @@ fn session_list_window_compares_correctly_across_provider_timestamp_formats() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
         &DimensionFilters::default(),
     )
@@ -1952,6 +1957,7 @@ fn session_list_ignores_empty_string_session_id() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
         &DimensionFilters::default(),
     )
@@ -1995,6 +2001,7 @@ fn session_list_with_dimension_filters() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            ticket: None,
         },
         &filters,
     )
@@ -2218,6 +2225,221 @@ fn branch_cost_untagged() {
     let branches = branch_cost(&conn, None, None, 10).unwrap();
     assert_eq!(branches.len(), 1);
     assert_eq!(branches[0].git_branch, "(untagged)");
+}
+
+// ---------------------------------------------------------------------------
+// Ticket cost (R1.0.3 / #304)
+// ---------------------------------------------------------------------------
+//
+// These tests cover the contract that 8.1 promotes ticket attribution to a
+// first-class CLI dimension:
+//   1. `--tickets` lists tickets by cost, with `(untagged)` for the bucket
+//      of assistant messages that have no `ticket_id` tag.
+//   2. `--ticket <ID>` returns a single detail row + per-branch breakdown.
+//   3. The session list filter restricts results to sessions tagged with
+//      the requested ticket.
+// All three rely on the `ticket_id` tag emitted by `GitEnricher`; the tests
+// inject the tag directly so they don't depend on enricher behaviour.
+
+fn ticket_msg(uuid: &str, session_id: &str, branch: &str, repo: &str, cost: f64) -> ParsedMessage {
+    let mut m = assistant_msg(uuid, session_id, cost);
+    m.git_branch = Some(branch.to_string());
+    m.repo_id = Some(repo.to_string());
+    m
+}
+
+fn ticket_tags(values: &[&str]) -> Vec<Tag> {
+    values
+        .iter()
+        .map(|v| Tag {
+            key: "ticket_id".to_string(),
+            value: (*v).to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn ticket_cost_groups_by_ticket() {
+    // Two tickets, with PAVA-1 carrying more cost than PAVA-2 across two
+    // sessions; PAVA-2 has a single session. Expect cost-desc ordering and
+    // session_count to count *distinct* sessions per ticket.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-1", "s1", "PAVA-1-foo", "repo-a", 4.0);
+    let m2 = ticket_msg("tk-2", "s2", "PAVA-1-foo", "repo-a", 6.0);
+    let m3 = ticket_msg("tk-3", "s3", "PAVA-2-bar", "repo-b", 3.0);
+    let tags = vec![
+        ticket_tags(&["PAVA-1"]),
+        ticket_tags(&["PAVA-1"]),
+        ticket_tags(&["PAVA-2"]),
+    ];
+    ingest_messages(&mut conn, &[m1, m2, m3], Some(&tags)).unwrap();
+
+    let tickets = ticket_cost(&conn, None, None, 10).unwrap();
+    let pava1 = tickets.iter().find(|t| t.ticket_id == "PAVA-1").unwrap();
+    let pava2 = tickets.iter().find(|t| t.ticket_id == "PAVA-2").unwrap();
+    assert_eq!(pava1.session_count, 2, "PAVA-1 spans two sessions");
+    assert_eq!(pava1.message_count, 2);
+    assert!((pava1.cost_cents - 10.0).abs() < 0.01);
+    assert_eq!(pava1.ticket_prefix, "PAVA");
+    assert_eq!(pava1.top_branch, "PAVA-1-foo");
+    assert_eq!(pava1.top_repo_id, "repo-a");
+    assert_eq!(pava2.session_count, 1);
+    assert!((pava2.cost_cents - 3.0).abs() < 0.01);
+    // Cost-desc ordering is the contract surfaced by `budi stats --tickets`.
+    let pava1_idx = tickets
+        .iter()
+        .position(|t| t.ticket_id == "PAVA-1")
+        .unwrap();
+    let pava2_idx = tickets
+        .iter()
+        .position(|t| t.ticket_id == "PAVA-2")
+        .unwrap();
+    assert!(pava1_idx < pava2_idx);
+}
+
+#[test]
+fn ticket_cost_includes_untagged_bucket() {
+    // One tagged ticket and one bare assistant message → expect the
+    // (untagged) row to appear so the total reconciles with the global
+    // cost summary, never silently disappears.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-u-1", "s1", "PAVA-9", "repo", 5.0);
+    let m2 = assistant_msg("tk-u-2", "s2", 7.0); // no branch, no ticket
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[ticket_tags(&["PAVA-9"]), Vec::new()]),
+    )
+    .unwrap();
+
+    let tickets = ticket_cost(&conn, None, None, 10).unwrap();
+    let untagged = tickets
+        .iter()
+        .find(|t| t.ticket_id == "(untagged)")
+        .expect("untagged ticket bucket present");
+    assert!((untagged.cost_cents - 7.0).abs() < 0.01);
+    assert_eq!(untagged.message_count, 1);
+    assert_eq!(untagged.ticket_prefix, "");
+    assert_eq!(untagged.top_branch, "");
+}
+
+#[test]
+fn ticket_cost_single_returns_detail_with_branches() {
+    // PAVA-7 is worked on across two branches in the same repo. Detail
+    // view should attribute cost per branch and pick the dominant repo.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-d-1", "s1", "PAVA-7-impl", "repo-a", 8.0);
+    let m2 = ticket_msg("tk-d-2", "s2", "PAVA-7-test", "repo-a", 2.0);
+    let tags = vec![ticket_tags(&["PAVA-7"]), ticket_tags(&["PAVA-7"])];
+    ingest_messages(&mut conn, &[m1, m2], Some(&tags)).unwrap();
+
+    let detail = ticket_cost_single(&conn, "PAVA-7", None, None, None)
+        .unwrap()
+        .expect("ticket detail present");
+    assert_eq!(detail.ticket_id, "PAVA-7");
+    assert_eq!(detail.ticket_prefix, "PAVA");
+    assert_eq!(detail.session_count, 2);
+    assert_eq!(detail.message_count, 2);
+    assert_eq!(detail.repo_id, "repo-a");
+    assert!((detail.cost_cents - 10.0).abs() < 0.01);
+    assert_eq!(detail.branches.len(), 2);
+    // Cost-desc ordering of the branch breakdown.
+    assert_eq!(detail.branches[0].git_branch, "PAVA-7-impl");
+    assert!((detail.branches[0].cost_cents - 8.0).abs() < 0.01);
+
+    let missing = ticket_cost_single(&conn, "DOES-NOT-EXIST", None, None, None).unwrap();
+    assert!(missing.is_none());
+}
+
+#[test]
+fn ticket_cost_single_can_filter_by_repo() {
+    // The same ticket id exists in two repos (rare, but possible when teams
+    // share IDs across services). `--repo` should narrow the result so the
+    // CLI can disambiguate.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-r-1", "s1", "PAVA-3", "repo-a", 4.0);
+    let m2 = ticket_msg("tk-r-2", "s2", "PAVA-3", "repo-b", 6.0);
+    let tags = vec![ticket_tags(&["PAVA-3"]), ticket_tags(&["PAVA-3"])];
+    ingest_messages(&mut conn, &[m1, m2], Some(&tags)).unwrap();
+
+    let only_a = ticket_cost_single(&conn, "PAVA-3", Some("repo-a"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(only_a.repo_id, "repo-a");
+    assert!((only_a.cost_cents - 4.0).abs() < 0.01);
+    assert_eq!(only_a.message_count, 1);
+
+    let none = ticket_cost_single(&conn, "PAVA-3", Some("repo-c"), None, None).unwrap();
+    assert!(none.is_none());
+}
+
+#[test]
+fn ticket_cost_splits_cost_for_multi_ticket_message() {
+    // Reuse the proportional-split contract that `tag_stats` already gives
+    // ticket tags so users see a fair number when one message touches two
+    // tickets (e.g. cross-cutting refactor).
+    let mut conn = test_db();
+    let m = ticket_msg("tk-multi", "s1", "PAVA-1+PAVA-2", "repo", 10.0);
+    let tags = vec![ticket_tags(&["PAVA-1", "PAVA-2"])];
+    ingest_messages(&mut conn, &[m], Some(&tags)).unwrap();
+
+    let tickets = ticket_cost(&conn, None, None, 10).unwrap();
+    let p1 = tickets.iter().find(|t| t.ticket_id == "PAVA-1").unwrap();
+    let p2 = tickets.iter().find(|t| t.ticket_id == "PAVA-2").unwrap();
+    assert!((p1.cost_cents - 5.0).abs() < 0.01);
+    assert!((p2.cost_cents - 5.0).abs() < 0.01);
+}
+
+#[test]
+fn session_list_filters_by_ticket() {
+    // The session list filter is the third surface added in 8.1 — without it,
+    // `budi sessions --ticket PAVA-9` would have to client-side filter and
+    // would misreport `total_count`.
+    let mut conn = test_db();
+    let m1 = ticket_msg("sess-tk-1", "s1", "PAVA-9", "repo", 5.0);
+    let m2 = assistant_msg("sess-tk-2", "s2", 7.0); // unrelated session
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[ticket_tags(&["PAVA-9"]), Vec::new()]),
+    )
+    .unwrap();
+
+    let filtered = session_list(
+        &conn,
+        &SessionListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            ticket: Some("PAVA-9"),
+        },
+    )
+    .unwrap();
+    assert_eq!(filtered.total_count, 1);
+    assert_eq!(filtered.sessions.len(), 1);
+    assert_eq!(filtered.sessions[0].id, "s1");
+
+    // A ticket that does not exist filters everything out.
+    let none = session_list(
+        &conn,
+        &SessionListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            ticket: Some("NOPE-1"),
+        },
+    )
+    .unwrap();
+    assert_eq!(none.total_count, 0);
+    assert!(none.sessions.is_empty());
 }
 
 #[test]
