@@ -38,6 +38,30 @@ pub const DURATION: &str = "duration";
 pub const TOOL: &str = "tool";
 pub const TOOL_USE_ID: &str = "tool_use_id";
 
+/// Repo-relative file path derived from a tool-call argument (e.g. the
+/// `file_path` input of Read/Write/Edit, Cursor's `target_file`, etc.).
+/// One tag per file on the assistant message. Added in R1.4 (#292).
+///
+/// Contract: value is always repo-relative, forward-slashed, and
+/// inside the resolved repo root. Absolute paths and paths that
+/// escape the repo are dropped before this tag is emitted — see
+/// `crate::file_attribution` and ADR-0083.
+pub const FILE_PATH: &str = "file_path";
+/// Where the file path came from. Stable values:
+/// - `tool_arg` — extracted directly from a known tool file argument
+///   (Read/Write/Edit/NotebookEdit/Grep/Glob/Cursor equivalents).
+/// - `cwd_relative` — path was absolute; stripped against the message
+///   cwd / resolved repo root.
+///
+/// Emitted once per message as a sibling to `file_path` so the source
+/// is queryable the same way R1.2 (#222) did for `activity_source`.
+pub const FILE_PATH_SOURCE: &str = "file_path_source";
+/// Confidence in the file-path attribution. Stable values: `high`
+/// (path was already repo-relative from a known arg), `medium`
+/// (normalized from an absolute path against cwd/repo). Emitted once
+/// per message.
+pub const FILE_PATH_CONFIDENCE: &str = "file_path_confidence";
+
 /// Identity tags: constant for the entire session, deduplicated to one
 /// assistant message per session.
 pub const SESSION_IDENTITY_KEYS: &[&str] = &[

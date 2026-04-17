@@ -65,9 +65,9 @@ enum Commands {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --tickets, --ticket, --activities, --activity, --models, or --tag)
+    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --tickets, --ticket, --activities, --activity, --files, --file, --models, or --tag)
     #[command(
-        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "tickets", "ticket", "activities", "activity", "models", "tag"])),
+        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "tickets", "ticket", "activities", "activity", "files", "file", "models", "tag"])),
         after_help = "\
 Examples:
   budi stats                       Today's cost summary (default)
@@ -81,6 +81,8 @@ Examples:
   budi stats --ticket ENG-123 --repo github.com/acme/app
   budi stats --activities          Activities ranked by cost (today)
   budi stats --activity bugfix     Cost details for a specific activity
+  budi stats --files               Files ranked by cost (today)
+  budi stats --file src/main.rs    Cost details for a specific file
   budi stats --projects -p all     All-time project costs
   budi stats --tag activity        Raw cost breakdown by the activity tag
   budi stats --provider cursor     Filter to Cursor only
@@ -119,8 +121,21 @@ Examples:
         /// breakdown so you can see where each kind of work was done.
         #[arg(long, value_name = "NAME")]
         activity: Option<String>,
-        /// Optional repository filter for --branch, --ticket, or --activity
-        /// (recommended when names repeat across repos).
+        /// Show files ranked by cost (sourced from the `file_path` tag
+        /// emitted by the pipeline when tool-call arguments point at a
+        /// file inside the repo root). Mirrors `--tickets` / `--activities`
+        /// so file-level attribution is a first-class CLI dimension.
+        /// Added in R1.4 (#292).
+        #[arg(long, default_value_t = false)]
+        files: bool,
+        /// Show cost details for a specific file (repo-relative path,
+        /// forward-slashed, inside the repo root). Mirrors `--ticket <ID>`
+        /// and includes per-branch and per-ticket breakdowns so you can see
+        /// which tickets touched the file. Added in R1.4 (#292).
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// Optional repository filter for --branch, --ticket, --activity,
+        /// or --file (recommended when names repeat across repos).
         #[arg(long)]
         repo: Option<String>,
         /// Show model usage breakdown
@@ -386,6 +401,8 @@ fn main() -> Result<()> {
             ticket,
             activities,
             activity,
+            files,
+            file,
             repo,
             models,
             provider,
@@ -402,6 +419,8 @@ fn main() -> Result<()> {
                 ticket,
                 activities,
                 activity,
+                files,
+                file,
                 repo,
                 models,
                 provider,
@@ -684,6 +703,73 @@ mod tests {
         match cli.command {
             Commands::Stats { activity, repo, .. } => {
                 assert_eq!(activity.as_deref(), Some("bugfix"));
+                assert_eq!(repo.as_deref(), Some("siropkin/budi"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_files_flag() {
+        let cli =
+            Cli::try_parse_from(["budi", "stats", "--files"]).expect("budi stats --files parses");
+        match cli.command {
+            Commands::Stats { files, file, .. } => {
+                assert!(files);
+                assert!(file.is_none());
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_file_value_flag() {
+        let cli = Cli::try_parse_from(["budi", "stats", "--file", "crates/budi-core/src/lib.rs"])
+            .expect("budi stats --file <path> parses");
+        match cli.command {
+            Commands::Stats { files, file, .. } => {
+                assert!(!files);
+                assert_eq!(file.as_deref(), Some("crates/budi-core/src/lib.rs"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_stats_file_is_mutually_exclusive_with_other_views() {
+        // --files vs --tickets / --branches / --file / --models etc.
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--files", "--tickets"]).is_err(),
+            "--files and --tickets must be mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--files", "--activities"]).is_err(),
+            "--files and --activities must be mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--files", "--file", "x.rs"]).is_err(),
+            "--files and --file must be mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--file", "x.rs", "--models"]).is_err(),
+            "--file and --models must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn cli_stats_file_accepts_repo_filter() {
+        let cli = Cli::try_parse_from([
+            "budi",
+            "stats",
+            "--file",
+            "src/main.rs",
+            "--repo",
+            "siropkin/budi",
+        ])
+        .expect("budi stats --file --repo parses");
+        match cli.command {
+            Commands::Stats { file, repo, .. } => {
+                assert_eq!(file.as_deref(), Some("src/main.rs"));
                 assert_eq!(repo.as_deref(), Some("siropkin/budi"));
             }
             _ => panic!("expected stats command"),

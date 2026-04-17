@@ -60,6 +60,8 @@ pub fn cmd_stats(
     ticket: Option<String>,
     activities: bool,
     activity: Option<String>,
+    files: bool,
+    file: Option<String>,
     repo: Option<String>,
     models: bool,
     provider: Option<String>,
@@ -71,13 +73,27 @@ pub fn cmd_stats(
     // user-friendly shortcuts that resolve to their canonical form.
     let provider = provider.map(|p| normalize_provider(&p)).transpose()?;
 
-    // `--repo` is a filter for `--branch`, `--ticket`, or `--activity` —
-    // surface the misuse early instead of silently ignoring it. Clap's
-    // `requires` only takes a single arg, so the cross-flag check lives here.
-    if repo.is_some() && branch.is_none() && ticket.is_none() && activity.is_none() {
+    // `--repo` is a filter for `--branch`, `--ticket`, `--activity`, or
+    // `--file` — surface the misuse early instead of silently ignoring it.
+    // Clap's `requires` only takes a single arg, so the cross-flag check
+    // lives here.
+    if repo.is_some()
+        && branch.is_none()
+        && ticket.is_none()
+        && activity.is_none()
+        && file.is_none()
+    {
         anyhow::bail!(
-            "--repo requires --branch <NAME>, --ticket <ID>, or --activity <NAME> to scope the filter"
+            "--repo requires --branch <NAME>, --ticket <ID>, --activity <NAME>, or --file <PATH> to scope the filter"
         );
+    }
+
+    // `--file <PATH>` must be a repo-relative forward-slashed path. The
+    // pipeline never stores absolute / traversal paths (see ADR-0083 and
+    // `file_attribution::normalize_one`), so validate early with a clear
+    // error rather than silently returning "file not found".
+    if let Some(ref f) = file {
+        validate_file_path_arg(f)?;
     }
 
     let client = DaemonClient::connect().context(
@@ -86,6 +102,14 @@ pub fn cmd_stats(
 
     if let Some(ref tag_filter) = tag {
         return cmd_stats_tags(&client, period, tag_filter, json_output);
+    }
+
+    if let Some(ref f) = file {
+        return cmd_stats_file_detail(&client, period, f, repo.as_deref(), json_output);
+    }
+
+    if files {
+        return cmd_stats_files(&client, period, json_output);
     }
 
     if let Some(ref ac) = activity {
@@ -835,6 +859,225 @@ fn cmd_stats_activity_detail(
             println!("  No data found for activity '{}'.", activity);
             println!("  Tip: run `budi import` first if you haven't imported data yet.");
             println!("  Run `budi stats --activities` to see available activities.");
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Validate a `--file <PATH>` argument. Rejects absolute paths, paths
+/// with `..` traversal, Windows separators, and URL schemes. The
+/// pipeline would never emit such a value as a `file_path` tag
+/// (`file_attribution::normalize_one` strips them), so surfacing a clear
+/// error here is more useful than a silent 404 from the daemon.
+fn validate_file_path_arg(path: &str) -> Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("--file path must not be empty");
+    }
+    if trimmed.starts_with('/') {
+        anyhow::bail!(
+            "--file must be a repo-relative path (no leading '/'); try a path like src/main.rs"
+        );
+    }
+    if trimmed.contains('\\') {
+        anyhow::bail!("--file path uses forward slashes only, even on Windows");
+    }
+    if trimmed.contains("..") {
+        anyhow::bail!("--file path must not contain '..' (repo-relative only)");
+    }
+    if trimmed.contains("://") {
+        anyhow::bail!("--file path must not contain a URL scheme");
+    }
+    Ok(())
+}
+
+/// `--files` list view. Mirrors `cmd_stats_tickets` / `cmd_stats_activities`:
+/// files come from the `file_path` tag emitted by `FileEnricher` when an
+/// assistant message's tool-call arguments point inside the repo root. The
+/// output always carries an `(untagged)` row so users can see how much
+/// activity isn't attributed to a file — that bucket should shrink as
+/// tool-arg coverage improves. Added in R1.4 (#292).
+fn cmd_stats_files(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let files = client.files(since.as_deref(), until.as_deref(), 30)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&files)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let cyan = ansi("\x1b[36m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!("  {bold_cyan} Files{reset} — {bold}{}{reset}", period_label);
+    println!("  {dim}{}{reset}", "─".repeat(72));
+
+    if files.is_empty() {
+        println!("  No file data for this period.");
+        println!(
+            "  Tip: file paths are extracted from tool-call arguments (Read/Write/Edit, etc)."
+        );
+        println!();
+        return Ok(());
+    }
+
+    let max_cost = files
+        .iter()
+        .map(|f| f.cost_cents)
+        .fold(0.0_f64, f64::max)
+        .max(0.01);
+    for f in &files {
+        let bar_len = ((f.cost_cents / max_cost) * 16.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
+        let ticket_label = if f.top_ticket_id.is_empty() {
+            "--".to_string()
+        } else {
+            f.top_ticket_id.clone()
+        };
+        let source_label = if f.source.is_empty() {
+            "--".to_string()
+        } else {
+            f.source.clone()
+        };
+        // Truncate very long paths so the row stays readable in narrow
+        // terminals. Full paths remain visible via `--file <PATH>` and
+        // `--format json`.
+        let path_label = if f.file_path.chars().count() > 40 {
+            let tail: String = f.file_path.chars().rev().take(37).collect();
+            let tail: String = tail.chars().rev().collect();
+            format!("…{tail}")
+        } else {
+            f.file_path.clone()
+        };
+        println!(
+            "    {bold}{:<40}{reset} {yellow}{:>8}{reset}  {dim}src={:<12}{reset}  {dim}{:<14}{reset}  {cyan}{}{reset}",
+            path_label,
+            format_cost_cents(f.cost_cents),
+            source_label,
+            ticket_label,
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+/// `--file <PATH>` detail view. Mirrors `cmd_stats_ticket_detail`, plus a
+/// per-ticket breakdown so users can see which tickets drove cost on a
+/// particular file (complements the per-branch view).
+fn cmd_stats_file_detail(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    file_path: &str,
+    repo: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let result = client.file_detail(file_path, repo, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!(
+        "  {bold_cyan} File{reset} {bold}{}{reset} — {dim}{}{reset}",
+        file_path, period_label
+    );
+    if let Some(repo_id) = repo {
+        println!("  {bold}Repo filter{reset} {}", repo_id);
+    }
+    println!("  {dim}{}{reset}", "─".repeat(50));
+
+    match result {
+        Some(f) => {
+            if !f.repo_id.is_empty() {
+                println!("  {bold}Repo{reset}       {}", f.repo_id);
+            }
+            if !f.source.is_empty() {
+                println!(
+                    "  {bold}Source{reset}     {} {dim}(confidence: {}){reset}",
+                    f.source,
+                    if f.confidence.is_empty() {
+                        "--"
+                    } else {
+                        &f.confidence
+                    }
+                );
+            }
+            println!("  {bold}Sessions{reset}   {}", f.session_count);
+            println!("  {bold}Messages{reset}   {}", f.message_count);
+            println!(
+                "  {bold}Input{reset}      {}",
+                format_tokens(f.input_tokens)
+            );
+            println!(
+                "  {bold}Output{reset}     {}",
+                format_tokens(f.output_tokens)
+            );
+            println!(
+                "  {bold}Est. cost{reset}  {yellow}{}{reset}",
+                format_cost_cents(f.cost_cents)
+            );
+
+            if !f.branches.is_empty() {
+                println!();
+                println!("  {bold}Branches{reset}");
+                for br in &f.branches {
+                    let repo_label = if br.repo_id.is_empty() {
+                        "--".to_string()
+                    } else {
+                        br.repo_id
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&br.repo_id)
+                            .to_string()
+                    };
+                    println!(
+                        "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}",
+                        br.git_branch,
+                        format_cost_cents(br.cost_cents),
+                        repo_label
+                    );
+                }
+            }
+
+            if !f.tickets.is_empty() {
+                println!();
+                println!("  {bold}Tickets{reset}");
+                for tk in &f.tickets {
+                    println!(
+                        "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{} msgs{reset}",
+                        tk.ticket_id,
+                        format_cost_cents(tk.cost_cents),
+                        tk.message_count
+                    );
+                }
+            }
+        }
+        None => {
+            println!("  No data found for file '{}'.", file_path);
+            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Run `budi stats --files` to see available files.");
         }
     }
 

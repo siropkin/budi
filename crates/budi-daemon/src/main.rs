@@ -117,6 +117,11 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/activities/{activity}",
             get(a::analytics_activity_detail),
         )
+        .route("/analytics/files", get(a::analytics_files))
+        .route(
+            "/analytics/files/{*file_path}",
+            get(a::analytics_file_detail),
+        )
         .route("/analytics/providers", get(a::analytics_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route(

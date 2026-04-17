@@ -73,6 +73,7 @@ fn ingest_and_query() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -103,6 +104,7 @@ fn ingest_and_query() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
 
@@ -153,6 +155,7 @@ fn rollups_track_message_updates_and_deletes() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
@@ -208,6 +211,7 @@ fn rollups_are_used_only_for_hour_aligned_ranges() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
@@ -281,6 +285,7 @@ fn rollup_summary_latency_smoke_on_large_dataset() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         });
     }
     ingest_messages(&mut conn, &messages, None).unwrap();
@@ -333,6 +338,7 @@ fn cost_cents_baked_at_ingest() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     // CostEnricher is the single source of truth for cost_cents
     CostEnricher.enrich(&mut msg);
@@ -408,6 +414,7 @@ fn last_seen_derived_from_messages() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "m2".to_string(),
@@ -438,6 +445,7 @@ fn last_seen_derived_from_messages() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -485,6 +493,7 @@ fn newest_ingested_data_uses_assistant_rows() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "a-only".to_string(),
@@ -515,6 +524,7 @@ fn newest_ingested_data_uses_assistant_rows() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -553,6 +563,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -583,6 +594,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "u2".to_string(),
@@ -613,6 +625,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ]
 }
@@ -808,6 +821,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "t2".to_string(),
@@ -838,6 +852,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "t3".to_string(),
@@ -868,6 +883,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ]
 }
@@ -964,6 +980,7 @@ fn multi_provider_ingest_and_query() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "cc-a1".to_string(),
@@ -994,6 +1011,7 @@ fn multi_provider_ingest_and_query() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
 
@@ -1027,6 +1045,7 @@ fn multi_provider_ingest_and_query() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "cu-a1".to_string(),
@@ -1057,6 +1076,7 @@ fn multi_provider_ingest_and_query() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
 
@@ -1122,6 +1142,7 @@ fn cross_parse_dedup_by_request_id() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -1159,6 +1180,7 @@ fn cross_parse_dedup_by_request_id() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -1211,6 +1233,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -1243,6 +1266,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -1293,6 +1317,7 @@ fn no_request_id_no_dedup() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg1], None).unwrap();
 
@@ -1325,6 +1350,7 @@ fn no_request_id_no_dedup() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg2], None).unwrap();
 
@@ -1389,6 +1415,7 @@ fn jsonl_dedup_matches_otel_by_fingerprint_within_window() {
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
@@ -1516,6 +1543,7 @@ fn session_cost_curve_buckets() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         });
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1559,6 +1587,7 @@ fn cost_confidence_stats_groups_correctly() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "conf-2".to_string(),
@@ -1589,6 +1618,7 @@ fn cost_confidence_stats_groups_correctly() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1634,6 +1664,7 @@ fn subagent_cost_stats_splits_correctly() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
         ParsedMessage {
             uuid: "sub-1".to_string(),
@@ -1664,6 +1695,7 @@ fn subagent_cost_stats_splits_correctly() {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -2185,6 +2217,7 @@ fn assistant_msg(uuid: &str, session_id: &str, cost_cents: f64) -> ParsedMessage
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     }
 }
 
@@ -2781,6 +2814,155 @@ fn activity_cost_single_can_filter_by_repo() {
     assert!((only_a.cost_cents - 4.0).abs() < 0.01);
 
     let none = activity_cost_single(&conn, "bugfix", Some("repo-c"), None, None).unwrap();
+    assert!(none.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// File cost (R1.4 / #292)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the ticket / activity roll-up contract. Tests inject the tags
+// directly so they don't depend on `FileEnricher` (which does its own
+// normalization, covered in `file_attribution::tests`).
+
+fn file_msg(uuid: &str, session_id: &str, branch: &str, repo: &str, cost: f64) -> ParsedMessage {
+    let mut m = assistant_msg(uuid, session_id, cost);
+    m.git_branch = Some(branch.to_string());
+    m.repo_id = Some(repo.to_string());
+    m
+}
+
+fn file_tags(values: &[&str]) -> Vec<Tag> {
+    values
+        .iter()
+        .map(|v| Tag {
+            key: "file_path".to_string(),
+            value: (*v).to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn file_cost_groups_by_file() {
+    // Two files touched across two sessions; splits cost proportionally
+    // on multi-file messages and sorts cost-descending.
+    let mut conn = test_db();
+    let m1 = file_msg("fc-1", "s1", "main", "repo-a", 10.0);
+    let m2 = file_msg("fc-2", "s2", "main", "repo-a", 4.0);
+    // Multi-file message: splits 4.0 across two files.
+    let m3 = file_msg("fc-3", "s3", "main", "repo-a", 4.0);
+    let tags = vec![
+        file_tags(&["src/main.rs"]),
+        file_tags(&["src/main.rs"]),
+        file_tags(&["src/main.rs", "Cargo.toml"]),
+    ];
+    ingest_messages(&mut conn, &[m1, m2, m3], Some(&tags)).unwrap();
+
+    let rows = file_cost(&conn, None, None, 10).unwrap();
+    let main_rs = rows.iter().find(|r| r.file_path == "src/main.rs").unwrap();
+    // 10.0 + 4.0 + (4.0/2 = 2.0) = 16.0
+    assert!((main_rs.cost_cents - 16.0).abs() < 0.01);
+    assert_eq!(main_rs.message_count, 3);
+    assert_eq!(main_rs.session_count, 3);
+    assert_eq!(main_rs.top_repo_id, "repo-a");
+    assert_eq!(main_rs.top_branch, "main");
+
+    let cargo = rows.iter().find(|r| r.file_path == "Cargo.toml").unwrap();
+    assert!((cargo.cost_cents - 2.0).abs() < 0.01);
+
+    let main_idx = rows
+        .iter()
+        .position(|r| r.file_path == "src/main.rs")
+        .unwrap();
+    let cargo_idx = rows
+        .iter()
+        .position(|r| r.file_path == "Cargo.toml")
+        .unwrap();
+    assert!(main_idx < cargo_idx, "cost-desc ordering");
+}
+
+#[test]
+fn file_cost_includes_untagged_bucket() {
+    // A tagged file + a bare assistant message → the (untagged) row
+    // should appear so totals reconcile with `usage_summary`.
+    let mut conn = test_db();
+    let m1 = file_msg("fc-u-1", "s1", "main", "repo", 5.0);
+    let m2 = assistant_msg("fc-u-2", "s2", 7.0);
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[file_tags(&["src/main.rs"]), Vec::new()]),
+    )
+    .unwrap();
+
+    let rows = file_cost(&conn, None, None, 10).unwrap();
+    let untagged = rows
+        .iter()
+        .find(|r| r.file_path == "(untagged)")
+        .expect("untagged file bucket present");
+    assert!((untagged.cost_cents - 7.0).abs() < 0.01);
+    assert_eq!(untagged.message_count, 1);
+}
+
+#[test]
+fn file_cost_single_returns_detail_with_branches_and_tickets() {
+    // Same file touched on two branches and on two tickets — detail view
+    // must attribute cost per branch and per ticket.
+    let mut conn = test_db();
+    let m1 = file_msg("fcd-1", "s1", "feat/a", "repo-a", 6.0);
+    let m2 = file_msg("fcd-2", "s2", "feat/b", "repo-a", 4.0);
+    let mut tags_1 = file_tags(&["src/main.rs"]);
+    tags_1.push(Tag {
+        key: "ticket_id".to_string(),
+        value: "PAVA-1".to_string(),
+    });
+    let mut tags_2 = file_tags(&["src/main.rs"]);
+    tags_2.push(Tag {
+        key: "ticket_id".to_string(),
+        value: "PAVA-2".to_string(),
+    });
+    ingest_messages(&mut conn, &[m1, m2], Some(&[tags_1, tags_2])).unwrap();
+
+    let detail = file_cost_single(&conn, "src/main.rs", None, None, None)
+        .unwrap()
+        .expect("file detail present");
+    assert_eq!(detail.file_path, "src/main.rs");
+    assert_eq!(detail.session_count, 2);
+    assert_eq!(detail.message_count, 2);
+    assert_eq!(detail.repo_id, "repo-a");
+    assert!((detail.cost_cents - 10.0).abs() < 0.01);
+    assert_eq!(detail.branches.len(), 2);
+    let branch_a = detail
+        .branches
+        .iter()
+        .find(|b| b.git_branch == "feat/a")
+        .unwrap();
+    assert!((branch_a.cost_cents - 6.0).abs() < 0.01);
+    assert_eq!(detail.tickets.len(), 2);
+
+    let missing = file_cost_single(&conn, "does/not/exist.rs", None, None, None).unwrap();
+    assert!(missing.is_none());
+}
+
+#[test]
+fn file_cost_single_can_filter_by_repo() {
+    let mut conn = test_db();
+    let m1 = file_msg("fcr-1", "s1", "main", "repo-a", 3.0);
+    let m2 = file_msg("fcr-2", "s2", "main", "repo-b", 5.0);
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[file_tags(&["src/lib.rs"]), file_tags(&["src/lib.rs"])]),
+    )
+    .unwrap();
+
+    let only_a = file_cost_single(&conn, "src/lib.rs", Some("repo-a"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(only_a.repo_id, "repo-a");
+    assert!((only_a.cost_cents - 3.0).abs() < 0.01);
+
+    let none = file_cost_single(&conn, "src/lib.rs", Some("repo-c"), None, None).unwrap();
     assert!(none.is_none());
 }
 
@@ -3420,6 +3602,7 @@ fn health_msg(
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     }
 }
 

@@ -181,6 +181,11 @@ pub struct ParsedMessage {
     pub tool_names: Vec<String>,
     /// Tool-use block IDs emitted by assistant content blocks.
     pub tool_use_ids: Vec<String>,
+    /// Raw file paths extracted from tool-call arguments (e.g. Read/Write/Edit
+    /// `file_path`, Grep/Glob `path`/`pattern`). Normalized to repo-relative
+    /// paths later by `FileEnricher` under ADR-0083 privacy rules; see
+    /// `crate::file_attribution`. Added in R1.4 (#292).
+    pub tool_files: Vec<String>,
 }
 
 impl Default for ParsedMessage {
@@ -214,17 +219,19 @@ impl Default for ParsedMessage {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         }
     }
 }
 
 fn extract_assistant_tool_metadata(
     content: Option<&Vec<serde_json::Value>>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut names = std::collections::HashSet::new();
     let mut tool_use_ids = std::collections::HashSet::new();
+    let mut files: Vec<String> = Vec::new();
     let Some(blocks) = content else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     };
 
     for block in blocks {
@@ -232,11 +239,10 @@ fn extract_assistant_tool_metadata(
         if block_type != "tool_use" {
             continue;
         }
-        if let Some(name) = block.get("name").and_then(|v| v.as_str()) {
-            let normalized = name.trim();
-            if !normalized.is_empty() {
-                names.insert(normalized.to_string());
-            }
+        let tool_name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let trimmed = tool_name.trim();
+        if !trimmed.is_empty() {
+            names.insert(trimmed.to_string());
         }
         if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
             let normalized = id.trim();
@@ -244,13 +250,19 @@ fn extract_assistant_tool_metadata(
                 tool_use_ids.insert(normalized.to_string());
             }
         }
+        // R1.4 (#292): collect raw file paths from known tool args. The
+        // actual repo-relative normalization + privacy filtering happens
+        // later in `FileEnricher` once `cwd` / `repo_id` are resolved.
+        if let Some(input) = block.get("input") {
+            crate::file_attribution::collect_claude_tool_paths(trimmed, input, &mut files);
+        }
     }
 
     let mut out: Vec<String> = names.into_iter().collect();
     out.sort();
     let mut out_ids: Vec<String> = tool_use_ids.into_iter().collect();
     out_ids.sort();
-    (out, out_ids)
+    (out, out_ids, files)
 }
 
 /// Parse a single JSONL line into a `ParsedMessage`, if relevant.
@@ -323,6 +335,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 prompt_category_confidence,
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
+                tool_files: Vec::new(),
             })
         }
         TranscriptEntry::Assistant(a) => {
@@ -330,7 +343,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 return None;
             }
             let usage = a.message.usage.as_ref();
-            let (tool_names, tool_use_ids) =
+            let (tool_names, tool_use_ids, tool_files) =
                 extract_assistant_tool_metadata(a.message.content.as_ref());
             // Extract 1-hour cache tier tokens from cache_creation breakdown
             let cache_1h = usage
@@ -372,6 +385,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 prompt_category_confidence: None,
                 tool_names,
                 tool_use_ids,
+                tool_files,
             })
         }
         TranscriptEntry::Other => None,
@@ -391,7 +405,8 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 return None;
             }
             let usage = flat.usage.as_ref();
-            let (tool_names, tool_use_ids) = extract_assistant_tool_metadata(flat.content.as_ref());
+            let (tool_names, tool_use_ids, tool_files) =
+                extract_assistant_tool_metadata(flat.content.as_ref());
             let cache_1h = usage
                 .and_then(|u| u.cache_creation.as_ref())
                 .map(|cc| cc.ephemeral_1h_input_tokens)
@@ -433,6 +448,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 prompt_category_confidence: None,
                 tool_names,
                 tool_use_ids,
+                tool_files,
             })
         }
         "user" => Some(ParsedMessage {

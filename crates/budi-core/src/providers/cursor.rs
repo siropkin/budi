@@ -830,6 +830,7 @@ fn usage_events_to_messages(
                 prompt_category_confidence: None,
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
+                tool_files: Vec::new(),
             }
         })
         .collect()
@@ -1292,6 +1293,12 @@ fn cursor_prompt_text(message: Option<&CursorMessage>) -> Option<String> {
 #[derive(Debug, Deserialize)]
 struct CursorToolCall {
     name: Option<String>,
+    /// Tool-call arguments. Cursor version churn means the exact shape is
+    /// not stable, so we accept any JSON value and let
+    /// `crate::file_attribution` pick out file-path fields it recognises
+    /// (`file_path`, `target_file`, `path`, `pattern`). Added in R1.4 (#292).
+    #[serde(default, alias = "arguments", alias = "input")]
+    args: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1354,14 +1361,24 @@ fn parse_cursor_line(
     let msg_cwd = entry.cwd.or_else(|| cwd.map(|s| s.to_string()));
     let git_branch = msg_cwd.as_deref().and_then(resolve_git_branch_from_head);
 
-    let mut tool_names: Vec<String> = entry
+    // R1.4 (#292): collect tool names + raw file paths from tool args. We
+    // walk the list once so we pick both up atomically per message.
+    let mut tool_names: Vec<String> = Vec::new();
+    let mut tool_files: Vec<String> = Vec::new();
+    for call in entry
         .tool_calls
         .or(entry.tool_calls_alt)
         .unwrap_or_default()
-        .into_iter()
-        .filter_map(|t| t.name.map(|n| n.trim().to_string()))
-        .filter(|n| !n.is_empty())
-        .collect();
+    {
+        let name = call.name.unwrap_or_default();
+        let trimmed = name.trim().to_string();
+        if !trimmed.is_empty() {
+            tool_names.push(trimmed.clone());
+        }
+        if let Some(args) = call.args.as_ref() {
+            crate::file_attribution::collect_cursor_tool_paths(&trimmed, args, &mut tool_files);
+        }
+    }
     tool_names.sort();
     tool_names.dedup();
 
@@ -1411,6 +1428,7 @@ fn parse_cursor_line(
                 prompt_category_confidence,
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
+                tool_files: Vec::new(),
             })
         }
         "assistant" | "ai" | "model" => {
@@ -1444,6 +1462,7 @@ fn parse_cursor_line(
                 prompt_category_confidence: None,
                 tool_names,
                 tool_use_ids: Vec::new(),
+                tool_files,
             })
         }
         _ => None,
