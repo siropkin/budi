@@ -1693,7 +1693,7 @@ fn tag_stats_branch_from_messages(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TicketCost {
     pub ticket_id: String,
-    /// Prefix of the ticket id, e.g. `PAVA` for `PAVA-2057`. Empty when
+    /// Prefix of the ticket id, e.g. `ENG` for `ENG-123`. Empty when
     /// the value has no `-` (covers the `(untagged)` row).
     pub ticket_prefix: String,
     pub session_count: u64,

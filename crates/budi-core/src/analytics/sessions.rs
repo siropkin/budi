@@ -294,7 +294,7 @@ pub struct SessionListParams<'a> {
     pub offset: usize,
     /// Restrict the result to sessions that have at least one assistant
     /// message tagged with this `ticket_id`. Promoted to a first-class
-    /// session filter in 8.1 so `budi sessions --ticket PAVA-2057` works
+    /// session filter in 8.1 so `budi sessions --ticket ENG-123` works
     /// the same way `--branch` does for branches.
     pub ticket: Option<&'a str>,
 }

@@ -77,8 +77,8 @@ Examples:
   budi stats --branch main         Cost details for a specific branch
   budi stats --branch main --repo github.com/acme/app
   budi stats --tickets             Tickets ranked by cost (today)
-  budi stats --ticket PAVA-2057    Cost details for a specific ticket
-  budi stats --ticket PAVA-2057 --repo github.com/acme/app
+  budi stats --ticket ENG-123      Cost details for a specific ticket
+  budi stats --ticket ENG-123 --repo github.com/acme/app
   budi stats --projects -p all     All-time project costs
   budi stats --tag activity        Cost by activity type
   budi stats --provider cursor     Filter to Cursor only
@@ -102,7 +102,7 @@ Examples:
         /// dimension alongside branches and repos.
         #[arg(long, default_value_t = false)]
         tickets: bool,
-        /// Show cost details for a specific ticket id (e.g. PAVA-2057).
+        /// Show cost details for a specific ticket id (e.g. ENG-123).
         /// Mirrors `--branch <NAME>` and includes a per-branch breakdown
         /// of where the ticket was worked on.
         #[arg(long, value_name = "ID")]
@@ -165,7 +165,7 @@ Examples:
   budi sessions                    Recent sessions (today)
   budi sessions -p week            This week's sessions
   budi sessions --search claude    Filter by search term
-  budi sessions --ticket PAVA-2057 Sessions tagged with a ticket
+  budi sessions --ticket ENG-123   Sessions tagged with a ticket
   budi sessions <session-id>       Show detail for a specific session
   budi sessions --format json      JSON output for scripting")]
     Sessions {
@@ -178,7 +178,7 @@ Examples:
         /// Filter sessions by search term (model, repo, branch, provider)
         #[arg(long)]
         search: Option<String>,
-        /// Filter sessions by ticket id (e.g. PAVA-2057). Matches the
+        /// Filter sessions by ticket id (e.g. ENG-123). Matches the
         /// `ticket_id` tag emitted by the git enricher when the branch name
         /// contains a recognised ID.
         #[arg(long, value_name = "ID")]

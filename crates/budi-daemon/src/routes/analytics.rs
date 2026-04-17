@@ -719,7 +719,7 @@ pub struct SessionsQueryParams {
     pub sort_asc: Option<bool>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
-    /// Filter to sessions tagged with the given `ticket_id` (e.g. `PAVA-2057`).
+    /// Filter to sessions tagged with the given `ticket_id` (e.g. `ENG-123`).
     /// Wired in by 8.1 so `budi sessions --ticket <ID>` mirrors `--branch`.
     pub ticket: Option<String>,
     #[serde(flatten)]
