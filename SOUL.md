@@ -72,7 +72,7 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 
 ### Product boundaries
 
-Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extraction-boundaries.md)):
+Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extraction-boundaries.md)). 8.x as a whole is organized as one local product with optional cloud visibility, not two peer products — see [ADR-0088](docs/adr/0088-8x-local-developer-first-product-contract.md) for the local-developer-first product contract governing 8.1 scope, classification principles, statusline contract, and 8.2 / 9.0 deferrals.
 
 | Product | Repo | Role |
 |---------|------|------|
@@ -149,7 +149,7 @@ Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingest
 ### Attribution contract (R1.0)
 
 Every ingestor that writes to `messages` MUST uphold the following so that the
-CLI, daemon, and dashboard tell the same story (see ADR-0082 and the R1.0 bugs
+CLI, daemon, and dashboard tell the same story (see ADR-0082, [ADR-0088](docs/adr/0088-8x-local-developer-first-product-contract.md) §5, and the R1.0 bugs
 in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 
 - **`timestamp`** — RFC3339 string in UTC. Accept both `...Z` and `...+00:00`
