@@ -293,6 +293,50 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Session visibility: catch a recurrence of R1.0.1 (#302) where assistant
+    // rows exist for a window but `budi sessions` returns empty because the
+    // session_id was dropped on write. Mismatch is a hard error for the
+    // developer-first story, so we add it to `issues`.
+    if let Ok(db_path) = budi_core::analytics::db_path()
+        && db_path.exists()
+        && let Ok(conn) = budi_core::analytics::open_db(&db_path)
+    {
+        match budi_core::analytics::session_visibility(&conn) {
+            Ok(windows) => {
+                let yellow = super::ansi("\x1b[33m");
+                let mut any_mismatch = false;
+                for window in &windows {
+                    let mark = if window.has_mismatch() {
+                        any_mismatch = true;
+                        format!("{red}\u{2717}{reset}")
+                    } else if window.assistant_messages == 0 {
+                        format!("{dim}-{reset}")
+                    } else if window.assistant_messages_with_session < window.assistant_messages {
+                        format!("{yellow}!{reset}")
+                    } else {
+                        format!("{green}\u{2713}{reset}")
+                    };
+                    println!(
+                        "  {mark} sessions visibility ({}): assistant={} with_session={} distinct={} returned={}",
+                        window.label,
+                        window.assistant_messages,
+                        window.assistant_messages_with_session,
+                        window.distinct_sessions,
+                        window.returned_sessions,
+                    );
+                }
+                if any_mismatch {
+                    issues.push(
+                        "Sessions visibility mismatch: assistant messages exist in a window but `budi sessions` returns none. See #302.".into(),
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  {dim}-{reset} sessions visibility: could not compute ({e})");
+            }
+        }
+    }
+
     // Auto-proxy configuration checks (shell profile + IDE config files)
     {
         let agents = budi_core::config::load_agents_config()

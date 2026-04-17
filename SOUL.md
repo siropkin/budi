@@ -119,6 +119,35 @@ Nine tables, seven data entities + two supporting:
 
 Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingestion has been removed. The proxy is the sole live data source.
 
+### Attribution contract (R1.0)
+
+Every ingestor that writes to `messages` MUST uphold the following so that the
+CLI, daemon, and dashboard tell the same story (see ADR-0082 and the R1.0 bugs
+in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
+
+- **`timestamp`** — RFC3339 string in UTC. Accept both `...Z` and `...+00:00`
+  offsets; `session_list_with_filters` and `activity_chart` compare these as
+  strings, so never write naive SQLite datetime (`YYYY-MM-DD HH:MM:SS`) or a
+  local-offset string. Providers emit RFC3339 from `DateTime::<Utc>::to_rfc3339()`
+  (Claude Code JSONL, Codex) or `DateTime::from_timestamp_millis(..).to_rfc3339()`
+  (Cursor, proxy).
+- **`session_id`** — required for every live assistant row. Live proxy traffic
+  uses the agent-provided `X-Budi-Session` header, falling back to
+  `generate_proxy_session_id()`. Empty-string `session_id` is treated as NULL
+  by the analytics layer, and the insert path normalizes `""` to `NULL` so
+  ghost `(empty)` sessions cannot appear. Rows with NULL/empty `session_id`
+  are invisible to `budi sessions` by design — they indicate an attribution
+  bug upstream, not a display bug.
+- **`provider`** — canonical provider key (`claude_code`, `cursor`, `openai`,
+  `copilot`). `COALESCE(provider, 'claude_code')` is the legacy fallback for
+  pre-8.0 rows; new writes MUST set it explicitly.
+- **`git_branch`** — written without the `refs/heads/` prefix
+  (`session_list_with_filters` strips it defensively for older rows).
+
+`budi doctor` runs a sessions-visibility check for the `today`, `7d`, and
+`30d` windows and fails with a link to #302 if any window has assistant rows
+but zero returned sessions.
+
 ### Key concepts
 
 - **cost_confidence**: determines `~` prefix in dashboard for non-exact costs

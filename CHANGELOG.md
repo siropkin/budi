@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (8.1.0)
+
+### Fixed
+
+- **`budi sessions` now shows today's proxy activity** — `insert_proxy_message` dropped the `session_id` column, so every proxied assistant message was written with `session_id = NULL` and filtered out of `session_list_with_filters`. Both the live proxy path and the defensive analytics filter now treat empty-string `session_id` as NULL so ghost sessions can't reappear (#302).
+
+### Added
+
+- **`budi doctor` sessions-visibility check** — reports assistant-messages vs returned-session counts for the `today`, `7d`, and `30d` windows and flags a hard error if any window has activity but zero returned sessions (#302).
+- **`messages.timestamp` / `session_id` attribution contract** documented in `SOUL.md` so future providers cannot silently regress R1.0 (#302).
+
 ## 8.0.0 — 2026-04-16
 
 Budi 8.0 is a ground-up rearchitecture: proxy-first live cost tracking replaces the old hook/OTEL/file-sync ingestion model, the Cursor extension and cloud dashboard are extracted into independent repos, and a new optional cloud layer gives managers team-wide AI cost visibility — all while keeping prompts, code, and responses strictly local.
