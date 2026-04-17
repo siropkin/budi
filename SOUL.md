@@ -309,6 +309,36 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
     repo-relative (no leading `/`, no `..`, no Windows separators, no
     URL scheme) before hitting SQLite.
 
+- **`tool_outcome`** — per-message tool-call outcome added in R1.5
+  ([#293](https://github.com/siropkin/budi/issues/293)). The JSONL
+  extractor reads `tool_result` blocks from user messages, keeps only
+  the `tool_use_id` and a bounded classification (`success`, `error`,
+  `denied`), and never persists the underlying content. The pipeline
+  joins these back to the originating assistant message on the next
+  pass and emits one `tool_outcome` tag per distinct outcome observed.
+  A session-scoped retry heuristic promotes a follow-up call to the
+  same tool after an `error` into `tool_outcome=retry`, so recovery
+  attempts surface without requiring provider cooperation. Sibling
+  `tool_outcome_source` (`jsonl_tool_result` when direct,
+  `heuristic_retry` when promoted) and `tool_outcome_confidence`
+  (`high` / `medium`) mirror the `activity_source` / `file_path_source`
+  contract. Messages with no tool uses carry no outcome tag. The proxy
+  ingest path does not emit outcomes in 8.1 — tool names and IDs
+  aren't captured there yet — so outcomes are import-only for now.
+
+- **`work_outcome`** (session-scoped) — derived in R1.5 from local
+  git state only. `budi session detail <id>` correlates the session's
+  `git_branch` with commits on that branch between the session's
+  start and its end + 24h grace, producing one of `committed`,
+  `branch_merged`, `no_commit`, or `unknown`. The derivation runs
+  `git` locally — no remote Git/PR API calls, no content capture —
+  and fails open to `unknown` whenever the branch is missing, is an
+  integration branch (`main`, `master`, `develop`), or the repo root
+  can't be resolved. A one-line rationale accompanies every label so
+  operators can see which rule fired. List surfaces skip the
+  derivation (one `git` invocation per session list row is too
+  expensive); only the detail view surfaces it.
+
 `budi doctor` runs three attribution checks:
 
 - **Session visibility** for the `today`, `7d`, and `30d` windows (R1.0.1,
@@ -373,7 +403,7 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
 - `budi init` prompts for per-agent enablement (Claude Code, Codex CLI, Cursor, Copilot CLI), persists choices to `~/.config/budi/agents.toml`, and auto-configures proxy routing for enabled agents (shell profile + Cursor/Codex settings). `budi enable/disable <agent>` updates this config later. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility. After configuring CLI agents (Claude, Codex, Copilot), both `budi init` and `budi enable` warn that a shell restart is required for proxy env vars to take effect and suggest `budi launch <agent>` for immediate routing. `budi doctor` detects when proxy env vars are configured in the shell profile but not set in the current process.
 - `budi init` configures integrations (statusline, extension) for enabled agents
-- Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
+- Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, `tool_outcome`, `tool_outcome_source`, `tool_outcome_confidence`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** ([siropkin/budi-cursor](https://github.com/siropkin/budi-cursor)): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.

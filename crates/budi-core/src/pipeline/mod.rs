@@ -70,6 +70,37 @@ impl Pipeline {
 
         propagate_session_context(messages);
 
+        // R1.5 (#293): collect every `tool_result` we saw on user messages
+        // into a session-scoped map keyed by `tool_use_id`. The pipeline
+        // joins these back to the originating assistant message below.
+        // We do this as a first pass because the ordering guarantees are
+        // already established by the sort + propagation above, but we
+        // still need to know *every* outcome for a session before we
+        // decide which tag to emit for a given assistant message
+        // (especially because Claude Code delivers tool results after
+        // the assistant message that produced the tool_use).
+        let mut session_outcomes: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for msg in messages.iter() {
+            if msg.role != "user" || msg.tool_outcomes.is_empty() {
+                continue;
+            }
+            let sid = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
+            let bucket = session_outcomes.entry(sid).or_default();
+            for o in &msg.tool_outcomes {
+                // Keep the first outcome we see for a `tool_use_id` —
+                // retries use a *different* id, so later entries can
+                // only be duplicates or out-of-order deliveries.
+                bucket
+                    .entry(o.tool_use_id.clone())
+                    .or_insert_with(|| o.outcome.clone());
+            }
+        }
+
+        // Per-session retry state: tool_name → last observed outcome on
+        // the most recent assistant message in that session. Used by the
+        // rule-based `retry` attribution below.
+        let mut last_tool_outcome: HashMap<(String, String), String> = HashMap::new();
+
         for msg in messages.iter_mut() {
             let mut msg_tags = Vec::new();
             let dedup_id = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
@@ -123,12 +154,153 @@ impl Pipeline {
                         });
                     }
                 }
+
+                // R1.5 (#293): tool_outcome tags. For each tool_use on
+                // this assistant message, look up the outcome reported
+                // by the next user message (already collected into
+                // `session_outcomes`). Then apply the rule-based retry
+                // heuristic so a follow-up call to the same tool after
+                // an `error` outcome in the same session surfaces as
+                // `retry` instead of just another `success`/`error`.
+                emit_tool_outcome_tags(
+                    msg,
+                    &session_outcomes,
+                    &mut last_tool_outcome,
+                    &mut msg_tags,
+                );
             }
 
             all_tags.push(msg_tags);
         }
         all_tags
     }
+}
+
+/// Emit `tool_outcome` / `tool_outcome_source` / `tool_outcome_confidence`
+/// tags on an assistant message using the session-scoped outcome map plus
+/// a rule-based retry heuristic. See ADR-0088 §5 and the constants in
+/// `crate::jsonl`.
+///
+/// Multi-valued: every distinct outcome observed across this message's
+/// tool uses produces its own `tool_outcome` tag so the analytics layer
+/// can surface "this message had one success and one error" without
+/// losing information. The sibling source/confidence tags describe the
+/// dominant provenance — `heuristic_retry` wins over `jsonl_tool_result`
+/// only if the retry attribution applied to at least one tool use on
+/// this message.
+fn emit_tool_outcome_tags(
+    msg: &crate::jsonl::ParsedMessage,
+    session_outcomes: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    last_tool_outcome: &mut std::collections::HashMap<(String, String), String>,
+    msg_tags: &mut Vec<Tag>,
+) {
+    use crate::jsonl as j;
+    if msg.tool_use_ids.is_empty() && msg.tool_names.is_empty() {
+        return;
+    }
+    let sid = msg.session_id.clone().unwrap_or_else(|| msg.uuid.clone());
+    let outcome_map = session_outcomes.get(&sid);
+
+    // Pair tool names with tool_use_ids by position. In practice the
+    // JSONL extractor produces parallel-indexed vectors (one entry per
+    // tool_use block) after a stable sort, so this is a best-effort
+    // join. Any mismatch (e.g. zero tool_use_ids) falls through with an
+    // empty name — we still record an outcome, we just can't promote it
+    // to `retry`.
+    let pairs: Vec<(String, String)> = msg
+        .tool_use_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let name = msg.tool_names.get(i).cloned().unwrap_or_default();
+            (id.clone(), name)
+        })
+        .collect();
+
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut any_heuristic = false;
+    let mut any_direct = false;
+
+    for (use_id, name) in &pairs {
+        let direct = outcome_map.and_then(|m| m.get(use_id)).cloned();
+        let prior_same_tool = if !name.is_empty() {
+            last_tool_outcome.get(&(sid.clone(), name.clone())).cloned()
+        } else {
+            None
+        };
+
+        let outcome = match (direct, prior_same_tool) {
+            (Some(_d), Some(prior)) if prior == j::TOOL_OUTCOME_ERROR => {
+                // Follow-up call to the same tool right after an error:
+                // even if the new one succeeded, surface it as a retry
+                // so analytics can see the recovery attempt.
+                any_heuristic = true;
+                j::TOOL_OUTCOME_RETRY.to_string()
+            }
+            (Some(d), _) => {
+                any_direct = true;
+                d
+            }
+            (None, Some(prior)) if prior == j::TOOL_OUTCOME_ERROR => {
+                any_heuristic = true;
+                j::TOOL_OUTCOME_RETRY.to_string()
+            }
+            (None, _) => {
+                // No outcome visible for this tool_use yet (e.g. the
+                // session was cut off before the result landed). Skip
+                // silently — the `(untagged)` bucket already covers
+                // open-ended calls.
+                continue;
+            }
+        };
+
+        // Update session state so the next assistant message in this
+        // session can detect its own retries against the *original*
+        // outcome — the one reported by `tool_result`, not the promoted
+        // `retry` label — otherwise a cascade of failures would collapse
+        // into a single retry label.
+        if !name.is_empty() {
+            let raw = outcome_map
+                .and_then(|m| m.get(use_id))
+                .cloned()
+                .unwrap_or_else(|| outcome.clone());
+            last_tool_outcome.insert((sid.clone(), name.clone()), raw);
+        }
+
+        if seen.insert(outcome.clone()) {
+            msg_tags.push(Tag {
+                key: tk::TOOL_OUTCOME.to_string(),
+                value: outcome,
+            });
+        }
+    }
+
+    if seen.is_empty() {
+        return;
+    }
+
+    // `any_direct` is implied whenever we got here without firing the
+    // heuristic (otherwise `seen` would be empty and we'd have
+    // returned), so the fallback is JSONL by construction.
+    let source = if any_heuristic {
+        j::TOOL_OUTCOME_SOURCE_HEURISTIC
+    } else {
+        let _ = any_direct;
+        j::TOOL_OUTCOME_SOURCE_JSONL
+    };
+    let confidence = if any_direct && !any_heuristic {
+        j::TOOL_OUTCOME_CONFIDENCE_HIGH
+    } else {
+        j::TOOL_OUTCOME_CONFIDENCE_MEDIUM
+    };
+    msg_tags.push(Tag {
+        key: tk::TOOL_OUTCOME_SOURCE.to_string(),
+        value: source.to_string(),
+    });
+    msg_tags.push(Tag {
+        key: tk::TOOL_OUTCOME_CONFIDENCE.to_string(),
+        value: confidence.to_string(),
+    });
 }
 
 /// Propagate git_branch, repo_id, cwd, prompt_category, and the R1.2
@@ -539,6 +711,7 @@ mod tests {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         }
     }
 
@@ -726,5 +899,197 @@ mod tests {
         assert!(tool_values.contains("Read"));
         assert!(tool_values.contains("Bash"));
         assert_eq!(tool_values.len(), 2);
+    }
+
+    // R1.5 (#293) — tool outcome tagging on assistant messages.
+
+    fn outcome(id: &str, label: &str) -> crate::jsonl::ToolOutcome {
+        crate::jsonl::ToolOutcome {
+            tool_use_id: id.to_string(),
+            outcome: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn tool_outcome_success_tag_on_assistant() {
+        use crate::config::TagsConfig;
+        use crate::jsonl::TOOL_OUTCOME_SUCCESS;
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
+
+        let mut a1 = test_msg();
+        a1.uuid = "a1".into();
+        a1.session_id = Some("sess-1".into());
+        a1.role = "assistant".into();
+        a1.model = Some("claude-opus".into());
+        a1.output_tokens = 1;
+        a1.tool_names = vec!["Read".into()];
+        a1.tool_use_ids = vec!["t-1".into()];
+        a1.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut u1 = test_msg();
+        u1.uuid = "u1".into();
+        u1.session_id = Some("sess-1".into());
+        u1.role = "user".into();
+        u1.tool_outcomes = vec![outcome("t-1", TOOL_OUTCOME_SUCCESS)];
+        u1.timestamp = "2026-03-14T18:13:44Z".parse().unwrap();
+
+        let mut msgs = vec![a1, u1];
+        let tags = pipeline.process(&mut msgs);
+        // After pipeline sort, assistant is index 0 (earlier timestamp).
+        let keys: Vec<(String, String)> = tags[0]
+            .iter()
+            .map(|t| (t.key.clone(), t.value.clone()))
+            .collect();
+        assert!(
+            keys.contains(&(tk::TOOL_OUTCOME.to_string(), "success".to_string())),
+            "expected tool_outcome=success tag, got: {keys:?}"
+        );
+        assert!(
+            keys.iter()
+                .any(|(k, v)| k == tk::TOOL_OUTCOME_SOURCE && v == "jsonl_tool_result"),
+            "expected jsonl_tool_result source, got: {keys:?}"
+        );
+        assert!(
+            keys.iter()
+                .any(|(k, v)| k == tk::TOOL_OUTCOME_CONFIDENCE && v == "high"),
+            "expected high confidence, got: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn tool_outcome_retry_heuristic_promotes_second_call() {
+        use crate::config::TagsConfig;
+        use crate::jsonl::{TOOL_OUTCOME_ERROR, TOOL_OUTCOME_SUCCESS};
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
+
+        // First assistant call errors, second call succeeds — retry
+        // heuristic should promote the second to `retry` with medium
+        // confidence.
+        let mut a1 = test_msg();
+        a1.uuid = "a1".into();
+        a1.session_id = Some("sess-1".into());
+        a1.role = "assistant".into();
+        a1.model = Some("claude-opus".into());
+        a1.output_tokens = 1;
+        a1.tool_names = vec!["Bash".into()];
+        a1.tool_use_ids = vec!["t-1".into()];
+        a1.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut u1 = test_msg();
+        u1.uuid = "u1".into();
+        u1.session_id = Some("sess-1".into());
+        u1.role = "user".into();
+        u1.tool_outcomes = vec![outcome("t-1", TOOL_OUTCOME_ERROR)];
+        u1.timestamp = "2026-03-14T18:13:44Z".parse().unwrap();
+
+        let mut a2 = test_msg();
+        a2.uuid = "a2".into();
+        a2.session_id = Some("sess-1".into());
+        a2.role = "assistant".into();
+        a2.model = Some("claude-opus".into());
+        a2.output_tokens = 1;
+        a2.tool_names = vec!["Bash".into()];
+        a2.tool_use_ids = vec!["t-2".into()];
+        a2.timestamp = "2026-03-14T18:13:45Z".parse().unwrap();
+
+        let mut u2 = test_msg();
+        u2.uuid = "u2".into();
+        u2.session_id = Some("sess-1".into());
+        u2.role = "user".into();
+        u2.tool_outcomes = vec![outcome("t-2", TOOL_OUTCOME_SUCCESS)];
+        u2.timestamp = "2026-03-14T18:13:46Z".parse().unwrap();
+
+        let mut msgs = vec![a1, u1, a2, u2];
+        let tags = pipeline.process(&mut msgs);
+
+        // a1 (index 0 after sort) should carry `error`; a2 (index 2) should carry `retry`.
+        let a1_outcomes: Vec<&str> = tags[0]
+            .iter()
+            .filter(|t| t.key == tk::TOOL_OUTCOME)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(a1_outcomes, vec!["error"], "a1 should be labeled error");
+
+        let a2_outcomes: Vec<&str> = tags[2]
+            .iter()
+            .filter(|t| t.key == tk::TOOL_OUTCOME)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(
+            a2_outcomes,
+            vec!["retry"],
+            "a2 should be promoted to retry via the heuristic"
+        );
+
+        // Source should flip to heuristic_retry / medium on a2.
+        assert!(
+            tags[2]
+                .iter()
+                .any(|t| t.key == tk::TOOL_OUTCOME_SOURCE && t.value == "heuristic_retry"),
+            "a2 should report heuristic source, got: {:?}",
+            tags[2]
+        );
+        assert!(
+            tags[2]
+                .iter()
+                .any(|t| t.key == tk::TOOL_OUTCOME_CONFIDENCE && t.value == "medium"),
+            "a2 should report medium confidence, got: {:?}",
+            tags[2]
+        );
+    }
+
+    #[test]
+    fn tool_outcome_denied_passes_through() {
+        use crate::config::TagsConfig;
+        use crate::jsonl::TOOL_OUTCOME_DENIED;
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
+
+        let mut a1 = test_msg();
+        a1.uuid = "a1".into();
+        a1.session_id = Some("sess-1".into());
+        a1.role = "assistant".into();
+        a1.model = Some("claude-opus".into());
+        a1.output_tokens = 1;
+        a1.tool_names = vec!["Edit".into()];
+        a1.tool_use_ids = vec!["t-1".into()];
+        a1.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut u1 = test_msg();
+        u1.uuid = "u1".into();
+        u1.session_id = Some("sess-1".into());
+        u1.role = "user".into();
+        u1.tool_outcomes = vec![outcome("t-1", TOOL_OUTCOME_DENIED)];
+        u1.timestamp = "2026-03-14T18:13:44Z".parse().unwrap();
+
+        let mut msgs = vec![a1, u1];
+        let tags = pipeline.process(&mut msgs);
+        let outcomes: Vec<&str> = tags[0]
+            .iter()
+            .filter(|t| t.key == tk::TOOL_OUTCOME)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(outcomes, vec!["denied"]);
+    }
+
+    #[test]
+    fn tool_outcome_absent_when_no_tool_use() {
+        use crate::config::TagsConfig;
+        let mut pipeline = Pipeline::default_pipeline(Some(TagsConfig::default()));
+
+        let mut a1 = test_msg();
+        a1.uuid = "a1".into();
+        a1.session_id = Some("sess-1".into());
+        a1.role = "assistant".into();
+        a1.model = Some("claude-opus".into());
+        a1.output_tokens = 1;
+        a1.timestamp = "2026-03-14T18:13:43Z".parse().unwrap();
+
+        let mut msgs = vec![a1];
+        let tags = pipeline.process(&mut msgs);
+        assert!(
+            tags[0].iter().all(|t| t.key != tk::TOOL_OUTCOME),
+            "assistant without tool_use should not carry tool_outcome, got: {:?}",
+            tags[0]
+        );
     }
 }

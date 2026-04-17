@@ -193,6 +193,21 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
     if !s.git_branches.is_empty() {
         println!("  {bold}Branches{reset}   {}", s.git_branches.join(", "));
     }
+    // R1.5 (#293): surface the rule-based work outcome whenever we
+    // could derive one. Rationale is intentionally shown in dim text
+    // so operators can see *why* a label was picked without it
+    // competing visually with the main session stats.
+    if let Some(ref outcome) = s.work_outcome {
+        let colored = match outcome.as_str() {
+            "committed" | "branch_merged" => format!("{green}{outcome}{reset}"),
+            "no_commit" => format!("{yellow}{outcome}{reset}"),
+            _ => outcome.to_string(),
+        };
+        println!("  {bold}Outcome{reset}    {colored}");
+        if let Some(ref rationale) = s.work_outcome_rationale {
+            println!("             {dim}{rationale}{reset}");
+        }
+    }
 
     println!();
     println!("  {bold}Messages{reset}   {}", s.message_count);

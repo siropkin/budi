@@ -17,3 +17,4 @@ pub mod proxy;
 pub mod repo_id;
 pub mod tag_keys;
 pub mod update;
+pub mod work_outcome;

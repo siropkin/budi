@@ -186,6 +186,24 @@ pub struct ParsedMessage {
     /// paths later by `FileEnricher` under ADR-0083 privacy rules; see
     /// `crate::file_attribution`. Added in R1.4 (#292).
     pub tool_files: Vec<String>,
+    /// Tool outcomes extracted from provider `tool_result` blocks on this
+    /// message (populated on **user** messages in Claude Code transcripts,
+    /// which is where tool results land). The pipeline joins these to the
+    /// originating assistant message by `tool_use_id` and emits
+    /// `tool_outcome` tags there. Added in R1.5 (#293); see ADR-0088 §5.
+    pub tool_outcomes: Vec<ToolOutcome>,
+}
+
+/// One provider-reported tool outcome. Content is never stored — we only
+/// keep the classified label and the `tool_use_id` it binds to. See
+/// ADR-0083 for the privacy contract.
+#[derive(Debug, Clone)]
+pub struct ToolOutcome {
+    pub tool_use_id: String,
+    /// Bounded label; one of `success`, `error`, `denied`. `retry` is
+    /// produced later by a session-scoped heuristic in the pipeline, not
+    /// by this extractor.
+    pub outcome: String,
 }
 
 impl Default for ParsedMessage {
@@ -220,7 +238,138 @@ impl Default for ParsedMessage {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         }
+    }
+}
+
+/// Scan user-message content blocks for `tool_result` entries and return
+/// the classified outcomes (R1.5, #293).
+///
+/// Claude Code transcripts deliver tool results as `user` messages with
+/// content blocks of shape
+/// `{"type":"tool_result","tool_use_id":"...","is_error":bool,"content":...}`.
+/// We classify each one into a bounded label:
+///
+/// - `error` — `is_error: true`.
+/// - `denied` — the content text matches a small set of
+///   permission-denied sentinels used by Claude Code when the user
+///   rejects a proposed action.
+/// - `success` — otherwise.
+///
+/// The content text itself is inspected in-memory only — we never
+/// persist it. See ADR-0083 §3.
+pub(crate) fn extract_user_tool_outcomes(
+    content: Option<&Vec<serde_json::Value>>,
+) -> Vec<ToolOutcome> {
+    let Some(blocks) = content else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for block in blocks {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if block_type != "tool_result" {
+            continue;
+        }
+        let tool_use_id = block
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if tool_use_id.is_empty() {
+            continue;
+        }
+        let is_error = block
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let text = tool_result_text(block.get("content"));
+        let outcome = classify_tool_outcome(is_error, text.as_deref());
+        out.push(ToolOutcome {
+            tool_use_id,
+            outcome: outcome.to_string(),
+        });
+    }
+    out
+}
+
+/// Flatten a `tool_result.content` value into a plain text snippet for
+/// sentinel matching. Content may be a string, a block array with
+/// `{"type":"text","text":...}` entries, or missing. We truncate to keep
+/// the classifier cheap; sentinels we care about all fit well within the
+/// first kilobyte of content.
+fn tool_result_text(content: Option<&serde_json::Value>) -> Option<String> {
+    const MAX: usize = 2048;
+    let v = content?;
+    let mut s = match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                serde_json::Value::String(s) => Some(s.as_str()),
+                serde_json::Value::Object(_) => b.get("text").and_then(|v| v.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    if s.len() > MAX {
+        s.truncate(MAX);
+    }
+    if s.trim().is_empty() { None } else { Some(s) }
+}
+
+/// Bounded label constants for `tool_outcome` tag values. Pinned here so
+/// analytics, tests, and proxy/import ingest all agree.
+pub const TOOL_OUTCOME_SUCCESS: &str = "success";
+pub const TOOL_OUTCOME_ERROR: &str = "error";
+pub const TOOL_OUTCOME_DENIED: &str = "denied";
+pub const TOOL_OUTCOME_RETRY: &str = "retry";
+
+/// Source label for outcomes extracted directly from a provider
+/// `tool_result` block. Mirrors the `_SOURCE` convention used by R1.2
+/// (#222) / R1.4 (#292).
+pub const TOOL_OUTCOME_SOURCE_JSONL: &str = "jsonl_tool_result";
+/// Source label for outcomes attributed by the session-scoped retry
+/// heuristic in the pipeline.
+pub const TOOL_OUTCOME_SOURCE_HEURISTIC: &str = "heuristic_retry";
+
+/// Confidence labels used on `tool_outcome_confidence` tags. `high` for
+/// explicit `tool_result` evidence, `medium` for heuristic retry.
+pub const TOOL_OUTCOME_CONFIDENCE_HIGH: &str = "high";
+pub const TOOL_OUTCOME_CONFIDENCE_MEDIUM: &str = "medium";
+
+/// Sentinels that indicate the user rejected the tool call in Claude
+/// Code / Cursor style permission flows. Matching is case-insensitive
+/// and substring-based; we deliberately keep the list short and
+/// debuggable. Anything not on this list with `is_error=true` is still
+/// classified as `error` — we do not overfit.
+const USER_DENIAL_SENTINELS: &[&str] = &[
+    "the user doesn't want to take this action",
+    "the user doesn't want to proceed",
+    "user rejected",
+    "user denied",
+    "operation cancelled by the user",
+    "operation canceled by the user",
+    "permission denied by user",
+];
+
+/// Classify a single `tool_result` block given its `is_error` flag and
+/// flattened content text. Exposed for tests and for the proxy path (if
+/// we ever grow one that inspects follow-up request bodies).
+pub fn classify_tool_outcome(is_error: bool, text: Option<&str>) -> &'static str {
+    if let Some(t) = text {
+        let lower = t.to_ascii_lowercase();
+        if USER_DENIAL_SENTINELS.iter().any(|s| lower.contains(s)) {
+            return TOOL_OUTCOME_DENIED;
+        }
+    }
+    if is_error {
+        TOOL_OUTCOME_ERROR
+    } else {
+        TOOL_OUTCOME_SUCCESS
     }
 }
 
@@ -294,6 +443,13 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 }
                 None => None,
             });
+            // R1.5 (#293): scan the same content blocks for tool_result
+            // entries so the pipeline can bind outcomes back to their
+            // originating assistant message by `tool_use_id`.
+            let tool_outcomes = match u.message.as_ref().and_then(|m| m.content.as_ref()) {
+                Some(UserContent::Blocks(blocks)) => extract_user_tool_outcomes(Some(blocks)),
+                _ => Vec::new(),
+            };
             let classification = prompt_text
                 .as_deref()
                 .and_then(crate::hooks::classify_prompt_detailed);
@@ -336,6 +492,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 tool_names: Vec::new(),
                 tool_use_ids: Vec::new(),
                 tool_files: Vec::new(),
+                tool_outcomes,
             })
         }
         TranscriptEntry::Assistant(a) => {
@@ -386,6 +543,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 tool_names,
                 tool_use_ids,
                 tool_files,
+                tool_outcomes: Vec::new(),
             })
         }
         TranscriptEntry::Other => None,
@@ -449,6 +607,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 tool_names,
                 tool_use_ids,
                 tool_files,
+                tool_outcomes: Vec::new(),
             })
         }
         "user" => Some(ParsedMessage {
@@ -775,5 +934,80 @@ mod tests {
         );
         let (msgs, _) = parse_transcript(content, 0);
         assert_eq!(msgs.len(), 1, "duplicate request_id should be deduped");
+    }
+
+    // -----------------------------------------------------------------------
+    // R1.5 (#293): tool_result → tool_outcome classification.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_plain_success() {
+        assert_eq!(classify_tool_outcome(false, None), TOOL_OUTCOME_SUCCESS);
+        assert_eq!(
+            classify_tool_outcome(false, Some("File contents redacted")),
+            TOOL_OUTCOME_SUCCESS
+        );
+    }
+
+    #[test]
+    fn classify_error_flag_wins_when_no_denial() {
+        assert_eq!(
+            classify_tool_outcome(true, Some("network timeout")),
+            TOOL_OUTCOME_ERROR
+        );
+        assert_eq!(classify_tool_outcome(true, None), TOOL_OUTCOME_ERROR);
+    }
+
+    #[test]
+    fn classify_user_denial_sentinels() {
+        let cases = [
+            "The user doesn't want to take this action right now.",
+            "User rejected the edit.",
+            "Operation cancelled by the user",
+            "permission denied by user",
+        ];
+        for c in cases {
+            assert_eq!(
+                classify_tool_outcome(true, Some(c)),
+                TOOL_OUTCOME_DENIED,
+                "{c} should classify as denied",
+            );
+        }
+    }
+
+    #[test]
+    fn extract_user_tool_outcomes_parses_blocks() {
+        let content = serde_json::json!([
+            {"type": "tool_result", "tool_use_id": "t-1", "content": "ok"},
+            {"type": "tool_result", "tool_use_id": "t-2", "is_error": true, "content": "boom"},
+            {"type": "text", "text": "ignored"},
+        ]);
+        let blocks = content.as_array().cloned().unwrap();
+        let outcomes = extract_user_tool_outcomes(Some(&blocks));
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].tool_use_id, "t-1");
+        assert_eq!(outcomes[0].outcome, TOOL_OUTCOME_SUCCESS);
+        assert_eq!(outcomes[1].tool_use_id, "t-2");
+        assert_eq!(outcomes[1].outcome, TOOL_OUTCOME_ERROR);
+    }
+
+    #[test]
+    fn extract_user_tool_outcomes_skips_missing_id() {
+        let content = serde_json::json!([
+            {"type": "tool_result", "content": "no id"},
+            {"type": "tool_result", "tool_use_id": "", "content": "empty id"},
+        ]);
+        let blocks = content.as_array().cloned().unwrap();
+        assert!(extract_user_tool_outcomes(Some(&blocks)).is_empty());
+    }
+
+    #[test]
+    fn parse_user_message_populates_tool_outcomes() {
+        let line = r#"{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t-1","content":"ok"}]},"uuid":"u1","timestamp":"2026-03-14T18:13:42.614Z","sessionId":"s1"}"#;
+        let msg = parse_line(line).unwrap();
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.tool_outcomes.len(), 1);
+        assert_eq!(msg.tool_outcomes[0].tool_use_id, "t-1");
+        assert_eq!(msg.tool_outcomes[0].outcome, TOOL_OUTCOME_SUCCESS);
     }
 }

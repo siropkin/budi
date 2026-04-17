@@ -74,6 +74,7 @@ fn ingest_and_query() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -105,6 +106,7 @@ fn ingest_and_query() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
 
@@ -156,6 +158,7 @@ fn rollups_track_message_updates_and_deletes() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
@@ -212,6 +215,7 @@ fn rollups_are_used_only_for_hour_aligned_ranges() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
@@ -286,6 +290,7 @@ fn rollup_summary_latency_smoke_on_large_dataset() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         });
     }
     ingest_messages(&mut conn, &messages, None).unwrap();
@@ -339,6 +344,7 @@ fn cost_cents_baked_at_ingest() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     // CostEnricher is the single source of truth for cost_cents
     CostEnricher.enrich(&mut msg);
@@ -415,6 +421,7 @@ fn last_seen_derived_from_messages() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "m2".to_string(),
@@ -446,6 +453,7 @@ fn last_seen_derived_from_messages() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -494,6 +502,7 @@ fn newest_ingested_data_uses_assistant_rows() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "a-only".to_string(),
@@ -525,6 +534,7 @@ fn newest_ingested_data_uses_assistant_rows() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -564,6 +574,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "a1".to_string(),
@@ -595,6 +606,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "u2".to_string(),
@@ -626,6 +638,7 @@ fn sample_messages() -> Vec<ParsedMessage> {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ]
 }
@@ -822,6 +835,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "t2".to_string(),
@@ -853,6 +867,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "t3".to_string(),
@@ -884,6 +899,7 @@ fn messages_with_cache_patterns() -> Vec<ParsedMessage> {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ]
 }
@@ -981,6 +997,7 @@ fn multi_provider_ingest_and_query() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "cc-a1".to_string(),
@@ -1012,6 +1029,7 @@ fn multi_provider_ingest_and_query() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
 
@@ -1046,6 +1064,7 @@ fn multi_provider_ingest_and_query() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "cu-a1".to_string(),
@@ -1077,6 +1096,7 @@ fn multi_provider_ingest_and_query() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
 
@@ -1143,6 +1163,7 @@ fn cross_parse_dedup_by_request_id() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -1181,6 +1202,7 @@ fn cross_parse_dedup_by_request_id() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -1234,6 +1256,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[final_entry], None).unwrap();
 
@@ -1267,6 +1290,7 @@ fn cross_parse_dedup_keeps_higher_output() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[intermediate], None).unwrap();
 
@@ -1318,6 +1342,7 @@ fn no_request_id_no_dedup() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg1], None).unwrap();
 
@@ -1351,6 +1376,7 @@ fn no_request_id_no_dedup() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg2], None).unwrap();
 
@@ -1416,6 +1442,7 @@ fn jsonl_dedup_matches_otel_by_fingerprint_within_window() {
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     };
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
@@ -1544,6 +1571,7 @@ fn session_cost_curve_buckets() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         });
     }
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1588,6 +1616,7 @@ fn cost_confidence_stats_groups_correctly() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "conf-2".to_string(),
@@ -1619,6 +1648,7 @@ fn cost_confidence_stats_groups_correctly() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -1665,6 +1695,7 @@ fn subagent_cost_stats_splits_correctly() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
         ParsedMessage {
             uuid: "sub-1".to_string(),
@@ -1696,6 +1727,7 @@ fn subagent_cost_stats_splits_correctly() {
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
         },
     ];
     ingest_messages(&mut conn, &msgs, None).unwrap();
@@ -2218,6 +2250,7 @@ fn assistant_msg(uuid: &str, session_id: &str, cost_cents: f64) -> ParsedMessage
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     }
 }
 
@@ -3603,6 +3636,7 @@ fn health_msg(
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     }
 }
 

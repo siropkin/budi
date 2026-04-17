@@ -282,6 +282,7 @@ fn parse_token_count(
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
     })
 }
 
