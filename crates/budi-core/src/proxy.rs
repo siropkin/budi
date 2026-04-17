@@ -801,6 +801,7 @@ mod tests {
                 limit: 50,
                 offset: 0,
                 ticket: None,
+                activity: None,
             },
             &crate::analytics::DimensionFilters::default(),
         )

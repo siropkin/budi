@@ -2105,6 +2105,462 @@ fn ticket_prefix_of(ticket: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Activities — first-class CLI dimension wired in 8.1 (#305)
+//
+// Activities come from the `activity` tag emitted by the pipeline when
+// `hooks::classify_prompt` recognises an intent in a user prompt (e.g.
+// "bugfix", "refactor", "testing"). The intent is propagated across every
+// assistant message in the session via `propagate_session_context`, so each
+// assistant row either carries exactly one `activity` tag or none at all.
+//
+// R1.0 treats every aggregate as `source = "rule"` / `confidence = "medium"`
+// because today the only producer is the rule-based classifier. R1.2 (#222)
+// will extend the classifier and can update these fields per-aggregate
+// without breaking the wire format.
+// ---------------------------------------------------------------------------
+
+pub(crate) const ACTIVITY_TAG_KEY: &str = crate::tag_keys::ACTIVITY;
+
+/// Canonical classification source label for rule-derived activities.
+/// Stays stable across the 8.1 release so dashboards can pin on it; R1.2
+/// may introduce additional sources alongside this one.
+pub const ACTIVITY_SOURCE_RULE: &str = "rule";
+
+/// Baseline confidence for rule-derived activities in 8.1.
+pub const ACTIVITY_CONFIDENCE_MEDIUM: &str = "medium";
+
+/// Per-activity aggregate cost row used by `GET /analytics/activities` and
+/// the `budi stats --activities` CLI view.
+///
+/// Activities are sourced from the `activity` tag emitted by the pipeline's
+/// prompt classifier. Messages with no `activity` tag collapse into a single
+/// `(untagged)` bucket so the total stays whole (same contract as
+/// `ticket_cost`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivityCost {
+    pub activity: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+    /// Dominant branch (highest cost) carrying this activity. Empty for
+    /// the `(untagged)` row.
+    #[serde(default)]
+    pub top_branch: String,
+    /// Dominant repo (highest cost) carrying this activity. Empty for the
+    /// `(untagged)` row.
+    #[serde(default)]
+    pub top_repo_id: String,
+    /// Where this activity label came from. `"rule"` in R1.0; reserved for
+    /// future per-aggregate sources in R1.2 (#222).
+    #[serde(default)]
+    pub source: String,
+    /// How confident the aggregate is in the label. `"medium"` baseline in
+    /// R1.0; R1.2 may downgrade to `"low"` for ambiguous prompts or promote
+    /// to `"high"` when a stronger signal lands. `""` for the
+    /// `(untagged)` row to make the absence explicit.
+    #[serde(default)]
+    pub confidence: String,
+}
+
+/// Per-branch breakdown attached to a single activity detail response.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivityBranchBreakdown {
+    pub git_branch: String,
+    pub repo_id: String,
+    pub message_count: u64,
+    pub session_count: u64,
+    pub cost_cents: f64,
+}
+
+/// Detail payload for `GET /analytics/activities/{name}` and
+/// `budi stats --activity <name>`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivityCostDetail {
+    pub activity: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+    /// Dominant repo (empty when ambiguous / unattributed).
+    pub repo_id: String,
+    /// Per-branch attribution for cost charged to this activity.
+    pub branches: Vec<ActivityBranchBreakdown>,
+    /// Classification source — see `ActivityCost::source`.
+    #[serde(default)]
+    pub source: String,
+    /// Classification confidence — see `ActivityCost::confidence`.
+    #[serde(default)]
+    pub confidence: String,
+}
+
+/// Query cost grouped by activity, sorted by cost descending. Includes an
+/// `(untagged)` bucket for assistant messages that have no `activity` tag.
+pub fn activity_cost(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ActivityCost>> {
+    let filters = DimensionFilters::default();
+    activity_cost_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn activity_cost_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<ActivityCost>> {
+    // Tagged path: join messages → tags(activity). An assistant message
+    // should carry at most one activity tag (see pipeline contract), but
+    // we still divide by n_values defensively so the total reconciles if
+    // a future enricher emits more than one value.
+    let mut conditions = vec!["m.role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    if let Some(s) = since {
+        idx += 1;
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{idx}"));
+    }
+    if let Some(u) = until {
+        idx += 1;
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{idx}"));
+    }
+    let model_expr = normalized_model_expr("m.model");
+    let project_expr = normalized_project_expr("m.repo_id");
+    let branch_expr = normalized_branch_expr("m.git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(m.provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    let untagged_conditions: Vec<String> = conditions
+        .iter()
+        .map(|c| c.replace("m.role = 'assistant'", "m2.role = 'assistant'"))
+        .collect();
+    let untagged_conditions: Vec<String> = untagged_conditions
+        .into_iter()
+        .map(|c| c.replace("m.", "m2."))
+        .collect();
+    let untagged_where = format!("WHERE {}", untagged_conditions.join(" AND "));
+
+    let limit_param_idx = param_values.len() + 1;
+    param_values.push(limit.to_string());
+
+    let sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = '{ACTIVITY_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         tagged AS (
+             SELECT t.value AS activity,
+                    m.session_id,
+                    m.repo_id,
+                    m.git_branch,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.cache_read_tokens,
+                    m.cache_creation_tokens,
+                    m.cost_cents,
+                    mvc.n_values
+             FROM tags t
+             JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+             JOIN messages m ON m.id = t.message_id
+             {where_clause}
+             AND t.key = '{ACTIVITY_TAG_KEY}'
+         ),
+         per_activity AS (
+             SELECT activity,
+                    COUNT(DISTINCT session_id) AS sess,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(input_tokens / n_values), 0) AS inp,
+                    COALESCE(SUM(output_tokens / n_values), 0) AS outp,
+                    COALESCE(SUM(cache_read_tokens / n_values), 0) AS cache_r,
+                    COALESCE(SUM(cache_creation_tokens / n_values), 0) AS cache_c,
+                    COALESCE(SUM(cost_cents / n_values), 0.0) AS cost
+             FROM tagged
+             GROUP BY activity
+         ),
+         top_branch AS (
+             SELECT activity,
+                    CASE
+                        WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(git_branch, ''), 12)
+                        ELSE COALESCE(git_branch, '')
+                    END AS branch_value,
+                    SUM(cost_cents / n_values) AS branch_cost
+             FROM tagged
+             GROUP BY activity, branch_value
+         ),
+         top_branch_pick AS (
+             SELECT activity, branch_value
+             FROM (
+                 SELECT activity, branch_value, branch_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY activity
+                            ORDER BY branch_cost DESC, branch_value ASC
+                        ) AS rn
+                 FROM top_branch
+                 WHERE branch_value != ''
+             )
+             WHERE rn = 1
+         ),
+         top_repo AS (
+             SELECT activity,
+                    COALESCE(repo_id, '') AS repo_value,
+                    SUM(cost_cents / n_values) AS repo_cost
+             FROM tagged
+             GROUP BY activity, repo_value
+         ),
+         top_repo_pick AS (
+             SELECT activity, repo_value
+             FROM (
+                 SELECT activity, repo_value, repo_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY activity
+                            ORDER BY repo_cost DESC, repo_value ASC
+                        ) AS rn
+                 FROM top_repo
+                 WHERE repo_value != '' AND repo_value != 'unknown'
+             )
+             WHERE rn = 1
+         )
+         SELECT pa.activity,
+                pa.sess, pa.cnt,
+                pa.inp, pa.outp, pa.cache_r, pa.cache_c, pa.cost,
+                COALESCE(tbp.branch_value, '') AS top_branch,
+                COALESCE(trp.repo_value, '') AS top_repo
+         FROM per_activity pa
+         LEFT JOIN top_branch_pick tbp ON tbp.activity = pa.activity
+         LEFT JOIN top_repo_pick trp ON trp.activity = pa.activity
+
+         UNION ALL
+
+         SELECT '{UNTAGGED_DIMENSION}' AS activity,
+                COUNT(DISTINCT m2.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m2.input_tokens), 0) AS inp,
+                COALESCE(SUM(m2.output_tokens), 0) AS outp,
+                COALESCE(SUM(m2.cache_read_tokens), 0) AS cache_r,
+                COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
+                COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
+                '' AS top_branch,
+                '' AS top_repo
+         FROM messages m2
+         {untagged_where}
+         AND NOT EXISTS (
+             SELECT 1 FROM tags t2
+             WHERE t2.message_id = m2.id AND t2.key = '{ACTIVITY_TAG_KEY}'
+         )
+
+         ORDER BY cost DESC
+         LIMIT ?{limit_param_idx}",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<ActivityCost> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let activity: String = row.get(0)?;
+            let (source, confidence) = activity_classification_labels(&activity);
+            Ok(ActivityCost {
+                activity,
+                session_count: row.get(1)?,
+                message_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cost_cents: row.get(7)?,
+                top_branch: row.get(8)?,
+                top_repo_id: row.get(9)?,
+                source: source.to_string(),
+                confidence: confidence.to_string(),
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .filter(|ac| !(ac.activity == UNTAGGED_DIMENSION && ac.message_count == 0))
+        .collect();
+
+    Ok(rows)
+}
+
+/// Detail view for a single activity: totals, dominant repo, and per-branch
+/// breakdown. Returns `None` when no assistant messages carry the activity
+/// in the requested window.
+pub fn activity_cost_single(
+    conn: &Connection,
+    activity: &str,
+    repo_id: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Option<ActivityCostDetail>> {
+    let mut conditions = vec![
+        "m.role = 'assistant'".to_string(),
+        "t.key = ?1".to_string(),
+        "t.value = ?2".to_string(),
+    ];
+    let mut param_values: Vec<String> = vec![ACTIVITY_TAG_KEY.to_string(), activity.to_string()];
+    let mut idx = 2usize;
+
+    if let Some(repo) = repo_id {
+        idx += 1;
+        param_values.push(repo.to_string());
+        conditions.push(format!("COALESCE(m.repo_id, '') = ?{idx}"));
+    }
+    if let Some(s) = since {
+        idx += 1;
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{idx}"));
+    }
+    if let Some(u) = until {
+        idx += 1;
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{idx}"));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    let totals_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         )
+         SELECT COUNT(DISTINCT m.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m.input_tokens / mvc.n_values), 0) AS inp,
+                COALESCE(SUM(m.output_tokens / mvc.n_values), 0) AS outp,
+                COALESCE(SUM(m.cache_read_tokens / mvc.n_values), 0) AS cache_r,
+                COALESCE(SUM(m.cache_creation_tokens / mvc.n_values), 0) AS cache_c,
+                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost,
+                CASE WHEN COUNT(DISTINCT COALESCE(m.repo_id, '')) = 1
+                     THEN COALESCE(MIN(m.repo_id), '')
+                     ELSE '' END AS repo
+         FROM tags t
+         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+         JOIN messages m ON m.id = t.message_id
+         {where_clause}",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&totals_sql)?;
+    let totals = stmt.query_row(param_refs.as_slice(), |row| {
+        Ok((
+            row.get::<_, u64>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, u64>(2)?,
+            row.get::<_, u64>(3)?,
+            row.get::<_, u64>(4)?,
+            row.get::<_, u64>(5)?,
+            row.get::<_, f64>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    });
+    let (sess, cnt, inp, outp, cache_r, cache_c, cost, repo) = match totals {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if cnt == 0 {
+        return Ok(None);
+    }
+
+    let branches_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         )
+         SELECT COALESCE(NULLIF(
+                    CASE
+                        WHEN COALESCE(m.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(m.git_branch, ''), 12)
+                        ELSE COALESCE(m.git_branch, '')
+                    END,
+                    ''
+                ), '{UNTAGGED_DIMENSION}') AS branch_value,
+                COALESCE(m.repo_id, '') AS repo_value,
+                COUNT(DISTINCT m.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+         FROM tags t
+         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+         JOIN messages m ON m.id = t.message_id
+         {where_clause}
+         GROUP BY branch_value, repo_value
+         ORDER BY cost DESC, branch_value ASC",
+    );
+    let mut stmt = conn.prepare(&branches_sql)?;
+    let branches: Vec<ActivityBranchBreakdown> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(ActivityBranchBreakdown {
+                git_branch: row.get(0)?,
+                repo_id: row.get(1)?,
+                session_count: row.get(2)?,
+                message_count: row.get(3)?,
+                cost_cents: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let (source, confidence) = activity_classification_labels(activity);
+    Ok(Some(ActivityCostDetail {
+        activity: activity.to_string(),
+        session_count: sess,
+        message_count: cnt,
+        input_tokens: inp,
+        output_tokens: outp,
+        cache_read_tokens: cache_r,
+        cache_creation_tokens: cache_c,
+        cost_cents: cost,
+        repo_id: repo,
+        branches,
+        source: source.to_string(),
+        confidence: confidence.to_string(),
+    }))
+}
+
+/// Return the `(source, confidence)` labels for an activity aggregate.
+///
+/// R1.0 has a single producer (rule-based `classify_prompt`), so every
+/// tagged value shares the same labels. `(untagged)` reports empty strings
+/// so callers can render `--` without having to special-case it.
+fn activity_classification_labels(activity: &str) -> (&'static str, &'static str) {
+    if activity == UNTAGGED_DIMENSION {
+        ("", "")
+    } else {
+        (ACTIVITY_SOURCE_RULE, ACTIVITY_CONFIDENCE_MEDIUM)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Model Usage
 // ---------------------------------------------------------------------------
 

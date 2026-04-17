@@ -58,6 +58,8 @@ pub fn cmd_stats(
     branch: Option<String>,
     tickets: bool,
     ticket: Option<String>,
+    activities: bool,
+    activity: Option<String>,
     repo: Option<String>,
     models: bool,
     provider: Option<String>,
@@ -69,12 +71,12 @@ pub fn cmd_stats(
     // user-friendly shortcuts that resolve to their canonical form.
     let provider = provider.map(|p| normalize_provider(&p)).transpose()?;
 
-    // `--repo` is a filter for `--branch` or `--ticket` — surface the
-    // misuse early instead of silently ignoring it. Clap's `requires` only
-    // takes a single arg, so the cross-flag check lives here.
-    if repo.is_some() && branch.is_none() && ticket.is_none() {
+    // `--repo` is a filter for `--branch`, `--ticket`, or `--activity` —
+    // surface the misuse early instead of silently ignoring it. Clap's
+    // `requires` only takes a single arg, so the cross-flag check lives here.
+    if repo.is_some() && branch.is_none() && ticket.is_none() && activity.is_none() {
         anyhow::bail!(
-            "--repo requires either --branch <NAME> or --ticket <ID> to scope the filter"
+            "--repo requires --branch <NAME>, --ticket <ID>, or --activity <NAME> to scope the filter"
         );
     }
 
@@ -84,6 +86,14 @@ pub fn cmd_stats(
 
     if let Some(ref tag_filter) = tag {
         return cmd_stats_tags(&client, period, tag_filter, json_output);
+    }
+
+    if let Some(ref ac) = activity {
+        return cmd_stats_activity_detail(&client, period, ac, repo.as_deref(), json_output);
+    }
+
+    if activities {
+        return cmd_stats_activities(&client, period, json_output);
     }
 
     if let Some(ref tk) = ticket {
@@ -639,6 +649,183 @@ fn cmd_stats_ticket_detail(
             println!("  No data found for ticket '{}'.", ticket);
             println!("  Tip: run `budi import` first if you haven't imported data yet.");
             println!("  Run `budi stats --tickets` to see available tickets.");
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// `--activities` list view. Mirrors `cmd_stats_tickets`: activities come
+/// from the `activity` tag emitted by the prompt classifier
+/// (`hooks::classify_prompt`) and propagated across the session by the
+/// pipeline. The output always carries an `(untagged)` row so users can see
+/// how much work isn't yet classified — that bucket should shrink as the
+/// classifier improves in R1.2 (#222).
+fn cmd_stats_activities(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let activities = client.activities(since.as_deref(), until.as_deref(), 30)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&activities)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let cyan = ansi("\x1b[36m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!(
+        "  {bold_cyan} Activities{reset} — {bold}{}{reset}",
+        period_label
+    );
+    println!("  {dim}{}{reset}", "─".repeat(66));
+
+    if activities.is_empty() {
+        println!("  No activity data for this period.");
+        println!(
+            "  Tip: activity is classified from the user's prompt; run `budi doctor` to check the signal."
+        );
+        println!();
+        return Ok(());
+    }
+
+    let max_cost = activities
+        .iter()
+        .map(|a| a.cost_cents)
+        .fold(0.0_f64, f64::max)
+        .max(0.01);
+    for a in &activities {
+        let bar_len = ((a.cost_cents / max_cost) * 16.0) as usize;
+        let bar: String = "\u{2588}".repeat(bar_len);
+        let branch_label = if a.top_branch.is_empty() {
+            "--".to_string()
+        } else {
+            a.top_branch.clone()
+        };
+        let confidence_label = if a.confidence.is_empty() {
+            "--".to_string()
+        } else {
+            a.confidence.clone()
+        };
+        println!(
+            "    {bold}{:<18}{reset} {yellow}{:>8}{reset}  {dim}conf={:<6}{reset}  {dim}{:<22}{reset}  {cyan}{}{reset}",
+            a.activity,
+            format_cost_cents(a.cost_cents),
+            confidence_label,
+            branch_label,
+            bar
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+/// `--activity <NAME>` detail view. Mirrors `cmd_stats_ticket_detail`, plus
+/// the classification `source`/`confidence` contract so the user can tell
+/// at a glance whether the label comes from rules (R1.0) or a richer
+/// classifier landing in R1.2 (#222).
+fn cmd_stats_activity_detail(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    activity: &str,
+    repo: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let result = client.activity_detail(activity, repo, since.as_deref(), until.as_deref())?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let period_label = period_label(period);
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!(
+        "  {bold_cyan} Activity{reset} {bold}{}{reset} — {dim}{}{reset}",
+        activity, period_label
+    );
+    if let Some(repo_id) = repo {
+        println!("  {bold}Repo filter{reset} {}", repo_id);
+    }
+    println!("  {dim}{}{reset}", "─".repeat(50));
+
+    match result {
+        Some(a) => {
+            if !a.repo_id.is_empty() {
+                println!("  {bold}Repo{reset}       {}", a.repo_id);
+            }
+            if !a.source.is_empty() {
+                println!(
+                    "  {bold}Source{reset}     {} {dim}(confidence: {}){reset}",
+                    a.source,
+                    if a.confidence.is_empty() {
+                        "--"
+                    } else {
+                        &a.confidence
+                    }
+                );
+            }
+            println!("  {bold}Sessions{reset}   {}", a.session_count);
+            println!("  {bold}Messages{reset}   {}", a.message_count);
+            println!(
+                "  {bold}Input{reset}      {}",
+                format_tokens(a.input_tokens)
+            );
+            println!(
+                "  {bold}Output{reset}     {}",
+                format_tokens(a.output_tokens)
+            );
+            println!(
+                "  {bold}Est. cost{reset}  {yellow}{}{reset}",
+                format_cost_cents(a.cost_cents)
+            );
+
+            if !a.branches.is_empty() {
+                println!();
+                println!("  {bold}Branches{reset}");
+                for br in &a.branches {
+                    let repo_label = if br.repo_id.is_empty() {
+                        "--".to_string()
+                    } else {
+                        br.repo_id
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&br.repo_id)
+                            .to_string()
+                    };
+                    println!(
+                        "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}",
+                        br.git_branch,
+                        format_cost_cents(br.cost_cents),
+                        repo_label
+                    );
+                }
+            }
+        }
+        None => {
+            println!("  No data found for activity '{}'.", activity);
+            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Run `budi stats --activities` to see available activities.");
         }
     }
 

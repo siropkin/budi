@@ -582,6 +582,80 @@ pub async fn analytics_ticket_detail(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Activities — first-class CLI dimension wired in 8.1 (#305)
+//
+// Same shape as the ticket endpoints so the CLI can mirror `--tickets` /
+// `--ticket` with `--activities` / `--activity` and operators don't need
+// to learn a second query surface. Activities come from the `activity`
+// tag emitted by the prompt classifier (`hooks::classify_prompt`).
+// ---------------------------------------------------------------------------
+
+/// `GET /analytics/activities` query params. Mirrors `TicketListParams`.
+#[derive(serde::Deserialize)]
+pub struct ActivityListParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ActivityDetailParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub repo_id: Option<String>,
+}
+
+pub async fn analytics_activities(
+    Query(params): Query<ActivityListParams>,
+) -> Result<Json<Vec<analytics::ActivityCost>>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::activity_cost_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+pub async fn analytics_activity_detail(
+    Path(activity): Path<String>,
+    Query(params): Query<ActivityDetailParams>,
+) -> Result<Json<analytics::ActivityCostDetail>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::activity_cost_single(
+            &conn,
+            &activity,
+            params.repo_id.as_deref(),
+            params.since.as_deref(),
+            params.until.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    match result {
+        Some(detail) => Ok(Json(detail)),
+        None => Err(not_found("activity not found")),
+    }
+}
+
 pub async fn analytics_schema_version()
 -> Result<Json<SchemaVersionResponse>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<SchemaVersionResponse> {
@@ -722,6 +796,10 @@ pub struct SessionsQueryParams {
     /// Filter to sessions tagged with the given `ticket_id` (e.g. `ENG-123`).
     /// Wired in by 8.1 so `budi sessions --ticket <ID>` mirrors `--branch`.
     pub ticket: Option<String>,
+    /// Filter to sessions tagged with the given `activity` (e.g. `bugfix`).
+    /// Wired in by 8.1 (#305) so `budi sessions --activity bugfix` mirrors
+    /// `--ticket`.
+    pub activity: Option<String>,
     #[serde(flatten)]
     pub filters: DimensionParams,
 }
@@ -753,6 +831,7 @@ pub async fn analytics_sessions(
                 limit: params.limit.unwrap_or(50).min(200),
                 offset: params.offset.unwrap_or(0),
                 ticket: params.ticket.as_deref(),
+                activity: params.activity.as_deref(),
             },
             &filters,
         )?;

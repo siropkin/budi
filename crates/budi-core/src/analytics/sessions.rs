@@ -171,6 +171,7 @@ pub fn session_visibility(conn: &Connection) -> Result<Vec<SessionVisibilityWind
                 limit: 1,
                 offset: 0,
                 ticket: None,
+                activity: None,
             },
         )?;
         let returned_sessions = paginated.total_count;
@@ -249,6 +250,66 @@ pub fn branch_attribution_stats(conn: &Connection) -> Result<Vec<BranchAttributi
     Ok(rows)
 }
 
+/// Per-provider counts of assistant rows in the last 7 days that are missing
+/// the `activity` tag. Drives the `budi doctor` activity-attribution check
+/// wired in 8.1 (#305) so a silent regression of the prompt classifier
+/// becomes visible the same way #303's branch-attribution drop does.
+///
+/// A high missing-ratio usually means the classifier never matched the
+/// user prompt — either the prompt was too short, the pipeline is broken,
+/// or hooks are disabled for that provider.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivityAttributionProvider {
+    pub provider: String,
+    pub total_assistant: u64,
+    pub missing_activity: u64,
+}
+
+impl ActivityAttributionProvider {
+    pub fn missing_activity_ratio(&self) -> f64 {
+        if self.total_assistant == 0 {
+            0.0
+        } else {
+            self.missing_activity as f64 / self.total_assistant as f64
+        }
+    }
+}
+
+/// 7-day activity-attribution health per provider.
+///
+/// The window matches `branch_attribution_stats` so the doctor output
+/// stays consistent: a short outage overnight should not flip either
+/// check red, a regression lasting a day should show up immediately.
+pub fn activity_attribution_stats(conn: &Connection) -> Result<Vec<ActivityAttributionProvider>> {
+    let since = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(m.provider, 'claude_code') AS p,
+                COUNT(*) AS total,
+                SUM(
+                    CASE WHEN NOT EXISTS (
+                        SELECT 1 FROM tags t
+                        WHERE t.message_id = m.id AND t.key = 'activity'
+                    ) THEN 1 ELSE 0 END
+                ) AS missing_activity
+         FROM messages m
+         WHERE m.role = 'assistant' AND m.timestamp >= ?1
+         GROUP BY p
+         ORDER BY total DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![since], |row| {
+            Ok(ActivityAttributionProvider {
+                provider: row.get(0)?,
+                total_assistant: row.get::<_, i64>(1)? as u64,
+                missing_activity: row.get::<_, i64>(2)? as u64,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 // ---------------------------------------------------------------------------
 // Session List
 // ---------------------------------------------------------------------------
@@ -297,6 +358,11 @@ pub struct SessionListParams<'a> {
     /// session filter in 8.1 so `budi sessions --ticket ENG-123` works
     /// the same way `--branch` does for branches.
     pub ticket: Option<&'a str>,
+    /// Restrict the result to sessions that have at least one assistant
+    /// message tagged with this `activity` value (e.g. `bugfix`,
+    /// `refactor`). Promoted to a first-class session filter in 8.1 so
+    /// `budi sessions --activity bugfix` mirrors `--ticket`. See #305.
+    pub activity: Option<&'a str>,
 }
 
 fn parse_models_csv(raw: Option<String>) -> Vec<String> {
@@ -428,6 +494,18 @@ pub fn session_list_with_filters(
         let idx = param_values.len();
         conditions.push(format!(
             "EXISTS (SELECT 1 FROM tags tk WHERE tk.message_id = m.id AND tk.key = 'ticket_id' AND tk.value = ?{idx})"
+        ));
+    }
+    if let Some(activity) = p.activity
+        && !activity.is_empty()
+    {
+        // Mirror the `ticket` filter: activities live in the `tags` table
+        // under the `activity` key (see `tag_keys::ACTIVITY`), so we scope
+        // with EXISTS rather than a column predicate.
+        param_values.push(activity.to_string());
+        let idx = param_values.len();
+        conditions.push(format!(
+            "EXISTS (SELECT 1 FROM tags ta WHERE ta.message_id = m.id AND ta.key = 'activity' AND ta.value = ?{idx})"
         ));
     }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));

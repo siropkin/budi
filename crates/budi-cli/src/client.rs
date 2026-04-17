@@ -14,8 +14,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    BranchCost, ModelUsage, PaginatedSessions, ProviderStats, RepoUsage, SessionHealth,
-    SessionListEntry, SessionTag, TagCost, TicketCost, TicketCostDetail, UsageSummary,
+    ActivityCost, ActivityCostDetail, BranchCost, ModelUsage, PaginatedSessions, ProviderStats,
+    RepoUsage, SessionHealth, SessionListEntry, SessionTag, TagCost, TicketCost, TicketCostDetail,
+    UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -50,6 +51,21 @@ fn analytics_ticket_detail_url(base_url: &str, ticket_id: &str) -> Result<String
         .push("analytics")
         .push("tickets")
         .push(ticket_id);
+    Ok(url.to_string())
+}
+
+/// Build `GET .../analytics/activities/{name}` with correct path encoding.
+/// Mirrors `analytics_ticket_detail_url` so activity values that include
+/// unusual characters (future classifier output) round-trip untouched.
+fn analytics_activity_detail_url(base_url: &str, activity: &str) -> Result<String> {
+    let normalized = format!("{}/", base_url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&normalized)
+        .with_context(|| format!("invalid daemon base URL: {base_url}"))?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid daemon base URL: {base_url}"))?
+        .push("analytics")
+        .push("activities")
+        .push(activity);
     Ok(url.to_string())
 }
 
@@ -476,6 +492,72 @@ impl DaemonClient {
         Ok(Some(serde_json::from_value(val)?))
     }
 
+    /// `GET /analytics/activities` — per-activity cost roll-up. Used by
+    /// `budi stats --activities`. Mirrors `tickets` so operators can swap
+    /// `--tickets` / `--activities` without learning a new query shape.
+    pub fn activities(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ActivityCost>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = since {
+            params.push(("since", s.to_string()));
+        }
+        if let Some(u) = until {
+            params.push(("until", u.to_string()));
+        }
+        params.push(("limit", limit.to_string()));
+        let resp = self
+            .client
+            .get(format!("{}/analytics/activities", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// `GET /analytics/activities/{name}` — single-activity detail with
+    /// per-branch breakdown. Returns `Ok(None)` for an unknown activity
+    /// (mirrors `ticket_detail`).
+    pub fn activity_detail(
+        &self,
+        activity: &str,
+        repo_id: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Option<ActivityCostDetail>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(repo) = repo_id {
+            params.push(("repo_id", repo));
+        }
+        if let Some(s) = since {
+            params.push(("since", s));
+        }
+        if let Some(u) = until {
+            params.push(("until", u));
+        }
+        let url = analytics_activity_detail_url(&self.base_url, activity)
+            .with_context(|| format!("invalid daemon base URL or activity: {activity:?}"))?;
+        let resp = self
+            .client
+            .get(url)
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = check_response(resp)?;
+        let val: Value = resp.json()?;
+        if val.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(val)?))
+    }
+
     pub fn models(&self, since: Option<&str>, until: Option<&str>) -> Result<Vec<ModelUsage>> {
         let mut params = Vec::new();
         if let Some(s) = since {
@@ -544,12 +626,14 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sessions(
         &self,
         since: Option<&str>,
         until: Option<&str>,
         search: Option<&str>,
         ticket: Option<&str>,
+        activity: Option<&str>,
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedSessions> {
@@ -565,6 +649,9 @@ impl DaemonClient {
         }
         if let Some(t) = ticket {
             params.push(("ticket", t.to_string()));
+        }
+        if let Some(a) = activity {
+            params.push(("activity", a.to_string()));
         }
         params.push(("sort_by", "started_at".to_string()));
         params.push(("limit", limit.to_string()));

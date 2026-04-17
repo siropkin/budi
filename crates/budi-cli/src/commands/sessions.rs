@@ -10,6 +10,7 @@ pub fn cmd_sessions(
     period: StatsPeriod,
     search: Option<&str>,
     ticket: Option<&str>,
+    activity: Option<&str>,
     limit: usize,
     json_output: bool,
 ) -> Result<()> {
@@ -18,7 +19,15 @@ pub fn cmd_sessions(
     )?;
 
     let (since, until) = period_date_range(period);
-    let sessions = client.sessions(since.as_deref(), until.as_deref(), search, ticket, limit, 0)?;
+    let sessions = client.sessions(
+        since.as_deref(),
+        until.as_deref(),
+        search,
+        ticket,
+        activity,
+        limit,
+        0,
+    )?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -34,17 +43,27 @@ pub fn cmd_sessions(
     let reset = ansi("\x1b[0m");
 
     println!();
+    // Build a compact filter suffix so the header shows which attribution
+    // dimension scoped the result. Both ticket and activity live in the
+    // same space (tag-derived filters) and can compose in principle.
+    let mut filter_bits: Vec<String> = Vec::new();
     if let Some(t) = ticket {
+        filter_bits.push(format!("ticket: {t}"));
+    }
+    if let Some(a) = activity {
+        filter_bits.push(format!("activity: {a}"));
+    }
+    if filter_bits.is_empty() {
         println!(
-            "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}(ticket: {}, {} total){reset}",
+            "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}({} total){reset}",
             period_label(period),
-            t,
             sessions.total_count
         );
     } else {
         println!(
-            "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}({} total){reset}",
+            "  {bold_cyan} Sessions{reset} — {bold}{}{reset} {dim}({}, {} total){reset}",
             period_label(period),
+            filter_bits.join(", "),
             sessions.total_count
         );
     }
