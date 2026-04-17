@@ -30,23 +30,18 @@ Prompts, code, and model responses never leave the local machine. This is struct
 - No "full upload" mode. No toggle. No exception.
 - Never-upload fields are enforced by the sync worker reading only from rollup tables
 
-## 4. Proxy-First Architecture (8.0+)
+## 4. JSONL Tailing as Sole Live Path (8.2+)
 
-The proxy is the sole live data source. Historical data (JSONL, Cursor API) is available via `budi import` for backfill only.
+> **Changed by [ADR-0089](./adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) (2026-04-17).** The "Proxy-First Architecture (8.0+)" principle that previously held this slot is superseded. Budi 8.1.x still ships the proxy during the transition window; it is removed in Budi 8.2.0. The principle as it applies going forward is below.
 
-- Don't reintroduce hooks, OTEL, or continuous file watching for live data
-- Proxy is transparent — no SDK, no per-agent integration code for live tracking
-- Adding a new agent = documenting its base URL configuration
+Budi's live data source is a filesystem tailer over the transcript files agents already write locally. There is one live ingestion path, not two.
 
-### Auto-proxy-install (8.0+)
-
-The proxy is installed automatically for agents the user selects during `budi init`. Users should not need to remember special launch commands — tracking starts the moment they open a terminal or IDE.
-
-- **CLI agents** (Claude Code, Codex, Copilot CLI, Gemini CLI): env vars injected into the user's shell profile (`~/.zshrc`, `~/.bashrc`) inside a `# >>> budi >>> ... # <<< budi <<<` guard block
-- **IDE agents** (Cursor, Codex Desktop): config files patched directly (`Override OpenAI Base URL` in Cursor's settings.json, `openai_base_url` in `~/.codex/config.toml`)
-- **Opt-out**: `budi disable <agent>` removes the env vars or reverts config changes
-- **Bypass**: `BUDI_BYPASS=1 <agent>` skips the proxy for a single session
-- **Prerequisite**: daemon autostart (launchd/systemd) is required — if env vars point to `localhost:9878` but the daemon isn't running, API calls fail
+- Don't reintroduce the proxy, hooks, or OTEL for live data — the tailer is the live data mechanism
+- Don't mutate shell profiles, Cursor `settings.json`, `~/.codex/config.toml`, or any user config during install; `budi init` creates the data dir, registers the daemon, and exits
+- Daemon outage must not break the user's agent — the agent keeps working; Budi catches up on next tail
+- Adding a new agent = one `Provider` impl (`discover_files` + `parse_file` + `watch_roots`) — no proxy matrix, no base-URL injection, no agent wrapper
+- Latency budget: single-digit seconds end-to-end is acceptable for every downstream surface (stats, sessions, statusline, doctor, cloud sync)
+- Privacy boundary is unchanged ([ADR-0083](./adr/0083-cloud-ingest-identity-and-privacy-contract.md)): the tailer reads the same files `budi import` already reads; nothing leaves the machine
 
 ## 5. Local-First, Cloud-Optional
 

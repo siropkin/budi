@@ -1,9 +1,11 @@
 # ADR-0081: 8.0 Product Contract and Deprecation Policy
 
 - **Date**: 2026-04-10
-- **Status**: Implemented
+- **Status**: Implemented (amended — see banner)
 - **Issue**: [#81](https://github.com/siropkin/budi/issues/81)
 - **Milestone**: 8.0.0
+
+> **Amended by [ADR-0089](./0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) (2026-04-17).** The §Provider System note that "JSONL file sync will be removed from the continuous sync loop when proxy mode ships (R2)" is **rescinded**. In Budi 8.2+, JSONL tailing **is** the continuous sync loop. The `Provider` trait is extended with `watch_roots()` to serve it. The rest of this ADR's deprecation policy framework stands as written.
 
 ## Context
 
