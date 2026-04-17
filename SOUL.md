@@ -349,12 +349,15 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   cwd, session propagation not rescuing the session) even if overall cost
   numbers look healthy.
 - **Activity attribution (7d, per provider)** (R1.0.4, #305) — red when
-  100% of a provider's recent assistant rows are missing an `activity`
-  tag and it has at least 5 rows in the window (a silent classifier
+  a provider's recent assistant rows are effectively fully silent
+  (≥99.9% missing an `activity` tag, float-tolerant so a single legacy
+  row without an activity doesn't save an otherwise-silent classifier)
+  and it has at least 5 rows in the window (a silent classifier
   regression). Yellow at >90% to hint at an over-aggressive skip path
   without tripping a hard fail; a moderate missing-ratio is expected
   because one-word prompts and slash commands never carry an `activity`
-  tag by design.
+  tag by design. See `activity_attribution` in
+  `crates/budi-cli/src/commands/doctor.rs`.
 
 ### Key concepts
 
@@ -370,8 +373,10 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 - `crates/budi-core/src/analytics/mod.rs` - SQLite storage, sync pipeline, all query functions
 - `crates/budi-core/src/analytics/health.rs` - Session health vitals, ProviderKind-aware tips, overall-state logic
 - `crates/budi-core/src/analytics/tests.rs` - Analytics + session health unit tests
-- `crates/budi-core/src/pipeline/mod.rs` - Pipeline struct, Enricher trait, default_pipeline()
-- `crates/budi-core/src/pipeline/enrichers.rs` - All 5 enricher implementations (HookEnricher removed)
+- `crates/budi-core/src/pipeline/mod.rs` - Pipeline struct, Enricher trait, default_pipeline() (ordered: IdentityEnricher → GitEnricher → ToolEnricher → FileEnricher → CostEnricher → TagEnricher); also hosts the cross-message tool-outcome correlation and retry heuristic that emit `tool_outcome` / `tool_outcome_source` / `tool_outcome_confidence` tags after the per-message enricher pass
+- `crates/budi-core/src/pipeline/enrichers.rs` - All 6 enricher implementations (`IdentityEnricher`, `GitEnricher`, `ToolEnricher`, `FileEnricher`, `CostEnricher`, `TagEnricher`; `HookEnricher` removed in 8.0, `FileEnricher` added in R1.4 #292)
+- `crates/budi-core/src/file_attribution.rs` - R1.4 (#292) repo-relative file-path extractor, enforces ADR-0083 privacy limits (no absolute paths, no outside-of-repo paths, no file contents)
+- `crates/budi-core/src/work_outcome.rs` - R1.5 (#293) session-scoped `work_outcome` derivation (`committed`, `branch_merged`, `no_commit`, `unknown`) from local git state only — no remote API calls, no content capture
 - `crates/budi-core/src/cost.rs` - Cost estimation, ModelPricing, per-provider pricing tables
 - `crates/budi-core/src/hooks.rs` - Prompt classification and migration helpers (hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1)
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
