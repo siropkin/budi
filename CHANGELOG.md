@@ -13,6 +13,10 @@
 - **`BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM` env overrides** on the proxy (mirroring the existing `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` pattern) so local end-to-end tests and air-gapped deployments can redirect proxy traffic without editing on-disk config.
 - **Local end-to-end test harness** in `scripts/e2e/` — the first script, `test_302_sessions_visibility.sh`, boots a real `budi-daemon` + mock upstream + CLI against an isolated `$HOME` and pins the #302 fix. See `scripts/e2e/README.md` for conventions and the new "Local end-to-end tests" section in `SOUL.md`.
 
+### Process
+
+- **R1.6 code review pass for the 8.1 classification round** completed (#217). Audited the merged work from R1.0.1 (#302) through R1.5 (#293) for correctness, privacy, and explainability against ADR-0088 §5. No blocking defects; the round meets the 8.1 classification contract. Four non-blocking follow-ups filed for 8.2: cloud-sync ticket extractor should share the pipeline helper (#333), `proxy_events` schema missing first-class dimension columns (#334), defensive sibling-tag pairing at emission sites (#335), and R1.5 edge cases in `work_outcome` integration-branch detection and `tool_result` variant coverage (#336). Docs-drift items handed off to R1.7 (#220) in an issue comment.
+
 ## 8.0.0 — 2026-04-16
 
 Budi 8.0 is a ground-up rearchitecture: proxy-first live cost tracking replaces the old hook/OTEL/file-sync ingestion model, the Cursor extension and cloud dashboard are extracted into independent repos, and a new optional cloud layer gives managers team-wide AI cost visibility — all while keeping prompts, code, and responses strictly local.
