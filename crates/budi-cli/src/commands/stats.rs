@@ -551,10 +551,16 @@ fn cmd_stats_tickets(client: &DaemonClient, period: StatsPeriod, json_output: bo
         } else {
             t.top_branch.clone()
         };
+        let source_label = if t.source.is_empty() {
+            "--".to_string()
+        } else {
+            t.source.clone()
+        };
         println!(
-            "    {bold}{:<24}{reset} {yellow}{:>8}{reset}  {dim}{:<24}{reset}  {cyan}{}{reset}",
+            "    {bold}{:<24}{reset} {yellow}{:>8}{reset}  {dim}src={:<15}{reset}  {dim}{:<24}{reset}  {cyan}{}{reset}",
             t.ticket_id,
             format_cost_cents(t.cost_cents),
+            source_label,
             branch_label,
             bar
         );
@@ -607,6 +613,9 @@ fn cmd_stats_ticket_detail(
             }
             if !t.ticket_prefix.is_empty() {
                 println!("  {bold}Prefix{reset}     {}", t.ticket_prefix);
+            }
+            if !t.source.is_empty() {
+                println!("  {bold}Source{reset}     {}", t.source);
             }
             println!("  {bold}Sessions{reset}   {}", t.session_count);
             println!("  {bold}Messages{reset}   {}", t.message_count);

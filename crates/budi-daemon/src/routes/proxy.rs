@@ -710,6 +710,7 @@ fn record_event(
         repo_id: attribution.repo_id.clone(),
         git_branch: attribution.git_branch.clone(),
         ticket_id: attribution.ticket_id.clone(),
+        ticket_source: attribution.ticket_source.clone(),
         cost_cents,
         session_id: session_id.to_string(),
         activity: activity.0.clone(),

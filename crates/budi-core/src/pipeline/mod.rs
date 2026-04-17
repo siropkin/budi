@@ -244,11 +244,66 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     pi == pat.len()
 }
 
+/// Canonical source label for tickets derived from the alphanumeric
+/// `<PREFIX>-<NUM>` pattern (e.g. `PAVA-2057`). Stable across the 8.x
+/// wire format — callers pin on this value.
+pub const TICKET_SOURCE_BRANCH: &str = "branch";
+
+/// Canonical source label for tickets derived from the pure-numeric
+/// fallback defined in ADR-0082 §9 (e.g. `1234` in `fix/1234-typo`).
+pub const TICKET_SOURCE_BRANCH_NUMERIC: &str = "branch_numeric";
+
+/// Branch names that are never tickets — integration branches and the
+/// literal detached-HEAD sentinel. Kept in one place so proxy ingest and
+/// the import pipeline agree.
+const INTEGRATION_BRANCHES: &[&str] = &["main", "master", "develop", "HEAD"];
+
 /// Extract a ticket ID (e.g. `PAVA-2057`) from a branch name.
 /// Matches `[a-zA-Z]{2,}-\d+` and returns it uppercased.
 /// Handles both standard (`PAVA-2057-fix`) and Graphite-style (`03-20-pava-2120_desc`) branches.
 /// Requires 2+ alpha chars in the prefix to avoid matching date fragments like `03-20`.
+///
+/// Backwards-compatible thin wrapper around `extract_ticket_from_branch`:
+/// callers that only care about the alphanumeric pattern still get what
+/// they expect. Use `extract_ticket_from_branch` when the call site needs
+/// to distinguish the numeric fallback or record the source.
 pub fn extract_ticket_id(branch: &str) -> Option<String> {
+    extract_ticket_alpha(branch)
+}
+
+/// Unified ticket extractor used by both the proxy ingest path and the
+/// batch import pipeline. Returns `(ticket_id, source)` where `source` is
+/// one of `TICKET_SOURCE_BRANCH` or `TICKET_SOURCE_BRANCH_NUMERIC`.
+///
+/// Behavior (R1.3, #221):
+/// 1. Integration branches (`main`, `master`, `develop`, `HEAD`) and
+///    empty branch names are never tickets.
+/// 2. Tries the alphanumeric pattern first (`[a-zA-Z]{2,}-\d+`). This
+///    covers the vast majority of enterprise dev workflows and wins over
+///    the numeric fallback so `fix/PAVA-42-and-1234` still resolves to
+///    `PAVA-42` rather than `42`.
+/// 3. Falls back to the pure-numeric pattern from ADR-0082 §9 — a
+///    leading numeric segment in the last `/`-separated path component,
+///    followed by `-` or end-of-string. This handles `fix/1234-typo`
+///    conventions that many GitHub-flow teams rely on and keeps proxy
+///    behaviour consistent with batch ingest.
+pub fn extract_ticket_from_branch(branch: &str) -> Option<(String, &'static str)> {
+    if branch.is_empty() || INTEGRATION_BRANCHES.contains(&branch) {
+        return None;
+    }
+    if let Some(id) = extract_ticket_alpha(branch) {
+        return Some((id, TICKET_SOURCE_BRANCH));
+    }
+    if let Some(id) = extract_ticket_numeric(branch) {
+        return Some((id, TICKET_SOURCE_BRANCH_NUMERIC));
+    }
+    None
+}
+
+/// Extract an alphanumeric ticket (`[a-zA-Z]{2,}-\d+`) from anywhere in
+/// the branch, uppercased. Private helper used by both `extract_ticket_id`
+/// and `extract_ticket_from_branch`.
+fn extract_ticket_alpha(branch: &str) -> Option<String> {
     let bytes = branch.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -280,6 +335,31 @@ pub fn extract_ticket_id(branch: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract a numeric-only ticket ID from the last path component of a
+/// branch name per ADR-0082 §9. Matches a leading digit run followed by
+/// `-` or end-of-string, e.g. `fix/1234-typo` → `"1234"`. Refuses bare
+/// year-style prefixes like `2024-roadmap` when they would collide with
+/// an alpha ticket (callers try alpha first).
+fn extract_ticket_numeric(branch: &str) -> Option<String> {
+    let segment = branch.rsplit('/').next().unwrap_or(branch);
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
+        return None;
+    }
+    let end = bytes
+        .iter()
+        .position(|&b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    // Must be followed by '-' or end-of-string to be a ticket, not just any number
+    if end < bytes.len() && bytes[end] != b'-' {
+        return None;
+    }
+    Some(segment[..end].to_string())
 }
 
 #[cfg(test)]
@@ -365,6 +445,63 @@ mod tests {
         );
         // No ticket at all
         assert_eq!(extract_ticket_id("kiyoshi/pava-searchbars"), None);
+    }
+
+    // Unified extractor contract (R1.3, #221) — must agree with proxy
+    // ingest and batch import so `--tickets` tells the same story from
+    // both ingest paths.
+
+    #[test]
+    fn extract_ticket_from_branch_prefers_alpha_pattern() {
+        assert_eq!(
+            extract_ticket_from_branch("feature/PROJ-42-fix"),
+            Some(("PROJ-42".to_string(), TICKET_SOURCE_BRANCH))
+        );
+        assert_eq!(
+            extract_ticket_from_branch("03-20-pava-2120_desc"),
+            Some(("PAVA-2120".to_string(), TICKET_SOURCE_BRANCH))
+        );
+    }
+
+    #[test]
+    fn extract_ticket_from_branch_falls_back_to_numeric() {
+        // ADR-0082 §9 numeric-only fallback — matches branches like
+        // `fix/1234-typo` used by GitHub-flow teams.
+        assert_eq!(
+            extract_ticket_from_branch("fix/1234-typo"),
+            Some(("1234".to_string(), TICKET_SOURCE_BRANCH_NUMERIC))
+        );
+        assert_eq!(
+            extract_ticket_from_branch("42-stabilize-auth"),
+            Some(("42".to_string(), TICKET_SOURCE_BRANCH_NUMERIC))
+        );
+    }
+
+    #[test]
+    fn extract_ticket_from_branch_integration_branches_are_none() {
+        for b in ["main", "master", "develop", "HEAD", ""] {
+            assert_eq!(
+                extract_ticket_from_branch(b),
+                None,
+                "{b} must not be treated as a ticket"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_ticket_from_branch_no_ticket_yields_none() {
+        assert_eq!(extract_ticket_from_branch("kiyoshi/pava-searchbars"), None);
+        assert_eq!(extract_ticket_from_branch("release/v1"), None);
+    }
+
+    #[test]
+    fn extract_ticket_from_branch_alpha_wins_over_numeric() {
+        // `fix/PROJ-42-and-1234` must resolve to the alpha ticket, not
+        // the trailing numeric fragment.
+        assert_eq!(
+            extract_ticket_from_branch("fix/PROJ-42-and-1234"),
+            Some(("PROJ-42".to_string(), TICKET_SOURCE_BRANCH))
+        );
     }
 
     pub fn test_msg() -> ParsedMessage {

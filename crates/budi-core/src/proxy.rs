@@ -9,7 +9,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::pipeline::extract_ticket_id;
+use crate::pipeline::extract_ticket_from_branch;
 
 /// The fallback repo_id when attribution cannot be determined.
 pub const UNASSIGNED_REPO: &str = "Unassigned";
@@ -38,11 +38,20 @@ impl std::fmt::Display for ProxyProvider {
 }
 
 /// Attribution context resolved from request headers or git state.
+///
+/// `ticket_id` is empty (not a sentinel) when no ticket could be derived
+/// from the branch — the live insert path treats empty as "do not tag"
+/// so proxy and import paths agree on the `(untagged)` bucket. `ticket_source`
+/// records which extractor produced the id (R1.3, #221) — one of
+/// `pipeline::TICKET_SOURCE_BRANCH` / `pipeline::TICKET_SOURCE_BRANCH_NUMERIC`
+/// when `ticket_id` is set, or empty otherwise.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyAttribution {
     pub repo_id: String,
     pub git_branch: String,
     pub ticket_id: String,
+    #[serde(default)]
+    pub ticket_source: String,
 }
 
 impl ProxyAttribution {
@@ -80,23 +89,23 @@ impl ProxyAttribution {
             resolved_repo
         };
 
-        let ticket_id = extract_ticket_id(&resolved_branch)
-            .or_else(|| extract_numeric_ticket(&resolved_branch))
-            .unwrap_or_else(|| "Unassigned".to_string());
-        // ADR-0082 §9: main/master/develop are integration branches, not tickets
-        let ticket_id = if matches!(
-            resolved_branch.as_str(),
-            "main" | "master" | "develop" | "HEAD" | ""
-        ) {
-            "Unassigned".to_string()
-        } else {
-            ticket_id
+        // R1.3 (#221): unified ticket extraction — the pipeline helper
+        // handles integration-branch filtering, alpha pattern, and the
+        // ADR-0082 §9 numeric fallback in one place so the proxy and
+        // `budi import` agree on what counts as a ticket. An empty
+        // `ticket_id` here means "no ticket" and `insert_proxy_message`
+        // will skip the ticket tag writes entirely — no more phantom
+        // `Unassigned` ticket bucket sitting next to `(untagged)`.
+        let (ticket_id, ticket_source) = match extract_ticket_from_branch(&resolved_branch) {
+            Some((id, source)) => (id, source.to_string()),
+            None => (String::new(), String::new()),
         };
 
         Self {
             repo_id,
             git_branch: resolved_branch,
             ticket_id,
+            ticket_source,
         }
     }
 }
@@ -120,30 +129,6 @@ fn resolve_git_branch(cwd: &std::path::Path) -> String {
     // Detached HEAD: git reports the literal "HEAD". Drop it so we never show
     // a bogus `HEAD` branch bucket in `budi stats --branches`.
     if raw == "HEAD" { String::new() } else { raw }
-}
-
-/// Extract a numeric-only ticket ID from a branch name per ADR-0082 §9.
-/// Matches the first segment after `/` or at the start that is purely numeric
-/// followed by `-` or end-of-string. E.g., `fix/1234-typo` → `"1234"`.
-fn extract_numeric_ticket(branch: &str) -> Option<String> {
-    // Take the segment after the last `/`, or the whole branch
-    let segment = branch.rsplit('/').next().unwrap_or(branch);
-    let bytes = segment.as_bytes();
-    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
-        return None;
-    }
-    let end = bytes
-        .iter()
-        .position(|&b| !b.is_ascii_digit())
-        .unwrap_or(bytes.len());
-    if end == 0 {
-        return None;
-    }
-    // Must be followed by '-' or end-of-string to be a ticket, not just any number
-    if end < bytes.len() && bytes[end] != b'-' {
-        return None;
-    }
-    Some(segment[..end].to_string())
 }
 
 /// Generate a best-effort session ID when the agent does not provide one.
@@ -194,6 +179,11 @@ pub struct ProxyEvent {
     pub git_branch: String,
     #[serde(default)]
     pub ticket_id: String,
+    /// Source the ticket id was derived from (R1.3, #221). Mirrors
+    /// `pipeline::TICKET_SOURCE_BRANCH` / `_BRANCH_NUMERIC`. Empty when
+    /// `ticket_id` is empty.
+    #[serde(default)]
+    pub ticket_source: String,
     #[serde(default)]
     pub cost_cents: f64,
     /// Session correlation ID. If the agent provides one via header, use it;
@@ -391,7 +381,14 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
         }
     }
 
-    if !event.ticket_id.is_empty() {
+    // R1.3 (#221): defence against the pre-8.1 proxy path, which stored the
+    // literal string `"Unassigned"` as `ticket_id` when the branch didn't
+    // match any pattern. After R1.3 callers produce an empty string for
+    // "no ticket" and the pipeline agrees, but we still drop the legacy
+    // sentinel here so in-flight rolling upgrades never plant a bogus
+    // `Unassigned` ticket bucket next to the analytics layer's own
+    // `(untagged)` row.
+    if !event.ticket_id.is_empty() && event.ticket_id != "Unassigned" {
         conn.execute(
             "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'ticket_id', ?2)",
             params![uuid, event.ticket_id],
@@ -400,6 +397,12 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
             conn.execute(
                 "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'ticket_prefix', ?2)",
                 params![uuid, &event.ticket_id[..dash]],
+            )?;
+        }
+        if !event.ticket_source.is_empty() {
+            conn.execute(
+                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
+                params![uuid, crate::tag_keys::TICKET_SOURCE, event.ticket_source],
             )?;
         }
     }
@@ -597,6 +600,7 @@ mod tests {
             repo_id: String::new(),
             git_branch: String::new(),
             ticket_id: String::new(),
+            ticket_source: String::new(),
             cost_cents: 0.0,
             session_id: String::new(),
             activity: String::new(),
@@ -680,14 +684,20 @@ mod tests {
         assert_eq!(attr.repo_id, "github.com/test/repo");
         assert_eq!(attr.git_branch, "feat/PROJ-42-fix");
         assert_eq!(attr.ticket_id, "PROJ-42");
+        assert_eq!(attr.ticket_source, "branch");
     }
 
+    /// R1.3 (#221): when nothing matches we return an empty `ticket_id`
+    /// rather than the `"Unassigned"` sentinel that used to produce a
+    /// phantom ticket bucket in `budi stats --tickets`. The insert path
+    /// treats empty as "no ticket" and skips the tag writes.
     #[test]
-    fn attribution_resolve_empty_falls_back_to_unassigned() {
+    fn attribution_resolve_empty_returns_empty_ticket() {
         let attr = ProxyAttribution::resolve(None, None, None);
         assert_eq!(attr.repo_id, UNASSIGNED_REPO);
         assert!(attr.git_branch.is_empty());
-        assert_eq!(attr.ticket_id, "Unassigned");
+        assert!(attr.ticket_id.is_empty());
+        assert!(attr.ticket_source.is_empty());
     }
 
     #[test]
@@ -696,6 +706,7 @@ mod tests {
         assert_eq!(attr.repo_id, UNASSIGNED_REPO);
         assert_eq!(attr.git_branch, "ABC-123-feat");
         assert_eq!(attr.ticket_id, "ABC-123");
+        assert_eq!(attr.ticket_source, "branch");
     }
 
     #[test]
@@ -703,25 +714,29 @@ mod tests {
         let attr = ProxyAttribution::resolve(Some("my-repo"), Some("main"), None);
         assert_eq!(attr.repo_id, "my-repo");
         assert_eq!(attr.git_branch, "main");
-        assert_eq!(attr.ticket_id, "Unassigned");
+        assert!(attr.ticket_id.is_empty());
+        assert!(attr.ticket_source.is_empty());
     }
 
     #[test]
     fn attribution_resolve_numeric_only_ticket() {
         let attr = ProxyAttribution::resolve(Some("repo"), Some("fix/1234-typo"), None);
         assert_eq!(attr.ticket_id, "1234");
+        assert_eq!(attr.ticket_source, "branch_numeric");
     }
 
     #[test]
-    fn attribution_resolve_develop_branch_unassigned() {
+    fn attribution_resolve_develop_branch_no_ticket() {
         let attr = ProxyAttribution::resolve(Some("repo"), Some("develop"), None);
-        assert_eq!(attr.ticket_id, "Unassigned");
+        assert!(attr.ticket_id.is_empty());
+        assert!(attr.ticket_source.is_empty());
     }
 
     #[test]
-    fn attribution_resolve_master_branch_unassigned() {
+    fn attribution_resolve_master_branch_no_ticket() {
         let attr = ProxyAttribution::resolve(Some("repo"), Some("master"), None);
-        assert_eq!(attr.ticket_id, "Unassigned");
+        assert!(attr.ticket_id.is_empty());
+        assert!(attr.ticket_source.is_empty());
     }
 
     #[test]
@@ -777,6 +792,7 @@ mod tests {
         event.repo_id = "github.com/test/repo".to_string();
         event.git_branch = "PROJ-42-fix".to_string();
         event.ticket_id = "PROJ-42".to_string();
+        event.ticket_source = "branch".to_string();
         event.cost_cents = 2.5;
 
         let uuid = insert_proxy_message(&conn, &event).unwrap();
@@ -834,6 +850,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(prefix, "PROJ");
+
+        // R1.3 (#221): the proxy now records the extractor source so
+        // analytics can tell apart alphanumeric vs numeric tickets
+        // without re-deriving from the branch.
+        let source: String = conn
+            .query_row(
+                "SELECT value FROM tags WHERE message_id = ?1 AND key = 'ticket_source'",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "branch");
     }
 
     #[test]
@@ -850,6 +878,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// R1.3 (#221): a pre-8.1 proxy that still writes `ticket_id = "Unassigned"`
+    /// must not plant a ticket tag — otherwise `budi stats --tickets`
+    /// shows a phantom `Unassigned` row next to the analytics layer's
+    /// own `(untagged)` bucket. Insert path drops the legacy sentinel.
+    #[test]
+    fn insert_proxy_message_drops_legacy_unassigned_ticket_sentinel() {
+        let conn = test_db_with_messages();
+        let mut event = test_event();
+        event.ticket_id = "Unassigned".to_string();
+        event.ticket_source = String::new();
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE message_id = ?1 AND key IN ('ticket_id','ticket_prefix','ticket_source')",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "legacy 'Unassigned' ticket_id must never be persisted as a ticket tag"
+        );
+    }
+
+    /// R1.3 (#221): numeric-only tickets from the ADR-0082 §9 fallback
+    /// must be tagged with `ticket_source = "branch_numeric"` so the
+    /// import path and analytics can tell them apart from alpha tickets.
+    #[test]
+    fn insert_proxy_message_writes_numeric_ticket_source() {
+        let conn = test_db_with_messages();
+        let mut event = test_event();
+        event.git_branch = "fix/1234-typo".to_string();
+        event.ticket_id = "1234".to_string();
+        event.ticket_source = "branch_numeric".to_string();
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+
+        let source: String = conn
+            .query_row(
+                "SELECT value FROM tags WHERE message_id = ?1 AND key = 'ticket_source'",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "branch_numeric");
+
+        // Numeric tickets have no dash, so no prefix tag.
+        let prefix_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE message_id = ?1 AND key = 'ticket_prefix'",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prefix_count, 0);
     }
 
     #[test]
@@ -1068,6 +1153,7 @@ mod tests {
         let attr = ProxyAttribution::resolve(None, None, repo.to_str());
         assert_eq!(attr.git_branch, "PROJ-42-feature");
         assert_eq!(attr.ticket_id, "PROJ-42");
+        assert_eq!(attr.ticket_source, "branch");
         assert_ne!(
             attr.repo_id, UNASSIGNED_REPO,
             "cwd-based git resolution must also populate repo_id"
@@ -1112,7 +1198,8 @@ mod tests {
             "detached HEAD must not leak as a literal 'HEAD' branch, got: {:?}",
             attr.git_branch
         );
-        assert_eq!(attr.ticket_id, "Unassigned");
+        assert!(attr.ticket_id.is_empty());
+        assert!(attr.ticket_source.is_empty());
 
         let _ = std::fs::remove_dir_all(&repo);
     }

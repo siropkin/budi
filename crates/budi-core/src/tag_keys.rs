@@ -6,6 +6,13 @@
 
 pub const TICKET_ID: &str = "ticket_id";
 pub const TICKET_PREFIX: &str = "ticket_prefix";
+/// Where the ticket id was derived from. Stable values mirror the
+/// constants in `pipeline::mod` — `branch` for the alphanumeric
+/// `<PREFIX>-<NUM>` pattern and `branch_numeric` for the pure-numeric
+/// fallback from ADR-0082 §9. Reserved for future sources (e.g.
+/// `header`, `hint`) as R3 / 9.0 work on ticket enrichment lands. See
+/// R1.3 (#221).
+pub const TICKET_SOURCE: &str = "ticket_source";
 pub const USER: &str = "user";
 pub const MACHINE: &str = "machine";
 pub const PLATFORM: &str = "platform";

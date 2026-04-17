@@ -1711,6 +1711,13 @@ pub struct TicketCost {
     /// `(untagged)` row.
     #[serde(default)]
     pub top_repo_id: String,
+    /// Where the ticket id was derived from — `"branch"` (alphanumeric
+    /// pattern) or `"branch_numeric"` (ADR-0082 §9 fallback). Empty for
+    /// the `(untagged)` row. Legacy rows with no `ticket_source` sibling
+    /// tag fall back to `"branch"` so older DBs stay readable. See R1.3
+    /// (#221).
+    #[serde(default)]
+    pub source: String,
 }
 
 /// Per-branch breakdown attached to a single ticket detail response.
@@ -1740,9 +1747,20 @@ pub struct TicketCostDetail {
     pub repo_id: String,
     /// Per-branch attribution for cost charged to this ticket.
     pub branches: Vec<TicketBranchBreakdown>,
+    /// Where the ticket id was derived from. See `TicketCost::source`.
+    #[serde(default)]
+    pub source: String,
 }
 
 const TICKET_TAG_KEY: &str = "ticket_id";
+const TICKET_SOURCE_TAG_KEY: &str = "ticket_source";
+
+/// Canonical fallback source for legacy rows (pre-R1.3) that carry a
+/// `ticket_id` tag but no sibling `ticket_source` tag. The alphanumeric
+/// extractor was the only producer before R1.3 — everything else was
+/// proxy-only — so this default keeps analytics consistent without a
+/// reindex.
+pub const TICKET_SOURCE_BRANCH: &str = crate::pipeline::TICKET_SOURCE_BRANCH;
 
 /// Query cost grouped by ticket, sorted by cost descending. Includes an
 /// `(untagged)` bucket for assistant messages that have no `ticket_id` tag.
@@ -1817,6 +1835,12 @@ pub fn ticket_cost_with_filters(
              WHERE key = '{TICKET_TAG_KEY}'
              GROUP BY message_id
          ),
+         msg_source AS (
+             SELECT message_id, MIN(value) AS source_value
+             FROM tags
+             WHERE key = '{TICKET_SOURCE_TAG_KEY}'
+             GROUP BY message_id
+         ),
          tagged AS (
              SELECT t.value AS ticket_id,
                     m.session_id,
@@ -1827,10 +1851,12 @@ pub fn ticket_cost_with_filters(
                     m.cache_read_tokens,
                     m.cache_creation_tokens,
                     m.cost_cents,
-                    mvc.n_values
+                    mvc.n_values,
+                    COALESCE(ms.source_value, '') AS ticket_source
              FROM tags t
              JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
              JOIN messages m ON m.id = t.message_id
+             LEFT JOIN msg_source ms ON ms.message_id = t.message_id
              {where_clause}
              AND t.key = '{TICKET_TAG_KEY}'
          ),
@@ -1889,15 +1915,37 @@ pub fn ticket_cost_with_filters(
                  WHERE repo_value != '' AND repo_value != 'unknown'
              )
              WHERE rn = 1
+         ),
+         top_source AS (
+             SELECT ticket_id,
+                    ticket_source AS source_value,
+                    SUM(cost_cents / n_values) AS source_cost
+             FROM tagged
+             GROUP BY ticket_id, source_value
+         ),
+         top_source_pick AS (
+             SELECT ticket_id, source_value
+             FROM (
+                 SELECT ticket_id, source_value, source_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ticket_id
+                            ORDER BY source_cost DESC, source_value ASC
+                        ) AS rn
+                 FROM top_source
+                 WHERE source_value != ''
+             )
+             WHERE rn = 1
          )
          SELECT pt.ticket_id,
                 pt.sess, pt.cnt,
                 pt.inp, pt.outp, pt.cache_r, pt.cache_c, pt.cost,
                 COALESCE(tbp.branch_value, '') AS top_branch,
-                COALESCE(trp.repo_value, '') AS top_repo
+                COALESCE(trp.repo_value, '') AS top_repo,
+                COALESCE(tsp.source_value, '{TICKET_SOURCE_BRANCH}') AS ticket_source
          FROM per_ticket pt
          LEFT JOIN top_branch_pick tbp ON tbp.ticket_id = pt.ticket_id
          LEFT JOIN top_repo_pick trp ON trp.ticket_id = pt.ticket_id
+         LEFT JOIN top_source_pick tsp ON tsp.ticket_id = pt.ticket_id
 
          UNION ALL
 
@@ -1910,7 +1958,8 @@ pub fn ticket_cost_with_filters(
                 COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
                 COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
                 '' AS top_branch,
-                '' AS top_repo
+                '' AS top_repo,
+                '' AS ticket_source
          FROM messages m2
          {untagged_where}
          AND NOT EXISTS (
@@ -1945,6 +1994,7 @@ pub fn ticket_cost_with_filters(
                 cost_cents: row.get(7)?,
                 top_branch: row.get(8)?,
                 top_repo_id: row.get(9)?,
+                source: row.get(10)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -1992,27 +2042,61 @@ pub fn ticket_cost_single(
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     // Totals. Use the same proportional split on multi-value ticket tags.
+    // `source` picks the dominant `ticket_source` sibling tag across the
+    // selected messages (by cost, then name). Legacy rows without a
+    // `ticket_source` tag fall back to the alphanumeric `branch` source in
+    // the caller so the detail view always has something to print.
     let totals_sql = format!(
         "WITH msg_val_counts AS (
              SELECT message_id, COUNT(*) AS n_values
              FROM tags
              WHERE key = ?1
              GROUP BY message_id
+         ),
+         msg_source AS (
+             SELECT message_id, MIN(value) AS source_value
+             FROM tags
+             WHERE key = '{TICKET_SOURCE_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         selected AS (
+             SELECT m.id AS message_id,
+                    m.session_id,
+                    m.repo_id,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.cache_read_tokens,
+                    m.cache_creation_tokens,
+                    m.cost_cents,
+                    mvc.n_values,
+                    COALESCE(ms.source_value, '') AS ticket_source
+             FROM tags t
+             JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+             JOIN messages m ON m.id = t.message_id
+             LEFT JOIN msg_source ms ON ms.message_id = t.message_id
+             {where_clause}
+         ),
+         source_pick AS (
+             SELECT ticket_source,
+                    SUM(cost_cents / n_values) AS source_cost
+             FROM selected
+             WHERE ticket_source != ''
+             GROUP BY ticket_source
+             ORDER BY source_cost DESC, ticket_source ASC
+             LIMIT 1
          )
-         SELECT COUNT(DISTINCT m.session_id) AS sess,
+         SELECT COUNT(DISTINCT session_id) AS sess,
                 COUNT(*) AS cnt,
-                COALESCE(SUM(m.input_tokens / mvc.n_values), 0) AS inp,
-                COALESCE(SUM(m.output_tokens / mvc.n_values), 0) AS outp,
-                COALESCE(SUM(m.cache_read_tokens / mvc.n_values), 0) AS cache_r,
-                COALESCE(SUM(m.cache_creation_tokens / mvc.n_values), 0) AS cache_c,
-                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost,
-                CASE WHEN COUNT(DISTINCT COALESCE(m.repo_id, '')) = 1
-                     THEN COALESCE(MIN(m.repo_id), '')
-                     ELSE '' END AS repo
-         FROM tags t
-         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
-         JOIN messages m ON m.id = t.message_id
-         {where_clause}",
+                COALESCE(SUM(input_tokens / n_values), 0) AS inp,
+                COALESCE(SUM(output_tokens / n_values), 0) AS outp,
+                COALESCE(SUM(cache_read_tokens / n_values), 0) AS cache_r,
+                COALESCE(SUM(cache_creation_tokens / n_values), 0) AS cache_c,
+                COALESCE(SUM(cost_cents / n_values), 0.0) AS cost,
+                CASE WHEN COUNT(DISTINCT COALESCE(repo_id, '')) = 1
+                     THEN COALESCE(MIN(repo_id), '')
+                     ELSE '' END AS repo,
+                COALESCE((SELECT ticket_source FROM source_pick), '') AS src
+         FROM selected",
     );
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -2030,9 +2114,10 @@ pub fn ticket_cost_single(
             row.get::<_, u64>(5)?,
             row.get::<_, f64>(6)?,
             row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
         ))
     });
-    let (sess, cnt, inp, outp, cache_r, cache_c, cost, repo) = match totals {
+    let (sess, cnt, inp, outp, cache_r, cache_c, cost, repo, src) = match totals {
         Ok(row) => row,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -2082,6 +2167,16 @@ pub fn ticket_cost_single(
         .filter_map(|r| r.ok())
         .collect();
 
+    // Legacy rows lack a `ticket_source` sibling tag; before R1.3
+    // (#221) only the alphanumeric extractor produced `ticket_id` tags
+    // in pipeline writes, so treat the empty source as `branch` for
+    // the detail view.
+    let source = if src.is_empty() {
+        TICKET_SOURCE_BRANCH.to_string()
+    } else {
+        src
+    };
+
     Ok(Some(TicketCostDetail {
         ticket_prefix: ticket_prefix_of(ticket_id),
         ticket_id: ticket_id.to_string(),
@@ -2094,6 +2189,7 @@ pub fn ticket_cost_single(
         cost_cents: cost,
         repo_id: repo,
         branches,
+        source,
     }))
 }
 
