@@ -1685,6 +1685,224 @@ fn session_list_uses_structured_models_array() {
     );
 }
 
+/// Regression test for #302 — `budi sessions -p today` was empty because
+/// `since` is computed as a UTC RFC3339 string from local midnight while
+/// message timestamps are written by each provider in RFC3339 (UTC). Confirm
+/// the string comparison works for the CLI's exact `since` format.
+#[test]
+fn session_list_returns_session_for_today_window_with_local_midnight_utc_since() {
+    use chrono::TimeZone;
+    let mut conn = test_db();
+
+    // Emulate the CLI's `local_midnight_to_utc(today)` output — RFC3339 UTC
+    // with a `+00:00` offset and no fractional seconds.
+    let since_dt = chrono::Local
+        .from_local_datetime(
+            &chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        )
+        .latest()
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let since = since_dt.to_rfc3339();
+
+    // One assistant message "today, one hour after local midnight".
+    let mut msg = assistant_msg("today-msg", "sess-today", 1.5);
+    msg.timestamp = since_dt + chrono::Duration::hours(1);
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let result = session_list_with_filters(
+        &conn,
+        &SessionListParams {
+            since: Some(&since),
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(result.total_count, 1);
+    assert_eq!(result.sessions[0].id, "sess-today");
+}
+
+/// Sessions visibility doctor check surfaces window-level mismatches so
+/// `budi doctor` can flag a recurrence of #302 even if the primary fix
+/// regresses.
+#[test]
+fn session_visibility_reports_windows_and_flags_hidden_rows() {
+    let mut conn = test_db();
+    let now = chrono::Utc::now();
+
+    // Visible: assistant message with a session_id, stamped 30 minutes ago.
+    let mut visible = assistant_msg("vis-1", "sess-vis", 1.0);
+    visible.timestamp = now - chrono::Duration::minutes(30);
+    ingest_messages(&mut conn, &[visible], None).unwrap();
+
+    // Hidden: assistant row written directly with NULL session_id, stamped
+    // 90 minutes ago — simulates the pre-fix proxy bug.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            cost_cents, cost_confidence)
+         VALUES ('hidden-1', NULL, 'assistant', ?1, 'claude-opus-4-6',
+                 'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
+        params![(now - chrono::Duration::minutes(90)).to_rfc3339()],
+    )
+    .unwrap();
+
+    let windows = session_visibility(&conn).unwrap();
+    let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, vec!["today", "7d", "30d"]);
+
+    for window in &windows {
+        assert_eq!(window.assistant_messages, 2, "{} window", window.label);
+        assert_eq!(
+            window.assistant_messages_with_session, 1,
+            "{} window",
+            window.label
+        );
+        assert_eq!(window.distinct_sessions, 1, "{} window", window.label);
+        assert_eq!(window.returned_sessions, 1, "{} window", window.label);
+        assert!(
+            !window.has_mismatch(),
+            "{} window should not flag mismatch: visible rows exist",
+            window.label
+        );
+    }
+}
+
+#[test]
+fn session_visibility_flags_mismatch_when_all_rows_missing_session_id() {
+    let conn = test_db();
+    let now = chrono::Utc::now();
+
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            cost_cents, cost_confidence)
+         VALUES ('hidden-1', NULL, 'assistant', ?1, 'claude-opus-4-6',
+                 'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
+        params![(now - chrono::Duration::minutes(30)).to_rfc3339()],
+    )
+    .unwrap();
+
+    let windows = session_visibility(&conn).unwrap();
+    let today = windows.iter().find(|w| w.label == "today").unwrap();
+    assert_eq!(today.assistant_messages, 1);
+    assert_eq!(today.assistant_messages_with_session, 0);
+    assert_eq!(today.returned_sessions, 0);
+    assert!(today.has_mismatch());
+}
+
+/// `messages.timestamp` contract — every provider must write an RFC3339 UTC
+/// string that string-compares correctly against the CLI's `since`/`until`
+/// bounds. This regression test exercises the exact formats emitted by the
+/// Claude Code JSONL, Cursor, and Codex providers (see SOUL.md §Messages).
+#[test]
+fn session_list_window_compares_correctly_across_provider_timestamp_formats() {
+    let mut conn = test_db();
+
+    // Claude Code JSONL uses `...Z`; after ingest we round-trip via
+    // `DateTime<Utc>::to_rfc3339()` which writes `+00:00`.
+    let mut claude = assistant_msg("cc-1", "cc-sess", 1.0);
+    claude.timestamp = "2026-03-14T12:00:00.500Z".parse().unwrap();
+    claude.provider = "claude_code".to_string();
+
+    // Cursor timestamps come in as millis and are written via
+    // `DateTime::from_timestamp_millis().to_rfc3339()`.
+    let mut cursor = assistant_msg("cu-1", "cu-sess", 1.0);
+    cursor.timestamp = "2026-03-14T12:30:00+00:00".parse().unwrap();
+    cursor.provider = "cursor".to_string();
+
+    // Codex emits RFC3339 with `...Z` suffix as well.
+    let mut codex = assistant_msg("cx-1", "cx-sess", 1.0);
+    codex.timestamp = "2026-03-14T13:00:00.123Z".parse().unwrap();
+    codex.provider = "openai".to_string();
+
+    ingest_messages(&mut conn, &[claude, cursor, codex], None).unwrap();
+
+    let since = "2026-03-14T00:00:00+00:00";
+    let until = "2026-03-15T00:00:00+00:00";
+    let result = session_list_with_filters(
+        &conn,
+        &SessionListParams {
+            since: Some(since),
+            until: Some(until),
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        result.total_count, 3,
+        "all three provider sessions must be in window"
+    );
+
+    // And the `Z`-suffixed upper bound (as produced by some callers) also works.
+    let until_z = "2026-03-15T00:00:00Z";
+    let result2 = session_list_with_filters(
+        &conn,
+        &SessionListParams {
+            since: Some(since),
+            until: Some(until_z),
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(result2.total_count, 3);
+}
+
+#[test]
+fn session_list_ignores_empty_string_session_id() {
+    let conn = test_db();
+    // Direct insert: assistant row whose session_id is the empty string.
+    // Pre-fix `insert_proxy_message` could land here if the proxy route
+    // supplied "" instead of generating an id.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
+            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            cost_cents, cost_confidence)
+         VALUES ('empty-1', '', 'assistant', '2026-03-14T10:00:00+00:00',
+                 'claude-opus-4-6', 'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
+        [],
+    )
+    .unwrap();
+
+    let result = session_list_with_filters(
+        &conn,
+        &SessionListParams {
+            since: Some("2026-03-13T00:00:00+00:00"),
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+        },
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        result.total_count, 0,
+        "empty-string session_id must not produce a ghost session row"
+    );
+}
+
 #[test]
 fn session_list_with_dimension_filters() {
     let mut conn = test_db();

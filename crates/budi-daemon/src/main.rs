@@ -207,8 +207,8 @@ async fn main() -> Result<()> {
                 .connect_timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("failed to build proxy HTTP client"),
-            anthropic_upstream: proxy_config.anthropic_upstream.clone(),
-            openai_upstream: proxy_config.openai_upstream.clone(),
+            anthropic_upstream: proxy_config.effective_anthropic_upstream(),
+            openai_upstream: proxy_config.effective_openai_upstream(),
             analytics_db_path,
             #[cfg(test)]
             record_tx: None,

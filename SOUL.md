@@ -25,6 +25,32 @@ budi init
 
 After upgrading: the first CLI command now verifies daemon version and auto-restarts stale daemons when needed. If automatic restart fails, stop the old process manually, then run `budi init`. On Unix you can use `pkill -f budi-daemon`; on Windows use `taskkill /IM budi-daemon.exe /F` if needed.
 
+### Local end-to-end tests
+
+Shell-driven end-to-end tests live under `scripts/e2e/`. They exercise the full stack — real release binaries (`budi` + `budi-daemon`), a mock upstream over loopback, the HTTP proxy path, and the CLI — against an isolated `$HOME` so they never touch real user data.
+
+```bash
+cargo build --release                                 # once per change
+bash scripts/e2e/test_302_sessions_visibility.sh      # regression guard for #302
+```
+
+Each script is a single self-contained bash file that:
+
+1. Builds a throwaway `HOME` in `mktemp` and exports it for the whole run.
+2. Boots a tiny Python mock upstream on loopback.
+3. Starts `budi-daemon serve --port … --proxy-port …` with `BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM` pointed at the mock (these env vars override the hard-coded upstreams — see `ProxyConfig::effective_anthropic_upstream` / `effective_openai_upstream`).
+4. Drives real CLI/HTTP commands and asserts DB rows, API responses, and CLI output.
+5. Tears down the temp HOME and child processes via a `trap`.
+
+Design rules:
+
+- **No shared mutable state.** Every script allocates its own ports and `HOME`; runs should be safe in parallel.
+- **Fail loud, fail fast.** Scripts use `set -euo pipefail` and print the daemon log on any failure.
+- **Negative-path provable.** Each regression test should fail when the fix it guards is reverted (every new script should be verified this way before merging).
+- **Keep the fixtures minimal.** Mock upstream responses stay inline in the script; no binary fixtures checked in.
+
+When adding a new script, name it `test_<issue>_<short_slug>.sh` and document what bug or contract it pins in the opening comment. See `scripts/e2e/README.md` for the full convention.
+
 ## Daemon autostart
 
 `budi init` installs a platform-native user-level service so the daemon starts automatically at login and restarts on crash:
@@ -118,6 +144,35 @@ Nine tables, seven data entities + two supporting:
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents from Cursor's API. Used by `budi import` for historical backfill |
 
 Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingestion has been removed. The proxy is the sole live data source.
+
+### Attribution contract (R1.0)
+
+Every ingestor that writes to `messages` MUST uphold the following so that the
+CLI, daemon, and dashboard tell the same story (see ADR-0082 and the R1.0 bugs
+in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
+
+- **`timestamp`** — RFC3339 string in UTC. Accept both `...Z` and `...+00:00`
+  offsets; `session_list_with_filters` and `activity_chart` compare these as
+  strings, so never write naive SQLite datetime (`YYYY-MM-DD HH:MM:SS`) or a
+  local-offset string. Providers emit RFC3339 from `DateTime::<Utc>::to_rfc3339()`
+  (Claude Code JSONL, Codex) or `DateTime::from_timestamp_millis(..).to_rfc3339()`
+  (Cursor, proxy).
+- **`session_id`** — required for every live assistant row. Live proxy traffic
+  uses the agent-provided `X-Budi-Session` header, falling back to
+  `generate_proxy_session_id()`. Empty-string `session_id` is treated as NULL
+  by the analytics layer, and the insert path normalizes `""` to `NULL` so
+  ghost `(empty)` sessions cannot appear. Rows with NULL/empty `session_id`
+  are invisible to `budi sessions` by design — they indicate an attribution
+  bug upstream, not a display bug.
+- **`provider`** — canonical provider key (`claude_code`, `cursor`, `openai`,
+  `copilot`). `COALESCE(provider, 'claude_code')` is the legacy fallback for
+  pre-8.0 rows; new writes MUST set it explicitly.
+- **`git_branch`** — written without the `refs/heads/` prefix
+  (`session_list_with_filters` strips it defensively for older rows).
+
+`budi doctor` runs a sessions-visibility check for the `today`, `7d`, and
+`30d` windows and fails with a link to #302 if any window has assistant rows
+but zero returned sessions.
 
 ### Key concepts
 

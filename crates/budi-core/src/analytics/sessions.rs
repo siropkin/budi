@@ -39,7 +39,8 @@ pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
         |r| r.get(0),
     )?;
     let assistant_rows_no_session: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE role = 'assistant' AND session_id IS NULL",
+        "SELECT COUNT(*) FROM messages
+         WHERE role = 'assistant' AND (session_id IS NULL OR session_id = '')",
         [],
         |r| r.get(0),
     )?;
@@ -54,7 +55,7 @@ pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(provider, 'claude_code'),
                 COUNT(*),
-                SUM(CASE WHEN session_id IS NOT NULL THEN 1 ELSE 0 END)
+                SUM(CASE WHEN session_id IS NOT NULL AND session_id != '' THEN 1 ELSE 0 END)
          FROM messages WHERE role = 'assistant'
          GROUP BY COALESCE(provider, 'claude_code')",
     )?;
@@ -83,6 +84,106 @@ pub fn session_audit(conn: &Connection) -> Result<SessionAudit> {
         sessions_orphaned,
         provider_coverage,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Session Visibility (doctor diagnostics)
+// ---------------------------------------------------------------------------
+
+/// Per-window session visibility snapshot used by `budi doctor` to surface the
+/// kind of silent attribution failure R1.0.1 (#302) fixed: when assistant rows
+/// exist in a period but the session listing returns empty because rows were
+/// written with NULL/empty `session_id`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionVisibilityWindow {
+    /// Human label: `today`, `7d`, `30d`.
+    pub label: String,
+    /// ISO-8601 UTC lower bound for the window (inclusive).
+    pub since: String,
+    /// Total assistant messages recorded in the window.
+    pub assistant_messages: u64,
+    /// Assistant messages in the window that have a non-empty `session_id`.
+    pub assistant_messages_with_session: u64,
+    /// Distinct session IDs observed in the window.
+    pub distinct_sessions: u64,
+    /// Sessions that `session_list_with_filters` would return for the window.
+    pub returned_sessions: u64,
+}
+
+impl SessionVisibilityWindow {
+    /// Any assistant activity in the window that is invisible to `budi sessions`.
+    pub fn has_mismatch(&self) -> bool {
+        self.assistant_messages > 0 && self.returned_sessions == 0
+    }
+}
+
+/// Session visibility stats for `today`, last 7 days, and last 30 days.
+///
+/// Built by the `budi doctor` session-visibility check. Each window compares
+/// `assistant_messages` vs `returned_sessions`; any non-zero assistant count
+/// with zero returned sessions flags a regression of R1.0.1 (#302).
+pub fn session_visibility(conn: &Connection) -> Result<Vec<SessionVisibilityWindow>> {
+    let now = chrono::Utc::now();
+    let windows = [
+        (
+            "today",
+            now.date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("valid midnight")
+                .and_utc(),
+        ),
+        ("7d", now - chrono::Duration::days(7)),
+        ("30d", now - chrono::Duration::days(30)),
+    ];
+
+    let mut out = Vec::with_capacity(windows.len());
+    for (label, since_dt) in windows {
+        let since = since_dt.to_rfc3339();
+        let assistant_messages: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE role = 'assistant' AND timestamp >= ?1",
+            params![since],
+            |r| r.get(0),
+        )?;
+        let assistant_messages_with_session: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE role = 'assistant' AND timestamp >= ?1
+               AND session_id IS NOT NULL AND session_id != ''",
+            params![since],
+            |r| r.get(0),
+        )?;
+        let distinct_sessions: u64 = conn.query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM messages
+             WHERE role = 'assistant' AND timestamp >= ?1
+               AND session_id IS NOT NULL AND session_id != ''",
+            params![since],
+            |r| r.get(0),
+        )?;
+
+        let paginated = session_list(
+            conn,
+            &SessionListParams {
+                since: Some(&since),
+                until: None,
+                search: None,
+                sort_by: None,
+                sort_asc: false,
+                limit: 1,
+                offset: 0,
+            },
+        )?;
+        let returned_sessions = paginated.total_count;
+
+        out.push(SessionVisibilityWindow {
+            label: label.to_string(),
+            since,
+            assistant_messages,
+            assistant_messages_with_session,
+            distinct_sessions,
+            returned_sessions,
+        });
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +362,7 @@ pub fn session_list_with_filters(
              FROM messages m
              LEFT JOIN sessions s ON s.id = m.session_id
              {where_clause}
-             AND m.session_id IS NOT NULL
+             AND m.session_id IS NOT NULL AND m.session_id != ''
              GROUP BY m.session_id
          )
          SELECT COUNT(*) FROM session_agg"
@@ -407,7 +508,7 @@ pub fn session_list_with_filters(
              FROM messages m
              LEFT JOIN sessions s ON s.id = m.session_id
              {where_clause}
-             AND m.session_id IS NOT NULL
+             AND m.session_id IS NOT NULL AND m.session_id != ''
              GROUP BY m.session_id
          )
          SELECT COUNT(*) OVER() as total,

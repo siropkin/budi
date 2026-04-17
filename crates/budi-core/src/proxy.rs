@@ -286,15 +286,29 @@ pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<Str
         Some(&event.git_branch)
     };
 
+    // Attribution: session_id must be written alongside other message columns.
+    // `session_list_with_filters` filters out rows with NULL/empty `session_id`,
+    // so a missing value here would make every proxied message invisible to
+    // `budi sessions`. The proxy route always supplies a non-empty id (either
+    // from `X-Budi-Session` or `generate_proxy_session_id`) — we still treat an
+    // empty string defensively as NULL so queries stay consistent with the
+    // documented `messages.session_id` contract (see SOUL.md).
+    let session_id = if event.session_id.is_empty() {
+        None
+    } else {
+        Some(event.session_id.as_str())
+    };
+
     conn.execute(
         "INSERT OR IGNORE INTO messages (
-            id, role, timestamp, model, provider,
+            id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens,
             repo_id, git_branch, cost_cents, cost_confidence
-        ) VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'proxy_estimated')",
+        ) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'proxy_estimated')",
         params![
             uuid,
+            session_id,
             event.timestamp,
             event.model,
             event.provider,
@@ -630,6 +644,71 @@ mod tests {
             .unwrap();
         assert_eq!(cache_create, Some(5000));
         assert_eq!(cache_read, Some(80000));
+    }
+
+    /// Regression test for #302 — `budi sessions` returned empty for periods
+    /// that clearly had proxy activity because `insert_proxy_message` dropped
+    /// `session_id`, making every proxied row invisible to the
+    /// `AND m.session_id IS NOT NULL` filter in `session_list_with_filters`.
+    #[test]
+    fn proxy_message_persists_session_id_and_is_visible_in_session_list() {
+        let conn = test_db_with_messages();
+        let mut event = test_event();
+        event.session_id = "proxy-session-abc".to_string();
+        event.timestamp = chrono::Utc::now().to_rfc3339();
+
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM messages WHERE id = ?1",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("proxy-session-abc"));
+
+        // Window that includes the event — `budi sessions -p today` would use
+        // an equivalent `since`. The session must be listed.
+        let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let paginated = crate::analytics::session_list_with_filters(
+            &conn,
+            &crate::analytics::SessionListParams {
+                since: Some(&since),
+                until: None,
+                search: None,
+                sort_by: None,
+                sort_asc: false,
+                limit: 50,
+                offset: 0,
+            },
+            &crate::analytics::DimensionFilters::default(),
+        )
+        .unwrap();
+        assert_eq!(paginated.total_count, 1);
+        assert_eq!(paginated.sessions.len(), 1);
+        assert_eq!(paginated.sessions[0].id, "proxy-session-abc");
+    }
+
+    /// Defensive: an empty `session_id` string is stored as NULL so it cannot
+    /// quietly produce a `(empty)` session bucket or confuse downstream
+    /// `session_id IS NOT NULL` checks. Such rows are intentionally invisible
+    /// to `budi sessions` (there is no session to attribute them to).
+    #[test]
+    fn proxy_message_empty_session_id_is_stored_as_null() {
+        let conn = test_db_with_messages();
+        let event = test_event(); // session_id = ""
+
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM messages WHERE id = ?1",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none(), "empty session_id must be stored as NULL");
     }
 
     #[test]
