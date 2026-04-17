@@ -292,13 +292,15 @@ budi stats --tickets               # tickets ranked by cost (sourced from ticket
 budi stats --ticket <id>           # cost for a specific ticket, with per-branch breakdown
 budi stats --activities            # activities ranked by cost (bugfix, refactor, …)
 budi stats --activity <name>       # cost for a specific activity, with per-branch breakdown
+budi stats --files                 # files ranked by cost (repo-relative paths only — ADR-0083)
+budi stats --file <path>           # cost for a specific file, with per-branch + per-ticket breakdown
 budi stats --provider codex        # filter stats to a single provider
 budi stats --tag ticket_id         # cost per ticket value (raw tag view)
 budi stats --tag ticket_prefix     # cost per team prefix
 budi sessions                      # list recent sessions with cost and health
 budi sessions --ticket <id>        # sessions tagged with a ticket id
 budi sessions --activity <name>    # sessions tagged with an activity (bugfix, refactor, …)
-budi sessions <id>                 # session detail: cost, models, health, tags
+budi sessions <id>                 # session detail: cost, models, health, tags, work outcome
 budi health                        # session health vitals for most recent session
 budi health --session <id>         # health vitals for a specific session
 ```
@@ -325,7 +327,9 @@ All data commands support `--period today|week|month|all` and `--format json`.
 
 ## Tags & cost attribution
 
-Assistant messages are tagged with core attribution keys: `provider`, `model`, `ticket_id`, `ticket_prefix`, `activity`, `composer_mode`, `permission_mode`, `duration`, `tool`, `tool_use_id`, `user_email`, `platform`, `machine`, `user`, `git_user`.
+Assistant messages are tagged with core attribution keys: `provider`, `model`, `ticket_id`, `ticket_prefix`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, `tool_outcome`, `tool_outcome_source`, `tool_outcome_confidence`, `composer_mode`, `permission_mode`, `duration`, `tool`, `tool_use_id`, `user_email`, `platform`, `machine`, `user`, `git_user`.
+
+Every first-class attribution dimension (ticket, activity, file, tool outcome) carries a sibling `*_source` tag that explains how the value was derived (`branch` / `branch_numeric` for tickets, `rule` for activity, `tool_arg` / `cwd_relative` for file paths, `jsonl_tool_result` / `heuristic_retry` for tool outcomes) and, where applicable, an `*_confidence` tag (`high` / `medium` / `low`). File-path attribution is strictly repo-relative: absolute paths, paths outside the repo root, `file://` and other URL schemes, and `..` escapes are dropped at extraction time so nothing outside the repo can land in the database (see [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md)).
 
 Conditional tags:
 - `cost_confidence` is added when `cost_cents` is present.
@@ -372,7 +376,7 @@ Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`,
 | **Context Growth** | Context size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute context size |
 | **Cache Reuse** | Recent cache reuse is low for the active model stretch | Below 60% recent reuse | Below 35% recent reuse |
 | **Cost Acceleration** | Later turns/replies cost much more than earlier ones | 2x+ growth and meaningful cost per unit | 4x+ growth and high cost per unit |
-| **Retry Loops** | Agent is stuck in a failing tool loop | One suspicious retry loop | Repeated or severe retry loops |
+| **Retry Loops** | Agent is stuck in a failing tool loop (disabled since 8.0 — hook-event source removed; will be re-enabled on top of R1.5 tool-outcome signals) | One suspicious retry loop | Repeated or severe retry loops |
 
 Health state appears in the status line, the Cursor extension panel, and the session detail page in the dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh."
 
@@ -552,6 +556,12 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | GET | `/analytics/projects` | Repos ranked by usage |
 | GET | `/analytics/branches` | Cost per git branch |
 | GET | `/analytics/branches/{branch}` | Cost for a specific branch |
+| GET | `/analytics/tickets` | Cost per ticket (first-class dimension, #304) |
+| GET | `/analytics/tickets/{ticket_id}` | Cost for a specific ticket, with per-branch breakdown |
+| GET | `/analytics/activities` | Cost per activity bucket (bugfix, refactor, …) (#305) |
+| GET | `/analytics/activities/{name}` | Cost for a specific activity, with per-branch breakdown |
+| GET | `/analytics/files` | Cost per repo-relative file (#292) |
+| GET | `/analytics/files/{*path}` | Cost for a specific file, with per-branch + per-ticket breakdown |
 | GET | `/analytics/cost` | Cost breakdown |
 | GET | `/analytics/models` | Model usage breakdown |
 | GET | `/analytics/providers` | Per-provider breakdown |
