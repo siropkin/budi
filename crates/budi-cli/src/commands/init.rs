@@ -182,39 +182,51 @@ pub fn cmd_init(
                 .unwrap_or_else(|_| "<unable to resolve budi home>".to_string())
         );
     }
-    println!();
-    println!("  {bold}Next steps:{reset}");
-    println!(
-        "    1. Start coding as usual (`claude`, `codex`, `cursor`, `gh copilot`) — proxy is auto-configured"
-    );
-    println!("       {dim}Need one-off bypass? Use `BUDI_BYPASS=1 budi launch <agent>`{reset}");
-    println!(
-        "    2. Import history: `budi import` {dim}(load past transcripts from Claude Code / Codex / Copilot / Cursor){reset}"
-    );
-    println!("    3. Health check:   `budi status`");
-    println!("    4. Cloud dashboard:  https://app.getbudi.dev");
-    println!();
-    if selected_integrations.is_empty() {
-        println!(
-            "  {dim}No integrations were installed. Use `budi integrations install ...` anytime.{reset}"
-        );
-    }
-
     let has_cli_agents = agents_config.claude_code.enabled
         || agents_config.codex_cli.enabled
         || agents_config.copilot_cli.enabled;
+
+    println!();
+    println!("  {bold}Next steps:{reset}");
     if has_cli_agents {
         let yellow = super::ansi("\x1b[33m");
         println!(
-            "  {yellow}\u{26a0}  Restart your terminal{reset} {dim}(or `source ~/.zshrc`){reset} {yellow}to activate proxy routing for CLI agents.{reset}"
+            "    1. {yellow}Restart your terminal{reset} {dim}(or `source ~/.zshrc`){reset} so CLI agents pick up proxy env vars."
         );
-        println!("     {dim}Already-running sessions are NOT going through the proxy yet.{reset}");
         println!(
-            "     {dim}For immediate proxy routing without restart: budi launch <agent>{reset}"
+            "       {dim}Already-running shells are NOT going through the proxy yet. For immediate routing: `budi launch <agent>`.{reset}"
         );
     } else if !selected_integrations.is_empty() {
-        println!("  {dim}Restart Cursor/IDE apps to pick up updated proxy settings.{reset}");
+        println!(
+            "    1. Restart your IDE (Cursor, etc.) so the updated proxy settings take effect."
+        );
+    } else {
+        println!(
+            "    1. Install an integration later with `budi integrations install ...` when you're ready."
+        );
     }
+    println!(
+        "    2. Start coding as usual {dim}(`claude`, `codex`, `cursor`, `gh copilot` — proxy is auto-configured){reset}"
+    );
+    println!(
+        "    3. Verify setup:      {bold}budi doctor{reset} {dim}(checks daemon, proxy, agents, attribution){reset}"
+    );
+    println!(
+        "    4. Check today's cost: {bold}budi status{reset} {dim}(quick snapshot, no data yet? see step 2){reset}"
+    );
+    println!(
+        "    5. Import history {dim}(optional):{reset} `budi import` {dim}(loads past Claude Code / Codex / Copilot / Cursor transcripts){reset}"
+    );
+    println!();
+    if selected_integrations.is_empty() {
+        println!(
+            "  {dim}No integrations were installed. Run `budi integrations install ...` anytime to add the Claude Code status line or Cursor extension.{reset}"
+        );
+        println!();
+    }
+    println!(
+        "  {dim}Cloud dashboard (optional):{reset} https://app.getbudi.dev {dim}— local stays local; cloud sync is off by default.{reset}"
+    );
     println!();
 
     if had_integration_warnings {

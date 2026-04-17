@@ -62,9 +62,11 @@ pub fn cmd_status() -> Result<()> {
     };
 
     let (since, _until) = period_date_range(StatsPeriod::Today);
-    if let Ok(summary) = client.summary(since.as_deref(), None, None)
-        && let Ok(cost) = client.cost(since.as_deref(), None, None)
-    {
+    let summary = client.summary(since.as_deref(), None, None).ok();
+    let cost = client.cost(since.as_deref(), None, None).ok();
+    let providers = client.providers(since.as_deref(), None).ok();
+
+    if let (Some(summary), Some(cost)) = (&summary, &cost) {
         println!();
         println!(
             "  {bold}Today{reset}    {yellow}{}{reset}  ({} messages, {} in, {} out)",
@@ -73,14 +75,22 @@ pub fn cmd_status() -> Result<()> {
             format_tokens(summary.total_input_tokens),
             format_tokens(summary.total_output_tokens),
         );
+        if let Some(providers) = &providers
+            && !providers.is_empty()
+        {
+            let names: Vec<&str> = providers.iter().map(|p| p.display_name.as_str()).collect();
+            println!("  {bold}Agents{reset}   {}", names.join(", "));
+        }
     }
 
-    // Active agents
-    if let Ok(providers) = client.providers(since.as_deref(), None)
-        && !providers.is_empty()
-    {
-        let names: Vec<&str> = providers.iter().map(|p| p.display_name.as_str()).collect();
-        println!("  {bold}Agents{reset}   {}", names.join(", "));
+    // First-run friendly hint when setup looks healthy but no activity recorded yet today.
+    let no_activity_today = summary.as_ref().is_some_and(|s| s.total_messages == 0);
+    if no_activity_today {
+        println!();
+        println!(
+            "  {dim}No activity recorded today yet. Open your agent (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt — it will show up here.{reset}"
+        );
+        println!("  {dim}Run `budi doctor` to verify your setup end-to-end.{reset}");
     }
 
     println!();

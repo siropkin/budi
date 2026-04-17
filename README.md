@@ -164,22 +164,20 @@ Use this sequence if you want the fastest "did setup really work?" path:
 1. **Install and initialize**
    - Homebrew: `brew install siropkin/budi/budi` then `budi init`
    - Standalone installers and `./scripts/install.sh` already run `budi init` for you
-2. **Choose agents and integrations** during `budi init` (recommended defaults are safe)
-   - `budi init` also installs a platform-native autostart service (launchd on macOS, systemd on Linux, Task Scheduler on Windows) so the daemon restarts automatically after reboots
-3. **Import historical data** (optional)
+   - `budi init` prompts for agents and integrations (defaults are safe), starts the daemon + proxy, and installs a platform-native autostart service (launchd on macOS, systemd on Linux, Task Scheduler on Windows)
+2. **Restart your terminal** (CLI agents only: Claude Code, Codex, Copilot CLI)
+   - Proxy env vars are written into your shell profile; already-running shells won't route through the proxy until they are reloaded
+   - For immediate routing without a restart, use `budi launch <agent>`
+3. **Send your first prompt**
+   - Open your agent as usual (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt — proxy is auto-configured
+   - One-off bypass if needed: `BUDI_BYPASS=1 budi launch <agent>`
+4. **Verify end-to-end** with `budi doctor`
+   - Checks daemon, proxy, autostart, agent configuration, database, and attribution (sessions / branches / activities)
+   - The top of the report says "All checks passed." when first-run setup is healthy — and adds a friendly nudge if no activity has been recorded yet
+5. **See today's cost** with `budi status`
+   - Quick snapshot: daemon/proxy state, today's cost, and active agents
+6. **Import historical data** (optional)
    - Run `budi import` to backfill from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API
-4. **Confirm health**
-   - Run `budi doctor` to check daemon, proxy, autostart service, and agent configuration
-   - Run `budi status` for a quick overview of daemon, proxy, and today's cost
-5. **Generate your first data point**
-   - Open your selected agent as usual (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt
-   - Optional explicit fallback: `budi launch <agent>`
-   - One-off bypass for explicit launch: `BUDI_BYPASS=1 budi launch <agent>`
-   - Run `budi stats` and confirm non-zero usage
-6. **Restart your terminal**
-   - CLI agents (Claude Code, Codex, Copilot) need a new shell session to pick up proxy env vars
-   - Or use `budi launch <agent>` for immediate proxy routing without restarting
-   - `budi doctor` warns if proxy env vars are configured but not active in the current shell
 
 ### PATH and duplicate binary checks
 

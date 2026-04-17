@@ -13,6 +13,11 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         None => config::BudiConfig::default(),
     };
     let mut issues: Vec<String> = Vec::new();
+    // Track whether the local database shows any assistant activity yet so we
+    // can add a friendly first-run hint when everything is healthy but the
+    // user hasn't sent their first prompt. A single positive signal from any
+    // attribution check flips this off.
+    let mut has_any_assistant_activity = false;
 
     let green = super::ansi("\x1b[32m");
     let red = super::ansi("\x1b[31m");
@@ -305,6 +310,9 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
             Ok(windows) => {
                 let yellow = super::ansi("\x1b[33m");
                 let mut any_mismatch = false;
+                if windows.iter().any(|w| w.assistant_messages > 0) {
+                    has_any_assistant_activity = true;
+                }
                 for window in &windows {
                     let mark = if window.has_mismatch() {
                         any_mismatch = true;
@@ -500,6 +508,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     println!();
     if issues.is_empty() {
         println!("All checks passed.");
+        if !has_any_assistant_activity {
+            println!();
+            println!(
+                "  {dim}No assistant activity yet. Open your agent (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt — then re-run `budi doctor` to see attribution health.{reset}"
+            );
+        }
     } else {
         println!("Issues found:");
         for issue in &issues {
