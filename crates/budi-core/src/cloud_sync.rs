@@ -164,6 +164,63 @@ pub fn set_session_watermark(conn: &Connection, timestamp: &str) -> Result<()> {
     Ok(())
 }
 
+/// Snapshot of the cloud sync state for reporting via `budi cloud status`.
+///
+/// Captures configuration readiness, the last successful sync watermarks, and
+/// how many records are waiting to be pushed on the next tick. Counts are
+/// best-effort and can be reported without a live network call.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CloudSyncStatus {
+    pub enabled: bool,
+    pub configured: bool,
+    pub ready: bool,
+    pub endpoint: String,
+    pub last_synced_at: Option<String>,
+    pub rollup_watermark: Option<String>,
+    pub pending_rollups: usize,
+    pub pending_sessions: usize,
+}
+
+/// Read the current cloud sync status from local config and SQLite.
+///
+/// Never makes a network call — this is used by `budi cloud status` and the
+/// daemon `/cloud/status` endpoint to report readiness and freshness at a
+/// glance. Pending counts are computed by running the envelope builder
+/// against the current watermarks; if envelope construction fails (e.g.
+/// device_id/org_id missing), pending counts fall back to 0 and the caller
+/// can still rely on `ready=false` to explain what is missing.
+pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncStatus {
+    let endpoint = config.effective_endpoint();
+    let enabled = config.effective_enabled();
+    let ready = config.is_ready();
+    let configured = config.api_key.is_some() || config.effective_api_key().is_some();
+
+    let mut last_synced_at = None;
+    let mut rollup_watermark = None;
+    let mut pending_rollups = 0usize;
+    let mut pending_sessions = 0usize;
+
+    if let Ok(conn) = crate::analytics::open_db(db_path) {
+        last_synced_at = get_session_watermark(&conn).ok().flatten();
+        rollup_watermark = get_cloud_watermark_value(&conn).ok().flatten();
+        if ready && let Ok(envelope) = build_sync_envelope(&conn, config) {
+            pending_rollups = envelope.payload.daily_rollups.len();
+            pending_sessions = envelope.payload.session_summaries.len();
+        }
+    }
+
+    CloudSyncStatus {
+        enabled,
+        configured,
+        ready,
+        endpoint,
+        last_synced_at,
+        rollup_watermark,
+        pending_rollups,
+        pending_sessions,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Data extraction from local SQLite (privacy-safe: rollups + session summaries)
 // ---------------------------------------------------------------------------
@@ -475,34 +532,103 @@ pub fn send_sync_envelope(endpoint: &str, api_key: &str, envelope: &SyncEnvelope
     }
 }
 
+/// Structured report of a single sync tick, suitable for rendering in the
+/// CLI (`budi cloud sync`) or returning as JSON from the daemon. Carries the
+/// underlying [`SyncResult`] plus the envelope counts that were attempted and
+/// any server-confirmed response fields.
+///
+/// Envelope counts are included so surfaces can say "pushed N records" even
+/// when the server omits `records_upserted`, and so `EmptyPayload` responses
+/// can still explain *why* nothing was pushed.
+#[derive(Debug)]
+pub struct SyncTickReport {
+    pub result: SyncResult,
+    pub endpoint: String,
+    pub envelope_rollups: usize,
+    pub envelope_sessions: usize,
+    pub server_records_upserted: Option<i64>,
+    pub server_watermark: Option<String>,
+}
+
 /// Execute a single sync tick: build envelope, send, update watermark.
 /// Blocking — call from `spawn_blocking`.
 pub fn sync_tick(db_path: &Path, config: &CloudConfig) -> SyncResult {
+    sync_tick_report(db_path, config).result
+}
+
+/// Execute a single sync tick and return a structured report.
+/// Used by the manual `budi cloud sync` path so the CLI can report how many
+/// records were attempted and confirmed, not just the coarse [`SyncResult`]
+/// variant. Shares all behavior with [`sync_tick`] so the manual and
+/// background paths stay in lockstep.
+pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport {
+    let endpoint = config.effective_endpoint();
+
     let conn = match crate::analytics::open_db(db_path) {
         Ok(c) => c,
-        Err(e) => return SyncResult::TransientError(format!("Failed to open DB: {e}")),
+        Err(e) => {
+            return SyncTickReport {
+                result: SyncResult::TransientError(format!("Failed to open DB: {e}")),
+                endpoint,
+                envelope_rollups: 0,
+                envelope_sessions: 0,
+                server_records_upserted: None,
+                server_watermark: None,
+            };
+        }
     };
 
     let envelope = match build_sync_envelope(&conn, config) {
         Ok(e) => e,
-        Err(e) => return SyncResult::TransientError(format!("Failed to build envelope: {e}")),
+        Err(e) => {
+            return SyncTickReport {
+                result: SyncResult::TransientError(format!("Failed to build envelope: {e}")),
+                endpoint,
+                envelope_rollups: 0,
+                envelope_sessions: 0,
+                server_records_upserted: None,
+                server_watermark: None,
+            };
+        }
     };
 
-    if envelope.payload.daily_rollups.is_empty() && envelope.payload.session_summaries.is_empty() {
-        return SyncResult::EmptyPayload;
+    let envelope_rollups = envelope.payload.daily_rollups.len();
+    let envelope_sessions = envelope.payload.session_summaries.len();
+
+    if envelope_rollups == 0 && envelope_sessions == 0 {
+        return SyncTickReport {
+            result: SyncResult::EmptyPayload,
+            endpoint,
+            envelope_rollups,
+            envelope_sessions,
+            server_records_upserted: None,
+            server_watermark: None,
+        };
     }
 
     let api_key = match config.effective_api_key() {
         Some(k) => k,
-        None => return SyncResult::AuthFailure,
+        None => {
+            return SyncTickReport {
+                result: SyncResult::AuthFailure,
+                endpoint,
+                envelope_rollups,
+                envelope_sessions,
+                server_records_upserted: None,
+                server_watermark: None,
+            };
+        }
     };
-
-    let endpoint = config.effective_endpoint();
 
     let result = send_sync_envelope(&endpoint, &api_key, &envelope);
 
+    let mut server_records_upserted = None;
+    let mut server_watermark = None;
+
     // On success, update watermarks (ADR-0083 §5)
     if let SyncResult::Success(ref resp) = result {
+        server_records_upserted = resp.records_upserted;
+        server_watermark = resp.watermark.clone();
         if let Some(ref wm) = resp.watermark
             && let Err(e) = set_cloud_watermark(&conn, wm)
         {
@@ -515,7 +641,14 @@ pub fn sync_tick(db_path: &Path, config: &CloudConfig) -> SyncResult {
         }
     }
 
-    result
+    SyncTickReport {
+        result,
+        endpoint,
+        envelope_rollups,
+        envelope_sessions,
+        server_records_upserted,
+        server_watermark,
+    }
 }
 
 /// Calculate exponential backoff delay.
@@ -722,6 +855,55 @@ mod tests {
         assert_eq!(envelope.org_id, "org_test");
         assert!(envelope.payload.daily_rollups.is_empty());
         assert!(envelope.payload.session_summaries.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_cloud_status_reports_disabled_when_config_default() {
+        let dir = std::env::temp_dir().join("budi-cloud-status-disabled");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let _ = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        let status = current_cloud_status(&db_path, &CloudConfig::default());
+        assert!(!status.enabled);
+        assert!(!status.ready);
+        assert_eq!(status.pending_rollups, 0);
+        assert_eq!(status.pending_sessions, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_cloud_status_reports_pending_counts_when_ready() {
+        let dir = std::env::temp_dir().join("budi-cloud-status-ready");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES ('msg-status-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
+                     'sha256:abc', 'main', 100, 200, 10, 50, 1.5)",
+            [],
+        )
+        .unwrap();
+
+        let config = CloudConfig {
+            enabled: true,
+            api_key: Some("budi_test".into()),
+            device_id: Some("dev_test".into()),
+            org_id: Some("org_test".into()),
+            ..CloudConfig::default()
+        };
+        let status = current_cloud_status(&db_path, &config);
+        assert!(status.enabled);
+        assert!(status.ready);
+        assert!(status.pending_rollups >= 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

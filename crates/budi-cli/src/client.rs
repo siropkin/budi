@@ -316,6 +316,37 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    /// `POST /cloud/sync` — trigger an immediate cloud flush.
+    ///
+    /// The daemon runs the same code path as the background worker
+    /// (`cloud_sync::sync_tick_report`) and returns a structured JSON body
+    /// that the CLI renders via `commands::cloud`. Non-2xx responses are
+    /// surfaced as `anyhow` errors via [`check_response`]; a successful HTTP
+    /// status still encodes per-result outcomes (`auth_failure`,
+    /// `transient_error`, …) in `result`.
+    pub fn cloud_sync(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!("{}/cloud/sync", self.base_url))
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// `GET /cloud/status` — read cloud sync readiness and watermarks.
+    /// Never blocks on the network; the daemon only reads local state.
+    pub fn cloud_status(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .get(format!("{}/cloud/status", self.base_url))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     // ─── Analytics ───────────────────────────────────────────────────
 
     pub fn summary(

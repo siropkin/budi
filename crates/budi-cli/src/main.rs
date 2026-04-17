@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -260,6 +260,22 @@ Examples:
         #[command(subcommand)]
         action: AutostartAction,
     },
+    /// Manual cloud sync and cloud freshness reporting
+    ///
+    /// `budi cloud sync` pushes queued local rollups and session summaries
+    /// to the cloud now (same work the background worker runs on an
+    /// interval — ADR-0083 §9, issue #225). `budi cloud status` reports
+    /// whether cloud sync is enabled, when it last succeeded, and how many
+    /// records are queued locally.
+    #[command(after_help = "\
+Examples:
+  budi cloud status              Show cloud sync readiness and last sync
+  budi cloud sync                Push queued local data to the cloud now
+  budi cloud sync --format json  JSON output (exit code 2 on failure)")]
+    Cloud {
+        #[command(subcommand)]
+        action: CloudAction,
+    },
     /// Launch an AI agent through the budi proxy (e.g. budi launch claude)
     #[command(after_help = "\
 Supported agents:
@@ -306,6 +322,22 @@ enum IntegrationAction {
         /// Skip prompts and use defaults
         #[arg(long, default_value_t = false)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CloudAction {
+    /// Show cloud sync readiness and last-synced-at
+    Status {
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
+    },
+    /// Push queued local data (daily rollups, session summaries) to the cloud now
+    Sync {
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
     },
 }
 
@@ -492,6 +524,10 @@ fn main() -> Result<()> {
             AutostartAction::Status => commands::autostart::cmd_autostart_status(),
             AutostartAction::Install => commands::autostart::cmd_autostart_install(),
             AutostartAction::Uninstall => commands::autostart::cmd_autostart_uninstall(),
+        },
+        Commands::Cloud { action } => match action {
+            CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
+            CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
         },
         Commands::Launch {
             agent,
@@ -774,6 +810,41 @@ mod tests {
             }
             _ => panic!("expected stats command"),
         }
+    }
+
+    #[test]
+    fn cli_parses_cloud_subcommands() {
+        let cli = Cli::try_parse_from(["budi", "cloud", "sync"]).expect("budi cloud sync parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Sync { format },
+            } => assert!(matches!(format, StatsFormat::Text)),
+            _ => panic!("expected cloud sync command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "cloud", "status", "--format", "json"])
+            .expect("budi cloud status --format json parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Status { format },
+            } => assert!(matches!(format, StatsFormat::Json)),
+            _ => panic!("expected cloud status command"),
+        }
+    }
+
+    #[test]
+    fn help_lists_cloud_commands() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        let lower = help.to_ascii_lowercase();
+        assert!(
+            lower.contains("cloud"),
+            "top-level help should advertise cloud subcommand"
+        );
+        assert!(
+            lower.contains("budi cloud sync"),
+            "top-level help should mention `budi cloud sync`"
+        );
     }
 
     #[test]

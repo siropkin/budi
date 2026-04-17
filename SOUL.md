@@ -121,6 +121,11 @@ Local SQLite daily rollups
   -> Manager dashboard at app.getbudi.dev
 Config: ~/.config/budi/cloud.toml ([cloud] section), env overrides BUDI_CLOUD_*
 Never uploaded: prompts, responses, code, file paths, email, raw payloads, tag values
+
+Manual cloud sync (since 8.1, R2.1, #225):
+`budi cloud sync`     -> POST /cloud/sync (loopback-only) -> same sync_tick as worker
+`budi cloud status`   -> GET /cloud/status -> readiness + watermarks, no network call
+AppState.cloud_syncing AtomicBool guards worker and manual path from double-posting.
 ```
 
 ### Database (SQLite, WAL mode, schema v1)
@@ -393,6 +398,8 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + proxy server (port 9878) + cloud sync worker, ~40 routes
 - `crates/budi-daemon/src/workers/cloud_sync.rs` - Background cloud sync loop: configurable interval, backoff, auth/schema error handling
 - `crates/budi-daemon/src/routes/hooks.rs` - /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints (hook ingestion removed)
+- `crates/budi-daemon/src/routes/cloud.rs` - /cloud/sync (loopback-only manual cloud flush) and /cloud/status (cloud readiness + watermarks); added in R2.1 (#225)
+- `crates/budi-cli/src/commands/cloud.rs` - `budi cloud sync` / `budi cloud status` (R2.1 #225): text + JSON output, exit code 2 on non-ok sync
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
 - `crates/budi-daemon/src/routes/proxy.rs` - Proxy handlers for Anthropic Messages and OpenAI Chat Completions
 - `crates/budi-cli/src/commands/proxy_install.rs` - Auto-proxy installer and verifier: shell profile block + Cursor/Codex config patching + `budi enable/disable`
