@@ -290,11 +290,14 @@ budi stats --branches              # branches ranked by cost
 budi stats --branch <name>         # cost for a specific branch
 budi stats --tickets               # tickets ranked by cost (sourced from ticket_id tag)
 budi stats --ticket <id>           # cost for a specific ticket, with per-branch breakdown
+budi stats --activities            # activities ranked by cost (bugfix, refactor, …)
+budi stats --activity <name>       # cost for a specific activity, with per-branch breakdown
 budi stats --provider codex        # filter stats to a single provider
 budi stats --tag ticket_id         # cost per ticket value (raw tag view)
 budi stats --tag ticket_prefix     # cost per team prefix
 budi sessions                      # list recent sessions with cost and health
 budi sessions --ticket <id>        # sessions tagged with a ticket id
+budi sessions --activity <name>    # sessions tagged with an activity (bugfix, refactor, …)
 budi sessions <id>                 # session detail: cost, models, health, tags
 budi health                        # session health vitals for most recent session
 budi health --session <id>         # health vitals for a specific session

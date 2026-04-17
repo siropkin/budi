@@ -203,7 +203,29 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
     `/analytics/branches{/branch}` so future cloud/dashboard work can adopt
     the same data contract.
 
-`budi doctor` runs two attribution checks:
+- **`activity`** — promoted to a first-class CLI dimension in 8.1 (R1.0.4,
+  [#305](https://github.com/siropkin/budi/issues/305)). The pipeline emits
+  an `activity` tag for every assistant message whose session has a
+  classified prompt category (bugfix, refactor, testing, feature, review,
+  ops, question, writing). Values come from the rule-based
+  `hooks::classify_prompt` and are propagated across the session by
+  `propagate_session_context`, so every assistant message in a classified
+  session carries exactly one `activity` tag. R1.0 surfaces every
+  aggregate as `source = "rule"` / `confidence = "medium"`; R1.2 (#222)
+  will refine these per-aggregate as the classifier learns additional
+  signals, without changing the wire format. Surfaces:
+  - `budi stats --activities` — list ranked by cost, with `(untagged)`
+    bucket for messages that never matched a classification rule (short
+    prompts, slash commands, metadata-only messages).
+  - `budi stats --activity <NAME>` — detail view with per-branch
+    breakdown, plus `source` and `confidence` labels.
+  - `budi sessions --activity <NAME>` — sessions tagged with the
+    activity, mirroring `--ticket`.
+  - `GET /analytics/activities` and `/analytics/activities/{name}`
+    mirror the ticket endpoints so future cloud/dashboard work can adopt
+    the same data contract.
+
+`budi doctor` runs three attribution checks:
 
 - **Session visibility** for the `today`, `7d`, and `30d` windows (R1.0.1,
   #302) — fails when a window has assistant rows but zero returned sessions.
@@ -212,6 +234,13 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   at a broken attribution path for that provider (no headers, no resolvable
   cwd, session propagation not rescuing the session) even if overall cost
   numbers look healthy.
+- **Activity attribution (7d, per provider)** (R1.0.4, #305) — red when
+  100% of a provider's recent assistant rows are missing an `activity`
+  tag and it has at least 5 rows in the window (a silent classifier
+  regression). Yellow at >90% to hint at an over-aggressive skip path
+  without tripping a hard fail; a moderate missing-ratio is expected
+  because one-word prompts and slash commands never carry an `activity`
+  tag by design.
 
 ### Key concepts
 
@@ -265,7 +294,7 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** ([siropkin/budi-cursor](https://github.com/siropkin/budi-cursor)): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.
 - **Cloud dashboard** ([siropkin/budi-cloud](https://github.com/siropkin/budi-cloud)) is a Next.js 16 app deployed to app.getbudi.dev. Uses Supabase Auth (GitHub/Google/magic link) for web sign-in. Dashboard pages: Overview, Team, Models, Repos, Sessions, Settings. Manager role sees all org data; member sees own data.
-- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity`, `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion)
+- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity` (activity chart timeline), `/analytics/activities`, `/analytics/activities/{name}` (activity buckets — #305), `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tickets`, `/analytics/tickets/{ticket_id}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion)
 - Admin endpoints (loopback-only): `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration), `/admin/integrations/install` (integration installer orchestration)
 - Sync mutation endpoints (loopback-only): `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync)
 - Sync status endpoint: `/sync/status` (syncing flag + last_synced)

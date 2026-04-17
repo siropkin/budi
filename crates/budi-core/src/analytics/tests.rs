@@ -1630,6 +1630,7 @@ fn session_list_returns_sessions() {
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
     )
     .unwrap();
@@ -1663,6 +1664,7 @@ fn session_list_uses_structured_models_array() {
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
     )
     .unwrap();
@@ -1726,6 +1728,7 @@ fn session_list_returns_session_for_today_window_with_local_midnight_utc_since()
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
         &DimensionFilters::default(),
     )
@@ -1902,6 +1905,7 @@ fn session_list_window_compares_correctly_across_provider_timestamp_formats() {
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
         &DimensionFilters::default(),
     )
@@ -1924,6 +1928,7 @@ fn session_list_window_compares_correctly_across_provider_timestamp_formats() {
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
         &DimensionFilters::default(),
     )
@@ -1958,6 +1963,7 @@ fn session_list_ignores_empty_string_session_id() {
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
         &DimensionFilters::default(),
     )
@@ -2002,6 +2008,7 @@ fn session_list_with_dimension_filters() {
             limit: 50,
             offset: 0,
             ticket: None,
+            activity: None,
         },
         &filters,
     )
@@ -2416,6 +2423,7 @@ fn session_list_filters_by_ticket() {
             limit: 50,
             offset: 0,
             ticket: Some("PAVA-9"),
+            activity: None,
         },
     )
     .unwrap();
@@ -2435,6 +2443,214 @@ fn session_list_filters_by_ticket() {
             limit: 50,
             offset: 0,
             ticket: Some("NOPE-1"),
+            activity: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(none.total_count, 0);
+    assert!(none.sessions.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Activities — R1.0 (#305)
+//
+// Activities live in the `tags` table under the `activity` key (see
+// `tag_keys::ACTIVITY`). The tests mirror the ticket suite so regressions
+// on either surface are easy to diff, and they seed the tag directly so
+// they don't depend on the classifier or pipeline.
+// ---------------------------------------------------------------------------
+
+fn activity_tags(values: &[&str]) -> Vec<Tag> {
+    values
+        .iter()
+        .map(|v| Tag {
+            key: "activity".to_string(),
+            value: (*v).to_string(),
+        })
+        .collect()
+}
+
+fn activity_msg(
+    uuid: &str,
+    session_id: &str,
+    branch: &str,
+    repo: &str,
+    cost: f64,
+) -> ParsedMessage {
+    let mut m = assistant_msg(uuid, session_id, cost);
+    m.git_branch = Some(branch.to_string());
+    m.repo_id = Some(repo.to_string());
+    m
+}
+
+#[test]
+fn activity_cost_groups_by_activity() {
+    // `bugfix` and `refactor` each span their own sessions and `bugfix`
+    // outweighs `refactor` on cost. We expect cost-desc ordering and
+    // `session_count` reporting distinct sessions.
+    let mut conn = test_db();
+    let m1 = activity_msg("ac-1", "s1", "feat/login", "repo-a", 4.0);
+    let m2 = activity_msg("ac-2", "s2", "feat/login", "repo-a", 6.0);
+    let m3 = activity_msg("ac-3", "s3", "refactor/api", "repo-b", 3.0);
+    let tags = vec![
+        activity_tags(&["bugfix"]),
+        activity_tags(&["bugfix"]),
+        activity_tags(&["refactor"]),
+    ];
+    ingest_messages(&mut conn, &[m1, m2, m3], Some(&tags)).unwrap();
+
+    let activities = activity_cost(&conn, None, None, 10).unwrap();
+    let bug = activities
+        .iter()
+        .find(|a| a.activity == "bugfix")
+        .expect("bugfix present");
+    let refac = activities
+        .iter()
+        .find(|a| a.activity == "refactor")
+        .expect("refactor present");
+    assert_eq!(bug.session_count, 2, "bugfix spans two sessions");
+    assert_eq!(bug.message_count, 2);
+    assert!((bug.cost_cents - 10.0).abs() < 0.01);
+    assert_eq!(bug.top_branch, "feat/login");
+    assert_eq!(bug.top_repo_id, "repo-a");
+    assert_eq!(bug.source, "rule", "R1.0 labels rule-derived activities");
+    assert_eq!(bug.confidence, "medium");
+    assert!((refac.cost_cents - 3.0).abs() < 0.01);
+    // Cost-desc ordering is the contract surfaced by `budi stats --activities`.
+    let bug_idx = activities
+        .iter()
+        .position(|a| a.activity == "bugfix")
+        .unwrap();
+    let refac_idx = activities
+        .iter()
+        .position(|a| a.activity == "refactor")
+        .unwrap();
+    assert!(bug_idx < refac_idx);
+}
+
+#[test]
+fn activity_cost_includes_untagged_bucket() {
+    // One tagged activity and one bare assistant message → expect the
+    // `(untagged)` row to appear with empty source/confidence so the
+    // total reconciles with the global cost summary, never silently
+    // disappears.
+    let mut conn = test_db();
+    let m1 = activity_msg("ac-u-1", "s1", "main", "repo", 5.0);
+    let m2 = assistant_msg("ac-u-2", "s2", 7.0);
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[activity_tags(&["bugfix"]), Vec::new()]),
+    )
+    .unwrap();
+
+    let activities = activity_cost(&conn, None, None, 10).unwrap();
+    let untagged = activities
+        .iter()
+        .find(|a| a.activity == "(untagged)")
+        .expect("untagged activity bucket present");
+    assert!((untagged.cost_cents - 7.0).abs() < 0.01);
+    assert_eq!(untagged.message_count, 1);
+    assert_eq!(untagged.top_branch, "");
+    assert_eq!(
+        untagged.source, "",
+        "untagged bucket advertises an explicit absence"
+    );
+    assert_eq!(untagged.confidence, "");
+}
+
+#[test]
+fn activity_cost_single_returns_detail_with_branches() {
+    // `bugfix` worked across two branches in the same repo. Detail view
+    // should attribute cost per branch and pick the dominant repo.
+    let mut conn = test_db();
+    let m1 = activity_msg("ac-d-1", "s1", "fix/a", "repo-a", 8.0);
+    let m2 = activity_msg("ac-d-2", "s2", "fix/b", "repo-a", 2.0);
+    let tags = vec![activity_tags(&["bugfix"]), activity_tags(&["bugfix"])];
+    ingest_messages(&mut conn, &[m1, m2], Some(&tags)).unwrap();
+
+    let detail = activity_cost_single(&conn, "bugfix", None, None, None)
+        .unwrap()
+        .expect("activity detail present");
+    assert_eq!(detail.activity, "bugfix");
+    assert_eq!(detail.session_count, 2);
+    assert_eq!(detail.message_count, 2);
+    assert_eq!(detail.repo_id, "repo-a");
+    assert!((detail.cost_cents - 10.0).abs() < 0.01);
+    assert_eq!(detail.branches.len(), 2);
+    assert_eq!(detail.branches[0].git_branch, "fix/a");
+    assert!((detail.branches[0].cost_cents - 8.0).abs() < 0.01);
+    assert_eq!(detail.source, "rule");
+    assert_eq!(detail.confidence, "medium");
+
+    let missing = activity_cost_single(&conn, "does-not-exist", None, None, None).unwrap();
+    assert!(missing.is_none());
+}
+
+#[test]
+fn activity_cost_single_can_filter_by_repo() {
+    let mut conn = test_db();
+    let m1 = activity_msg("ac-r-1", "s1", "main", "repo-a", 4.0);
+    let m2 = activity_msg("ac-r-2", "s2", "main", "repo-b", 6.0);
+    let tags = vec![activity_tags(&["bugfix"]), activity_tags(&["bugfix"])];
+    ingest_messages(&mut conn, &[m1, m2], Some(&tags)).unwrap();
+
+    let only_a = activity_cost_single(&conn, "bugfix", Some("repo-a"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(only_a.repo_id, "repo-a");
+    assert!((only_a.cost_cents - 4.0).abs() < 0.01);
+
+    let none = activity_cost_single(&conn, "bugfix", Some("repo-c"), None, None).unwrap();
+    assert!(none.is_none());
+}
+
+#[test]
+fn session_list_filters_by_activity() {
+    // The session list filter is the third surface added in 8.1 (#305) —
+    // without it, `budi sessions --activity bugfix` would have to
+    // client-side filter and would misreport `total_count`.
+    let mut conn = test_db();
+    let m1 = activity_msg("sess-ac-1", "s1", "fix/a", "repo", 5.0);
+    let m2 = assistant_msg("sess-ac-2", "s2", 7.0);
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[activity_tags(&["bugfix"]), Vec::new()]),
+    )
+    .unwrap();
+
+    let filtered = session_list(
+        &conn,
+        &SessionListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            ticket: None,
+            activity: Some("bugfix"),
+        },
+    )
+    .unwrap();
+    assert_eq!(filtered.total_count, 1);
+    assert_eq!(filtered.sessions.len(), 1);
+    assert_eq!(filtered.sessions[0].id, "s1");
+
+    let none = session_list(
+        &conn,
+        &SessionListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            ticket: None,
+            activity: Some("nope"),
         },
     )
     .unwrap();

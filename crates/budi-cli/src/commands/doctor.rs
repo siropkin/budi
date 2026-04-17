@@ -385,6 +385,55 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Activity attribution: surface a recurrence of a silent classifier
+    // regression (#305 ships `activity` as a first-class dimension; if the
+    // classifier breaks, `budi stats --activities` collapses into
+    // `(untagged)` without anything else catching it). 100% missing for
+    // a provider with traffic is almost always a bug; a mid-range ratio
+    // is expected because short prompts and slash commands never carry
+    // an `activity` tag by design.
+    if let Ok(db_path) = budi_core::analytics::db_path()
+        && db_path.exists()
+        && let Ok(conn) = budi_core::analytics::open_db(&db_path)
+    {
+        match budi_core::analytics::activity_attribution_stats(&conn) {
+            Ok(stats) if stats.is_empty() => {
+                println!("  {dim}-{reset} activity attribution (7d): no assistant activity yet");
+            }
+            Ok(stats) => {
+                let yellow = super::ansi("\x1b[33m");
+                let mut any_red = false;
+                for row in &stats {
+                    let pct = row.missing_activity_ratio() * 100.0;
+                    // Only flag fully-silent providers with non-trivial
+                    // traffic — enough volume to rule out "everybody
+                    // typed a one-word prompt" coincidence.
+                    let fully_silent = pct >= 99.9 && row.total_assistant >= 5;
+                    let mark = if fully_silent {
+                        any_red = true;
+                        format!("{red}\u{2717}{reset}")
+                    } else if pct > 90.0 {
+                        format!("{yellow}!{reset}")
+                    } else {
+                        format!("{green}\u{2713}{reset}")
+                    };
+                    println!(
+                        "  {mark} activity attribution ({}, 7d): assistant={} missing_activity={} ({:.0}%)",
+                        row.provider, row.total_assistant, row.missing_activity, pct,
+                    );
+                }
+                if any_red {
+                    issues.push(
+                        "Activity classification is silent for at least one provider (100% of recent assistant rows have no `activity` tag). `budi stats --activities` will show only `(untagged)`. See #305.".into(),
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  {dim}-{reset} activity attribution: could not compute ({e})");
+            }
+        }
+    }
+
     // Auto-proxy configuration checks (shell profile + IDE config files)
     {
         let agents = budi_core::config::load_agents_config()

@@ -65,9 +65,9 @@ enum Commands {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --tickets, --ticket, --models, or --tag)
+    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --tickets, --ticket, --activities, --activity, --models, or --tag)
     #[command(
-        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "tickets", "ticket", "models", "tag"])),
+        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "tickets", "ticket", "activities", "activity", "models", "tag"])),
         after_help = "\
 Examples:
   budi stats                       Today's cost summary (default)
@@ -79,8 +79,10 @@ Examples:
   budi stats --tickets             Tickets ranked by cost (today)
   budi stats --ticket ENG-123      Cost details for a specific ticket
   budi stats --ticket ENG-123 --repo github.com/acme/app
+  budi stats --activities          Activities ranked by cost (today)
+  budi stats --activity bugfix     Cost details for a specific activity
   budi stats --projects -p all     All-time project costs
-  budi stats --tag activity        Cost by activity type
+  budi stats --tag activity        Raw cost breakdown by the activity tag
   budi stats --provider cursor     Filter to Cursor only
   budi stats --format json         JSON output for scripting"
     )]
@@ -107,7 +109,18 @@ Examples:
         /// of where the ticket was worked on.
         #[arg(long, value_name = "ID")]
         ticket: Option<String>,
-        /// Optional repository filter for --branch or --ticket (recommended when branch/ticket names repeat across repos)
+        /// Show activities ranked by cost (sourced from the `activity` tag
+        /// emitted by the prompt classifier). Mirrors `--tickets` so
+        /// activity attribution is a first-class CLI dimension.
+        #[arg(long, default_value_t = false)]
+        activities: bool,
+        /// Show cost details for a specific activity (e.g. `bugfix`,
+        /// `refactor`). Mirrors `--ticket <ID>` and includes a per-branch
+        /// breakdown so you can see where each kind of work was done.
+        #[arg(long, value_name = "NAME")]
+        activity: Option<String>,
+        /// Optional repository filter for --branch, --ticket, or --activity
+        /// (recommended when names repeat across repos).
         #[arg(long)]
         repo: Option<String>,
         /// Show model usage breakdown
@@ -166,6 +179,7 @@ Examples:
   budi sessions -p week            This week's sessions
   budi sessions --search claude    Filter by search term
   budi sessions --ticket ENG-123   Sessions tagged with a ticket
+  budi sessions --activity bugfix  Sessions classified as bug-fix work
   budi sessions <session-id>       Show detail for a specific session
   budi sessions --format json      JSON output for scripting")]
     Sessions {
@@ -183,6 +197,11 @@ Examples:
         /// contains a recognised ID.
         #[arg(long, value_name = "ID")]
         ticket: Option<String>,
+        /// Filter sessions by activity (e.g. `bugfix`, `refactor`). Matches
+        /// the `activity` tag emitted by the prompt classifier; promoted to
+        /// a first-class session filter in 8.1 (#305).
+        #[arg(long, value_name = "NAME")]
+        activity: Option<String>,
         /// Max sessions to show (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -365,6 +384,8 @@ fn main() -> Result<()> {
             branch,
             tickets,
             ticket,
+            activities,
+            activity,
             repo,
             models,
             provider,
@@ -379,6 +400,8 @@ fn main() -> Result<()> {
                 branch,
                 tickets,
                 ticket,
+                activities,
+                activity,
                 repo,
                 models,
                 provider,
@@ -424,6 +447,7 @@ fn main() -> Result<()> {
             period,
             search,
             ticket,
+            activity,
             limit,
             format,
         } => {
@@ -435,6 +459,7 @@ fn main() -> Result<()> {
                     period,
                     search.as_deref(),
                     ticket.as_deref(),
+                    activity.as_deref(),
                     limit,
                     json_output,
                 )
@@ -585,6 +610,96 @@ mod tests {
         match cli.command {
             Commands::Sessions { ticket, .. } => {
                 assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
+            }
+            _ => panic!("expected sessions command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_activities_flag() {
+        let cli = Cli::try_parse_from(["budi", "stats", "--activities"])
+            .expect("budi stats --activities parses");
+        match cli.command {
+            Commands::Stats {
+                activities,
+                activity,
+                ..
+            } => {
+                assert!(activities);
+                assert!(activity.is_none());
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_activity_value_flag() {
+        let cli = Cli::try_parse_from(["budi", "stats", "--activity", "bugfix"])
+            .expect("budi stats --activity bugfix parses");
+        match cli.command {
+            Commands::Stats {
+                activities,
+                activity,
+                ..
+            } => {
+                assert!(!activities);
+                assert_eq!(activity.as_deref(), Some("bugfix"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_stats_activity_is_mutually_exclusive_with_other_views() {
+        // --activities vs --tickets / --branches / --activity / --models
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--activities", "--tickets"]).is_err(),
+            "--activities and --tickets must be mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--activities", "--branches"]).is_err(),
+            "--activities and --branches must be mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--activities", "--activity", "bugfix"]).is_err(),
+            "--activities and --activity must be mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "stats", "--activity", "bugfix", "--models"]).is_err(),
+            "--activity and --models must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn cli_stats_activity_accepts_repo_filter() {
+        let cli = Cli::try_parse_from([
+            "budi",
+            "stats",
+            "--activity",
+            "bugfix",
+            "--repo",
+            "siropkin/budi",
+        ])
+        .expect("budi stats --activity --repo parses");
+        match cli.command {
+            Commands::Stats { activity, repo, .. } => {
+                assert_eq!(activity.as_deref(), Some("bugfix"));
+                assert_eq!(repo.as_deref(), Some("siropkin/budi"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_sessions_activity_flag() {
+        let cli = Cli::try_parse_from(["budi", "sessions", "--activity", "bugfix"])
+            .expect("budi sessions --activity parses");
+        match cli.command {
+            Commands::Sessions {
+                ticket, activity, ..
+            } => {
+                assert!(ticket.is_none());
+                assert_eq!(activity.as_deref(), Some("bugfix"));
             }
             _ => panic!("expected sessions command"),
         }

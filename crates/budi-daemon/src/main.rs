@@ -112,6 +112,11 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/tickets/{ticket_id}",
             get(a::analytics_ticket_detail),
         )
+        .route("/analytics/activities", get(a::analytics_activities))
+        .route(
+            "/analytics/activities/{activity}",
+            get(a::analytics_activity_detail),
+        )
         .route("/analytics/providers", get(a::analytics_providers))
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route(
