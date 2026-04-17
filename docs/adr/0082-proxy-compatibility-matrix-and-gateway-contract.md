@@ -1,10 +1,12 @@
 # ADR-0082: Proxy Compatibility Matrix and Local Gateway Contract
 
 - **Date**: 2026-04-10
-- **Status**: Implemented
+- **Status**: Superseded by [ADR-0089](./0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) (2026-04-17)
 - **Issue**: [#82](https://github.com/siropkin/budi/issues/82)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0081](./0081-product-contract-and-deprecation-policy.md)
+
+> **Superseded by [ADR-0089](./0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) (2026-04-17).** Budi 8.2 replaces proxy-first ingestion with JSONL tailing as the sole live path. The compatibility matrix, gateway contract, streaming behavior, and `X-Budi-*` attribution header protocol described below are retired in 8.2 R2.1. Agent compatibility in 8.2+ is a function of `Provider::watch_roots()` + `Provider::parse_file`, not of proxy base-URL configuration. The record below is preserved for historical context only.
 
 ## Context
 

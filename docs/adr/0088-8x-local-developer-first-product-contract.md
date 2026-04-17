@@ -1,10 +1,12 @@
 # ADR-0088: 8.x Local-Developer-First Product Contract
 
 - **Date**: 2026-04-17
-- **Status**: Accepted
+- **Status**: Accepted (amended — see banner)
 - **Issue**: [#216](https://github.com/siropkin/budi/issues/216)
 - **Milestone**: 8.1.0
 - **Depends on**: [ADR-0081](./0081-product-contract-and-deprecation-policy.md), [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md), [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md), [ADR-0086](./0086-extraction-boundaries.md), [ADR-0087](./0087-cloud-infrastructure-and-deployment.md)
+
+> **Amended by [ADR-0089](./0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) (2026-04-17).** §2's table row naming the proxy as "Sole live ingestion path (ADR-0082)" is replaced: in 8.2+, the tailer is the sole live ingestion path (ADR-0089); it filesystem-watches agent transcripts and there is no proxy. §5's language about "rule-based activity/ticket/branch/file/outcome signals inside the proxy + pipeline" is replaced with "inside the pipeline, over JSONL tailed from agent transcripts." The rest of this ADR — persona priority (§1), local vs cloud boundary (§2 remainder), round order (§3), statusline contract (§4), classification intent (§5 intent), cloud scope for 8.1 (§6), and deprecation policy (§7) — stands as written. The 8.1 surfaces referenced here all shipped against the proxy path because 8.1 predates the pivot; 8.2 R1/R2 execute the reversal.
 
 ## Context
 
