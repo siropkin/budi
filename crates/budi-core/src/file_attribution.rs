@@ -370,12 +370,33 @@ mod tests {
         assert_eq!(a.dropped, 0);
     }
 
+    // Absolute-path normalization is inherently platform-specific: a leading
+    // `/` is absolute on Unix but not on Windows (Windows requires a drive or
+    // UNC prefix). We cover both shapes so Windows CI exercises the same
+    // `cwd_relative` / `medium` contract without relying on accidental
+    // path-syntax coincidences.
+
+    #[cfg(unix)]
     #[test]
-    fn absolute_path_normalized_against_cwd_is_medium_confidence() {
+    fn absolute_path_normalized_against_cwd_is_medium_confidence_unix() {
         let root = Path::new("/home/dev/repo");
         let a = attribute_files(
             &raw(&["/home/dev/repo/src/main.rs"]),
             Some("/home/dev/repo"),
+            Some(root),
+        );
+        assert_eq!(a.paths, vec!["src/main.rs"]);
+        assert_eq!(a.source, Some(FILE_SOURCE_CWD_RELATIVE));
+        assert_eq!(a.confidence, Some(FILE_CONFIDENCE_MEDIUM));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolute_path_normalized_against_cwd_is_medium_confidence_windows() {
+        let root = Path::new(r"C:\dev\repo");
+        let a = attribute_files(
+            &raw(&[r"C:\dev\repo\src\main.rs"]),
+            Some(r"C:\dev\repo"),
             Some(root),
         );
         assert_eq!(a.paths, vec!["src/main.rs"]);
