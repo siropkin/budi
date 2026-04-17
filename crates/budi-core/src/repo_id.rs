@@ -52,6 +52,15 @@ impl RepoIdCache {
     }
 }
 
+/// Walk up from `start` to find the enclosing repo root (directory
+/// containing `.git`). Used by `FileEnricher` to normalize tool-call
+/// file paths against the same root that defines `repo_id`, so the
+/// "inside the repo" privacy check matches what analytics see. Added
+/// in R1.4 (#292).
+pub fn repo_root_for(cwd: &Path) -> Option<PathBuf> {
+    find_git_root(cwd).map(|root| crate::config::resolve_storage_root(&root))
+}
+
 /// Walk up from `start` to find a directory containing `.git`.
 fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();

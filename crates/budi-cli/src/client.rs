@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    ActivityCost, ActivityCostDetail, BranchCost, ModelUsage, PaginatedSessions, ProviderStats,
-    RepoUsage, SessionHealth, SessionListEntry, SessionTag, TagCost, TicketCost, TicketCostDetail,
-    UsageSummary,
+    ActivityCost, ActivityCostDetail, BranchCost, FileCost, FileCostDetail, ModelUsage,
+    PaginatedSessions, ProviderStats, RepoUsage, SessionHealth, SessionListEntry, SessionTag,
+    TagCost, TicketCost, TicketCostDetail, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -66,6 +66,29 @@ fn analytics_activity_detail_url(base_url: &str, activity: &str) -> Result<Strin
         .push("analytics")
         .push("activities")
         .push(activity);
+    Ok(url.to_string())
+}
+
+/// Build `GET .../analytics/files/{path}` with per-segment encoding.
+///
+/// File paths are repo-relative and forward-slashed (see
+/// `file_attribution::attribute_files`). We split on `/` and push each
+/// segment individually so slashes stay structural (axum's `{*file_path}`
+/// wildcard receives them as a single joined path) and every other
+/// character gets percent-encoded correctly.
+fn analytics_file_detail_url(base_url: &str, file_path: &str) -> Result<String> {
+    let normalized = format!("{}/", base_url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&normalized)
+        .with_context(|| format!("invalid daemon base URL: {base_url}"))?;
+    {
+        let mut segs = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid daemon base URL: {base_url}"))?;
+        segs.push("analytics").push("files");
+        for segment in file_path.split('/').filter(|s| !s.is_empty()) {
+            segs.push(segment);
+        }
+    }
     Ok(url.to_string())
 }
 
@@ -541,6 +564,70 @@ impl DaemonClient {
         }
         let url = analytics_activity_detail_url(&self.base_url, activity)
             .with_context(|| format!("invalid daemon base URL or activity: {activity:?}"))?;
+        let resp = self
+            .client
+            .get(url)
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = check_response(resp)?;
+        let val: Value = resp.json()?;
+        if val.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(val)?))
+    }
+
+    /// `GET /analytics/files` — per-file cost roll-up. Used by
+    /// `budi stats --files`. Mirrors `tickets` / `activities`.
+    pub fn files(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FileCost>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = since {
+            params.push(("since", s.to_string()));
+        }
+        if let Some(u) = until {
+            params.push(("until", u.to_string()));
+        }
+        params.push(("limit", limit.to_string()));
+        let resp = self
+            .client
+            .get(format!("{}/analytics/files", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// `GET /analytics/files/{path}` — single-file detail with per-branch
+    /// and per-ticket breakdowns. Returns `Ok(None)` for an unknown file.
+    pub fn file_detail(
+        &self,
+        file_path: &str,
+        repo_id: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Option<FileCostDetail>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(repo) = repo_id {
+            params.push(("repo_id", repo));
+        }
+        if let Some(s) = since {
+            params.push(("since", s));
+        }
+        if let Some(u) = until {
+            params.push(("until", u));
+        }
+        let url = analytics_file_detail_url(&self.base_url, file_path)
+            .with_context(|| format!("invalid daemon base URL or file: {file_path:?}"))?;
         let resp = self
             .client
             .get(url)

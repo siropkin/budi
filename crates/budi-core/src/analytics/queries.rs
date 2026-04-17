@@ -3863,3 +3863,594 @@ fn filter_options_from_rollups(
         branches: distinct_rollup_values(conn, window, "git_branch", limit)?,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Files — per-file cost attribution (R1.4, #292)
+//
+// Files come from the `file_path` tag emitted by `FileEnricher` when an
+// assistant message's tool-use arguments point at a file inside the
+// resolved repo root. The analytics layer joins `messages → tags` and
+// splits cost proportionally when a single message carries multiple
+// files, mirroring the ticket / activity roll-ups so the three dimensions
+// compose cleanly.
+// ---------------------------------------------------------------------------
+
+const FILE_TAG_KEY: &str = crate::tag_keys::FILE_PATH;
+const FILE_SOURCE_TAG_KEY: &str = crate::tag_keys::FILE_PATH_SOURCE;
+const FILE_CONFIDENCE_TAG_KEY: &str = crate::tag_keys::FILE_PATH_CONFIDENCE;
+
+/// Per-file aggregate cost row used by `GET /analytics/files` and the
+/// `budi stats --files` CLI view. Mirrors [`TicketCost`] — same shape,
+/// swapped dimension — so clients can render one component for both.
+///
+/// The list always carries an `(untagged)` row (assistant messages with
+/// no `file_path` tag) so users can see how much activity is *not*
+/// attributed to a file; that bucket should shrink as tool-arg coverage
+/// improves.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileCost {
+    pub file_path: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+    /// Dominant repo (highest cost) for this file. Empty for the
+    /// `(untagged)` row or when provenance is ambiguous.
+    #[serde(default)]
+    pub top_repo_id: String,
+    /// Dominant branch (highest cost) for this file. Empty for the
+    /// `(untagged)` row.
+    #[serde(default)]
+    pub top_branch: String,
+    /// Dominant ticket id (highest cost) for this file, derived from
+    /// the same message's `ticket_id` tag. Empty when the file was not
+    /// worked on a ticket-bearing branch.
+    #[serde(default)]
+    pub top_ticket_id: String,
+    /// Dominant `file_path_source` (`tool_arg` or `cwd_relative`).
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Per-branch breakdown attached to a single file detail response.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileBranchBreakdown {
+    pub git_branch: String,
+    pub repo_id: String,
+    pub message_count: u64,
+    pub session_count: u64,
+    pub cost_cents: f64,
+}
+
+/// Per-ticket breakdown attached to a single file detail response.
+/// Separate struct from [`FileBranchBreakdown`] so the wire format can
+/// evolve independently as ticket attribution gets richer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileTicketBreakdown {
+    pub ticket_id: String,
+    pub message_count: u64,
+    pub session_count: u64,
+    pub cost_cents: f64,
+}
+
+/// Detail payload for `GET /analytics/files/{path}` and `budi stats
+/// --file <PATH>`. Mirrors [`TicketCostDetail`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileCostDetail {
+    pub file_path: String,
+    pub session_count: u64,
+    pub message_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_cents: f64,
+    pub repo_id: String,
+    pub branches: Vec<FileBranchBreakdown>,
+    pub tickets: Vec<FileTicketBreakdown>,
+    /// Dominant `file_path_source` for the selection.
+    #[serde(default)]
+    pub source: String,
+    /// Dominant `file_path_confidence` for the selection.
+    #[serde(default)]
+    pub confidence: String,
+}
+
+/// Query cost grouped by file path, sorted by cost descending. Includes
+/// an `(untagged)` bucket for assistant messages that have no `file_path`
+/// tag. Same proportional-split semantics as [`ticket_cost`].
+pub fn file_cost(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<FileCost>> {
+    let filters = DimensionFilters::default();
+    file_cost_with_filters(conn, since, until, &filters, limit)
+}
+
+pub fn file_cost_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+    limit: usize,
+) -> Result<Vec<FileCost>> {
+    let mut conditions = vec!["m.role = 'assistant'".to_string()];
+    let mut param_values: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    if let Some(s) = since {
+        idx += 1;
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{idx}"));
+    }
+    if let Some(u) = until {
+        idx += 1;
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{idx}"));
+    }
+    let model_expr = normalized_model_expr("m.model");
+    let project_expr = normalized_project_expr("m.repo_id");
+    let branch_expr = normalized_branch_expr("m.git_branch");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(m.provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    // (untagged) clause re-aliases to m2.*.
+    let untagged_conditions: Vec<String> = conditions
+        .iter()
+        .map(|c| c.replace("m.role = 'assistant'", "m2.role = 'assistant'"))
+        .collect();
+    let untagged_conditions: Vec<String> = untagged_conditions
+        .into_iter()
+        .map(|c| c.replace("m.", "m2."))
+        .collect();
+    let untagged_where = format!("WHERE {}", untagged_conditions.join(" AND "));
+
+    let limit_param_idx = param_values.len() + 1;
+    param_values.push(limit.to_string());
+
+    let sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = '{FILE_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         msg_source AS (
+             SELECT message_id, MIN(value) AS source_value
+             FROM tags
+             WHERE key = '{FILE_SOURCE_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         msg_ticket AS (
+             SELECT message_id, MIN(value) AS ticket_value
+             FROM tags
+             WHERE key = '{TICKET_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         tagged AS (
+             SELECT t.value AS file_path,
+                    m.session_id,
+                    m.repo_id,
+                    m.git_branch,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.cache_read_tokens,
+                    m.cache_creation_tokens,
+                    m.cost_cents,
+                    mvc.n_values,
+                    COALESCE(ms.source_value, '') AS file_source,
+                    COALESCE(mt.ticket_value, '') AS ticket_value
+             FROM tags t
+             JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+             JOIN messages m ON m.id = t.message_id
+             LEFT JOIN msg_source ms ON ms.message_id = t.message_id
+             LEFT JOIN msg_ticket mt ON mt.message_id = t.message_id
+             {where_clause}
+             AND t.key = '{FILE_TAG_KEY}'
+         ),
+         per_file AS (
+             SELECT file_path,
+                    COUNT(DISTINCT session_id) AS sess,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(input_tokens / n_values), 0) AS inp,
+                    COALESCE(SUM(output_tokens / n_values), 0) AS outp,
+                    COALESCE(SUM(cache_read_tokens / n_values), 0) AS cache_r,
+                    COALESCE(SUM(cache_creation_tokens / n_values), 0) AS cache_c,
+                    COALESCE(SUM(cost_cents / n_values), 0.0) AS cost
+             FROM tagged
+             GROUP BY file_path
+         ),
+         top_repo AS (
+             SELECT file_path,
+                    COALESCE(repo_id, '') AS repo_value,
+                    SUM(cost_cents / n_values) AS repo_cost
+             FROM tagged
+             GROUP BY file_path, repo_value
+         ),
+         top_repo_pick AS (
+             SELECT file_path, repo_value
+             FROM (
+                 SELECT file_path, repo_value, repo_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY file_path
+                            ORDER BY repo_cost DESC, repo_value ASC
+                        ) AS rn
+                 FROM top_repo
+                 WHERE repo_value != '' AND repo_value != 'unknown'
+             )
+             WHERE rn = 1
+         ),
+         top_branch AS (
+             SELECT file_path,
+                    CASE
+                        WHEN COALESCE(git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(git_branch, ''), 12)
+                        ELSE COALESCE(git_branch, '')
+                    END AS branch_value,
+                    SUM(cost_cents / n_values) AS branch_cost
+             FROM tagged
+             GROUP BY file_path, branch_value
+         ),
+         top_branch_pick AS (
+             SELECT file_path, branch_value
+             FROM (
+                 SELECT file_path, branch_value, branch_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY file_path
+                            ORDER BY branch_cost DESC, branch_value ASC
+                        ) AS rn
+                 FROM top_branch
+                 WHERE branch_value != ''
+             )
+             WHERE rn = 1
+         ),
+         top_ticket AS (
+             SELECT file_path,
+                    ticket_value,
+                    SUM(cost_cents / n_values) AS ticket_cost
+             FROM tagged
+             GROUP BY file_path, ticket_value
+         ),
+         top_ticket_pick AS (
+             SELECT file_path, ticket_value
+             FROM (
+                 SELECT file_path, ticket_value, ticket_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY file_path
+                            ORDER BY ticket_cost DESC, ticket_value ASC
+                        ) AS rn
+                 FROM top_ticket
+                 WHERE ticket_value != ''
+             )
+             WHERE rn = 1
+         ),
+         top_source AS (
+             SELECT file_path,
+                    file_source AS source_value,
+                    SUM(cost_cents / n_values) AS source_cost
+             FROM tagged
+             GROUP BY file_path, source_value
+         ),
+         top_source_pick AS (
+             SELECT file_path, source_value
+             FROM (
+                 SELECT file_path, source_value, source_cost,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY file_path
+                            ORDER BY source_cost DESC, source_value ASC
+                        ) AS rn
+                 FROM top_source
+                 WHERE source_value != ''
+             )
+             WHERE rn = 1
+         )
+         SELECT pf.file_path,
+                pf.sess, pf.cnt,
+                pf.inp, pf.outp, pf.cache_r, pf.cache_c, pf.cost,
+                COALESCE(trp.repo_value, '') AS top_repo,
+                COALESCE(tbp.branch_value, '') AS top_branch,
+                COALESCE(ttp.ticket_value, '') AS top_ticket,
+                COALESCE(tsp.source_value, '') AS file_source
+         FROM per_file pf
+         LEFT JOIN top_repo_pick trp ON trp.file_path = pf.file_path
+         LEFT JOIN top_branch_pick tbp ON tbp.file_path = pf.file_path
+         LEFT JOIN top_ticket_pick ttp ON ttp.file_path = pf.file_path
+         LEFT JOIN top_source_pick tsp ON tsp.file_path = pf.file_path
+
+         UNION ALL
+
+         SELECT '{UNTAGGED_DIMENSION}' AS file_path,
+                COUNT(DISTINCT m2.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m2.input_tokens), 0) AS inp,
+                COALESCE(SUM(m2.output_tokens), 0) AS outp,
+                COALESCE(SUM(m2.cache_read_tokens), 0) AS cache_r,
+                COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
+                COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
+                '' AS top_repo,
+                '' AS top_branch,
+                '' AS top_ticket,
+                '' AS file_source
+         FROM messages m2
+         {untagged_where}
+         AND NOT EXISTS (
+             SELECT 1 FROM tags t2
+             WHERE t2.message_id = m2.id AND t2.key = '{FILE_TAG_KEY}'
+         )
+
+         ORDER BY cost DESC
+         LIMIT ?{limit_param_idx}",
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<FileCost> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(FileCost {
+                file_path: row.get(0)?,
+                session_count: row.get(1)?,
+                message_count: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cost_cents: row.get(7)?,
+                top_repo_id: row.get(8)?,
+                top_branch: row.get(9)?,
+                top_ticket_id: row.get(10)?,
+                source: row.get(11)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        // Drop the (untagged) row when empty to avoid noise on freshly-imported DBs.
+        .filter(|fc| !(fc.file_path == UNTAGGED_DIMENSION && fc.message_count == 0))
+        .collect();
+
+    Ok(rows)
+}
+
+/// Detail view for a single file: totals + dominant repo + per-branch and
+/// per-ticket breakdowns. Returns `None` when no assistant messages carry
+/// the file in the requested window.
+pub fn file_cost_single(
+    conn: &Connection,
+    file_path: &str,
+    repo_id: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Option<FileCostDetail>> {
+    let mut conditions = vec![
+        "m.role = 'assistant'".to_string(),
+        "t.key = ?1".to_string(),
+        "t.value = ?2".to_string(),
+    ];
+    let mut param_values: Vec<String> = vec![FILE_TAG_KEY.to_string(), file_path.to_string()];
+    let mut idx = 2usize;
+    if let Some(repo) = repo_id {
+        idx += 1;
+        param_values.push(repo.to_string());
+        conditions.push(format!("COALESCE(m.repo_id, '') = ?{idx}"));
+    }
+    if let Some(s) = since {
+        idx += 1;
+        param_values.push(s.to_string());
+        conditions.push(format!("m.timestamp >= ?{idx}"));
+    }
+    if let Some(u) = until {
+        idx += 1;
+        param_values.push(u.to_string());
+        conditions.push(format!("m.timestamp < ?{idx}"));
+    }
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+    let totals_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         ),
+         msg_source AS (
+             SELECT message_id, MIN(value) AS source_value
+             FROM tags
+             WHERE key = '{FILE_SOURCE_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         msg_confidence AS (
+             SELECT message_id, MIN(value) AS confidence_value
+             FROM tags
+             WHERE key = '{FILE_CONFIDENCE_TAG_KEY}'
+             GROUP BY message_id
+         ),
+         selected AS (
+             SELECT m.id AS message_id,
+                    m.session_id,
+                    m.repo_id,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.cache_read_tokens,
+                    m.cache_creation_tokens,
+                    m.cost_cents,
+                    mvc.n_values,
+                    COALESCE(ms.source_value, '') AS file_source,
+                    COALESCE(mc.confidence_value, '') AS file_confidence
+             FROM tags t
+             JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+             JOIN messages m ON m.id = t.message_id
+             LEFT JOIN msg_source ms ON ms.message_id = t.message_id
+             LEFT JOIN msg_confidence mc ON mc.message_id = t.message_id
+             {where_clause}
+         ),
+         source_pick AS (
+             SELECT file_source,
+                    SUM(cost_cents / n_values) AS source_cost
+             FROM selected
+             WHERE file_source != ''
+             GROUP BY file_source
+             ORDER BY source_cost DESC, file_source ASC
+             LIMIT 1
+         ),
+         confidence_pick AS (
+             SELECT file_confidence,
+                    SUM(cost_cents / n_values) AS confidence_cost
+             FROM selected
+             WHERE file_confidence != ''
+             GROUP BY file_confidence
+             ORDER BY confidence_cost DESC, file_confidence ASC
+             LIMIT 1
+         )
+         SELECT COUNT(DISTINCT session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(input_tokens / n_values), 0) AS inp,
+                COALESCE(SUM(output_tokens / n_values), 0) AS outp,
+                COALESCE(SUM(cache_read_tokens / n_values), 0) AS cache_r,
+                COALESCE(SUM(cache_creation_tokens / n_values), 0) AS cache_c,
+                COALESCE(SUM(cost_cents / n_values), 0.0) AS cost,
+                CASE WHEN COUNT(DISTINCT COALESCE(repo_id, '')) = 1
+                     THEN COALESCE(MIN(repo_id), '')
+                     ELSE '' END AS repo,
+                COALESCE((SELECT file_source FROM source_pick), '') AS src,
+                COALESCE((SELECT file_confidence FROM confidence_pick), '') AS conf
+         FROM selected"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&totals_sql)?;
+    let totals = stmt.query_row(param_refs.as_slice(), |row| {
+        Ok((
+            row.get::<_, u64>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, u64>(2)?,
+            row.get::<_, u64>(3)?,
+            row.get::<_, u64>(4)?,
+            row.get::<_, u64>(5)?,
+            row.get::<_, f64>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+        ))
+    });
+    let (sess, cnt, inp, outp, cache_r, cache_c, cost, repo, src, conf) = match totals {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if cnt == 0 {
+        return Ok(None);
+    }
+
+    // Per-branch breakdown.
+    let branches_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         )
+         SELECT COALESCE(NULLIF(
+                    CASE
+                        WHEN COALESCE(m.git_branch, '') LIKE 'refs/heads/%'
+                            THEN SUBSTR(COALESCE(m.git_branch, ''), 12)
+                        ELSE COALESCE(m.git_branch, '')
+                    END,
+                    ''
+                ), '{UNTAGGED_DIMENSION}') AS branch_value,
+                COALESCE(m.repo_id, '') AS repo_value,
+                COUNT(DISTINCT m.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+         FROM tags t
+         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+         JOIN messages m ON m.id = t.message_id
+         {where_clause}
+         GROUP BY branch_value, repo_value
+         ORDER BY cost DESC, branch_value ASC"
+    );
+    let mut stmt = conn.prepare(&branches_sql)?;
+    let branches: Vec<FileBranchBreakdown> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(FileBranchBreakdown {
+                git_branch: row.get(0)?,
+                repo_id: row.get(1)?,
+                session_count: row.get(2)?,
+                message_count: row.get(3)?,
+                cost_cents: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Per-ticket breakdown — joins the same selected rows to their
+    // `ticket_id` sibling tag (when present).
+    let tickets_sql = format!(
+        "WITH msg_val_counts AS (
+             SELECT message_id, COUNT(*) AS n_values
+             FROM tags
+             WHERE key = ?1
+             GROUP BY message_id
+         ),
+         msg_ticket AS (
+             SELECT message_id, MIN(value) AS ticket_value
+             FROM tags
+             WHERE key = '{TICKET_TAG_KEY}'
+             GROUP BY message_id
+         )
+         SELECT COALESCE(NULLIF(mt.ticket_value, ''), '{UNTAGGED_DIMENSION}') AS ticket_value,
+                COUNT(DISTINCT m.session_id) AS sess,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+         FROM tags t
+         JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
+         JOIN messages m ON m.id = t.message_id
+         LEFT JOIN msg_ticket mt ON mt.message_id = m.id
+         {where_clause}
+         GROUP BY ticket_value
+         ORDER BY cost DESC, ticket_value ASC"
+    );
+    let mut stmt = conn.prepare(&tickets_sql)?;
+    let tickets: Vec<FileTicketBreakdown> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(FileTicketBreakdown {
+                ticket_id: row.get(0)?,
+                session_count: row.get(1)?,
+                message_count: row.get(2)?,
+                cost_cents: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Some(FileCostDetail {
+        file_path: file_path.to_string(),
+        session_count: sess,
+        message_count: cnt,
+        input_tokens: inp,
+        output_tokens: outp,
+        cache_read_tokens: cache_r,
+        cache_creation_tokens: cache_c,
+        cost_cents: cost,
+        repo_id: repo,
+        branches,
+        tickets,
+        source: src,
+        confidence: conf,
+    }))
+}

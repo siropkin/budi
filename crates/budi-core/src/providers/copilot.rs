@@ -307,6 +307,7 @@ fn parse_usage_event(
         prompt_category_confidence: None,
         tool_names: Vec::new(),
         tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
     })
 }
 

@@ -4,9 +4,10 @@ use std::path::Path;
 
 use crate::analytics::Tag;
 use crate::config::TagsConfig;
+use crate::file_attribution;
 use crate::jsonl::ParsedMessage;
 use crate::pipeline::{Enricher, extract_ticket_from_branch, glob_match};
-use crate::repo_id::RepoIdCache;
+use crate::repo_id::{RepoIdCache, repo_root_for};
 use crate::tag_keys as tk;
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,92 @@ impl Enricher for ToolEnricher {
                     value: normalized.to_string(),
                 });
             }
+        }
+        tags
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileEnricher — turns raw tool_files into repo-relative file_path tags
+// ---------------------------------------------------------------------------
+
+/// Emits per-file tags from `ParsedMessage::tool_files` after normalizing
+/// each path against the message's `cwd` / resolved repo root. Always
+/// runs **after** `GitEnricher` so `cwd` and `repo_id` are set, and so
+/// the repo-root walk resolves the same identity analytics will join
+/// against. See R1.4 (#292) and ADR-0083.
+///
+/// Emitted tags:
+/// - `file_path` — one per accepted file (multi-valued tag).
+/// - `file_path_source` — dominant source (`tool_arg` or `cwd_relative`).
+/// - `file_path_confidence` — dominant confidence (`high` or `medium`).
+///
+/// The source/confidence pair is recorded once per message because in
+/// practice all files on a given assistant message came from the same
+/// extractor pass and share the same provenance. Sibling tags mirror
+/// the R1.2 (#222) `activity_source` / `activity_confidence` shape so
+/// downstream queries can use the same pattern.
+pub struct FileEnricher {
+    /// Per-cwd cache so repeated messages in a session don't re-walk the
+    /// filesystem for every tool-use block.
+    cache: std::collections::HashMap<String, Option<std::path::PathBuf>>,
+}
+
+impl Default for FileEnricher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileEnricher {
+    pub fn new() -> Self {
+        Self {
+            cache: std::collections::HashMap::new(),
+        }
+    }
+
+    fn repo_root(&mut self, cwd: &str) -> Option<std::path::PathBuf> {
+        if let Some(hit) = self.cache.get(cwd) {
+            return hit.clone();
+        }
+        let resolved = repo_root_for(std::path::Path::new(cwd));
+        self.cache.insert(cwd.to_string(), resolved.clone());
+        resolved
+    }
+}
+
+impl Enricher for FileEnricher {
+    fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
+        if msg.role != "assistant" || msg.tool_files.is_empty() {
+            return Vec::new();
+        }
+        let repo_root = msg.cwd.as_deref().and_then(|cwd| self.repo_root(cwd));
+        let attribution = file_attribution::attribute_files(
+            &msg.tool_files,
+            msg.cwd.as_deref(),
+            repo_root.as_deref(),
+        );
+        if attribution.paths.is_empty() {
+            return Vec::new();
+        }
+        let mut tags = Vec::with_capacity(attribution.paths.len() + 2);
+        for path in attribution.paths {
+            tags.push(Tag {
+                key: tk::FILE_PATH.to_string(),
+                value: path,
+            });
+        }
+        if let Some(source) = attribution.source {
+            tags.push(Tag {
+                key: tk::FILE_PATH_SOURCE.to_string(),
+                value: source.to_string(),
+            });
+        }
+        if let Some(confidence) = attribution.confidence {
+            tags.push(Tag {
+                key: tk::FILE_PATH_CONFIDENCE.to_string(),
+                value: confidence.to_string(),
+            });
         }
         tags
     }
@@ -725,5 +812,67 @@ mod tests {
         // Web search: 10 * $0.01 = $0.10 (NOT multiplied by fast)
         // Total: $30.10 = 3010 cents
         assert_eq!(msg.cost_cents.unwrap(), 3010.0);
+    }
+
+    // ---- FileEnricher --------------------------------------------------
+
+    #[test]
+    fn file_enricher_ignores_user_messages() {
+        let mut enricher = FileEnricher::new();
+        let mut msg = test_msg();
+        msg.role = "user".to_string();
+        msg.tool_files = vec!["src/main.rs".into()];
+        assert!(enricher.enrich(&mut msg).is_empty());
+    }
+
+    #[test]
+    fn file_enricher_skips_when_no_tool_files() {
+        let mut enricher = FileEnricher::new();
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.tool_files.clear();
+        assert!(enricher.enrich(&mut msg).is_empty());
+    }
+
+    #[test]
+    fn file_enricher_emits_repo_relative_file_tags_without_cwd() {
+        let mut enricher = FileEnricher::new();
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.cwd = None;
+        msg.tool_files = vec!["src/main.rs".into(), "README.md".into()];
+        let tags = enricher.enrich(&mut msg);
+
+        let files: Vec<&str> = tags
+            .iter()
+            .filter(|t| t.key == tk::FILE_PATH)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(files, vec!["README.md", "src/main.rs"]);
+
+        assert!(
+            tags.iter()
+                .any(|t| t.key == tk::FILE_PATH_SOURCE && t.value == "tool_arg")
+        );
+        assert!(
+            tags.iter()
+                .any(|t| t.key == tk::FILE_PATH_CONFIDENCE && t.value == "high")
+        );
+    }
+
+    #[test]
+    fn file_enricher_drops_absolute_path_without_repo_root() {
+        // With no cwd/repo-root signal, absolute paths are privacy-sensitive
+        // and must be dropped — this is the ADR-0083 invariant.
+        let mut enricher = FileEnricher::new();
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.cwd = None;
+        msg.tool_files = vec!["/Users/dev/secret.rs".into()];
+        let tags = enricher.enrich(&mut msg);
+        assert!(
+            !tags.iter().any(|t| t.key == tk::FILE_PATH),
+            "absolute path must not leak into file_path tags"
+        );
     }
 }

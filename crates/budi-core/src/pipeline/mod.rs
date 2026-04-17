@@ -26,12 +26,16 @@ impl Pipeline {
         //   1. IdentityEnricher — populates local identity tags (user/platform/machine/git_user)
         //   2. GitEnricher   — sets repo_id for glob_match (MUST run before TagEnricher)
         //   3. ToolEnricher  — emits per-message tool tags from parsed tool calls
-        //   4. CostEnricher  — calculates cost_cents and cost_confidence
-        //   5. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
+        //   4. FileEnricher  — R1.4 (#292) turns raw tool_files into repo-relative
+        //                       file_path tags; MUST run after GitEnricher so cwd is
+        //                       resolved and the repo-root walk lines up with repo_id
+        //   5. CostEnricher  — calculates cost_cents and cost_confidence
+        //   6. TagEnricher   — applies user rules (depends on repo_id, model, cost_confidence)
         let enrichers: Vec<Box<dyn Enricher>> = vec![
             Box::new(enrichers::IdentityEnricher::new()),
             Box::new(enrichers::GitEnricher::new()),
             Box::new(enrichers::ToolEnricher),
+            Box::new(enrichers::FileEnricher::new()),
             Box::new(enrichers::CostEnricher),
             Box::new(enrichers::TagEnricher::new(tags_config)),
         ];
@@ -534,6 +538,7 @@ mod tests {
             prompt_category_confidence: None,
             tool_names: Vec::new(),
             tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
         }
     }
 

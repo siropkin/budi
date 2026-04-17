@@ -269,6 +269,46 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
     mirror the ticket endpoints so future cloud/dashboard work can adopt
     the same data contract.
 
+- **`file_path`** — per-file attribution added in R1.4
+  ([#292](https://github.com/siropkin/budi/issues/292)). When an assistant
+  message uses a file-aware tool (Claude Code's `Read` / `Write` / `Edit` /
+  `MultiEdit` / `NotebookEdit` / `Grep` / `Glob`, Cursor's `edit_file` /
+  `read_file` / `write_file` / `search_replace` / `delete_file` / …) the
+  pipeline extracts raw candidate paths from the tool-call arguments and
+  runs them through `file_attribution::attribute_files`, which:
+    1. Rejects URL schemes other than `file://`.
+    2. Normalizes Windows separators to forward slashes.
+    3. Strips absolute paths against the message's `cwd` / resolved repo
+       root. Anything that cannot be proven to sit inside the repo root
+       is **dropped** — we never record outside-of-repo paths, mtimes,
+       sizes, or file contents. See
+       [ADR-0083](docs/adr/0083-privacy-constraints.md).
+    4. Collapses `.` / `..` segments; traversals that would escape the
+       repo are dropped.
+    5. Caps per-message tag fan-out at
+       `file_attribution::MAX_FILES_PER_MESSAGE` (16) to keep payloads
+       small on pathological Grep/Glob output.
+
+  Every accepted path is emitted as a `file_path` tag (multi-valued);
+  a sibling `file_path_source` (`tool_arg` when the path came directly
+  from a known argument, `cwd_relative` when it was normalized from an
+  absolute path against the message cwd) and `file_path_confidence`
+  (`high` / `medium`) are written once per message so provenance is
+  queryable the same way as `ticket_source` / `activity_source`.
+
+  Surfaces:
+  - `budi stats --files` — files ranked by cost, with `(untagged)`
+    bucket and a `src=…` column showing the dominant source. Long
+    paths are truncated in the CLI output; full paths stay available
+    via `--file <PATH>` and `--format json`.
+  - `budi stats --file <PATH>` — detail view with per-branch **and**
+    per-ticket breakdowns, so you can see which tickets charged cost
+    to a particular file.
+  - `GET /analytics/files` and `/analytics/files/{*path}` mirror the
+    ticket / activity endpoints; the path segment is validated to be
+    repo-relative (no leading `/`, no `..`, no Windows separators, no
+    URL scheme) before hitting SQLite.
+
 `budi doctor` runs three attribution checks:
 
 - **Session visibility** for the `today`, `7d`, and `30d` windows (R1.0.1,
@@ -333,12 +373,12 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
 - `budi init` prompts for per-agent enablement (Claude Code, Codex CLI, Cursor, Copilot CLI), persists choices to `~/.config/budi/agents.toml`, and auto-configures proxy routing for enabled agents (shell profile + Cursor/Codex settings). `budi enable/disable <agent>` updates this config later. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility. After configuring CLI agents (Claude, Codex, Copilot), both `budi init` and `budi enable` warn that a shell restart is required for proxy env vars to take effect and suggest `budi launch <agent>` for immediate routing. `budi doctor` detects when proxy env vars are configured in the shell profile but not set in the current process.
 - `budi init` configures integrations (statusline, extension) for enabled agents
-- Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `activity`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
+- Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
 - **Cursor extension** ([siropkin/budi-cursor](https://github.com/siropkin/budi-cursor)): VS Code extension that shows session health in the status bar (aggregated health circles) and a side panel (session details, vitals, tips, session list). Installed via VS Code Marketplace or `budi integrations install --with cursor-extension`. Communicates with daemon via HTTP and spawns `budi statusline --format json`. Writes `~/.local/share/budi/cursor-sessions.json` (v1 contract, ADR-0086 §3.4) to signal the active workspace. Checks daemon `api_version` on startup and warns if incompatible.
 - **Cloud dashboard** ([siropkin/budi-cloud](https://github.com/siropkin/budi-cloud)) is a Next.js 16 app deployed to app.getbudi.dev. Uses Supabase Auth (GitHub/Google/magic link) for web sign-in. Dashboard pages: Overview, Team, Models, Repos, Sessions, Settings. Manager role sees all org data; member sees own data.
-- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity` (activity chart timeline), `/analytics/activities`, `/analytics/activities/{name}` (activity buckets — #305), `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tickets`, `/analytics/tickets/{ticket_id}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion)
+- Analytics endpoints: `/analytics/summary`, `/analytics/filter-options`, `/analytics/messages`, `/analytics/messages/{message_uuid}/detail`, `/analytics/projects`, `/analytics/cost`, `/analytics/models`, `/analytics/activity` (activity chart timeline), `/analytics/activities`, `/analytics/activities/{name}` (activity buckets — #305), `/analytics/branches`, `/analytics/branches/{branch}`, `/analytics/tickets`, `/analytics/tickets/{ticket_id}`, `/analytics/files`, `/analytics/files/{*path}`, `/analytics/tags`, `/analytics/providers`, `/analytics/statusline`, `/analytics/cache-efficiency`, `/analytics/session-cost-curve`, `/analytics/cost-confidence`, `/analytics/subagent-cost`, `/analytics/sessions`, `/analytics/sessions/{id}`, `/analytics/sessions/{id}/messages`, `/analytics/sessions/{id}/curve`, `/analytics/sessions/{id}/tags`, `/analytics/session-health`, `/analytics/session-audit` (session attribution stats for debugging ingestion)
 - Admin endpoints (loopback-only): `/admin/providers` (registered providers), `/admin/schema` (schema version), `/admin/migrate` (run migration), `/admin/repair` (repair schema drift + run migration), `/admin/integrations/install` (integration installer orchestration)
 - Sync mutation endpoints (loopback-only): `/sync` (30-day), `/sync/all` (full history), `/sync/reset` (wipe sync state + full re-sync)
 - Sync status endpoint: `/sync/status` (syncing flag + last_synced)

@@ -656,6 +656,98 @@ pub async fn analytics_activity_detail(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Files — per-file attribution wired in 8.1 R1.4 (#292)
+//
+// Mirrors the ticket/activity endpoints so the CLI exposes one consistent
+// shape: `--files` lists top files, `--file <PATH>` shows a single file's
+// detail with per-branch and per-ticket breakdowns.
+//
+// The path segment is URL-encoded by callers because repo-relative paths
+// routinely contain slashes. We validate it in the handler to avoid
+// surprises in paths that include path traversal tokens.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct FileListParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<usize>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileDetailParams {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub repo_id: Option<String>,
+}
+
+pub async fn analytics_files(
+    Query(params): Query<FileListParams>,
+) -> Result<Json<Vec<analytics::FileCost>>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = params.limit.unwrap_or(20).min(200);
+    let filters = parse_dimension_filters(&params.filters);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::file_cost_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+pub async fn analytics_file_detail(
+    Path(file_path): Path<String>,
+    Query(params): Query<FileDetailParams>,
+) -> Result<Json<analytics::FileCostDetail>, (StatusCode, Json<serde_json::Value>)> {
+    // Reject absolute paths and traversal tokens early. `FileEnricher`
+    // never stores such values, so clients asking for them can't match a
+    // row anyway; returning 400 is clearer than a silent 404.
+    if file_path.starts_with('/')
+        || file_path.contains("..")
+        || file_path.contains('\\')
+        || file_path.contains("://")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "file path must be repo-relative, forward-slashed, and inside the repo root"
+            })),
+        ));
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::file_cost_single(
+            &conn,
+            &file_path,
+            params.repo_id.as_deref(),
+            params.since.as_deref(),
+            params.until.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    match result {
+        Some(detail) => Ok(Json(detail)),
+        None => Err(not_found("file not found")),
+    }
+}
+
 pub async fn analytics_schema_version()
 -> Result<Json<SchemaVersionResponse>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<SchemaVersionResponse> {
