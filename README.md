@@ -76,7 +76,7 @@ All agents also support one-time historical import via `budi import` (Claude Cod
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, quality checks, and PR workflow.
 Architecture and module boundaries are documented in [SOUL.md](SOUL.md).
-Architecture decision records live in [`docs/adr/`](docs/adr/).
+Architecture decision records live in [`docs/adr/`](docs/adr/). The 8.x local-developer-first product contract (persona priority, local/cloud boundary, classification principles, statusline contract, explicit 8.2 / 9.0 deferrals) is [ADR-0088](docs/adr/0088-8x-local-developer-first-product-contract.md).
 
 Quick validation: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
 
