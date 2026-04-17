@@ -192,12 +192,36 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   CI runs do not pollute the branches list with a bogus `HEAD` bucket.
 
 - **`ticket_id`** — promoted to a first-class CLI dimension in 8.1 (R1.0.3,
-  #304). The git enricher emits a `ticket_id` tag (and `ticket_prefix`)
-  whenever `git_branch` matches the recognised pattern (e.g. `ENG-123`),
-  so ticket attribution rides on top of the branch attribution rules above
-  with no extra wiring. Surfaces:
-  - `budi stats --tickets` — list ranked by cost, with `(untagged)` bucket.
-  - `budi stats --ticket <ID>` — detail view with per-branch breakdown.
+  #304) and further hardened in R1.3
+  ([#221](https://github.com/siropkin/budi/issues/221)). Both the batch
+  pipeline (`GitEnricher`) and the live proxy
+  (`ProxyAttribution::resolve`) now share one extractor —
+  `pipeline::extract_ticket_from_branch` — which (1) filters integration
+  branches (`main`, `master`, `develop`, `HEAD`), (2) prefers the canonical
+  alphanumeric pattern (e.g. `ENG-123`, `PAVA-2120` anywhere in the
+  branch), then (3) falls back to a numeric-only id for branches like
+  `feature/1234` or `42-quick-fix`. Every emitted `ticket_id` tag is paired
+  with:
+    - `ticket_prefix` — alphabetic prefix (`ENG`, `PAVA`), or empty for
+      numeric-only ids; and
+    - `ticket_source` — explains how the id was derived: `branch` for the
+      alphanumeric pattern, `branch_numeric` for the numeric fallback.
+      Reserved for future `header` / `hint` sources from a smarter client
+      shim. Mirrors the `activity_source` contract so every first-class
+      attribution dimension carries its own provenance.
+
+  Messages without a recognised ticket emit no `ticket_id` tag (no legacy
+  `Unassigned` sentinel); they surface as `(untagged)` in the tickets
+  list, keeping bucket semantics consistent across branch / ticket /
+  activity views.
+
+  Surfaces:
+  - `budi stats --tickets` — list ranked by cost, with `(untagged)`
+    bucket and a `src=…` column showing the dominant `ticket_source`.
+  - `budi stats --ticket <ID>` — detail view with per-branch breakdown
+    and a `Source` row. Legacy rows without a `ticket_source` sibling
+    tag default to `branch` (the only pre-R1.3 pipeline producer) so
+    older DBs stay readable without a reindex.
   - `budi sessions --ticket <ID>` — sessions tagged with the ticket.
   - `GET /analytics/tickets` and `/analytics/tickets/{ticket_id}` mirror
     `/analytics/branches{/branch}` so future cloud/dashboard work can adopt

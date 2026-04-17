@@ -2518,6 +2518,119 @@ fn session_list_filters_by_ticket() {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket source — R1.3 (#221)
+// ---------------------------------------------------------------------------
+//
+// R1.3 promotes `ticket_source` to a first-class sibling of `ticket_id`
+// so analytics can explain how an id was derived (alphanumeric `branch`
+// pattern vs `branch_numeric` fallback). The list and detail views must
+// surface the dominant source per ticket, and legacy rows that only
+// carry a `ticket_id` tag (pre-R1.3) must keep working by defaulting to
+// `branch` — the only pre-R1.3 pipeline producer.
+
+fn ticket_tags_with_source(ticket: &str, source: &str) -> Vec<Tag> {
+    vec![
+        Tag {
+            key: "ticket_id".to_string(),
+            value: ticket.to_string(),
+        },
+        Tag {
+            key: "ticket_source".to_string(),
+            value: source.to_string(),
+        },
+    ]
+}
+
+#[test]
+fn ticket_cost_surfaces_source_per_ticket() {
+    // Two tickets with explicit, distinct sources. Expect each row to
+    // carry its own `source` so the CLI `src=…` column is reliable.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-src-1", "s1", "PAVA-11-alpha", "repo", 5.0);
+    let m2 = ticket_msg("tk-src-2", "s2", "1234-numeric", "repo", 3.0);
+    ingest_messages(
+        &mut conn,
+        &[m1, m2],
+        Some(&[
+            ticket_tags_with_source("PAVA-11", "branch"),
+            ticket_tags_with_source("1234", "branch_numeric"),
+        ]),
+    )
+    .unwrap();
+
+    let tickets = ticket_cost(&conn, None, None, 10).unwrap();
+    let alpha = tickets.iter().find(|t| t.ticket_id == "PAVA-11").unwrap();
+    let numeric = tickets.iter().find(|t| t.ticket_id == "1234").unwrap();
+    assert_eq!(alpha.source, "branch");
+    assert_eq!(numeric.source, "branch_numeric");
+}
+
+#[test]
+fn ticket_cost_defaults_legacy_source_to_branch() {
+    // Pre-R1.3 DBs only carry the `ticket_id` tag. The loader falls back
+    // to `branch` so older data stays readable without a reindex.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-legacy-1", "s1", "PAVA-42-impl", "repo", 4.0);
+    ingest_messages(&mut conn, &[m1], Some(&[ticket_tags(&["PAVA-42"])])).unwrap();
+
+    let tickets = ticket_cost(&conn, None, None, 10).unwrap();
+    let pava42 = tickets.iter().find(|t| t.ticket_id == "PAVA-42").unwrap();
+    assert_eq!(
+        pava42.source, "branch",
+        "legacy rows default to the alphanumeric source"
+    );
+}
+
+#[test]
+fn ticket_cost_untagged_row_has_empty_source() {
+    // The `(untagged)` bucket has no derivation, so its source column is
+    // empty — rendered as `--` by the CLI.
+    let mut conn = test_db();
+    let m = assistant_msg("tk-src-unt", "s1", 3.0);
+    ingest_messages(&mut conn, &[m], Some(&[Vec::new()])).unwrap();
+
+    let tickets = ticket_cost(&conn, None, None, 10).unwrap();
+    let untagged = tickets
+        .iter()
+        .find(|t| t.ticket_id == "(untagged)")
+        .unwrap();
+    assert_eq!(untagged.source, "");
+}
+
+#[test]
+fn ticket_cost_single_surfaces_source() {
+    // The detail view must carry the dominant source too; it drives the
+    // `Source` row in `budi stats --ticket <ID>`.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-src-d-1", "s1", "4321-fix", "repo", 6.0);
+    ingest_messages(
+        &mut conn,
+        &[m1],
+        Some(&[ticket_tags_with_source("4321", "branch_numeric")]),
+    )
+    .unwrap();
+
+    let detail = ticket_cost_single(&conn, "4321", None, None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.source, "branch_numeric");
+}
+
+#[test]
+fn ticket_cost_single_legacy_source_defaults_to_branch() {
+    // Pre-R1.3 detail rows lack a `ticket_source` tag; the detail view
+    // still needs to print something useful, so default to `branch`.
+    let mut conn = test_db();
+    let m1 = ticket_msg("tk-src-d-legacy", "s1", "PAVA-99-impl", "repo", 2.0);
+    ingest_messages(&mut conn, &[m1], Some(&[ticket_tags(&["PAVA-99"])])).unwrap();
+
+    let detail = ticket_cost_single(&conn, "PAVA-99", None, None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.source, "branch");
+}
+
+// ---------------------------------------------------------------------------
 // Activities — R1.0 (#305)
 //
 // Activities live in the `tags` table under the `activity` key (see

@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::analytics::Tag;
 use crate::config::TagsConfig;
 use crate::jsonl::ParsedMessage;
-use crate::pipeline::{Enricher, extract_ticket_id, glob_match};
+use crate::pipeline::{Enricher, extract_ticket_from_branch, glob_match};
 use crate::repo_id::RepoIdCache;
 use crate::tag_keys as tk;
 
@@ -49,9 +49,14 @@ impl Enricher for GitEnricher {
             }
         }
 
-        // Extract ticket_id from git_branch (branch itself is stored as a column, not a tag)
+        // Extract ticket_id from git_branch (branch itself is stored as a
+        // column, not a tag). R1.3 (#221) unifies the extractor with the
+        // proxy ingest path so imported Claude Code / Cursor data agrees
+        // with live proxy rows — in particular, pure-numeric tickets from
+        // branches like `fix/1234-typo` (ADR-0082 §9) now tag consistently
+        // on both paths.
         if let Some(ref branch) = msg.git_branch
-            && let Some(ticket) = extract_ticket_id(branch)
+            && let Some((ticket, source)) = extract_ticket_from_branch(branch)
         {
             tags.push(Tag {
                 key: tk::TICKET_ID.to_string(),
@@ -63,6 +68,10 @@ impl Enricher for GitEnricher {
                     value: ticket[..dash].to_string(),
                 });
             }
+            tags.push(Tag {
+                key: tk::TICKET_SOURCE.to_string(),
+                value: source.to_string(),
+            });
         }
 
         tags
@@ -535,8 +544,67 @@ mod tests {
             tags.iter()
                 .any(|t| t.key == "ticket_prefix" && t.value == "PAVA")
         );
+        // R1.3 (#221): GitEnricher records the extractor source so the
+        // analytics layer can show provenance the same way R1.2 (#222)
+        // did for activity classification.
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "ticket_source" && t.value == "branch"),
+            "expected ticket_source=branch tag for alphanumeric ticket, got: {tags:?}"
+        );
         assert!(!tags.iter().any(|t| t.key == "repo"));
         assert!(!tags.iter().any(|t| t.key == "branch"));
+    }
+
+    /// R1.3 (#221): the import path must also honour the ADR-0082 §9
+    /// numeric-only ticket fallback, matching the proxy ingest path.
+    /// Before R1.3, `fix/1234-typo` produced a ticket tag on the proxy
+    /// path but not on `budi import`, so analytics disagreed.
+    #[test]
+    fn git_enricher_extracts_numeric_only_ticket() {
+        let mut enricher = GitEnricher {
+            repo_cache: RepoIdCache::new(),
+        };
+        let mut msg = test_msg();
+        msg.git_branch = Some("fix/1234-typo".to_string());
+        msg.repo_id = Some("test-repo".to_string());
+        let tags = enricher.enrich(&mut msg);
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "ticket_id" && t.value == "1234"),
+            "expected numeric ticket_id=1234, got: {tags:?}"
+        );
+        assert!(
+            !tags.iter().any(|t| t.key == "ticket_prefix"),
+            "numeric tickets have no prefix, got: {tags:?}"
+        );
+        assert!(
+            tags.iter()
+                .any(|t| t.key == "ticket_source" && t.value == "branch_numeric"),
+            "expected ticket_source=branch_numeric, got: {tags:?}"
+        );
+    }
+
+    /// Integration branches (main/master/develop/HEAD) never produce a
+    /// ticket tag — this pins the unified extractor's filter behaviour
+    /// on the import path.
+    #[test]
+    fn git_enricher_skips_integration_branches() {
+        let mut enricher = GitEnricher {
+            repo_cache: RepoIdCache::new(),
+        };
+        for branch in ["main", "master", "develop", "HEAD"] {
+            let mut msg = test_msg();
+            msg.git_branch = Some(branch.to_string());
+            msg.repo_id = Some("test-repo".to_string());
+            let tags = enricher.enrich(&mut msg);
+            assert!(
+                !tags
+                    .iter()
+                    .any(|t| t.key == "ticket_id" || t.key == "ticket_source"),
+                "{branch} must not produce ticket tags, got: {tags:?}"
+            );
+        }
     }
 
     #[test]
