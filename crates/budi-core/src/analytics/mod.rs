@@ -81,6 +81,47 @@ pub fn set_sync_offset(conn: &Connection, file_path: &str, offset: usize) -> Res
     Ok(())
 }
 
+/// Look up the live tailer's stored byte offset for `(provider, path)`.
+///
+/// Returns `Ok(None)` when no row exists, signalling that the tailer has
+/// never observed this file before. Callers use that signal to decide
+/// whether to seek to end-of-file (the daemon's "skip the backfill"
+/// behaviour, owned by `budi import`) or to resume from the stored
+/// offset. See [ADR-0089] §1 / #319.
+///
+/// [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
+pub fn get_tail_offset(conn: &Connection, provider: &str, path: &str) -> Result<Option<usize>> {
+    let result = conn.query_row(
+        "SELECT byte_offset FROM tail_offsets WHERE provider = ?1 AND path = ?2",
+        params![provider, path],
+        |row| row.get::<_, i64>(0),
+    );
+    match result {
+        Ok(offset) => Ok(Some(offset.max(0) as usize)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Persist the tailer's byte offset for `(provider, path)`. Inserts when
+/// missing, updates otherwise; `last_seen` is refreshed on every call so
+/// stale entries are easy to identify later.
+///
+/// Distinct from [`set_sync_offset`]: that table is shared with `budi
+/// import` and keyed on path alone. The tailer's offsets must not collide
+/// with import's offsets — if a user ever runs both for the same file,
+/// they should advance independently.
+pub fn set_tail_offset(conn: &Connection, provider: &str, path: &str, offset: usize) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(provider, path) DO UPDATE SET byte_offset = ?3, last_seen = ?4",
+        params![provider, path, offset as i64, now],
+    )?;
+    Ok(())
+}
+
 /// Record that a full sync run completed successfully at the current time.
 pub fn mark_sync_completed(conn: &Connection) -> Result<()> {
     let now = Utc::now().to_rfc3339();

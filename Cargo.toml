@@ -21,6 +21,8 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-mini = { version = "0.6", default-features = false, features = ["macos_fsevent"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
