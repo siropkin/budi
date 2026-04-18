@@ -13,6 +13,9 @@ budi-core = { path = "../budi-core" }
 chrono.workspace = true
 clap.workspace = true
 futures-util.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
@@ -22,5 +25,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
-rusqlite.workspace = true
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

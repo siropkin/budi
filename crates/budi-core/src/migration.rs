@@ -156,7 +156,38 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
     )?;
     create_sessions(conn)?;
     ensure_rollup_schema(conn, false)?;
+    ensure_tail_offsets(conn)?;
     create_indexes(conn)?;
+    Ok(())
+}
+
+/// Per-(provider, file) byte offset table used by the daemon's live tailer
+/// (see [ADR-0089] §1 and #319).
+///
+/// This is intentionally distinct from `sync_state` (which is keyed on file
+/// path alone and shared with `budi import`). The tailer needs:
+/// - a per-provider scope so two providers sharing a watch root cannot
+///   stomp on each other's offsets,
+/// - a `last_seen` timestamp so future tooling can prune stale rows
+///   without crawling the filesystem.
+///
+/// Offsets are byte counts into the JSONL file, identical in semantics to
+/// `sync_state.byte_offset` so the `Provider::parse_file(path, content,
+/// offset)` contract works unchanged.
+///
+/// [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
+fn ensure_tail_offsets(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS tail_offsets (
+            provider     TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            byte_offset  INTEGER NOT NULL DEFAULT 0,
+            last_seen    TEXT NOT NULL,
+            PRIMARY KEY (provider, path)
+        );
+        ",
+    )?;
     Ok(())
 }
 
@@ -969,6 +1000,12 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         }
     }
 
+    let needs_tail_offsets = !table_exists(conn, "tail_offsets")?;
+    if needs_tail_offsets {
+        ensure_tail_offsets(conn)?;
+        added_columns.push("tail_offsets".to_string());
+    }
+
     let added_indexes = missing_reconcile_indexes(conn)?;
 
     create_indexes(conn)?;
@@ -997,6 +1034,7 @@ mod tests {
             .unwrap();
         assert!(table_exists(conn, "message_rollups_hourly").unwrap());
         assert!(table_exists(conn, "message_rollups_daily").unwrap());
+        assert!(table_exists(conn, "tail_offsets").unwrap());
         assert!(trigger_exists(conn, "trg_messages_rollup_insert").unwrap());
         assert!(trigger_exists(conn, "trg_messages_rollup_delete").unwrap());
         assert!(trigger_exists(conn, "trg_messages_rollup_update").unwrap());
@@ -1067,5 +1105,28 @@ mod tests {
                 .unwrap();
             assert_eq!(junk, 0, "old tables should be dropped (v{old_version})");
         }
+    }
+
+    /// 8.1 → 8.2 upgrade: an existing v1 database that pre-dates the
+    /// `tail_offsets` table must gain it through `reconcile_schema` without
+    /// triggering a destructive migration. See #319 / ADR-0089.
+    #[test]
+    fn reconcile_adds_tail_offsets_to_existing_v1_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("DROP TABLE tail_offsets;").unwrap();
+        assert!(!table_exists(&conn, "tail_offsets").unwrap());
+
+        let report = repair(&conn).unwrap();
+
+        assert_eq!(report.from_version, SCHEMA_VERSION);
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+        assert!(!report.migrated, "additive repair should not bump version");
+        assert!(
+            report.added_columns.iter().any(|c| c == "tail_offsets"),
+            "report should mention the new table; got {:?}",
+            report.added_columns
+        );
+        assert!(table_exists(&conn, "tail_offsets").unwrap());
     }
 }

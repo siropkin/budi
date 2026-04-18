@@ -269,6 +269,31 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Start filesystem tailer if BUDI_LIVE_TAIL=1 (R1.3 / ADR-0089 / #319) ---
+    //
+    // R1.3 ships the tailer behind a feature flag. R1.4 (#320) flips the
+    // default and starts skipping `proxy_events` writes; this stage
+    // intentionally runs both paths in parallel so analytics output can be
+    // cross-validated on the same machine before R2 starts deleting proxy
+    // code (#322).
+    if std::env::var("BUDI_LIVE_TAIL").as_deref() == Ok("1") {
+        match analytics::db_path() {
+            Ok(db_path) => {
+                tracing::info!(
+                    target: "budi_daemon::tailer",
+                    "BUDI_LIVE_TAIL=1: starting filesystem tailer (ADR-0089 §1)"
+                );
+                let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                tokio::spawn(workers::tailer::run(db_path, shutdown));
+            }
+            Err(e) => tracing::warn!(
+                target: "budi_daemon::tailer",
+                error = %e,
+                "BUDI_LIVE_TAIL=1 set but db_path is not resolvable; tailer not started"
+            ),
+        }
+    }
+
     // --- Start cloud sync worker if configured ---
     {
         let cloud_config = budi_core::config::load_cloud_config();
