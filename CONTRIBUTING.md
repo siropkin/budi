@@ -127,7 +127,7 @@ The existing `Provider` trait is retained only for historical import via `budi i
 1. Create a struct implementing `pipeline::Enricher` in `crates/budi-core/src/pipeline/enrichers.rs`
 2. `enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag>` - mutate the message and/or return tags
 3. Register in `Pipeline::default_pipeline()` in `crates/budi-core/src/pipeline/mod.rs`
-4. Enricher order matters: Identity -> Git -> Tool -> Cost -> Tag
+4. Enricher order matters: Identity -> Git -> Tool -> File -> Cost -> Tag (`FileEnricher` was added in R1.4 / #292; it runs after `GitEnricher` so cwd/repo-root are resolved and before `CostEnricher` so file-path tags are available to user rules)
 
 ## Releasing
 

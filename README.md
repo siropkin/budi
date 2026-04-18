@@ -233,6 +233,8 @@ Budi includes a Cursor/VS Code extension that shows session health and cost in t
 
 The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 🔴 0`). Click it to open the health panel with session details, vitals, and tips.
 
+The extension also works as a **first-run onboarding entry point**: if you discover budi through the VS Code Marketplace before installing the CLI, the extension shows a welcome view with a pre-filled install command and hands you off to `budi init` in an integrated terminal. The hand-off is tracked by local-only integer counters in `~/.local/share/budi/cursor-onboarding.json` (no remote telemetry, ADR-0083 privacy limits preserved) and `budi doctor` prints a one-line summary of those counters so install-funnel health is visible locally.
+
 **Manual install** (if auto-install was skipped or you want to rebuild):
 
 ```bash
