@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "budi-cli"
-version = "8.0.0"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "budi-core",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "budi-core"
-version = "8.0.0"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "budi-daemon"
-version = "8.0.0"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "axum",
