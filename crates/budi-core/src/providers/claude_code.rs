@@ -40,6 +40,29 @@ impl Provider for ClaudeCodeProvider {
     ) -> Result<(Vec<ParsedMessage>, usize)> {
         Ok(jsonl::parse_transcript(content, offset))
     }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        let Ok(home) = crate::config::home_dir() else {
+            return Vec::new();
+        };
+        watch_roots_for_home(&home)
+    }
+}
+
+/// Compute Claude Code's tailer watch roots relative to the given home dir.
+///
+/// Claude Code writes JSONL transcripts under `~/.claude/projects/<encoded-cwd>/*.jsonl`.
+/// The daemon's tailer attaches a recursive watcher to `~/.claude/projects`,
+/// so this function returns that single root when it exists. Returning an
+/// empty vector when the directory is absent lets the daemon skip the
+/// watcher rather than failing to start.
+fn watch_roots_for_home(home: &Path) -> Vec<PathBuf> {
+    let projects = home.join(".claude").join("projects");
+    if projects.is_dir() {
+        vec![projects]
+    } else {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +364,30 @@ mod tests {
                 p.cache_read
             );
         }
+    }
+
+    #[test]
+    fn watch_roots_returns_projects_dir_when_present() {
+        let tmp = std::env::temp_dir().join("budi-claude-watch-roots-present");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".claude/projects")).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert_eq!(roots, vec![tmp.join(".claude/projects")]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn watch_roots_empty_when_projects_dir_absent() {
+        let tmp = std::env::temp_dir().join("budi-claude-watch-roots-absent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert!(roots.is_empty(), "expected empty roots, got {roots:?}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Verify that a realistic message produces the expected cost.

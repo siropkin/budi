@@ -84,6 +84,37 @@ impl Provider for CursorProvider {
         // Sync from Cursor Usage API (exact per-request tokens and cost)
         sync_from_usage_api(conn, pipeline, max_age_days)
     }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        let Ok(home) = crate::config::home_dir() else {
+            return Vec::new();
+        };
+        watch_roots_for_home(&home)
+    }
+}
+
+/// Compute Cursor's tailer watch roots relative to the given home dir.
+///
+/// Cursor writes JSONL transcripts under
+/// `~/.cursor/projects/<encoded-cwd>/agent-transcripts/**/*.jsonl`. The
+/// tailer attaches a recursive watcher to `~/.cursor/projects` so that new
+/// per-project subdirs are picked up automatically.
+///
+/// The Cursor Usage API is intentionally **not** a watch root. Per ADR-0089
+/// §7 it remains a pull-mode reconciliation handled by
+/// [`Provider::sync_direct`] and is scheduled independently of the live
+/// tailer; its lag profile is the subject of #321.
+///
+/// `state.vscdb` is also not a watch root — the JSONL transcripts already
+/// carry the messages the pipeline needs, and `state.vscdb` is a SQLite
+/// database whose write semantics are not tail-friendly.
+fn watch_roots_for_home(home: &Path) -> Vec<PathBuf> {
+    let projects = home.join(".cursor").join("projects");
+    if projects.is_dir() {
+        vec![projects]
+    } else {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2235,5 +2266,46 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn watch_roots_returns_projects_dir_when_present() {
+        let tmp = std::env::temp_dir().join("budi-cursor-watch-roots-present");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".cursor/projects")).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert_eq!(roots, vec![tmp.join(".cursor/projects")]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn watch_roots_empty_when_projects_dir_absent() {
+        let tmp = std::env::temp_dir().join("budi-cursor-watch-roots-absent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert!(roots.is_empty(), "expected empty roots, got {roots:?}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn watch_roots_excludes_state_vscdb_and_usage_api() {
+        // ADR-0089 §7: Usage API stays in sync_direct; state.vscdb is not a
+        // watch root. Even when both exist, the only watch root is the JSONL
+        // projects dir.
+        let tmp = std::env::temp_dir().join("budi-cursor-watch-roots-jsonl-only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".cursor/projects")).unwrap();
+        std::fs::create_dir_all(tmp.join("Library/Application Support/Cursor/User/globalStorage"))
+            .unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert_eq!(roots, vec![tmp.join(".cursor/projects")]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
