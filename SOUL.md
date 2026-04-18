@@ -33,6 +33,9 @@ Shell-driven end-to-end tests live under `scripts/e2e/`. They exercise the full 
 cargo build --release                                 # once per change
 bash scripts/e2e/test_302_sessions_visibility.sh      # regression guard for #302
 bash scripts/e2e/test_303_branch_attribution.sh       # regression guard for #303
+bash scripts/e2e/test_221_ticket_first_class.sh       # regression guard for #221 / #304 (ticket dimension)
+bash scripts/e2e/test_222_activity_classification.sh  # regression guard for #222 / #305 (activity dimension)
+bash scripts/e2e/test_224_statusline_provider_scope.sh # regression guard for #224 (statusline provider scoping)
 ```
 
 Each script is a single self-contained bash file that:
