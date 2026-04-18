@@ -6,7 +6,7 @@
 This document pins the shared provider-scoped status contract emitted by Budi's local status surfaces. It is the single JSON shape consumed by:
 
 - the CLI statusline (`budi statusline --format json`)
-- the Cursor extension ([#232](https://github.com/siropkin/budi/issues/232), surfaced in Cursor's status bar + side panel)
+- the Cursor extension ([#232](https://github.com/siropkin/budi/issues/232), surfaced as a single Cursor status bar item — no sidebar, no side panel)
 - the cloud dashboard's provider-scoped views ([#235](https://github.com/siropkin/budi/issues/235))
 
 Provider is an explicit filter rather than a family of per-surface shapes. New agents added in 8.2 under [#294](https://github.com/siropkin/budi/issues/294) slot into the same shape — they do not each invent their own statusline schema.

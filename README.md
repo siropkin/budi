@@ -44,7 +44,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, opt-in via `~/.config/budi/cloud.toml`)
-- Live cost + health status line in Claude Code and Cursor
+- Provider-scoped live cost status line in Claude Code and Cursor (quiet rolling `1d` / `7d` / `30d`)
 - **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
 
@@ -70,7 +70,7 @@ All agents also support one-time historical import via `budi import` (Claude Cod
 
 - **[budi](https://github.com/siropkin/budi)** — The core Rust daemon and CLI tool (you are here)
 - **[budi-cloud](https://github.com/siropkin/budi-cloud)** — Cloud dashboard and ingest API for team-wide cost visibility
-- **[budi-cursor](https://github.com/siropkin/budi-cursor)** — VS Code/Cursor extension for live status bar and health panel
+- **[budi-cursor](https://github.com/siropkin/budi-cursor)** — VS Code/Cursor extension: a provider-scoped Cursor-only status bar (no sidebar) that mirrors the Claude Code statusline
 
 ## Contributing
 
@@ -229,9 +229,9 @@ Available slots: `1d`, `7d`, `30d`, `session`, `branch`, `project`, `provider`, 
 
 ## Cursor extension
 
-Budi includes a Cursor/VS Code extension that shows session health and cost in the status bar and a side panel. It can be installed during `budi init` and later via `budi integrations install --with cursor-extension`.
+Budi includes a Cursor/VS Code extension that shows Cursor-only spend in a single status bar item. It can be installed during `budi init` and later via `budi integrations install --with cursor-extension`.
 
-The status bar shows today's sessions with health at a glance (`🟢 3 🟡 1 🔴 0`). Click it to open the health panel with session details, vitals, and tips.
+As of v1.1.0 the extension is intentionally statusline-only (ADR-0088 §7, [#232](https://github.com/siropkin/budi/issues/232)) — no sidebar, no session list, no vitals/tips panel. The status bar renders the shared provider-scoped status contract filtered to `provider=cursor` and mirrors the Claude Code statusline byte-for-byte: `🟢 budi · $X 1d · $Y 7d · $Z 30d`. A leading dot glyph reports health (🟢 active, 🟡 reachable but quiet, 🔴 daemon unreachable, ⚪ first run / not installed yet). Click the status bar item to open the cloud dashboard — session list when a Cursor session is active, dashboard root otherwise — matching the Claude Code click-through.
 
 The extension also works as a **first-run onboarding entry point**: if you discover budi through the VS Code Marketplace before installing the CLI, the extension shows a welcome view with a pre-filled install command and hands you off to `budi init` in an integrated terminal. The hand-off is tracked by local-only integer counters in `~/.local/share/budi/cursor-onboarding.json` (no remote telemetry, ADR-0083 privacy limits preserved) and `budi doctor` prints a one-line summary of those counters so install-funnel health is visible locally.
 
@@ -394,7 +394,7 @@ Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`,
 | **Cost Acceleration** | Later turns/replies cost much more than earlier ones | 2x+ growth and meaningful cost per unit | 4x+ growth and high cost per unit |
 | **Retry Loops** | Agent is stuck in a failing tool loop (disabled since 8.0 — hook-event source removed; will be re-enabled on top of R1.5 tool-outcome signals) | One suspicious retry loop | Repeated or severe retry loops |
 
-Health state appears in the status line, the Cursor extension panel, and the session detail page in the dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh."
+Health state appears in the statusline's opt-in `coach` / `full` presets (see above; the default statusline is quiet and cost-only) and on the session detail page in the cloud dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh." The Cursor extension is statusline-only as of v1.1.0 and does not render per-session health.
 
 ## Privacy
 
@@ -636,11 +636,11 @@ Run `budi autostart status` — if it shows "not installed", run `budi autostart
 1. Restart Claude Code after `budi init`
 2. Check: `budi statusline` should output cost data
 
-**Cursor extension shows offline or stale session:**
-1. Run `budi doctor` to verify daemon is running
-2. In Cursor, run **Budi: Refresh Status**
-3. If needed, reload Cursor window (`Developer: Reload Window`) after `budi init` or daemon URL changes
-4. Use **Budi: Select Session** when passively switching between sessions
+**Cursor extension status bar shows offline (red dot) or stays quiet (yellow):**
+1. Run `budi doctor` to verify daemon + proxy health.
+2. In Cursor, run **Budi: Refresh Status**.
+3. If needed, reload Cursor window (`Developer: Reload Window`) after `budi init` or daemon URL changes.
+4. Confirm `Override OpenAI Base URL` is set to `http://localhost:9878` (Cursor Settings → Models) so Cursor traffic routes through the budi proxy.
 
 ## Uninstall
 
