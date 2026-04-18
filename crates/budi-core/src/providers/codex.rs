@@ -67,6 +67,32 @@ impl Provider for CodexProvider {
     ) -> Result<(Vec<ParsedMessage>, usize)> {
         Ok(parse_codex_transcript(content, offset))
     }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        let Ok(home) = crate::config::home_dir() else {
+            return Vec::new();
+        };
+        watch_roots_for_home(&home)
+    }
+}
+
+/// Compute Codex's tailer watch roots relative to the given home dir.
+///
+/// Codex writes session JSONL to two parallel locations:
+/// - `~/.codex/sessions/YYYY/MM/DD/*.jsonl` — active sessions, currently
+///   growing, written to live by `codex` runs.
+/// - `~/.codex/archived_sessions/*.jsonl` — sessions the CLI rotates out
+///   of `sessions/`. Tail-watching keeps offsets honest if a session is
+///   rotated mid-tail.
+///
+/// Both are returned when present; missing roots are filtered so the daemon
+/// can attach a watcher to whichever subset exists.
+fn watch_roots_for_home(home: &Path) -> Vec<PathBuf> {
+    let codex = home.join(".codex");
+    [codex.join("sessions"), codex.join("archived_sessions")]
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -613,5 +639,48 @@ mod tests {
         let p = codex_pricing_for_model("some-future-model");
         assert_eq!(p.input, 1.75);
         assert_eq!(p.output, 14.0);
+    }
+
+    #[test]
+    fn watch_roots_returns_both_session_dirs_when_present() {
+        let tmp = std::env::temp_dir().join("budi-codex-watch-roots-both");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".codex/sessions")).unwrap();
+        std::fs::create_dir_all(tmp.join(".codex/archived_sessions")).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert_eq!(
+            roots,
+            vec![
+                tmp.join(".codex/sessions"),
+                tmp.join(".codex/archived_sessions"),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn watch_roots_skips_missing_archived_dir() {
+        let tmp = std::env::temp_dir().join("budi-codex-watch-roots-active-only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".codex/sessions")).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert_eq!(roots, vec![tmp.join(".codex/sessions")]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn watch_roots_empty_when_codex_home_absent() {
+        let tmp = std::env::temp_dir().join("budi-codex-watch-roots-empty");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let roots = watch_roots_for_home(&tmp);
+        assert!(roots.is_empty(), "expected empty roots, got {roots:?}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -90,6 +90,29 @@ impl Provider for CopilotProvider {
             content, offset, session_id, workspace,
         ))
     }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        let Ok(home) = copilot_home() else {
+            return Vec::new();
+        };
+        watch_roots_under(&home)
+    }
+}
+
+/// Compute Copilot CLI's tailer watch root relative to the given Copilot home.
+///
+/// Copilot writes session events to `<COPILOT_HOME>/session-state/<session-id>/events.jsonl`.
+/// New sessions create new subdirectories, so the daemon attaches a recursive
+/// watcher to `session-state/` rather than to each individual session directory.
+/// Returns an empty vector when the directory is absent so the daemon can
+/// skip the watcher rather than failing to start.
+fn watch_roots_under(copilot_home: &Path) -> Vec<PathBuf> {
+    let session_state = copilot_home.join("session-state");
+    if session_state.is_dir() {
+        vec![session_state]
+    } else {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -535,5 +558,29 @@ mod tests {
         let codex_p = crate::providers::codex::codex_pricing_for_model("gpt-5.3");
         assert_eq!(p.input, codex_p.input);
         assert_eq!(p.output, codex_p.output);
+    }
+
+    #[test]
+    fn watch_roots_returns_session_state_when_present() {
+        let tmp = std::env::temp_dir().join("budi-copilot-watch-roots-present");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("session-state/sess-1")).unwrap();
+
+        let roots = watch_roots_under(&tmp);
+        assert_eq!(roots, vec![tmp.join("session-state")]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn watch_roots_empty_when_session_state_absent() {
+        let tmp = std::env::temp_dir().join("budi-copilot-watch-roots-absent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let roots = watch_roots_under(&tmp);
+        assert!(roots.is_empty(), "expected empty roots, got {roots:?}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

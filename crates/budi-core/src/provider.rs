@@ -97,6 +97,46 @@ pub trait Provider: Send + Sync {
     ) -> Option<Result<(usize, usize, Vec<String>)>> {
         None
     }
+
+    /// Directories the daemon's filesystem tailer should watch for new and
+    /// grown transcript files (see [ADR-0089] §1 and #318).
+    ///
+    /// The tailer registers a recursive `notify` watcher on each returned
+    /// path; on each event it calls [`Provider::parse_file`] with the stored
+    /// per-file offset and feeds the resulting messages through
+    /// `Pipeline::default_pipeline()`. This is the single live ingestion
+    /// path in 8.2+ — there is no proxy fallback.
+    ///
+    /// Returned paths must:
+    /// - be absolute,
+    /// - point at directories that currently exist on disk (the tailer skips
+    ///   non-existent roots rather than blocking startup), and
+    /// - cover the parent of every file [`Provider::discover_files`] would
+    ///   return on the same machine.
+    ///
+    /// The default implementation derives roots by deduplicating the parent
+    /// directories of [`Provider::discover_files`]. This keeps existing
+    /// providers compiling, but every shipped provider should override with
+    /// its well-known root(s) so the watcher can attach even before any
+    /// transcripts have been written (e.g. on a freshly installed agent).
+    ///
+    /// Cursor's Usage API is **not** a watch root. It is a pull-mode
+    /// reconciliation handled by [`Provider::sync_direct`] and scheduled
+    /// independently of the tailer (see #321).
+    ///
+    /// [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        let Ok(files) = self.discover_files() else {
+            return Vec::new();
+        };
+        let mut roots: Vec<PathBuf> = files
+            .into_iter()
+            .filter_map(|f| f.path.parent().map(Path::to_path_buf))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
 }
 
 /// Returns all registered providers (whether or not their data is present).
@@ -129,5 +169,69 @@ pub fn enabled_providers() -> Vec<Box<dyn Provider>> {
             .filter(|p| p.is_available() && config.is_agent_enabled(p.name()))
             .collect(),
         None => available_providers(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal Provider that only implements the required surface so we can
+    /// exercise the default `watch_roots()` implementation.
+    struct StubProvider {
+        files: Vec<PathBuf>,
+    }
+
+    impl Provider for StubProvider {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        fn display_name(&self) -> &'static str {
+            "Stub"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn discover_files(&self) -> Result<Vec<DiscoveredFile>> {
+            Ok(self
+                .files
+                .iter()
+                .cloned()
+                .map(|path| DiscoveredFile { path })
+                .collect())
+        }
+        fn parse_file(
+            &self,
+            _path: &Path,
+            _content: &str,
+            _offset: usize,
+        ) -> Result<(Vec<crate::jsonl::ParsedMessage>, usize)> {
+            Ok((Vec::new(), 0))
+        }
+    }
+
+    #[test]
+    fn default_watch_roots_dedups_parent_dirs() {
+        let provider = StubProvider {
+            files: vec![
+                PathBuf::from("/tmp/budi-stub/a/one.jsonl"),
+                PathBuf::from("/tmp/budi-stub/a/two.jsonl"),
+                PathBuf::from("/tmp/budi-stub/b/three.jsonl"),
+            ],
+        };
+        let roots = provider.watch_roots();
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/tmp/budi-stub/a"),
+                PathBuf::from("/tmp/budi-stub/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_watch_roots_empty_when_no_files() {
+        let provider = StubProvider { files: Vec::new() };
+        assert!(provider.watch_roots().is_empty());
     }
 }
