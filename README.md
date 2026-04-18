@@ -193,25 +193,39 @@ Keep only one install source first on PATH (Homebrew **or** standalone path), no
 
 ## Status line
 
-Budi adds a live cost display to Claude Code (optional in `budi init`):
+Budi adds a live cost display to Claude Code (optional in `budi init`). The default is intentionally quiet, stable, and scoped to the current agent surface — the Claude Code statusline shows Claude Code usage only (ADR-0088 §4):
 
-`🟢 budi · $4.92 session · session healthy`
+`budi · $1.24 1d · $8.50 7d · $32.10 30d`
 
-The `coach` preset shows your current session cost plus a health indicator. When Budi spots a problem, the short tip explains what to do next:
+Rolling `1d` / `7d` / `30d` windows are the primary signal. They tell you what you spent in the last 24 hours, the last 7 days, and the last 30 days — not calendar-today or calendar-month. `budi stats` keeps calendar semantics if you want those.
 
-`🟡 budi · $12.50 session · Context growing — /compact soon`
+### Shared status contract
 
-New sessions start green — the default is always positive:
+`budi statusline --format json` emits the shared provider-scoped status contract (see [`docs/statusline-contract.md`](docs/statusline-contract.md)) that the Cursor extension and cloud dashboard reuse:
 
-`🟢 budi · $0.42 session · new session`
-
-Customize slots in `~/.config/budi/statusline.toml`:
-
-```toml
-slots = ["today", "week", "month", "branch"]
+```bash
+budi statusline --format json                      # auto-scoped to claude_code for --format claude
+budi statusline --format json --provider cursor    # Cursor surface reuses the same shape
+budi statusline --format json --provider codex     # any other supported provider
 ```
 
-Available slots: `today`, `week`, `month`, `session`, `branch`, `project`, `provider`.
+### Advanced variants
+
+Power users can pick a different preset by creating `~/.config/budi/statusline.toml`:
+
+```toml
+# Default quiet preset (same as no file).
+slots = ["1d", "7d", "30d"]
+
+# `coach` — show the active session's cost and health:
+#   budi · $1.24 session · session healthy
+# preset = "coach"
+
+# `full` — session cost + health + today's rolling 1d total:
+# preset = "full"
+```
+
+Available slots: `1d`, `7d`, `30d`, `session`, `branch`, `project`, `provider`, `health`. The legacy `today` / `week` / `month` slot names still work — they resolve to the same rolling `1d` / `7d` / `30d` values so existing configs keep rendering.
 
 ## Cursor extension
 

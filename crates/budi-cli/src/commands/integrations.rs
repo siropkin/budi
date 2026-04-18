@@ -129,14 +129,11 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
                 return Ok(());
             }
 
-            let mut preset = statusline_preset;
-            if selected.contains(&IntegrationComponent::ClaudeCodeStatusline)
-                && preset.is_none()
-                && !yes
-                && io::stdin().is_terminal()
-            {
-                preset = Some(prompt_statusline_preset()?);
-            }
+            // Default statusline is the quiet `1d` / `7d` / `30d` cost view
+            // (ADR-0088 §4). `coach` / `full` remain opt-in advanced variants
+            // documented in the README — we no longer prompt for a preset
+            // during onboarding so the default path stays simple.
+            let preset = statusline_preset;
 
             if !yes && io::stdin().is_terminal() {
                 println!("Will install:");
@@ -180,26 +177,6 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn prompt_statusline_preset() -> Result<StatuslinePreset> {
-    println!();
-    println!("Choose Claude Code status line preset:");
-    println!("  1) coach  (session cost + health)");
-    println!("  2) cost   (today/week/month)");
-    println!("  3) full   (session + health + today)");
-    eprint!("Preset [1]: ");
-    io::stdout().flush().ok();
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read stdin")?;
-    let preset = match input.trim() {
-        "2" | "cost" => StatuslinePreset::Cost,
-        "3" | "full" => StatuslinePreset::Full,
-        _ => StatuslinePreset::Coach,
-    };
-    Ok(preset)
 }
 
 pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {

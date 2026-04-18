@@ -2947,14 +2947,38 @@ pub fn model_usage_with_filters(
 }
 
 // ---------------------------------------------------------------------------
-// Statusline
+// Statusline — shared provider-scoped status contract (ADR-0088 §4, #224).
 // ---------------------------------------------------------------------------
+//
+// The JSON shape emitted by `/analytics/statusline` and `budi statusline
+// --format json` is the single shared provider-scoped status contract. It is
+// consumed by the CLI statusline, the Cursor extension (#232), and the cloud
+// dashboard (#235). Provider is an explicit filter rather than a family of
+// per-surface shapes. See `docs/statusline-contract.md`.
 
 /// Compact stats for the status line display.
+///
+/// Primary windows are rolling `1d` / `7d` / `30d`, surfaced as
+/// `cost_1d` / `cost_7d` / `cost_30d`. The legacy `today_cost` /
+/// `week_cost` / `month_cost` fields are populated with the same rolling
+/// values for one-release backward compatibility with downstream consumers
+/// written against 8.0; they are deprecated and will be removed in 9.0.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StatuslineStats {
+    /// Rolling 24h cost in dollars, optionally provider-scoped.
+    pub cost_1d: f64,
+    /// Rolling 7-day cost in dollars, optionally provider-scoped.
+    pub cost_7d: f64,
+    /// Rolling 30-day cost in dollars, optionally provider-scoped.
+    pub cost_30d: f64,
+    /// Provider this response was scoped to, or `None` for unscoped totals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_scope: Option<String>,
+    /// Deprecated alias for `cost_1d`. Removed in 9.0.
     pub today_cost: f64,
+    /// Deprecated alias for `cost_7d`. Removed in 9.0.
     pub week_cost: f64,
+    /// Deprecated alias for `cost_30d`. Removed in 9.0.
     pub month_cost: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_cost: Option<f64>,
@@ -2979,9 +3003,20 @@ pub struct StatuslineParams {
     pub session_id: Option<String>,
     pub branch: Option<String>,
     pub project_dir: Option<String>,
+    /// Optional provider filter. When set, every numeric field
+    /// (`cost_1d/7d/30d`, `session_cost`, `branch_cost`, `project_cost`) and
+    /// `active_provider` are scoped to this provider. Provider-scoped
+    /// surfaces (the Claude Code statusline, the Cursor extension) must set
+    /// this; unscoped blended totals remain available for advanced users and
+    /// for the `budi stats` command.
+    pub provider: Option<String>,
 }
 
-fn assistant_cost_since_from_rollups(conn: &Connection, since: &str) -> Option<f64> {
+fn assistant_cost_since_from_rollups(
+    conn: &Connection,
+    since: &str,
+    provider: Option<&str>,
+) -> Option<f64> {
     if !rollups_available(conn) {
         return None;
     }
@@ -2989,6 +3024,10 @@ fn assistant_cost_since_from_rollups(conn: &Connection, since: &str) -> Option<f
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut params: Vec<String> = Vec::new();
     append_rollup_time_filters(&mut conditions, &mut params, &window);
+    if let Some(p) = provider {
+        conditions.push("provider = ?".to_string());
+        params.push(p.to_string());
+    }
     let sql = format!(
         "SELECT COALESCE(SUM(cost_cents), 0.0)
          FROM {}
@@ -3004,80 +3043,125 @@ fn assistant_cost_since_from_rollups(conn: &Connection, since: &str) -> Option<f
         .ok()
 }
 
-/// Compute cost stats for today/week/month, suitable for the CLI status line.
-/// Optionally computes session/branch/project costs when params are provided.
+/// Compute cost stats for rolling 1d / 7d / 30d, suitable for the CLI status
+/// line and for the shared provider-scoped status contract consumed by the
+/// Cursor extension and cloud dashboard (ADR-0088 §4, #224). Optionally
+/// computes session / branch / project costs when params are provided, and
+/// scopes every numeric field to `params.provider` when set.
 pub fn statusline_stats(
     conn: &Connection,
-    today: &str,
-    week_start: &str,
-    month_start: &str,
+    since_1d: &str,
+    since_7d: &str,
+    since_30d: &str,
     params: &StatuslineParams,
 ) -> Result<StatuslineStats> {
-    fn cost_since(conn: &Connection, since: &str) -> f64 {
-        assistant_cost_since_from_rollups(conn, since)
-            .unwrap_or_else(|| {
-                conn.query_row(
-                    "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE timestamp >= ?1 AND role = 'assistant'",
-                    [since],
-                    |r| r.get::<_, f64>(0),
-                )
-                .unwrap_or(0.0)
-            })
-            / 100.0
-    }
+    let provider_filter = params.provider.as_deref();
 
-    let today_cost = cost_since(conn, today);
-    let week_cost = cost_since(conn, week_start);
-    let month_cost = cost_since(conn, month_start);
+    let cost_since = |since: &str| -> f64 {
+        assistant_cost_since_from_rollups(conn, since, provider_filter).unwrap_or_else(|| {
+            let mut sql = String::from(
+                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+                     WHERE timestamp >= ?1 AND role = 'assistant'",
+            );
+            let mut bindings: Vec<String> = vec![since.to_string()];
+            if let Some(p) = provider_filter {
+                sql.push_str(" AND provider = ?2");
+                bindings.push(p.to_string());
+            }
+            let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+            conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, f64>(0))
+                .unwrap_or(0.0)
+        }) / 100.0
+    };
+
+    let cost_1d = cost_since(since_1d);
+    let cost_7d = cost_since(since_7d);
+    let cost_30d = cost_since(since_30d);
     let normalized_session_id = params
         .session_id
         .as_deref()
         .map(crate::identity::normalize_session_id);
 
-    // Session cost: total cost for a specific session
+    // Session cost: total cost for a specific session (optionally provider-scoped).
     let session_cost = normalized_session_id.as_ref().map(|sid| {
-        conn.query_row(
-            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE session_id = ?1 AND role = 'assistant'",
-            [sid],
-            |r| r.get::<_, f64>(0),
-        )
-        .unwrap_or(0.0)
+        let mut sql = String::from(
+            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+             WHERE session_id = ?1 AND role = 'assistant'",
+        );
+        let mut bindings: Vec<String> = vec![sid.clone()];
+        if let Some(p) = provider_filter {
+            sql.push_str(" AND provider = ?2");
+            bindings.push(p.to_string());
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, f64>(0))
+            .unwrap_or(0.0)
             / 100.0
     });
 
-    // Branch cost: total cost for messages on a specific branch
+    // Branch cost: total cost for messages on a specific branch.
     let branch_cost = params.branch.as_ref().map(|branch| {
-        conn.query_row(
-            "SELECT COALESCE(SUM(m.cost_cents), 0.0) \
-             FROM messages m \
-             WHERE m.git_branch = ?1 AND m.role = 'assistant'",
-            [branch],
-            |r| r.get::<_, f64>(0),
-        )
-        .unwrap_or(0.0)
+        let mut sql = String::from(
+            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+             WHERE git_branch = ?1 AND role = 'assistant'",
+        );
+        let mut bindings: Vec<String> = vec![branch.clone()];
+        if let Some(p) = provider_filter {
+            sql.push_str(" AND provider = ?2");
+            bindings.push(p.to_string());
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, f64>(0))
+            .unwrap_or(0.0)
             / 100.0
     });
 
-    // Project cost: total cost for messages in a specific directory
+    // Project cost: total cost for messages in a specific directory.
     let project_cost = params.project_dir.as_ref().map(|dir| {
-        conn.query_row(
-            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages WHERE cwd = ?1 AND role = 'assistant'",
-            [dir],
-            |r| r.get::<_, f64>(0),
-        )
-        .unwrap_or(0.0)
+        let mut sql = String::from(
+            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+             WHERE cwd = ?1 AND role = 'assistant'",
+        );
+        let mut bindings: Vec<String> = vec![dir.clone()];
+        if let Some(p) = provider_filter {
+            sql.push_str(" AND provider = ?2");
+            bindings.push(p.to_string());
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, f64>(0))
+            .unwrap_or(0.0)
             / 100.0
     });
 
-    // Active provider: most recent provider used today
-    let active_provider: Option<String> = conn
-        .query_row(
-            "SELECT provider FROM messages \
-             WHERE timestamp >= ?1 ORDER BY timestamp DESC LIMIT 1",
-            [today],
-            |r| r.get(0),
-        )
-        .ok();
+    // Active provider: most recent provider used in the last 24h.
+    // When the request is already provider-scoped, this is just the same
+    // provider when there's recent activity, or None if the window is empty.
+    let active_provider: Option<String> = {
+        let mut sql = String::from("SELECT provider FROM messages WHERE timestamp >= ?1");
+        let mut bindings: Vec<String> = vec![since_1d.to_string()];
+        if let Some(p) = provider_filter {
+            sql.push_str(" AND provider = ?2");
+            bindings.push(p.to_string());
+        }
+        sql.push_str(" ORDER BY timestamp DESC LIMIT 1");
+        let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.query_row(&sql, refs.as_slice(), |r| r.get(0)).ok()
+    };
 
     let (health_state, health_tip, session_msg_cost) = normalized_session_id
         .as_ref()
@@ -3093,9 +3177,13 @@ pub fn statusline_stats(
         .unwrap_or((None, None, None));
 
     Ok(StatuslineStats {
-        today_cost,
-        week_cost,
-        month_cost,
+        cost_1d,
+        cost_7d,
+        cost_30d,
+        provider_scope: params.provider.clone(),
+        today_cost: cost_1d,
+        week_cost: cost_7d,
+        month_cost: cost_30d,
         session_cost,
         branch_cost,
         project_cost,

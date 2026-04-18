@@ -919,13 +919,17 @@ fn cache_stats_computes_hit_rate() {
 fn statusline_stats_empty_db() {
     let conn = test_db();
     let params = StatuslineParams::default();
-    let stats = statusline_stats(&conn, "2026-03-21", "2026-03-17", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-21", "2026-03-14", "2026-02-19", &params).unwrap();
+    assert_eq!(stats.cost_1d, 0.0);
+    assert_eq!(stats.cost_7d, 0.0);
+    assert_eq!(stats.cost_30d, 0.0);
     assert_eq!(stats.today_cost, 0.0);
     assert_eq!(stats.week_cost, 0.0);
     assert_eq!(stats.month_cost, 0.0);
     assert!(stats.session_cost.is_none());
     assert!(stats.branch_cost.is_none());
     assert!(stats.project_cost.is_none());
+    assert!(stats.provider_scope.is_none());
 }
 
 #[test]
@@ -933,8 +937,9 @@ fn statusline_stats_with_data() {
     let mut conn = test_db();
     ingest_messages(&mut conn, &sample_messages(), None).unwrap();
     let params = StatuslineParams::default();
-    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
-    assert!(stats.month_cost > 0.0);
+    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-08", "2026-02-14", &params).unwrap();
+    assert!(stats.cost_30d > 0.0);
+    assert_eq!(stats.cost_30d, stats.month_cost);
 }
 
 #[test]
@@ -945,7 +950,7 @@ fn statusline_stats_with_session_filter() {
         session_id: Some("sess-1".to_string()),
         ..Default::default()
     };
-    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-08", "2026-02-14", &params).unwrap();
     assert!(stats.session_cost.is_some());
     assert!(stats.session_cost.unwrap() >= 0.0);
 }
@@ -958,8 +963,139 @@ fn statusline_stats_with_branch_filter() {
         branch: Some("main".to_string()),
         ..Default::default()
     };
-    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-10", "2026-03-01", &params).unwrap();
+    let stats = statusline_stats(&conn, "2026-03-14", "2026-03-08", "2026-02-14", &params).unwrap();
     assert!(stats.branch_cost.is_some());
+}
+
+#[test]
+fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
+    // Regression guard for ADR-0088 §4 + #224: the Claude Code statusline
+    // must show Claude Code usage only, not blended multi-provider totals.
+    let mut conn = test_db();
+
+    let msgs = vec![
+        ParsedMessage {
+            uuid: "claude-1".to_string(),
+            session_id: Some("claude-sess".to_string()),
+            timestamp: "2026-04-15T10:00:00Z".parse().unwrap(),
+            cwd: Some("/proj/a".to_string()),
+            role: "assistant".to_string(),
+            model: Some("claude-sonnet".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: Some("main".to_string()),
+            repo_id: Some("repo-1".to_string()),
+            provider: "claude_code".to_string(),
+            cost_cents: Some(500.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "exact".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            prompt_category_source: None,
+            prompt_category_confidence: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
+        },
+        ParsedMessage {
+            uuid: "cursor-1".to_string(),
+            session_id: Some("cursor-sess".to_string()),
+            timestamp: "2026-04-15T11:00:00Z".parse().unwrap(),
+            cwd: Some("/proj/a".to_string()),
+            role: "assistant".to_string(),
+            model: Some("cursor-gpt-4".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: Some("main".to_string()),
+            repo_id: Some("repo-1".to_string()),
+            provider: "cursor".to_string(),
+            cost_cents: Some(700.0),
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "exact".to_string(),
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            prompt_category_source: None,
+            prompt_category_confidence: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
+        },
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    // Windows span the ingested data.
+    let since_1d = "2026-04-15T00:00:00Z";
+    let since_7d = "2026-04-10T00:00:00Z";
+    let since_30d = "2026-03-20T00:00:00Z";
+
+    let unscoped = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams::default(),
+    )
+    .unwrap();
+    assert_eq!(unscoped.cost_30d, 12.0); // (500 + 700) / 100
+    assert!(unscoped.provider_scope.is_none());
+
+    let claude = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            provider: Some("claude_code".to_string()),
+            session_id: Some("claude-sess".to_string()),
+            branch: Some("main".to_string()),
+            project_dir: Some("/proj/a".to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(claude.provider_scope.as_deref(), Some("claude_code"));
+    assert_eq!(claude.cost_1d, 5.0);
+    assert_eq!(claude.cost_7d, 5.0);
+    assert_eq!(claude.cost_30d, 5.0);
+    assert_eq!(claude.session_cost, Some(5.0));
+    assert_eq!(claude.branch_cost, Some(5.0));
+    assert_eq!(claude.project_cost, Some(5.0));
+    assert_eq!(claude.active_provider.as_deref(), Some("claude_code"));
+
+    let cursor = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            provider: Some("cursor".to_string()),
+            branch: Some("main".to_string()),
+            project_dir: Some("/proj/a".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cursor.cost_30d, 7.0);
+    assert_eq!(cursor.branch_cost, Some(7.0));
+    assert_eq!(cursor.project_cost, Some(7.0));
+    assert_eq!(cursor.active_provider.as_deref(), Some("cursor"));
 }
 
 #[test]

@@ -2,7 +2,6 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use budi_core::{analytics, cost};
-use chrono::Datelike;
 use serde_json::json;
 
 use super::{bad_request, internal_error, not_found};
@@ -423,28 +422,15 @@ pub async fn analytics_statusline(
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        let now = chrono::Local::now();
-        let to_utc = |d: chrono::NaiveDateTime| -> String {
-            d.and_local_timezone(chrono::Local)
-                .latest()
-                .unwrap_or_else(|| chrono::Utc::now().with_timezone(&chrono::Local))
-                .with_timezone(&chrono::Utc)
-                .to_rfc3339()
-        };
-        let today = to_utc(now.date_naive().and_hms_opt(0, 0, 0).unwrap());
-        let dow = now.weekday().num_days_from_monday();
-        let week_start = to_utc(
-            (now.date_naive() - chrono::Duration::days(dow as i64))
-                .and_hms_opt(0, 0, 0)
-                .unwrap(),
-        );
-        let month_start = to_utc(
-            chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap(),
-        );
-        analytics::statusline_stats(&conn, &today, &week_start, &month_start, &params)
+        // Primary windows are rolling 1d / 7d / 30d from `now`, per ADR-0088
+        // §4 and issue #224. Calendar today/week/month have been retired
+        // from this endpoint to align with the shared provider-scoped
+        // status contract.
+        let now = chrono::Utc::now();
+        let since_1d = (now - chrono::Duration::days(1)).to_rfc3339();
+        let since_7d = (now - chrono::Duration::days(7)).to_rfc3339();
+        let since_30d = (now - chrono::Duration::days(30)).to_rfc3339();
+        analytics::statusline_stats(&conn, &since_1d, &since_7d, &since_30d, &params)
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?

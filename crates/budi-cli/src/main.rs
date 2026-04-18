@@ -227,6 +227,17 @@ Examples:
     /// Quick overview: daemon, proxy, today's cost (is everything working?)
     Status,
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
+    ///
+    /// Emits the shared provider-scoped status contract (ADR-0088 §4, #224).
+    /// Rolling `1d` / `7d` / `30d` windows. The `--format claude` surface is
+    /// automatically scoped to `claude_code` usage; downstream consumers
+    /// (Cursor extension, cloud dashboard) pass `--provider` explicitly.
+    #[command(after_help = "\
+Examples:
+  budi statusline                              Default quiet output scoped to the Claude Code surface
+  budi statusline --format json                Emit the shared status contract (JSON)
+  budi statusline --format json --provider cursor   Consume the same shape for the Cursor surface
+  budi statusline --install                    Install budi into the Claude Code status line")]
     Statusline {
         /// Install the status line in ~/.claude/settings.json
         #[arg(long, default_value_t = false)]
@@ -234,6 +245,11 @@ Examples:
         /// Output format: claude (ANSI+OSC8), starship (plain text), json, custom (uses config template)
         #[arg(long, value_enum, default_value_t = StatuslineFormat::Claude)]
         format: StatuslineFormat,
+        /// Scope all costs to a single provider (claude_code, cursor, codex, copilot_cli).
+        /// Defaults to `claude_code` when `--format claude` is used so the
+        /// Claude Code statusline never shows blended multi-provider totals.
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Manage optional integrations (install later, list current status)
     Integrations {
@@ -486,11 +502,15 @@ fn main() -> Result<()> {
         Commands::Repair => commands::repair::cmd_repair(),
         Commands::Import { force } => commands::import::cmd_import(force),
         Commands::Health { session } => commands::health::cmd_health(session),
-        Commands::Statusline { install, format } => {
+        Commands::Statusline {
+            install,
+            format,
+            provider,
+        } => {
             if install {
                 commands::statusline::cmd_statusline_install()
             } else {
-                commands::statusline::cmd_statusline(format)
+                commands::statusline::cmd_statusline(format, provider)
             }
         }
         Commands::Sessions {
