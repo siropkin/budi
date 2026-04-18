@@ -1871,22 +1871,32 @@ fn session_list_returns_session_for_today_window_with_local_midnight_utc_since()
 #[test]
 fn session_visibility_reports_windows_and_flags_hidden_rows() {
     let mut conn = test_db();
-    let now = chrono::Utc::now();
+    // Anchor both rows inside today's UTC window (matches the
+    // `session_visibility` production query which floors to
+    // `Utc::now().date_naive()` midnight). Using `Utc::now() - minutes(30)`
+    // directly made the test flaky when CI happened to run in the first
+    // ~90 minutes after UTC midnight, because "30 minutes ago" was
+    // yesterday and fell outside the today window.
+    let today_midnight = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("valid midnight")
+        .and_utc();
 
-    // Visible: assistant message with a session_id, stamped 30 minutes ago.
+    // Visible: assistant message with a session_id, stamped inside today.
     let mut visible = assistant_msg("vis-1", "sess-vis", 1.0);
-    visible.timestamp = now - chrono::Duration::minutes(30);
+    visible.timestamp = today_midnight + chrono::Duration::minutes(1);
     ingest_messages(&mut conn, &[visible], None).unwrap();
 
-    // Hidden: assistant row written directly with NULL session_id, stamped
-    // 90 minutes ago — simulates the pre-fix proxy bug.
+    // Hidden: assistant row written directly with NULL session_id, also
+    // stamped inside today — simulates the pre-fix proxy bug.
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
             cost_cents, cost_confidence)
          VALUES ('hidden-1', NULL, 'assistant', ?1, 'claude-opus-4-6',
                  'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
-        params![(now - chrono::Duration::minutes(90)).to_rfc3339()],
+        params![(today_midnight + chrono::Duration::minutes(2)).to_rfc3339()],
     )
     .unwrap();
 
@@ -1914,7 +1924,15 @@ fn session_visibility_reports_windows_and_flags_hidden_rows() {
 #[test]
 fn session_visibility_flags_mismatch_when_all_rows_missing_session_id() {
     let conn = test_db();
-    let now = chrono::Utc::now();
+    // Anchor the row inside today's UTC window for the same reason as
+    // `session_visibility_reports_windows_and_flags_hidden_rows`: using
+    // `Utc::now() - minutes(30)` was flaky in the first ~90 minutes after
+    // UTC midnight (the timestamp fell into "yesterday").
+    let today_midnight = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("valid midnight")
+        .and_utc();
 
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
@@ -1922,7 +1940,7 @@ fn session_visibility_flags_mismatch_when_all_rows_missing_session_id() {
             cost_cents, cost_confidence)
          VALUES ('hidden-1', NULL, 'assistant', ?1, 'claude-opus-4-6',
                  'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
-        params![(now - chrono::Duration::minutes(30)).to_rfc3339()],
+        params![(today_midnight + chrono::Duration::minutes(1)).to_rfc3339()],
     )
     .unwrap();
 
