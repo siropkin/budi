@@ -1,15 +1,46 @@
-//! Proxy event types and analytics storage.
+//! Proxy event types and (deprecated) analytics storage.
 //!
-//! Each proxied request produces a `ProxyEvent` record that is appended to the
-//! `proxy_events` table in the analytics database. Attribution fields (repo,
-//! branch, ticket, cost) make proxy traffic visible in existing analytics
-//! surfaces via a unified insert into the `messages` table.
+//! ## R1.4 (#320, ADR-0089) deprecation
+//!
+//! As of 8.2 R1.4 ([#320](https://github.com/siropkin/budi/issues/320)) the
+//! proxy is no longer the live ingestion path. The JSONL tailer worker
+//! (`crates/budi-daemon/src/workers/tailer.rs`, R1.3 #319) is the sole live
+//! source per ADR-0089 §1.
+//!
+//! [`insert_proxy_event`] and [`insert_proxy_message`] are intentionally
+//! short-circuited to no-ops (with a single per-process deprecation warning)
+//! so the proxy can keep forwarding traffic during the soak window without
+//! racing the tailer on the same messages. The
+//! [`analytics/sync.rs`](../analytics/sync.rs.html) `proxy_cutoff` dedup rule
+//! that papered over the dual-write race is removed in the same PR.
+//!
+//! The `proxy_events` table itself is preserved for read-only access to 8.1.x
+//! history. R2.5 ([#326](https://github.com/siropkin/budi/issues/326))
+//! decides the fate of those rows on upgrade. This whole module is deleted in
+//! R2.1 ([#322](https://github.com/siropkin/budi/issues/322)).
+
+use std::sync::Once;
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline::extract_ticket_from_branch;
+
+/// Logs the proxy-ingestion deprecation banner once per process, the first
+/// time [`insert_proxy_event`] or [`insert_proxy_message`] is invoked.
+fn log_proxy_ingestion_deprecated_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            target: "budi_core::proxy",
+            "Proxy ingestion is a no-op as of 8.2 R1.4 (#320, ADR-0089 §1). \
+             Live data flows through the JSONL tailer worker (#319). \
+             The proxy still forwards traffic but no longer writes to `proxy_events` or `messages`. \
+             The proxy crate is removed in 8.2 R2.1 (#322)."
+        );
+    });
+}
 
 /// The fallback repo_id when attribution cannot be determined.
 pub const UNASSIGNED_REPO: &str = "Unassigned";
@@ -252,192 +283,30 @@ pub fn ensure_proxy_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Insert a proxy event into the analytics database.
-pub fn insert_proxy_event(conn: &Connection, event: &ProxyEvent) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO proxy_events (
-            timestamp, provider, model, input_tokens, output_tokens,
-            cache_creation_input_tokens, cache_read_input_tokens,
-            duration_ms, status_code, is_streaming,
-            repo_id, git_branch, ticket_id, cost_cents, session_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-        params![
-            event.timestamp,
-            event.provider,
-            event.model,
-            event.input_tokens,
-            event.output_tokens,
-            event.cache_creation_input_tokens,
-            event.cache_read_input_tokens,
-            event.duration_ms,
-            event.status_code as i64,
-            event.is_streaming as i64,
-            event.repo_id,
-            event.git_branch,
-            event.ticket_id,
-            event.cost_cents,
-            event.session_id,
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
+/// **Deprecated (R1.4 #320, ADR-0089 §1) — no-op.**
+///
+/// The proxy is no longer the live ingestion path. This function logs the
+/// per-process deprecation banner once and returns `Ok(0)` without touching
+/// the database. The whole module is deleted in R2.1 (#322).
+///
+/// `_event` is kept in the signature so callers don't need to change shape
+/// during the brief window between this PR and R2.1.
+pub fn insert_proxy_event(_conn: &Connection, _event: &ProxyEvent) -> Result<i64> {
+    log_proxy_ingestion_deprecated_once();
+    Ok(0)
 }
 
-/// Insert a proxy event into the unified `messages` table so existing analytics
-/// surfaces (dashboard, CLI, statusline) can query it without modification.
+/// **Deprecated (R1.4 #320, ADR-0089 §1) — no-op.**
 ///
-/// Returns the generated message UUID on success.
-///
-/// ## Session-level branch propagation (#303)
-///
-/// The live proxy ingest path does **not** go through `Pipeline::process` (that
-/// is used by batch `budi import`), so `propagate_session_context` never ran on
-/// proxied rows. When the first turns of a session landed without a branch (the
-/// very common case — agents do not set `X-Budi-*` headers, client cwd is not
-/// yet known, etc.) every later assistant reply in the same session also got
-/// `git_branch = NULL`, and `budi stats --branches` collapsed them into the
-/// `(untagged)` bucket.
-///
-/// This function mirrors the pipeline's per-session carry-forward directly in
-/// SQL so live ingest matches batch ingest:
-///
-/// - If the incoming event has an empty `git_branch` but another message in
-///   the same session already has one, inherit it.
-/// - If the incoming event has a `git_branch` but earlier same-session rows
-///   are empty, backfill them. This covers the "first message lacked context,
-///   later one resolved it" race described in the ticket.
-/// - Same pattern for `repo_id`.
-///
-/// The propagation runs inside a single connection scope so a concurrent
-/// writer on another session is unaffected.
-pub fn insert_proxy_message(conn: &Connection, event: &ProxyEvent) -> Result<String> {
-    let uuid = format!("proxy-{}", uuid::Uuid::new_v4());
-
-    // Attribution: session_id must be written alongside other message columns.
-    // `session_list_with_filters` filters out rows with NULL/empty `session_id`,
-    // so a missing value here would make every proxied message invisible to
-    // `budi sessions`. The proxy route always supplies a non-empty id (either
-    // from `X-Budi-Session` or `generate_proxy_session_id`) — we still treat an
-    // empty string defensively as NULL so queries stay consistent with the
-    // documented `messages.session_id` contract (see SOUL.md).
-    let session_id = if event.session_id.is_empty() {
-        None
-    } else {
-        Some(event.session_id.as_str())
-    };
-
-    // Session-level propagation: if this row lacks branch/repo but a prior row
-    // in the same session has one, adopt it before inserting. See fn doc above.
-    let (repo_id, git_branch) = resolve_session_attribution(conn, session_id, event);
-
-    let repo_id_param = repo_id.as_deref();
-    let git_branch_param = git_branch.as_deref();
-
-    conn.execute(
-        "INSERT OR IGNORE INTO messages (
-            id, session_id, role, timestamp, model, provider,
-            input_tokens, output_tokens,
-            cache_creation_tokens, cache_read_tokens,
-            repo_id, git_branch, cost_cents, cost_confidence
-        ) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'proxy_estimated')",
-        params![
-            uuid,
-            session_id,
-            event.timestamp,
-            event.model,
-            event.provider,
-            event.input_tokens.unwrap_or(0),
-            event.output_tokens.unwrap_or(0),
-            event.cache_creation_input_tokens.unwrap_or(0),
-            event.cache_read_input_tokens.unwrap_or(0),
-            repo_id_param,
-            git_branch_param,
-            event.cost_cents,
-        ],
-    )?;
-
-    // Backfill earlier same-session rows whose branch/repo was NULL at write
-    // time. This catches the exact race in #303: the first few proxy turns of
-    // a session land before any attribution is resolved, then a later turn
-    // arrives with a cwd-derived branch. Without backfill, the early turns
-    // stay in `(untagged)` forever.
-    if let Some(sid) = session_id {
-        if let Some(ref branch) = git_branch {
-            conn.execute(
-                "UPDATE messages SET git_branch = ?1
-                 WHERE session_id = ?2
-                   AND (git_branch IS NULL OR git_branch = '')
-                   AND id != ?3",
-                params![branch, sid, uuid],
-            )?;
-        }
-        if let Some(ref repo) = repo_id {
-            conn.execute(
-                "UPDATE messages SET repo_id = ?1
-                 WHERE session_id = ?2
-                   AND (repo_id IS NULL OR repo_id = '' OR repo_id = 'Unassigned')
-                   AND id != ?3",
-                params![repo, sid, uuid],
-            )?;
-        }
-    }
-
-    // R1.3 (#221): defence against the pre-8.1 proxy path, which stored the
-    // literal string `"Unassigned"` as `ticket_id` when the branch didn't
-    // match any pattern. After R1.3 callers produce an empty string for
-    // "no ticket" and the pipeline agrees, but we still drop the legacy
-    // sentinel here so in-flight rolling upgrades never plant a bogus
-    // `Unassigned` ticket bucket next to the analytics layer's own
-    // `(untagged)` row.
-    if !event.ticket_id.is_empty() && event.ticket_id != "Unassigned" {
-        conn.execute(
-            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'ticket_id', ?2)",
-            params![uuid, event.ticket_id],
-        )?;
-        if let Some(dash) = event.ticket_id.find('-') {
-            conn.execute(
-                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'ticket_prefix', ?2)",
-                params![uuid, &event.ticket_id[..dash]],
-            )?;
-        }
-        if !event.ticket_source.is_empty() {
-            conn.execute(
-                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
-                params![uuid, crate::tag_keys::TICKET_SOURCE, event.ticket_source],
-            )?;
-        }
-    }
-
-    // R1.2 (#222): write activity classification tags alongside the row.
-    // The classifier runs on the prompt in-memory at the proxy route; no
-    // prompt content is stored — we only persist the derived label.
-    if !event.activity.is_empty() {
-        conn.execute(
-            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
-            params![uuid, crate::tag_keys::ACTIVITY, event.activity],
-        )?;
-        if !event.activity_source.is_empty() {
-            conn.execute(
-                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
-                params![
-                    uuid,
-                    crate::tag_keys::ACTIVITY_SOURCE,
-                    event.activity_source
-                ],
-            )?;
-        }
-        if !event.activity_confidence.is_empty() {
-            conn.execute(
-                "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
-                params![
-                    uuid,
-                    crate::tag_keys::ACTIVITY_CONFIDENCE,
-                    event.activity_confidence
-                ],
-            )?;
-        }
-    }
-
-    Ok(uuid)
+/// Live ingestion is the JSONL tailer worker (#319). This function logs the
+/// per-process deprecation banner once and returns `Ok(String::new())`
+/// without writing to the `messages` table. The session-level branch
+/// propagation that used to live here (#303) is now handled by the pipeline
+/// for tailer-ingested rows; the proxy never carried the agent JSONL's
+/// `gitBranch` field anyway. The whole module is deleted in R2.1 (#322).
+pub fn insert_proxy_message(_conn: &Connection, _event: &ProxyEvent) -> Result<String> {
+    log_proxy_ingestion_deprecated_once();
+    Ok(String::new())
 }
 
 /// Classify the last user prompt in an Anthropic or OpenAI request body.
@@ -500,70 +369,6 @@ fn extract_user_text(content: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Merge the incoming event's attribution with whatever the rest of the
-/// session already knows. Used by `insert_proxy_message` to propagate
-/// `git_branch` / `repo_id` forward in a session (#303).
-///
-/// Returns `(repo_id, git_branch)` where each field is either:
-/// - the event's value if non-empty, or
-/// - the latest non-empty value observed on any prior message in the same
-///   session, or
-/// - `None` / `Unassigned` fallback if neither is known yet.
-fn resolve_session_attribution(
-    conn: &Connection,
-    session_id: Option<&str>,
-    event: &ProxyEvent,
-) -> (Option<String>, Option<String>) {
-    let event_repo = if event.repo_id.is_empty() || event.repo_id == UNASSIGNED_REPO {
-        None
-    } else {
-        Some(event.repo_id.clone())
-    };
-    let event_branch = if event.git_branch.is_empty() {
-        None
-    } else {
-        Some(event.git_branch.clone())
-    };
-
-    if event_repo.is_some() && event_branch.is_some() {
-        return (event_repo, event_branch);
-    }
-    let Some(sid) = session_id else {
-        return (event_repo, event_branch);
-    };
-
-    // Find the most recent message in this session that has the field we are
-    // missing. We intentionally look across both directions (earlier and later
-    // by timestamp) because a batch import or a restarted daemon may have
-    // inserted the context row either way.
-    let session_branch: Option<String> = event_branch.clone().or_else(|| {
-        conn.query_row(
-            "SELECT git_branch FROM messages
-             WHERE session_id = ?1
-               AND git_branch IS NOT NULL AND git_branch != ''
-             ORDER BY timestamp DESC LIMIT 1",
-            params![sid],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    });
-    let session_repo: Option<String> = event_repo.clone().or_else(|| {
-        conn.query_row(
-            "SELECT repo_id FROM messages
-             WHERE session_id = ?1
-               AND repo_id IS NOT NULL AND repo_id != '' AND repo_id != 'Unassigned'
-             ORDER BY timestamp DESC LIMIT 1",
-            params![sid],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    });
-
-    (session_repo, session_branch)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,66 +415,106 @@ mod tests {
     }
 
     #[test]
-    fn proxy_event_round_trip() {
-        let conn = test_db();
-        let event = test_event();
-        let id = insert_proxy_event(&conn, &event).unwrap();
-        assert!(id > 0);
-
-        let (provider, model, status): (String, String, i64) = conn
-            .query_row(
-                "SELECT provider, model, status_code FROM proxy_events WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(provider, "openai");
-        assert_eq!(model, "gpt-4o");
-        assert_eq!(status, 200);
-    }
-
-    #[test]
-    fn proxy_event_with_attribution() {
-        let conn = test_db();
-        let mut event = test_event();
-        event.repo_id = "github.com/siropkin/budi".to_string();
-        event.git_branch = "PAVA-2057-fix-auth".to_string();
-        event.ticket_id = "PAVA-2057".to_string();
-        event.cost_cents = 1.5;
-
-        let id = insert_proxy_event(&conn, &event).unwrap();
-        let (repo, branch, ticket, cost): (String, String, String, f64) = conn
-            .query_row(
-                "SELECT repo_id, git_branch, ticket_id, cost_cents FROM proxy_events WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(repo, "github.com/siropkin/budi");
-        assert_eq!(branch, "PAVA-2057-fix-auth");
-        assert_eq!(ticket, "PAVA-2057");
-        assert!((cost - 1.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn proxy_event_with_null_tokens() {
-        let conn = test_db();
-        let mut event = test_event();
-        event.provider = "claude_code".to_string();
-        event.model = "claude-sonnet-4-6".to_string();
-        event.input_tokens = None;
-        event.output_tokens = None;
-        event.is_streaming = true;
-        let id = insert_proxy_event(&conn, &event).unwrap();
-        assert!(id > 0);
-    }
-
-    #[test]
     fn ensure_schema_is_idempotent() {
         let conn = test_db();
         ensure_proxy_schema(&conn).unwrap();
         ensure_proxy_schema(&conn).unwrap();
     }
+
+    // ---- R1.4 (#320, ADR-0089 §1) no-op contract for proxy ingestion ----
+    //
+    // The proxy crate is removed in R2.1 (#322). For the soak window between
+    // this PR and R2.1 the ingestion functions stay in the API surface but
+    // do not write — the JSONL tailer is the sole live ingestion path. The
+    // tests below pin that contract so a regression cannot silently revive
+    // dual-writes (which would re-introduce the `proxy_cutoff` dedup that
+    // R1.4 deletes from `analytics::sync`).
+
+    /// `insert_proxy_event` returns `Ok(0)` and writes nothing to
+    /// `proxy_events`. The 0 stand-in is fine because no caller reads the
+    /// returned rowid (it was only ever used for debug logs).
+    #[test]
+    fn insert_proxy_event_is_noop_after_r1_4() {
+        let conn = test_db();
+        let event = test_event();
+        let id = insert_proxy_event(&conn, &event).unwrap();
+        assert_eq!(id, 0, "no-op must return 0; rows were not inserted");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proxy_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "proxy_events must not receive new writes from insert_proxy_event \
+             (ADR-0089 §1; R1.4 #320). Live ingestion is the JSONL tailer only."
+        );
+    }
+
+    /// `insert_proxy_message` returns `Ok(String::new())` and writes nothing
+    /// to `messages` or `tags`. The empty UUID stand-in is fine because the
+    /// only caller (`record_event_blocking` in the daemon proxy route) only
+    /// looks at the `Result` discriminant.
+    #[test]
+    fn insert_proxy_message_is_noop_after_r1_4() {
+        let conn = test_db_with_messages();
+        let mut event = test_event();
+        // Populate the same fields the pre-R1.4 test exercised so we know
+        // the no-op holds even when full attribution / activity / cost
+        // would otherwise have been written.
+        event.session_id = "proxy-session-noop".to_string();
+        event.repo_id = "github.com/test/repo".to_string();
+        event.git_branch = "PROJ-42-fix".to_string();
+        event.ticket_id = "PROJ-42".to_string();
+        event.ticket_source = "branch".to_string();
+        event.activity = "bugfix".to_string();
+        event.activity_source = "rule".to_string();
+        event.activity_confidence = "high".to_string();
+        event.cost_cents = 2.5;
+
+        let uuid = insert_proxy_message(&conn, &event).unwrap();
+        assert!(
+            uuid.is_empty(),
+            "no-op must return an empty uuid stand-in; got {uuid:?}"
+        );
+
+        let messages_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            messages_count, 0,
+            "no proxy-derived row may land in `messages` after R1.4 (#320). \
+             The JSONL tailer is the sole live writer."
+        );
+
+        let tags_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            tags_count, 0,
+            "no proxy-derived tag may land in `tags` after R1.4 (#320)."
+        );
+
+        // Specifically: the pre-R1.4 path stamped `cost_confidence =
+        // 'proxy_estimated'` on every successful insert, which the
+        // `proxy_cutoff` dedup keyed on. That marker must no longer
+        // appear from new ingestion (existing rows from 8.1.x stay
+        // queryable; their disposition is R2.5 / #326).
+        let proxy_estimated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE cost_confidence = 'proxy_estimated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            proxy_estimated, 0,
+            "no `cost_confidence='proxy_estimated'` rows may be written after R1.4 (#320)"
+        );
+    }
+
+    // ---- ProxyAttribution::resolve — pure helper still consumed by the
+    //      proxy route's structured-log line. Stays valid until R2.1 (#322)
+    //      deletes the route. ----
 
     #[test]
     fn proxy_provider_display() {
@@ -687,10 +532,6 @@ mod tests {
         assert_eq!(attr.ticket_source, "branch");
     }
 
-    /// R1.3 (#221): when nothing matches we return an empty `ticket_id`
-    /// rather than the `"Unassigned"` sentinel that used to produce a
-    /// phantom ticket bucket in `budi stats --tickets`. The insert path
-    /// treats empty as "no ticket" and skips the tag writes.
     #[test]
     fn attribution_resolve_empty_returns_empty_ticket() {
         let attr = ProxyAttribution::resolve(None, None, None);
@@ -754,7 +595,6 @@ mod tests {
 
     #[test]
     fn compute_proxy_cost_with_cache_tokens() {
-        // Without cache tokens
         let cost_no_cache = compute_proxy_cost_cents(
             ProxyProvider::Anthropic,
             "claude-opus-4-6",
@@ -763,7 +603,6 @@ mod tests {
             None,
             None,
         );
-        // With cache tokens
         let cost_with_cache = compute_proxy_cost_cents(
             ProxyProvider::Anthropic,
             "claude-opus-4-6",
@@ -785,184 +624,8 @@ mod tests {
         assert!((cost - 0.0).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn insert_proxy_message_creates_messages_row() {
-        let conn = test_db_with_messages();
-        let mut event = test_event();
-        event.repo_id = "github.com/test/repo".to_string();
-        event.git_branch = "PROJ-42-fix".to_string();
-        event.ticket_id = "PROJ-42".to_string();
-        event.ticket_source = "branch".to_string();
-        event.cost_cents = 2.5;
-
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-        assert!(uuid.starts_with("proxy-"));
-
-        let (role, provider, model, repo, branch, cost, confidence): (
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            f64,
-            String,
-        ) = conn
-            .query_row(
-                "SELECT role, provider, model, repo_id, git_branch, cost_cents, cost_confidence
-                 FROM messages WHERE id = ?1",
-                params![uuid],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(role, "assistant");
-        assert_eq!(provider, "openai");
-        assert_eq!(model, "gpt-4o");
-        assert_eq!(repo.as_deref(), Some("github.com/test/repo"));
-        assert_eq!(branch.as_deref(), Some("PROJ-42-fix"));
-        assert!((cost - 2.5).abs() < f64::EPSILON);
-        assert_eq!(confidence, "proxy_estimated");
-
-        // Ticket tags should be present
-        let ticket: String = conn
-            .query_row(
-                "SELECT value FROM tags WHERE message_id = ?1 AND key = 'ticket_id'",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(ticket, "PROJ-42");
-
-        let prefix: String = conn
-            .query_row(
-                "SELECT value FROM tags WHERE message_id = ?1 AND key = 'ticket_prefix'",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(prefix, "PROJ");
-
-        // R1.3 (#221): the proxy now records the extractor source so
-        // analytics can tell apart alphanumeric vs numeric tickets
-        // without re-deriving from the branch.
-        let source: String = conn
-            .query_row(
-                "SELECT value FROM tags WHERE message_id = ?1 AND key = 'ticket_source'",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(source, "branch");
-    }
-
-    #[test]
-    fn insert_proxy_message_no_ticket_skips_tags() {
-        let conn = test_db_with_messages();
-        let event = test_event();
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM tags WHERE message_id = ?1",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    /// R1.3 (#221): a pre-8.1 proxy that still writes `ticket_id = "Unassigned"`
-    /// must not plant a ticket tag — otherwise `budi stats --tickets`
-    /// shows a phantom `Unassigned` row next to the analytics layer's
-    /// own `(untagged)` bucket. Insert path drops the legacy sentinel.
-    #[test]
-    fn insert_proxy_message_drops_legacy_unassigned_ticket_sentinel() {
-        let conn = test_db_with_messages();
-        let mut event = test_event();
-        event.ticket_id = "Unassigned".to_string();
-        event.ticket_source = String::new();
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM tags WHERE message_id = ?1 AND key IN ('ticket_id','ticket_prefix','ticket_source')",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            count, 0,
-            "legacy 'Unassigned' ticket_id must never be persisted as a ticket tag"
-        );
-    }
-
-    /// R1.3 (#221): numeric-only tickets from the ADR-0082 §9 fallback
-    /// must be tagged with `ticket_source = "branch_numeric"` so the
-    /// import path and analytics can tell them apart from alpha tickets.
-    #[test]
-    fn insert_proxy_message_writes_numeric_ticket_source() {
-        let conn = test_db_with_messages();
-        let mut event = test_event();
-        event.git_branch = "fix/1234-typo".to_string();
-        event.ticket_id = "1234".to_string();
-        event.ticket_source = "branch_numeric".to_string();
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let source: String = conn
-            .query_row(
-                "SELECT value FROM tags WHERE message_id = ?1 AND key = 'ticket_source'",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(source, "branch_numeric");
-
-        // Numeric tickets have no dash, so no prefix tag.
-        let prefix_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM tags WHERE message_id = ?1 AND key = 'ticket_prefix'",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(prefix_count, 0);
-    }
-
-    #[test]
-    fn insert_proxy_message_writes_activity_tags() {
-        let conn = test_db_with_messages();
-        let mut event = test_event();
-        event.activity = "bugfix".to_string();
-        event.activity_source = "rule".to_string();
-        event.activity_confidence = "high".to_string();
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let mut stmt = conn
-            .prepare("SELECT key, value FROM tags WHERE message_id = ?1 ORDER BY key")
-            .unwrap();
-        let tags: Vec<(String, String)> = stmt
-            .query_map(params![uuid], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect();
-        assert_eq!(
-            tags,
-            vec![
-                ("activity".to_string(), "bugfix".to_string()),
-                ("activity_confidence".to_string(), "high".to_string()),
-                ("activity_source".to_string(), "rule".to_string()),
-            ]
-        );
-    }
+    // ---- classify_request_body — pure prompt classifier, still consumed
+    //      by the proxy route's `activity` / structured-log line. ----
 
     #[test]
     fn classify_request_body_openai_last_user_turn_wins() {
@@ -1006,318 +669,5 @@ mod tests {
         })
         .to_string();
         assert!(classify_request_body(body.as_bytes()).is_none());
-    }
-
-    #[test]
-    fn proxy_event_stores_cache_tokens() {
-        let conn = test_db();
-        let mut event = test_event();
-        event.cache_creation_input_tokens = Some(5000);
-        event.cache_read_input_tokens = Some(80000);
-        let id = insert_proxy_event(&conn, &event).unwrap();
-
-        let (cache_create, cache_read): (Option<i64>, Option<i64>) = conn
-            .query_row(
-                "SELECT cache_creation_input_tokens, cache_read_input_tokens
-                 FROM proxy_events WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(cache_create, Some(5000));
-        assert_eq!(cache_read, Some(80000));
-    }
-
-    /// Regression test for #302 — `budi sessions` returned empty for periods
-    /// that clearly had proxy activity because `insert_proxy_message` dropped
-    /// `session_id`, making every proxied row invisible to the
-    /// `AND m.session_id IS NOT NULL` filter in `session_list_with_filters`.
-    #[test]
-    fn proxy_message_persists_session_id_and_is_visible_in_session_list() {
-        let conn = test_db_with_messages();
-        let mut event = test_event();
-        event.session_id = "proxy-session-abc".to_string();
-        event.timestamp = chrono::Utc::now().to_rfc3339();
-
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT session_id FROM messages WHERE id = ?1",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored.as_deref(), Some("proxy-session-abc"));
-
-        // Window that includes the event — `budi sessions -p today` would use
-        // an equivalent `since`. The session must be listed.
-        let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-        let paginated = crate::analytics::session_list_with_filters(
-            &conn,
-            &crate::analytics::SessionListParams {
-                since: Some(&since),
-                until: None,
-                search: None,
-                sort_by: None,
-                sort_asc: false,
-                limit: 50,
-                offset: 0,
-                ticket: None,
-                activity: None,
-            },
-            &crate::analytics::DimensionFilters::default(),
-        )
-        .unwrap();
-        assert_eq!(paginated.total_count, 1);
-        assert_eq!(paginated.sessions.len(), 1);
-        assert_eq!(paginated.sessions[0].id, "proxy-session-abc");
-    }
-
-    /// Defensive: an empty `session_id` string is stored as NULL so it cannot
-    /// quietly produce a `(empty)` session bucket or confuse downstream
-    /// `session_id IS NOT NULL` checks. Such rows are intentionally invisible
-    /// to `budi sessions` (there is no session to attribute them to).
-    #[test]
-    fn proxy_message_empty_session_id_is_stored_as_null() {
-        let conn = test_db_with_messages();
-        let event = test_event(); // session_id = ""
-
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT session_id FROM messages WHERE id = ?1",
-                params![uuid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(stored.is_none(), "empty session_id must be stored as NULL");
-    }
-
-    // Regression tests for #303 — branch attribution on live proxy ingest.
-
-    /// `ProxyAttribution::resolve` must populate the branch when the caller
-    /// supplies a cwd that points at a git worktree, even without headers.
-    /// This is the fallback path exercised by the new socket-PID lookup and by
-    /// `budi launch` callers.
-    /// Create a throwaway directory path for a single test. Caller is
-    /// expected to create/remove the directory themselves — kept out of a
-    /// shared helper so tests can be moved into dedicated integration files
-    /// later without a cross-crate helper crate dependency.
-    fn unique_test_dir(tag: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "budi-proxy-303-{tag}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4(),
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn git(repo: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
-    #[test]
-    fn attribution_resolve_populates_branch_from_cwd_git_repo() {
-        let repo = unique_test_dir("branch-ok");
-        // `git init -b` exists on 2.28+. Fall back to renaming main so we run
-        // on older git too (older git in CI images still honors checkout -b).
-        git(&repo, &["init", "-q"]);
-        git(
-            &repo,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "init",
-            ],
-        );
-        git(&repo, &["checkout", "-q", "-b", "PROJ-42-feature"]);
-
-        let attr = ProxyAttribution::resolve(None, None, repo.to_str());
-        assert_eq!(attr.git_branch, "PROJ-42-feature");
-        assert_eq!(attr.ticket_id, "PROJ-42");
-        assert_eq!(attr.ticket_source, "branch");
-        assert_ne!(
-            attr.repo_id, UNASSIGNED_REPO,
-            "cwd-based git resolution must also populate repo_id"
-        );
-
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    /// Detached HEAD is explicitly treated as "no branch" — we must never emit
-    /// the literal string `HEAD` as a branch, otherwise `budi stats --branches`
-    /// accumulates a bogus `HEAD` bucket for worktrees, CI runs, and mid-rebase
-    /// sessions.
-    #[test]
-    fn attribution_resolve_detached_head_yields_empty_branch() {
-        let repo = unique_test_dir("detached");
-        git(&repo, &["init", "-q"]);
-        git(
-            &repo,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "first",
-            ],
-        );
-        let sha = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        let sha = String::from_utf8(sha.stdout).unwrap().trim().to_string();
-        git(&repo, &["checkout", "-q", &sha]);
-
-        let attr = ProxyAttribution::resolve(None, None, repo.to_str());
-        assert!(
-            attr.git_branch.is_empty(),
-            "detached HEAD must not leak as a literal 'HEAD' branch, got: {:?}",
-            attr.git_branch
-        );
-        assert!(attr.ticket_id.is_empty());
-        assert!(attr.ticket_source.is_empty());
-
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    /// Later messages in a session inherit the branch set by an earlier
-    /// message in the same session, matching the pipeline's
-    /// `propagate_session_context` behavior but on the live ingest path.
-    #[test]
-    fn insert_proxy_message_inherits_branch_from_earlier_session_message() {
-        let conn = test_db_with_messages();
-
-        let mut first = test_event();
-        first.session_id = "sess-propagate".to_string();
-        first.timestamp = "2026-04-10T10:00:00Z".to_string();
-        first.repo_id = "github.com/test/repo".to_string();
-        first.git_branch = "PROJ-42-feature".to_string();
-        insert_proxy_message(&conn, &first).unwrap();
-
-        // Second turn in the same session arrives with no attribution — this
-        // is the common case when headers are missing and cwd could not be
-        // resolved for that particular request.
-        let mut second = test_event();
-        second.session_id = "sess-propagate".to_string();
-        second.timestamp = "2026-04-10T10:00:05Z".to_string();
-        let uuid = insert_proxy_message(&conn, &second).unwrap();
-
-        let (branch, repo): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT git_branch, repo_id FROM messages WHERE id = ?1",
-                params![uuid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(branch.as_deref(), Some("PROJ-42-feature"));
-        assert_eq!(repo.as_deref(), Some("github.com/test/repo"));
-    }
-
-    /// The opposite direction: a late-arriving event that finally resolves a
-    /// branch must retroactively fill earlier rows of the same session that
-    /// went in without one. This is the race called out in #303.
-    #[test]
-    fn insert_proxy_message_backfills_earlier_session_rows_when_branch_appears() {
-        let conn = test_db_with_messages();
-
-        let mut first = test_event();
-        first.session_id = "sess-backfill".to_string();
-        first.timestamp = "2026-04-10T10:00:00Z".to_string();
-        let first_uuid = insert_proxy_message(&conn, &first).unwrap();
-
-        let mut second = test_event();
-        second.session_id = "sess-backfill".to_string();
-        second.timestamp = "2026-04-10T10:00:05Z".to_string();
-        second.repo_id = "github.com/test/repo".to_string();
-        second.git_branch = "PROJ-42-feature".to_string();
-        insert_proxy_message(&conn, &second).unwrap();
-
-        let (branch, repo): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT git_branch, repo_id FROM messages WHERE id = ?1",
-                params![first_uuid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            branch.as_deref(),
-            Some("PROJ-42-feature"),
-            "earlier message must be backfilled with the later session branch"
-        );
-        assert_eq!(repo.as_deref(), Some("github.com/test/repo"));
-    }
-
-    /// Backfill must be scoped to the affected session — sibling sessions
-    /// keep their own attribution (including their own missing state).
-    #[test]
-    fn insert_proxy_message_backfill_is_scoped_to_session() {
-        let conn = test_db_with_messages();
-
-        let mut a = test_event();
-        a.session_id = "sess-a".to_string();
-        a.timestamp = "2026-04-10T10:00:00Z".to_string();
-        let a_uuid = insert_proxy_message(&conn, &a).unwrap();
-
-        let mut b = test_event();
-        b.session_id = "sess-b".to_string();
-        b.timestamp = "2026-04-10T10:00:01Z".to_string();
-        b.git_branch = "OTHER-9-fix".to_string();
-        insert_proxy_message(&conn, &b).unwrap();
-
-        let branch: Option<String> = conn
-            .query_row(
-                "SELECT git_branch FROM messages WHERE id = ?1",
-                params![a_uuid],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            branch.is_none(),
-            "session A must not inherit session B's branch, got: {branch:?}"
-        );
-    }
-
-    #[test]
-    fn proxy_message_stores_cache_tokens() {
-        let conn = test_db_with_messages();
-        let mut event = test_event();
-        event.cache_creation_input_tokens = Some(3000);
-        event.cache_read_input_tokens = Some(60000);
-        let uuid = insert_proxy_message(&conn, &event).unwrap();
-
-        let (cache_create, cache_read): (i64, i64) = conn
-            .query_row(
-                "SELECT cache_creation_tokens, cache_read_tokens
-                 FROM messages WHERE id = ?1",
-                params![uuid],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(cache_create, 3000);
-        assert_eq!(cache_read, 60000);
     }
 }

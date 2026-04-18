@@ -269,29 +269,26 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- Start filesystem tailer if BUDI_LIVE_TAIL=1 (R1.3 / ADR-0089 / #319) ---
+    // --- Start filesystem tailer (ADR-0089 §1 / R1.4 #320) ---
     //
-    // R1.3 ships the tailer behind a feature flag. R1.4 (#320) flips the
-    // default and starts skipping `proxy_events` writes; this stage
-    // intentionally runs both paths in parallel so analytics output can be
-    // cross-validated on the same machine before R2 starts deleting proxy
-    // code (#322).
-    if std::env::var("BUDI_LIVE_TAIL").as_deref() == Ok("1") {
-        match analytics::db_path() {
-            Ok(db_path) => {
-                tracing::info!(
-                    target: "budi_daemon::tailer",
-                    "BUDI_LIVE_TAIL=1: starting filesystem tailer (ADR-0089 §1)"
-                );
-                let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                tokio::spawn(workers::tailer::run(db_path, shutdown));
-            }
-            Err(e) => tracing::warn!(
+    // R1.3 (#319) shipped the tailer behind `BUDI_LIVE_TAIL=1`. R1.4 (#320)
+    // promotes it to the default and short-circuits proxy ingestion in
+    // `budi_core::proxy::insert_proxy_*` so only one path writes. The proxy
+    // still forwards traffic until R2.1 (#322) deletes it wholesale.
+    match analytics::db_path() {
+        Ok(db_path) => {
+            tracing::info!(
                 target: "budi_daemon::tailer",
-                error = %e,
-                "BUDI_LIVE_TAIL=1 set but db_path is not resolvable; tailer not started"
-            ),
+                "starting filesystem tailer (ADR-0089 §1)"
+            );
+            let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            tokio::spawn(workers::tailer::run(db_path, shutdown));
         }
+        Err(e) => tracing::warn!(
+            target: "budi_daemon::tailer",
+            error = %e,
+            "db_path is not resolvable; tailer not started"
+        ),
     }
 
     // --- Start cloud sync worker if configured ---
@@ -675,23 +672,40 @@ mod tests {
         addr
     }
 
-    /// Wait for `record_event`'s `spawn_blocking` DB write to complete via
-    /// the test channel, then read the result. This avoids polling/timeout
-    /// flakiness entirely — the channel provides a deterministic signal.
-    fn wait_for_record_then_query<T, F>(
+    /// Wait for `record_event`'s `spawn_blocking` ingestion path to complete
+    /// via the test channel, then assert the R1.4 (#320, ADR-0089 §1)
+    /// no-op contract: the proxy did not write to `proxy_events` or
+    /// `messages`. The channel signal still fires because the no-op runs
+    /// inside the same `spawn_blocking` task that sends on `record_tx`.
+    ///
+    /// The full migration is run so both tables exist for the `COUNT(*)`
+    /// queries even though the no-op never reaches a `CREATE TABLE`.
+    fn wait_for_record_then_assert_noop_ingest(
         rx: &std::sync::mpsc::Receiver<()>,
         db_path: &std::path::Path,
-        query: &str,
-        map_row: F,
-    ) -> T
-    where
-        F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
+    ) {
         rx.recv_timeout(std::time::Duration::from_secs(30))
             .expect("timed out waiting for record_event to complete");
         let conn = rusqlite::Connection::open(db_path).unwrap();
+        budi_core::migration::migrate(&conn).unwrap();
         budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        conn.query_row(query, [], map_row).unwrap()
+        let proxy_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proxy_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            proxy_rows, 0,
+            "proxy ingestion is a no-op after R1.4 (#320, ADR-0089 §1); \
+             `proxy_events` must not receive new writes — the JSONL tailer \
+             is the sole live writer."
+        );
+        let message_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            message_rows, 0,
+            "no proxy-derived row may land in `messages` after R1.4 (#320). \
+             Live ingestion runs through the tailer worker only."
+        );
     }
 
     struct ProxyTestHarness {
@@ -726,7 +740,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proxy_streams_anthropic_sse_and_extracts_tokens() {
+    async fn proxy_streams_anthropic_sse_and_does_not_ingest() {
         let sse_body = [
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_t\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
@@ -780,20 +794,15 @@ mod tests {
         );
         assert!(text.contains("Hello"), "content delta should pass through");
 
-        let (input, output, streaming): (Option<i64>, Option<i64>, i64) =
-            wait_for_record_then_query(
-                &h.record_rx,
-                &h.db_path,
-                "SELECT input_tokens, output_tokens, is_streaming FROM proxy_events ORDER BY id DESC LIMIT 1",
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            );
-        assert_eq!(input, Some(25), "input_tokens from message_start");
-        assert_eq!(output, Some(15), "output_tokens from message_delta");
-        assert_eq!(streaming, 1);
+        // R1.4 (#320, ADR-0089 §1): the proxy still streams data through
+        // upstream → client, but its ingestion path is a no-op. No row
+        // should land in `proxy_events` or `messages`. Token / streaming
+        // extraction logic is dead code that R2.1 (#322) deletes wholesale.
+        wait_for_record_then_assert_noop_ingest(&h.record_rx, &h.db_path);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proxy_streams_openai_sse_and_extracts_tokens() {
+    async fn proxy_streams_openai_sse_and_does_not_ingest() {
         let sse_body = [
             "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n",
@@ -829,18 +838,13 @@ mod tests {
             "terminal event should pass through"
         );
 
-        let (input, output): (Option<i64>, Option<i64>) = wait_for_record_then_query(
-            &h.record_rx,
-            &h.db_path,
-            "SELECT input_tokens, output_tokens FROM proxy_events ORDER BY id DESC LIMIT 1",
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        );
-        assert_eq!(input, Some(10), "prompt_tokens from usage");
-        assert_eq!(output, Some(20), "completion_tokens from usage");
+        // R1.4 (#320, ADR-0089 §1): proxy passthrough still works, but
+        // ingestion is a no-op. Same contract as the Anthropic test above.
+        wait_for_record_then_assert_noop_ingest(&h.record_rx, &h.db_path);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proxy_sse_duration_reflects_stream_end() {
+    async fn proxy_sse_completes_full_stream_without_ingest() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -881,15 +885,10 @@ mod tests {
             .unwrap();
         let _ = resp.into_body().collect().await.unwrap();
 
-        let duration_ms: i64 = wait_for_record_then_query(
-            &h.record_rx,
-            &h.db_path,
-            "SELECT duration_ms FROM proxy_events ORDER BY id DESC LIMIT 1",
-            |row| row.get(0),
-        );
-        assert!(
-            duration_ms >= 200,
-            "duration_ms ({duration_ms}) should reflect stream end, not header time"
-        );
+        // R1.4 (#320, ADR-0089 §1): the proxy still consumes the upstream
+        // SSE stream end-to-end (delayed `message_stop`), but the duration
+        // measurement is observed only as the no-op ingest signal. Test
+        // pins the contract: passthrough completes, no DB rows written.
+        wait_for_record_then_assert_noop_ingest(&h.record_rx, &h.db_path);
     }
 }

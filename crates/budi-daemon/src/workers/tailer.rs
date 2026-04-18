@@ -8,12 +8,14 @@
 //! call the same provider parser, the same enricher chain, and the same
 //! `ingest_messages_with_sync` sink.
 //!
-//! ## Lifecycle (R1.3 — feature-flagged)
+//! ## Lifecycle (R1.4 — default-on)
 //!
-//! 1. `main.rs` checks `BUDI_LIVE_TAIL=1` (the only env var this round
-//!    introduces) and spawns [`run`] iff the flag is set. The proxy stays
-//!    live in parallel — R1.4 (#320) flips the default and starts skipping
-//!    `proxy_events` writes; this PR does neither.
+//! 1. `main.rs` spawns [`run`] unconditionally on every daemon start (the
+//!    `BUDI_LIVE_TAIL` gate from R1.3 was removed in R1.4 / #320). The proxy
+//!    is still live in parallel for HTTP forwarding, but its ingestion path
+//!    in `budi_core::proxy::insert_proxy_*` is now a no-op — the tailer is
+//!    the sole live writer to `messages` / `tags` / `sessions`. R2.1 (#322)
+//!    deletes the proxy module entirely.
 //! 2. [`run`] hops into a blocking thread (`notify` is fundamentally
 //!    blocking and we don't want to bind a Tokio worker thread for it),
 //!    snapshots `enabled_providers()`, builds a `(provider, watch_root)`
@@ -44,7 +46,10 @@
 //! - No changes to `Pipeline` signature or the enricher list — the tailer
 //!   uses `Pipeline::default_pipeline` exactly as `budi import` does.
 //! - No edits to `analytics/sync.rs` `proxy_cutoff`. Cross-path dedup stays
-//!   on until R2 (#322) starts deleting proxy code.
+//!   on until R2.5 (#326) decides the fate of pre-existing
+//!   `cost_confidence='proxy_estimated'` rows from 8.1.x users; while those
+//!   rows live in the DB, `budi import` still needs the cutoff to avoid
+//!   double-counting JSONL backfill against historical proxy ingest.
 //!
 //! [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
 
