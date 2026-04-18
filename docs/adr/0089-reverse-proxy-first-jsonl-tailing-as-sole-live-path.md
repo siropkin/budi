@@ -91,6 +91,8 @@ There is no proxy fallback. There is no dual-path reconciliation. There is no "i
 
 The Cursor Usage API remains a **pull** used only for cost/token reconciliation where the JSONL does not carry that data. It is scheduled separately from the tailer and is not part of the live hot path. Its lag profile is measured in [#321](https://github.com/siropkin/budi/issues/321) before this ADR is promoted to `Accepted`.
 
+The measurement instrument lives at `scripts/research/cursor_usage_api_lag.sh`. It is operator-only (real Cursor session + real auth on the operator's machine, per [#316](https://github.com/siropkin/budi/issues/316) Lessons §5) and emits a CSV plus a JSON summary with `p50` / `p90` / `p99` of the lag between an event's claimed timestamp and the moment the Usage API first surfaces it. The numeric verdict and the chosen recommendation (§C.{a, b, c} of #321) are published to the [wiki](https://github.com/siropkin/budi/wiki) under `Research/` per #316 rule 12 (no new files under `docs/research/` for the duration of 8.2). This section is updated to link the wiki page and embed the recommendation before the ADR is promoted from `Proposed` to `Accepted`.
+
 ### 8. Plugin model is preserved
 
 The `Provider` trait is the only extension point. Adding a new agent in 8.3 (#294) is one new `Provider` impl plus its registration — no proxy adapter, no base URL matrix, no env-var injection, no shell profile work. The plugin model survives intact; what changes is that it is also the live model, not just the import model.
@@ -171,7 +173,7 @@ Any section that still describes the proxy as the live path is updated in the R1
 
 This ADR is promoted from `Proposed` to `Accepted` only when all of the following are true:
 
-- [#321](https://github.com/siropkin/budi/issues/321) Cursor Usage API lag memo is merged and its recommendation is consistent with this ADR's §7
+- [#321](https://github.com/siropkin/budi/issues/321) Cursor Usage API lag wiki memo is published (instrument shipped in `scripts/research/cursor_usage_api_lag.sh`; operator runs the instrument, posts the numeric verdict to the wiki under `Research/`, links it back from #321, and updates §7 of this ADR) and its recommendation is consistent with this ADR's §7
 - [#318](https://github.com/siropkin/budi/issues/318) `Provider::watch_roots()` is merged
 - [#319](https://github.com/siropkin/budi/issues/319) daemon tailer is merged behind `BUDI_LIVE_TAIL=1`
 - [#320](https://github.com/siropkin/budi/issues/320) tailer is promoted to default and proxy ingestion is short-circuited
