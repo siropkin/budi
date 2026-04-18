@@ -182,16 +182,39 @@ pub fn save_agents_config(config: &AgentsConfig) -> Result<()> {
 }
 
 /// Known statusline slot names.
+///
+/// `1d` / `7d` / `30d` are the canonical window slot names for the default
+/// quiet statusline (ADR-0088 §4, #224). `today` / `week` / `month` are kept
+/// as backward-compatible aliases — they render the same rolling-window
+/// values so existing `~/.config/budi/statusline.toml` files keep working.
 pub const STATUSLINE_SLOTS: &[&str] = &[
-    "today", "week", "month", "session", "branch", "project", "provider", "health",
+    "1d", "7d", "30d", "today", "week", "month", "session", "branch", "project", "provider",
+    "health",
 ];
 
 /// Named presets for common statusline layouts.
+///
+/// Default is `cost` (rolling `1d` / `7d` / `30d`). `coach` and `full` are
+/// advanced variants documented in the README; they are not in the default
+/// install path per ADR-0088 §4.
 pub const STATUSLINE_PRESETS: &[(&str, &[&str])] = &[
-    ("cost", &["today", "week", "month"]),
+    ("cost", &["1d", "7d", "30d"]),
     ("coach", &["session", "health"]),
-    ("full", &["session", "health", "today"]),
+    ("full", &["session", "health", "1d"]),
 ];
+
+/// Normalize a legacy slot name to its canonical form.
+/// Maps calendar-window aliases (`today` / `week` / `month`) to their rolling
+/// equivalents (`1d` / `7d` / `30d`). Returns the input unchanged for all
+/// other slot names.
+pub fn normalize_statusline_slot(slot: &str) -> &str {
+    match slot {
+        "today" => "1d",
+        "week" => "7d",
+        "month" => "30d",
+        other => other,
+    }
+}
 
 /// User-configurable statusline layout.
 ///
@@ -220,7 +243,7 @@ impl Default for StatuslineConfig {
     fn default() -> Self {
         Self {
             preset: None,
-            slots: vec!["today".to_string(), "week".to_string(), "month".to_string()],
+            slots: vec!["1d".to_string(), "7d".to_string(), "30d".to_string()],
             format: None,
         }
     }
@@ -228,18 +251,26 @@ impl Default for StatuslineConfig {
 
 impl StatuslineConfig {
     /// Resolve the effective slots list, considering preset → slots → format priority.
+    /// Legacy slot aliases (`today` / `week` / `month`) are normalized to
+    /// their canonical rolling-window names (`1d` / `7d` / `30d`).
     pub fn effective_slots(&self) -> Vec<String> {
-        if let Some(ref preset_name) = self.preset
+        let raw = if let Some(ref preset_name) = self.preset
             && let Some((_, preset_slots)) = STATUSLINE_PRESETS
                 .iter()
                 .find(|(name, _)| *name == preset_name.as_str())
         {
-            return preset_slots.iter().map(|s| s.to_string()).collect();
-        }
-        self.slots.clone()
+            preset_slots.iter().map(|s| s.to_string()).collect()
+        } else {
+            self.slots.clone()
+        };
+        raw.into_iter()
+            .map(|s| normalize_statusline_slot(&s).to_string())
+            .collect()
     }
 
     /// Resolve which slots are needed (from format template, preset, or explicit slots list).
+    /// Legacy slot aliases (`today` / `week` / `month`) are normalized to
+    /// their canonical rolling-window names (`1d` / `7d` / `30d`).
     pub fn required_slots(&self) -> Vec<String> {
         if let Some(ref fmt) = self.format {
             let mut slots = Vec::new();
@@ -247,8 +278,11 @@ impl StatuslineConfig {
             while let Some(start) = rest.find('{') {
                 if let Some(end) = rest[start..].find('}') {
                     let name = &rest[start + 1..start + end];
-                    if STATUSLINE_SLOTS.contains(&name) && !slots.iter().any(|s| s == name) {
-                        slots.push(name.to_string());
+                    if STATUSLINE_SLOTS.contains(&name) {
+                        let canonical = normalize_statusline_slot(name).to_string();
+                        if !slots.iter().any(|s: &String| s == &canonical) {
+                            slots.push(canonical);
+                        }
                     }
                     rest = &rest[start + end + 1..];
                 } else {
@@ -794,7 +828,7 @@ mod tests {
     #[test]
     fn statusline_config_default_slots() {
         let config = StatuslineConfig::default();
-        assert_eq!(config.slots, vec!["today", "week", "month"]);
+        assert_eq!(config.slots, vec!["1d", "7d", "30d"]);
         assert!(config.format.is_none());
     }
 
@@ -802,10 +836,10 @@ mod tests {
     fn statusline_config_required_slots_from_slots() {
         let config = StatuslineConfig {
             preset: None,
-            slots: vec!["today".to_string(), "branch".to_string()],
+            slots: vec!["1d".to_string(), "branch".to_string()],
             format: None,
         };
-        assert_eq!(config.required_slots(), vec!["today", "branch"]);
+        assert_eq!(config.required_slots(), vec!["1d", "branch"]);
     }
 
     #[test]
@@ -813,10 +847,10 @@ mod tests {
         let config = StatuslineConfig {
             preset: None,
             slots: vec![],
-            format: Some("{today} | {branch} | {provider}".to_string()),
+            format: Some("{1d} | {branch} | {provider}".to_string()),
         };
         let required = config.required_slots();
-        assert_eq!(required, vec!["today", "branch", "provider"]);
+        assert_eq!(required, vec!["1d", "branch", "provider"]);
     }
 
     #[test]
@@ -824,17 +858,17 @@ mod tests {
         let config = StatuslineConfig {
             preset: None,
             slots: vec![],
-            format: Some("{today} | {unknown} | {week}".to_string()),
+            format: Some("{1d} | {unknown} | {7d}".to_string()),
         };
         let required = config.required_slots();
-        assert_eq!(required, vec!["today", "week"]);
+        assert_eq!(required, vec!["1d", "7d"]);
     }
 
     #[test]
     fn statusline_preset_overrides_slots() {
         let config = StatuslineConfig {
             preset: Some("coach".to_string()),
-            slots: vec!["today".to_string()],
+            slots: vec!["1d".to_string()],
             format: None,
         };
         assert_eq!(config.effective_slots(), vec!["session", "health"]);
@@ -846,34 +880,57 @@ mod tests {
         let config = StatuslineConfig {
             preset: Some("coach".to_string()),
             slots: vec![],
-            format: Some("{today} | {week}".to_string()),
+            format: Some("{1d} | {7d}".to_string()),
         };
-        assert_eq!(config.required_slots(), vec!["today", "week"]);
+        assert_eq!(config.required_slots(), vec!["1d", "7d"]);
     }
 
     #[test]
     fn statusline_config_parse_toml() {
         let toml_str = r#"
-slots = ["today", "week", "branch"]
-format = "{today} | {week} | {branch}"
+slots = ["1d", "7d", "branch"]
+format = "{1d} | {7d} | {branch}"
 "#;
         let config: StatuslineConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.slots, vec!["today", "week", "branch"]);
-        assert_eq!(config.format.unwrap(), "{today} | {week} | {branch}");
+        assert_eq!(config.slots, vec!["1d", "7d", "branch"]);
+        assert_eq!(config.format.unwrap(), "{1d} | {7d} | {branch}");
     }
 
     #[test]
     fn statusline_config_parse_minimal_toml() {
-        let toml_str = r#"slots = ["month", "project"]"#;
+        let toml_str = r#"slots = ["30d", "project"]"#;
         let config: StatuslineConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.slots, vec!["month", "project"]);
+        assert_eq!(config.slots, vec!["30d", "project"]);
         assert!(config.format.is_none());
     }
 
     #[test]
     fn statusline_config_empty_toml_uses_defaults() {
         let config: StatuslineConfig = toml::from_str("").unwrap();
-        assert_eq!(config.slots, vec!["today", "week", "month"]);
+        assert_eq!(config.slots, vec!["1d", "7d", "30d"]);
+    }
+
+    #[test]
+    fn statusline_config_legacy_slot_aliases_normalize() {
+        // Existing configs that use the old calendar slot names still work —
+        // today/week/month render the same rolling-window values as 1d/7d/30d.
+        let config = StatuslineConfig {
+            preset: None,
+            slots: vec!["today".to_string(), "week".to_string(), "month".to_string()],
+            format: None,
+        };
+        assert_eq!(config.effective_slots(), vec!["1d", "7d", "30d"]);
+        assert_eq!(config.required_slots(), vec!["1d", "7d", "30d"]);
+    }
+
+    #[test]
+    fn statusline_cost_preset_uses_rolling_windows() {
+        let config = StatuslineConfig {
+            preset: Some("cost".to_string()),
+            slots: vec![],
+            format: None,
+        };
+        assert_eq!(config.effective_slots(), vec!["1d", "7d", "30d"]);
     }
 
     #[test]

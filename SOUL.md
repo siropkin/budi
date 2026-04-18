@@ -344,6 +344,45 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   derivation (one `git` invocation per session list row is too
   expensive); only the detail view surfaces it.
 
+### Statusline contract (R2.3, #224)
+
+The JSON shape emitted by `GET /analytics/statusline` and
+`budi statusline --format json` is the single shared provider-scoped
+status contract. It is consumed by the CLI statusline, the Cursor
+extension ([#232](https://github.com/siropkin/budi/issues/232)), and the
+cloud dashboard ([#235](https://github.com/siropkin/budi/issues/235)).
+Provider is an explicit filter rather than a family of per-surface
+shapes — new agents added in 8.2 under
+[#294](https://github.com/siropkin/budi/issues/294) slot into the same
+shape. See [`docs/statusline-contract.md`](docs/statusline-contract.md)
+for the full schema.
+
+Key points:
+
+- **Rolling `1d` / `7d` / `30d` windows** (`cost_1d`, `cost_7d`,
+  `cost_30d`) — not calendar today/week/month. The statusline surface
+  is the only place Budi uses rolling windows; `budi stats` keeps
+  calendar semantics.
+- **Provider-scoping is strict.** When the request carries
+  `provider=claude_code`, every numeric field (`cost_*`, `session_cost`,
+  `branch_cost`, `project_cost`) and `active_provider` are filtered to
+  that provider. The Claude Code statusline uses this by default so it
+  never shows blended multi-provider totals (the 8.0 bug #224 was
+  opened against).
+- **Deprecated aliases** `today_cost` / `week_cost` / `month_cost` are
+  kept populated with the same rolling values for one release of
+  backward compatibility and are removed in 9.0. New consumers read
+  `cost_1d` / `cost_7d` / `cost_30d`.
+- **Slot config aliases.** `~/.config/budi/statusline.toml` files
+  written against the 8.0 vocabulary (`slots = ["today", "week",
+  "month"]`) continue to render, since `today` / `week` / `month` are
+  normalized to `1d` / `7d` / `30d` at load time.
+- **Default install path is quiet.** `budi init` and
+  `budi integrations install` no longer prompt for a statusline preset;
+  the default is the rolling `1d` / `7d` / `30d` cost view. The
+  `coach` and `full` presets remain as opt-in advanced variants
+  documented in `README.md`.
+
 `budi doctor` runs three attribution checks:
 
 - **Session visibility** for the `today`, `7d`, and `30d` windows (R1.0.1,
@@ -406,7 +445,7 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
 - `crates/budi-cli/src/commands/launch.rs` - `budi launch <agent>` explicit launcher (fallback path, supports `BUDI_BYPASS=1`)
 - `crates/budi-cli/src/commands/sessions.rs` - `budi sessions` list and detail view (Rich CLI)
 - `crates/budi-cli/src/commands/status.rs` - `budi status` quick overview (daemon, proxy, today's cost). When the daemon is healthy but no messages are recorded for today, the command prints a first-run hint pointing the user at their agents and at `budi doctor` (R2.2, #228)
-- `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (coach mode with health tips) + installation
+- `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (default: quiet rolling `1d` / `7d` / `30d`, provider-scoped per ADR-0088 §4 / [docs/statusline-contract.md](docs/statusline-contract.md); `coach` / `full` presets remain as opt-in advanced variants) + installation
 <!-- budi-cursor and budi-cloud live in their own repos: siropkin/budi-cursor, siropkin/budi-cloud -->
 
 ## Dev notes

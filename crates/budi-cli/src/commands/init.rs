@@ -372,32 +372,17 @@ fn filter_integrations_by_agents(
 fn resolve_statusline_preset(
     selected: &BTreeSet<super::integrations::IntegrationComponent>,
     preset: Option<StatuslinePreset>,
-    prompt: bool,
+    _prompt: bool,
 ) -> Result<Option<StatuslinePreset>> {
     if !selected.contains(&super::integrations::IntegrationComponent::ClaudeCodeStatusline) {
         return Ok(None);
     }
-    if preset.is_some() || !prompt {
-        return Ok(preset);
-    }
-
-    println!();
-    println!("  Choose Claude Code status line preset:");
-    println!("    1) coach  (session cost + health)");
-    println!("    2) cost   (today/week/month)");
-    println!("    3) full   (session + health + today)");
-    eprint!("  Preset [1]: ");
-    io::stdout().flush().ok();
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read stdin")?;
-    let chosen = match input.trim() {
-        "2" | "cost" => StatuslinePreset::Cost,
-        "3" | "full" => StatuslinePreset::Full,
-        _ => StatuslinePreset::Coach,
-    };
-    Ok(Some(chosen))
+    // ADR-0088 §4 / #224: the default statusline is the quiet `1d` / `7d` /
+    // `30d` cost view. `coach` / `full` remain opt-in advanced variants
+    // documented in the README; `budi init` no longer prompts for a preset
+    // so the default path stays simple. Honor `--statusline-preset` when
+    // passed so power users can still opt in non-interactively.
+    Ok(preset)
 }
 
 fn prompt_for_integrations(

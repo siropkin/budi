@@ -38,11 +38,30 @@ fn detect_git_branch(dir: &str) -> Option<String> {
 fn build_slot_values(data: &Value) -> HashMap<String, String> {
     let mut vals = HashMap::new();
 
-    let get_cost = |key: &str| -> f64 { data.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0) };
+    // Prefer the new rolling-window fields (`cost_1d` / `cost_7d` /
+    // `cost_30d`), falling back to the deprecated calendar aliases so older
+    // daemons still render something useful during a mixed-version window.
+    let get_cost = |primary: &str, legacy: &str| -> f64 {
+        data.get(primary)
+            .and_then(|v| v.as_f64())
+            .or_else(|| data.get(legacy).and_then(|v| v.as_f64()))
+            .unwrap_or(0.0)
+    };
 
-    vals.insert("today".to_string(), fmt_cost(get_cost("today_cost")));
-    vals.insert("week".to_string(), fmt_cost(get_cost("week_cost")));
-    vals.insert("month".to_string(), fmt_cost(get_cost("month_cost")));
+    let cost_1d = fmt_cost(get_cost("cost_1d", "today_cost"));
+    let cost_7d = fmt_cost(get_cost("cost_7d", "week_cost"));
+    let cost_30d = fmt_cost(get_cost("cost_30d", "month_cost"));
+
+    vals.insert("1d".to_string(), cost_1d.clone());
+    vals.insert("7d".to_string(), cost_7d.clone());
+    vals.insert("30d".to_string(), cost_30d.clone());
+
+    // Legacy aliases — users with older `~/.config/budi/statusline.toml`
+    // files written against the 8.0 slot vocabulary keep rendering, since
+    // slot names are normalized during config load.
+    vals.insert("today".to_string(), cost_1d);
+    vals.insert("week".to_string(), cost_7d);
+    vals.insert("month".to_string(), cost_30d);
 
     if let Some(v) = data.get("session_cost").and_then(|v| v.as_f64()) {
         vals.insert("session".to_string(), fmt_cost(v));
@@ -76,7 +95,7 @@ pub fn render_template(template: &str, values: &HashMap<String, String>) -> Stri
     result
 }
 
-const FALLBACK_SLOTS: &[&str] = &["today", "week", "month"];
+const FALLBACK_SLOTS: &[&str] = &["1d", "7d", "30d"];
 
 /// Render slots as a separator-joined string.
 /// Falls back to basic cost slots if the requested slots produce nothing.
@@ -138,7 +157,7 @@ fn render_coach(
     Some(parts.join(&sep))
 }
 
-pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
+pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Result<()> {
     let stdin_json = if io::stdin().is_terminal() {
         None
     } else {
@@ -187,8 +206,20 @@ pub fn cmd_statusline(format: StatuslineFormat) -> Result<()> {
         None
     };
 
+    // Provider scoping: the Claude Code statusline shows Claude Code usage
+    // only by default (ADR-0088 §4, #224). Other formats are unscoped unless
+    // an explicit `--provider` is passed so downstream consumers can reuse
+    // the shared status contract with their own provider filter.
+    let effective_provider = provider.or_else(|| match format {
+        StatuslineFormat::Claude => Some("claude_code".to_string()),
+        _ => None,
+    });
+
     // Build query params for the daemon
     let mut query_params: Vec<(&str, String)> = Vec::new();
+    if let Some(ref p) = effective_provider {
+        query_params.push(("provider", p.clone()));
+    }
     let needs_session =
         needed.contains(&"session".to_string()) || needed.contains(&"health".to_string());
     if let Some(ref sid) = session_id
@@ -515,19 +546,39 @@ mod tests {
     #[test]
     fn build_slot_values_from_json() {
         let data = json!({
-            "today_cost": 1.23,
-            "week_cost": 5.0,
-            "month_cost": 0.0,
+            "cost_1d": 1.23,
+            "cost_7d": 5.0,
+            "cost_30d": 0.0,
             "branch_cost": 12.5,
             "active_provider": "claude_code"
         });
         let vals = build_slot_values(&data);
+        assert_eq!(vals.get("1d").unwrap(), "$1.23");
+        assert_eq!(vals.get("7d").unwrap(), "$5.00");
+        assert_eq!(vals.get("30d").unwrap(), "$0.00");
+        // Legacy aliases continue to resolve to the same rolling values.
         assert_eq!(vals.get("today").unwrap(), "$1.23");
         assert_eq!(vals.get("week").unwrap(), "$5.00");
         assert_eq!(vals.get("month").unwrap(), "$0.00");
         assert_eq!(vals.get("branch").unwrap(), "$12.50");
         assert_eq!(vals.get("provider").unwrap(), "claude_code");
         assert!(!vals.contains_key("session")); // not in response
+    }
+
+    #[test]
+    fn build_slot_values_falls_back_to_legacy_field_names() {
+        // Simulate an older daemon that only knows today_cost / week_cost /
+        // month_cost. The CLI must still render something during a
+        // mixed-version window.
+        let data = json!({
+            "today_cost": 2.5,
+            "week_cost": 10.0,
+            "month_cost": 40.0,
+        });
+        let vals = build_slot_values(&data);
+        assert_eq!(vals.get("1d").unwrap(), "$2.50");
+        assert_eq!(vals.get("7d").unwrap(), "$10.00");
+        assert_eq!(vals.get("30d").unwrap(), "$40.00");
     }
 
     #[test]
