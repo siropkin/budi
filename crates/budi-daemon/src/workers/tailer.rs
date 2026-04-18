@@ -217,7 +217,7 @@ fn build_routes(providers: &[Box<dyn Provider>]) -> Routes {
                 .collect::<Vec<_>>()
         })
         .collect();
-    routes.sort_by(|a, b| b.0.components().count().cmp(&a.0.components().count()));
+    routes.sort_by_key(|r| std::cmp::Reverse(r.0.components().count()));
     routes
 }
 
@@ -565,7 +565,7 @@ mod tests {
             (PathBuf::from("/tmp/a"), "general".to_string()),
         ];
         let mut sorted = routes.clone();
-        sorted.sort_by(|a, b| b.0.components().count().cmp(&a.0.components().count()));
+        sorted.sort_by_key(|r| std::cmp::Reverse(r.0.components().count()));
         assert_eq!(
             provider_for_path(Path::new("/tmp/a/b/c.jsonl"), &sorted),
             Some("specific")
