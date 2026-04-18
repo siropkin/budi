@@ -442,6 +442,43 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
+    // Cursor extension onboarding funnel (siropkin/budi#314).
+    //
+    // The Cursor extension writes local-only counters to
+    // `~/.local/share/budi/cursor-onboarding.json` when it is used as
+    // an onboarding entry point (the user discovered budi via the
+    // marketplace and clicked through the welcome view). Surfacing a
+    // one-line summary here gives us visibility into the acquisition
+    // funnel without any remote telemetry — if a new user got the
+    // welcome view but never landed a hand-off, we can see it on their
+    // machine when they run `budi doctor`.
+    {
+        match read_cursor_onboarding_counters() {
+            Some(counters) => {
+                let impressions = counters.welcome_view_impressions;
+                let terminal_clicks = counters.open_terminal_clicks;
+                let handoffs = counters.handoffs_completed;
+                let mark = if handoffs > 0 {
+                    format!("{green}\u{2713}{reset}")
+                } else if impressions > 0 {
+                    let yellow = super::ansi("\x1b[33m");
+                    format!("{yellow}!{reset}")
+                } else {
+                    format!("{dim}-{reset}")
+                };
+                println!(
+                    "  {mark} cursor extension onboarding: {impressions} welcome view(s), {terminal_clicks} open-terminal click(s), {handoffs} hand-off(s)"
+                );
+            }
+            None => {
+                // No counter file yet — treat as "no extension-first onboarding seen".
+                println!(
+                    "  {dim}-{reset} cursor extension onboarding: no local counters yet {dim}(not opened via extension-first flow){reset}"
+                );
+            }
+        }
+    }
+
     // Auto-proxy configuration checks (shell profile + IDE config files)
     {
         let agents = budi_core::config::load_agents_config()
@@ -564,6 +601,60 @@ fn check_proxy_port(port: u16) -> bool {
     .is_ok()
 }
 
+/// v1 contract for `~/.local/share/budi/cursor-onboarding.json`. This is
+/// the local-only onboarding counter file written by the Cursor
+/// extension (siropkin/budi-cursor, siropkin/budi#314). Only
+/// integer counts are surfaced here — no prompts, no code, no paths
+/// beyond the file's own path — so `budi doctor` can report the
+/// extension-first acquisition funnel without any remote telemetry.
+#[derive(Debug, Default, Clone)]
+struct CursorOnboardingCounters {
+    welcome_view_impressions: u64,
+    open_terminal_clicks: u64,
+    handoffs_completed: u64,
+}
+
+fn cursor_onboarding_counters_path() -> Option<PathBuf> {
+    // Mirrors `onboardingCounters.ts` in siropkin/budi-cursor, which
+    // resolves relative to `os.homedir()`. `HOME` is consistent on
+    // the platforms budi ships on today (macOS / Linux). On Windows
+    // the extension writes to the same path under the user profile
+    // because `os.homedir()` already maps to `%USERPROFILE%`.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+    Some(
+        home.join(".local")
+            .join("share")
+            .join("budi")
+            .join("cursor-onboarding.json"),
+    )
+}
+
+fn read_cursor_onboarding_counters() -> Option<CursorOnboardingCounters> {
+    let path = cursor_onboarding_counters_path()?;
+    let bytes = std::fs::read(&path).ok()?;
+    parse_cursor_onboarding_counters(&bytes)
+}
+
+fn parse_cursor_onboarding_counters(bytes: &[u8]) -> Option<CursorOnboardingCounters> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let obj = value.as_object()?;
+    // Only version 1 is defined today; an unknown version still
+    // parses so `budi doctor` keeps working during a forward-compat
+    // upgrade, but we guard against reading garbage.
+    let version = obj.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+    if version == 0 {
+        return None;
+    }
+    let pick = |key: &str| -> u64 { obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0) };
+    Some(CursorOnboardingCounters {
+        welcome_view_impressions: pick("welcome_view_impressions"),
+        open_terminal_clicks: pick("open_terminal_clicks"),
+        handoffs_completed: pick("handoffs_completed"),
+    })
+}
+
 /// Check available disk space in MB. Uses `df -k` on Unix, skips on Windows.
 fn check_available_disk_mb(path: &Path) -> Option<u64> {
     if cfg!(target_os = "windows") {
@@ -599,5 +690,38 @@ mod tests {
     fn integrity_check_uses_full_check_in_deep_mode() {
         assert_eq!(integrity_check_pragma(true), "PRAGMA integrity_check");
         assert_eq!(integrity_check_mode_label(true), "integrity_check");
+    }
+
+    #[test]
+    fn parses_cursor_onboarding_counters_v1() {
+        let payload = br#"{
+            "version": 1,
+            "welcome_view_impressions": 3,
+            "open_terminal_clicks": 1,
+            "handoffs_completed": 1,
+            "first_impression_at": "2026-04-17T10:00:00.000Z",
+            "last_impression_at": "2026-04-17T10:05:00.000Z",
+            "last_handoff_at": "2026-04-17T10:05:30.000Z"
+        }"#;
+        let counters = parse_cursor_onboarding_counters(payload).expect("counters parse");
+        assert_eq!(counters.welcome_view_impressions, 3);
+        assert_eq!(counters.open_terminal_clicks, 1);
+        assert_eq!(counters.handoffs_completed, 1);
+    }
+
+    #[test]
+    fn cursor_onboarding_counters_default_missing_fields_to_zero() {
+        let payload = br#"{ "version": 1 }"#;
+        let counters = parse_cursor_onboarding_counters(payload).expect("counters parse");
+        assert_eq!(counters.welcome_view_impressions, 0);
+        assert_eq!(counters.open_terminal_clicks, 0);
+        assert_eq!(counters.handoffs_completed, 0);
+    }
+
+    #[test]
+    fn cursor_onboarding_counters_rejects_garbage_payload() {
+        // Should never panic — a broken file must not break `budi doctor`.
+        assert!(parse_cursor_onboarding_counters(b"not json").is_none());
+        assert!(parse_cursor_onboarding_counters(b"[1,2,3]").is_none());
     }
 }
