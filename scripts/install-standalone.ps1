@@ -139,9 +139,9 @@ try {
     if ($initExit -eq 0 -or $initExit -eq 2) {
         Log ""
         if ($initExit -eq 2) {
-            Log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
+            Log "Setup complete with warnings. Run 'budi doctor' to see what needs fixing."
         } else {
-            Log "Setup complete! Use 'budi launch <agent>' to start coding through the proxy, or run 'budi status' to check health."
+            Log "Setup complete! Restart your terminal so CLI agents pick up proxy env vars, then run 'budi doctor' to verify end-to-end."
         }
     } else {
         Fail "budi init failed (exit code $initExit). Run 'budi doctor' to diagnose."

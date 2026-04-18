@@ -234,10 +234,10 @@ main() {
     "$BIN_DIR/budi" init || init_rc=$?
     if [ "$init_rc" -eq 0 ]; then
       log ""
-      log "Setup complete! Use 'budi launch <agent>' to start coding through the proxy, or run 'budi status' to check health."
+      log "Setup complete! Restart your terminal so CLI agents pick up proxy env vars, then run 'budi doctor' to verify end-to-end."
     elif [ "$init_rc" -eq 2 ]; then
       log ""
-      log "Setup complete with warnings. Run 'budi doctor' to check what needs fixing."
+      log "Setup complete with warnings. Run 'budi doctor' to see what needs fixing."
     else
       fail "budi init failed (exit code $init_rc). Run 'budi doctor' to diagnose."
     fi
