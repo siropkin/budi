@@ -315,10 +315,20 @@ fn tool_result_text(content: Option<&serde_json::Value>) -> Option<String> {
             .join(" "),
         _ => return None,
     };
-    if s.len() > MAX {
-        s.truncate(MAX);
-    }
+    truncate_utf8_at_char_boundary(&mut s, MAX);
     if s.trim().is_empty() { None } else { Some(s) }
+}
+
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 scalar.
+fn truncate_utf8_at_char_boundary(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
 }
 
 /// Bounded label constants for `tool_outcome` tag values. Pinned here so
@@ -1009,5 +1019,17 @@ mod tests {
         assert_eq!(msg.tool_outcomes.len(), 1);
         assert_eq!(msg.tool_outcomes[0].tool_use_id, "t-1");
         assert_eq!(msg.tool_outcomes[0].outcome, TOOL_OUTCOME_SUCCESS);
+    }
+
+    #[test]
+    fn tool_result_text_truncates_at_utf8_boundary_without_panicking() {
+        // 2048 lands in the middle of the emoji's 4-byte UTF-8 encoding.
+        let long = format!("{}🙂tail", "a".repeat(2047));
+        let value = serde_json::Value::String(long);
+
+        let out = tool_result_text(Some(&value)).expect("text should remain non-empty");
+
+        assert_eq!(out.len(), 2047);
+        assert!(out.chars().all(|c| c == 'a'));
     }
 }
