@@ -539,7 +539,7 @@ Messages with `exact` confidence show exact cost in the dashboard. Estimated cos
 <details>
 <summary>OpenTelemetry (removed in 8.0)</summary>
 
-OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. The proxy (port 9878) captures real-time cost data directly.
+OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. As of 8.2.0 live cost capture is handled by the JSONL tailer (per-provider `Provider::watch_roots()`, [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)); 8.1.x used the proxy on port 9878 in this slot, which is removed in 8.2 R2.1 (#322).
 
 </details>
 
