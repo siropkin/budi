@@ -7,12 +7,18 @@ use crate::client::DaemonClient;
 
 use super::ansi;
 
-pub fn period_label(period: StatsPeriod) -> &'static str {
+pub fn period_label(period: StatsPeriod) -> String {
     match period {
-        StatsPeriod::Today => "Today",
-        StatsPeriod::Week => "This week",
-        StatsPeriod::Month => "This month",
-        StatsPeriod::All => "All time",
+        StatsPeriod::Today => "Today".to_string(),
+        StatsPeriod::Week => "This week".to_string(),
+        StatsPeriod::Month => "This month".to_string(),
+        StatsPeriod::All => "All time".to_string(),
+        StatsPeriod::Days(1) => "Last 1 day".to_string(),
+        StatsPeriod::Days(n) => format!("Last {} days", n),
+        StatsPeriod::Weeks(1) => "Last 1 week".to_string(),
+        StatsPeriod::Weeks(n) => format!("Last {} weeks", n),
+        StatsPeriod::Months(1) => "Last 1 month".to_string(),
+        StatsPeriod::Months(n) => format!("Last {} months", n),
     }
 }
 
@@ -47,6 +53,22 @@ pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>
             (Some(since), None)
         }
         StatsPeriod::All => (None, None),
+        StatsPeriod::Days(n) => {
+            let past = today - chrono::Duration::days(n as i64);
+            let since = local_midnight_to_utc(past);
+            (Some(since), None)
+        }
+        StatsPeriod::Weeks(n) => {
+            let past = today - chrono::Duration::weeks(n as i64);
+            let since = local_midnight_to_utc(past);
+            (Some(since), None)
+        }
+        StatsPeriod::Months(n) => {
+            // A simple approximation for months is 30 days
+            let past = today - chrono::Duration::days((n * 30) as i64);
+            let since = local_midnight_to_utc(past);
+            (Some(since), None)
+        }
     }
 }
 
@@ -266,6 +288,10 @@ fn cmd_stats_summary_filtered(
         );
     }
 
+    if provider == Some("cursor") {
+        println!("  {dim}* {}{reset}", budi_core::analytics::CURSOR_LAG_HINT);
+    }
+
     println!();
     Ok(())
 }
@@ -344,6 +370,10 @@ fn cmd_stats_multi_agent(
             "  {green}  cache savings {}{reset}",
             format_cost(est.cache_savings)
         );
+    }
+
+    if providers.iter().any(|p| p.provider == "cursor") {
+        println!("  {dim}* {}{reset}", budi_core::analytics::CURSOR_LAG_HINT);
     }
 
     println!();
