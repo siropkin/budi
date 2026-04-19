@@ -4,6 +4,8 @@
 - **Purpose**: Catalogue what local session/log files each AI coding agent produces, to inform the proxy-vs-file-watching design decision
 - **Last updated**: 2026-04-13
 
+> **Decision note after 2026-04-17 (ADR-0089).** This inventory was gathered for the proxy-vs-file-watching decision and is preserved as historical research. The open design question is closed: transcript tailing is the sole live path in 8.2+ per [ADR-0089](../adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md).
+
 ---
 
 ## Summary Table

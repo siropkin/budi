@@ -45,10 +45,10 @@ Budi 8.x is organized around one **local product** with optional **cloud visibil
 | Surface | Owner repo | Role in 8.x |
 |---------|------------|-------------|
 | CLI (`budi`) | `siropkin/budi` | Primary developer surface. Daily-use commands (`stats`, `sessions`, `status`, `doctor`, `statusline`). |
-| Daemon (`budi-daemon`) | `siropkin/budi` | Owns SQLite, serves analytics APIs, runs proxy, runs cloud sync worker. |
-| Proxy | `siropkin/budi` | Sole live ingestion path (ADR-0082). |
+| Daemon (`budi-daemon`) | `siropkin/budi` | Owns SQLite, serves analytics APIs, runs the transcript tailer, and runs the cloud sync worker. |
+| Tailer | `siropkin/budi` | Sole live ingestion path in 8.2+ (ADR-0089). Watches agent transcript roots; no proxy. |
 | Statusline | `siropkin/budi` | Quiet, provider-scoped ambient signal (see §4). |
-| Classification | `siropkin/budi` | Rule-based activity/ticket/branch/file/outcome signals inside the proxy + pipeline (see §5). |
+| Classification | `siropkin/budi` | Rule-based activity/ticket/branch/file/outcome signals inside the pipeline over tailed/imported transcripts (see §5). |
 | Cursor extension | `siropkin/budi-cursor` | Provider-scoped Cursor surface. Consumes the shared status contract from §4. |
 | Cloud dashboard | `siropkin/budi-cloud` | Shared visibility + manager-facing view. Uses the **same** windows (`1d`/`7d`/`30d`) and classification vocabulary as local. Owns local→cloud linking UX. |
 
@@ -111,14 +111,14 @@ Classification should improve through **simple, explainable, local-first methods
 **R1.4 — file-level attribution (#292):**
 
 - Stays inside ADR-0083 privacy limits: **repo-relative paths only**, no absolute paths, no outside-of-repo paths, no file contents, no diffs.
-- Signal is derived from tool-call arguments already visible to the proxy and pipeline.
+- Signal is derived from tool-call arguments already present in parsed transcript messages and the pipeline.
 - Writes are small, bounded, and deduplicated — file attribution must not inflate row size or row count unboundedly.
 - A file attribution row without a valid repo-relative path is dropped, not stored with a placeholder.
 
 **R1.5 — tool outcome and session→work outcome signals (#293):**
 
 - Rule-based and debuggable. No remote git or PR API calls in 8.1. No content capture.
-- Tool outcomes are derived from proxy-observable signals (denials, retries, follow-up success) and optional local git state the daemon can already see, not from external systems.
+- Tool outcomes are derived from transcript-observable signals (denials, retries, follow-up success) and optional local git state the daemon can already see, not from external systems.
 - Session→work outcome ("did this session produce a merged change, a reverted change, or no change?") is inferred from local git transitions only.
 - Every outcome signal is labeled with an explicit `source` / `confidence` so surfaces can honestly say "this is a heuristic".
 

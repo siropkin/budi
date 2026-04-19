@@ -4,6 +4,8 @@
 - **Status**: Implemented (repo_id column exists, hash-based)
 - **See**: `crates/budi-core/src/repo_id.rs`
 
+> **Stale after 2026-04-17 (ADR-0089).** This note is preserved for historical context, but any mention of proxy/header-based attribution is obsolete in 8.2+. Current live-path attribution comes from tailed transcripts per [ADR-0089](../adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md).
+
 ## Problem
 
 Same git repo in different worktrees or clones counts as separate projects in stats/dashboard. User expects them merged.

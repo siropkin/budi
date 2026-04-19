@@ -2088,8 +2088,8 @@ fn session_visibility_flags_mismatch_when_all_rows_missing_session_id() {
     assert!(today.has_mismatch());
 }
 
-/// Regression for #303 — `budi doctor` must see when live proxy traffic
-/// lands in the last 7 days without `git_branch`, which is exactly what
+/// Regression for #303 — `budi doctor` must see when recent assistant rows
+/// land in the last 7 days without `git_branch`, which is exactly what
 /// makes `budi stats --branches` collapse into `(untagged)`.
 #[test]
 fn branch_attribution_stats_reports_missing_branch_within_7d() {

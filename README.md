@@ -40,11 +40,11 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 ## What it does
 
 - Tracks tokens, costs, and usage per message across AI coding agents
-- **Local proxy** (port 9878) sits between your agent and the LLM provider, capturing every request in real time — streaming responses pass through with no visible lag
+- **Local transcript tailer** watches the JSONL/session files agents already write on disk and ingests them live
 - Attributes cost to repos, branches, tickets, and custom tags
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, opt-in via `~/.config/budi/cloud.toml`)
-- Provider-scoped live cost status line in Claude Code and Cursor (quiet rolling `1d` / `7d` / `30d`)
+- Provider-scoped cost status line in Claude Code and Cursor (quiet rolling `1d` / `7d` / `30d`)
 - **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
 
@@ -56,13 +56,13 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 | Agent | Tier | Status | How |
 |-------|------|--------|-----|
-| **Claude Code** | Tier 1 | Supported | Auto-configured by `budi init` (shell profile env block) |
-| **Codex CLI** | Tier 1 | Supported | Auto-configured by `budi init` (shell profile env block + Codex Desktop config patch) |
-| **Cursor** | Tier 2 | Supported | Auto-configured by `budi init` (Cursor settings.json patch) |
-| **Copilot CLI** | Tier 2 | Supported | Auto-configured by `budi init` (shell profile env block) |
-| **Gemini CLI** | Tier 3 | Deferred | Different API format; not supported in v1 proxy |
+| **Claude Code** | Tier 1 | Supported | Live transcript tailing from local JSONL files |
+| **Codex CLI** | Tier 1 | Supported | Live transcript tailing from local session files |
+| **Cursor** | Tier 2 | Supported | Live transcript tailing plus Usage API cost reconciliation |
+| **Copilot CLI** | Tier 2 | Supported | Live transcript tailing from local session files |
+| **Gemini CLI** | Tier 3 | Deferred | Not part of the 8.2 scope |
 
-Tier 1 agents use simple env vars with high confidence. Tier 2 agents work but have onboarding caveats (GUI settings, proprietary env vars). See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full compatibility matrix.
+Supported means Budi can observe the agent's normal local transcript/session artifacts. `budi init` does not wrap the agent, patch shell profiles, or rewrite editor settings in 8.2.
 
 All agents also support one-time historical import via `budi import` (Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API).
 
@@ -142,16 +142,11 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` starts the daemon (port 7878) and proxy (port 9878), and **prompts you to choose which agents to track** (Claude Code, Cursor, Codex CLI, Copilot CLI) and **which integrations to install** (statusline, extension). Agent choices are stored in `~/.config/budi/agents.toml`. In non-interactive mode it uses safe defaults (all agents enabled). You can also choose integrations explicitly with flags like `--with`, `--without`, and `--integrations all|none|auto`.
+`budi init` is intentionally small in 8.2: it creates the data directory, validates schema/binary state, starts the daemon on port 7878, installs the platform-native autostart service, prints any detected agents based on local transcript roots, and exits.
 
-During init, budi automatically applies proxy routing for selected agents:
-- CLI agents (Claude/Codex/Copilot): injects a managed env-var block into your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile`)
-- Cursor: patches Cursor settings.json with the proxy base URL
-- Codex Desktop: patches `~/.codex/config.toml` with `openai_base_url`
+It does **not** patch shell profiles, Cursor settings, or Codex config files. Run your agent normally (`claude`, `codex`, `cursor`, `gh copilot`) and Budi will tail the transcripts those tools already write locally.
 
-`budi launch <agent>` still works as an explicit fallback. For a one-off bypass, run `BUDI_BYPASS=1 budi launch <agent>`.
-
-**Important:** After `budi init` or `budi enable`, restart your terminal so the shell-profile proxy env vars take effect for CLI agents (Claude Code, Codex, Copilot). Already-running sessions are NOT going through the proxy until the shell is restarted. For immediate proxy routing without restart, use `budi launch <agent>`. `budi doctor` detects when proxy env vars are configured but not active in the current shell. Customize ports in the **repo-local** `config.toml` under `<budi-home>/repos/<repo-id>/config.toml` (run `budi doctor` inside the repo to see the exact path).
+If you are upgrading from 8.0/8.1 and `budi doctor` reports leftover proxy-era config, run `budi init --cleanup` to review and remove managed Budi blocks with explicit consent.
 
 To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
 
@@ -164,20 +159,19 @@ Use this sequence if you want the fastest "did setup really work?" path:
 1. **Install and initialize**
    - Homebrew: `brew install siropkin/budi/budi` then `budi init`
    - Standalone installers and `./scripts/install.sh` already run `budi init` for you
-   - `budi init` prompts for agents and integrations (defaults are safe), starts the daemon + proxy, and installs a platform-native autostart service (launchd on macOS, systemd on Linux, Task Scheduler on Windows)
-2. **Restart your terminal** (CLI agents only: Claude Code, Codex, Copilot CLI)
-   - Proxy env vars are written into your shell profile; already-running shells won't route through the proxy until they are reloaded
-   - For immediate routing without a restart, use `budi launch <agent>`
-3. **Send your first prompt**
-   - Open your agent as usual (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt — proxy is auto-configured
-   - One-off bypass if needed: `BUDI_BYPASS=1 budi launch <agent>`
-4. **Verify end-to-end** with `budi doctor`
-   - Checks daemon, proxy, autostart, agent configuration, database, and attribution (sessions / branches / activities)
+   - `budi init` starts the daemon, installs autostart, shows detected agents, and exits
+2. **Send your first prompt**
+   - Open your agent as usual (`claude`, `codex`, `cursor`, `gh copilot`) and send a prompt
+   - Budi tails the local transcript/session files the agent already writes
+3. **Verify end-to-end** with `budi doctor`
+   - Checks daemon, tailer readiness, schema, transcript visibility, and any leftover 8.0/8.1 proxy residue
    - The top of the report says "All checks passed." when first-run setup is healthy — and adds a friendly nudge if no activity has been recorded yet
-5. **See today's cost** with `budi status`
-   - Quick snapshot: daemon/proxy state, today's cost, and active agents
-6. **Import historical data** (optional)
+4. **See today's cost** with `budi status`
+   - Quick snapshot: daemon health, today's cost, and first-run hints when the DB is still quiet
+5. **Import historical data** (optional)
    - Run `budi import` to backfill from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API
+6. **Upgraded from 8.0/8.1?** (only if `budi doctor` warns)
+   - Run `budi init --cleanup` to preview and remove managed proxy-era shell/editor config residue
 
 ### PATH and duplicate binary checks
 
@@ -285,18 +279,15 @@ Environment variable overrides: `BUDI_CLOUD_ENABLED=true`, `BUDI_CLOUD_API_KEY=b
 **Launch and onboarding:**
 
 ```bash
-budi init                          # start daemon, configure integrations
-budi launch claude                 # launch Claude Code through the proxy (zero config)
-budi launch codex                  # launch Codex CLI through the proxy
-budi launch copilot                # launch Copilot CLI through the proxy
-budi launch cursor                 # print Cursor proxy setup instructions (GUI only)
+budi init                          # start daemon + install autostart + show detected agents
+budi init --cleanup                # review/remove managed 8.0/8.1 proxy residue
 budi import                        # one-time import of historical transcripts
 ```
 
 **Monitoring and analytics:**
 
 ```bash
-budi status                        # quick overview: daemon, proxy, today's cost
+budi status                        # quick overview: daemon and today's cost
 budi stats                         # usage summary with cost breakdown
 budi stats --models                # model usage breakdown
 budi stats --projects              # repos ranked by cost
@@ -322,7 +313,7 @@ budi health --session <id>         # health vitals for a specific session
 **Diagnostics and maintenance:**
 
 ```bash
-budi doctor                        # check health: daemon, proxy, database, config
+budi doctor                        # check health: daemon, tailer, schema, transcript visibility
 budi doctor --deep                 # run full SQLite integrity_check (slower)
 budi cloud status                  # cloud sync readiness + last-synced-at + queued records
 budi cloud sync                    # push queued local rollups/sessions to the cloud now
@@ -398,7 +389,7 @@ Health state appears in the statusline's opt-in `coach` / `full` presets (see ab
 
 ## Privacy
 
-Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). The proxy forwards your requests to the upstream LLM provider and back, but budi only **stores** metadata locally: timestamps, token counts, model names, and costs. Prompts, code, and AI responses pass through the proxy and are never written to disk or retained by budi.
+Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). In 8.2, Budi reads the local transcripts/session files the agent already wrote to disk and stores derived analytics metadata locally: timestamps, token counts, model names, costs, and attribution tags. Prompts, code, and responses never leave the machine; cloud sync sends only aggregated rollups and session summaries.
 
 **Cloud sync** (optional, disabled by default) pushes pre-aggregated daily rollups and session summaries to a team dashboard at `app.getbudi.dev`. Only numeric metrics cross the wire: token counts, costs, model names, hashed repo IDs, branch names, and ticket IDs. Prompts, code, responses, file paths, email addresses, raw payloads, and tag values are structurally excluded from the sync payload — there is no "full upload" mode.
 
@@ -414,7 +405,7 @@ See [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md) for 
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon runs a **proxy server** on port 9878 that transparently forwards agent traffic to upstream providers (Anthropic, OpenAI) while capturing metadata. Streaming (SSE) responses pass through chunk-by-chunk with no buffering; token metadata is extracted from the byte stream without modifying it. Proxy traffic is attributed to repos, branches, and tickets via `X-Budi-Repo`/`X-Budi-Branch`/`X-Budi-Cwd` headers or automatic git resolution, with cost computed from provider pricing tables. Historical data from Claude Code JSONL transcripts and Cursor Usage API can be backfilled via `budi import`. The CLI is a thin HTTP client — all queries go through the daemon.
+A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon watches each supported provider's local transcript/session roots, tails incremental appends through the shared pipeline, and writes canonical `messages` + tag rows. Cursor cost/token reconciliation still comes from the Usage API on a pull cadence; the CLI is a thin HTTP client and all queries go through the daemon.
 
 ## Details
 
@@ -424,7 +415,7 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 | | budi | ccusage | Claude `/cost` |
 |---|---|---|---|
 | Multi-agent support | **Yes** (Claude Code, Codex CLI, Cursor, Copilot CLI) | Claude Code only | Claude Code only |
-| Real-time cost via proxy | **Yes** | No | No |
+| Live local transcript tailing | **Yes** | No | No |
 | Cost history | **Per-message + daily** | Per-session | Current session |
 | Cloud dashboard | **Yes** ([app.getbudi.dev](https://app.getbudi.dev)) | No | No |
 | Status line + session health | **Yes** (with actionable tips) | No | No |
@@ -445,25 +436,17 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
 └──────────┘             │  (port 7878) │              └──────────┘
                          │              │                    ▲
                          │  - analytics │    Pipeline       │
-                         │  - import    │ ──────────────────┘
-                         │  (on demand) │    Extract → Normalize
+                         │  - tailer    │ ──────────────────┘
+                         │  - import    │    Extract → Normalize
                          └──────────────┘      → Enrich → Load
+                                ▲
                                 │
-                         ┌──────────────┐
-┌──────────┐    proxy    │ budi proxy   │    upstream
-│ AI Agent │ ──────────▶ │  (port 9878) │ ──────────▶ Anthropic / OpenAI
-│ (CC/CX)  │  localhost  │  transparent │  API calls
-└──────────┘             │  pass-thru   │
-                         └──────────────┘
-
-Historical import (budi import):
-  JSONL transcripts (Claude Code) ──┐
-  JSONL sessions (Codex) ───────────┤
-  JSONL sessions (Copilot CLI) ─────┼──▶ Pipeline → SQLite
-  Usage API (Cursor) ───────────────┘
+       Claude/Codex/Copilot JSONL/session files  ─┐
+       Cursor transcripts + Usage API pull        ├──▶ shared ingest path
+       Historical import (`budi import`)          ┘
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. The **proxy** is the sole live data source: every LLM request flows through it, capturing tokens, cost, and attribution in real time. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API can be imported via `budi import` for one-time backfill.
+The daemon is the single source of truth — the CLI never opens the database directly. The transcript tailer is the sole live data path in 8.2. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API can be imported via `budi import` for one-time backfill.
 
 **Data model** — nine tables, seven data entities + two supporting:
 
@@ -471,7 +454,6 @@ The daemon is the single source of truth — the CLI never opens the database di
 |-------|------|
 | **messages** | Single cost entity — all token/cost data lives here (one row per API call) |
 | **sessions** | Lifecycle context (start/end, duration, mode) without mixing cost concerns |
-| **proxy_events** | Append-only log of proxied LLM API requests (provider, model, tokens, duration, status, repo, branch, ticket, cost) |
 | **tags** | Flexible key-value pairs per message (repo, ticket, activity, user, etc.) |
 | **sync_state** | Tracks incremental ingestion progress per file for progressive sync, plus cloud sync watermarks |
 | **message_rollups_hourly** | Derived hourly aggregates (provider/model/repo/branch/role) for low-latency analytics reads |
@@ -517,7 +499,7 @@ Retention cleanup runs automatically after sync and queued realtime ingestion pr
 <details>
 <summary>Hooks (removed in 8.0)</summary>
 
-Hook-based ingestion (`budi hook`) and the `hook_events` table have been removed. The proxy (port 9878) is now the sole live data source.
+Hook-based ingestion (`budi hook`) and the `hook_events` table have been removed. In 8.2, the transcript tailer is the sole live data source.
 
 </details>
 
@@ -528,7 +510,7 @@ Every message carries a `cost_confidence` tag that indicates how the cost was de
 
 | Level | Source | Accuracy |
 |-------|--------|----------|
-| `proxy_estimated` | Proxy real-time capture | Estimated from response body / SSE stream |
+| `proxy_estimated` | Retained 8.1 proxy-era rows (historical only) | Estimated from response body / SSE stream |
 | `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
 | `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
 
@@ -608,9 +590,9 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 ## Troubleshooting
 
 **No data after setup:**
-1. Run `budi status` to check daemon, proxy, and today's cost
-2. Verify auto-proxy config with `budi doctor` (shell profile + Cursor/Codex settings)
-3. If `budi doctor` reports proxy env vars not set in current shell, restart your terminal or use `budi launch <agent>` for immediate routing
+1. Run `budi status` to check daemon health and today's cost
+2. Run `budi doctor` to verify transcript visibility and any leftover 8.0/8.1 proxy residue
+3. If `budi doctor` warns about legacy proxy residue, run `budi init --cleanup` and follow the consent flow
 4. Send a prompt and check `budi stats` for non-zero usage
 5. For historical data: `budi import` (one-time backfill from Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage API)
 
@@ -627,20 +609,20 @@ Windows equivalent:
 **Daemon doesn't survive reboots:**
 Run `budi autostart status` — if it shows "not installed", run `budi autostart install` to install the platform-native service (launchd on macOS, systemd on Linux, Task Scheduler on Windows). `budi init` also installs the autostart service.
 
-**Proxy not reachable (agent gets connection refused on port 9878):**
-1. Run `budi doctor` to check proxy health
-2. Check if port 9878 is in use by another process: `lsof -i :9878`
-3. Restart with `budi init`
+**Legacy proxy residue warning after upgrade:**
+1. Run `budi doctor` to see which shell/editor files still contain managed 8.0/8.1 proxy blocks
+2. Run `budi init --cleanup` to preview and remove those managed blocks with explicit consent
+3. Open a fresh terminal after cleanup if the current shell still has old proxy env vars loaded
 
 **Status line not showing:**
 1. Restart Claude Code after `budi init`
 2. Check: `budi statusline` should output cost data
 
 **Cursor extension status bar shows offline (red dot) or stays quiet (yellow):**
-1. Run `budi doctor` to verify daemon + proxy health.
+1. Run `budi doctor` to verify daemon health and Cursor transcript visibility.
 2. In Cursor, run **Budi: Refresh Status**.
 3. If needed, reload Cursor window (`Developer: Reload Window`) after `budi init` or daemon URL changes.
-4. Confirm `Override OpenAI Base URL` is set to `http://localhost:9878` (Cursor Settings → Models) so Cursor traffic routes through the budi proxy.
+4. Open a Cursor chat/composer once so Cursor creates its local session artifacts, then send a prompt and recheck `budi status`.
 
 ## Uninstall
 

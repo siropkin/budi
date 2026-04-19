@@ -3,6 +3,8 @@
 - **Date**: 2026-04-12
 - **Purpose**: Understand which competitors and adjacent companies are YC-backed, funding levels, and market signals
 
+> **Stale after 2026-04-17 (ADR-0089).** This note preserves pre-pivot proxy/gateway market framing as historical research only. Current live-path decisions are governed by [ADR-0089](../adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md).
+
 ## Summary
 
 YC W23 was the defining batch for LLM observability — Helicone, Langfuse, LiteLLM, Traceloop, and Athina AI all came from it. The shakeout since then is telling:

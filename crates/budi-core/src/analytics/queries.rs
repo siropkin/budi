@@ -1757,9 +1757,9 @@ const TICKET_SOURCE_TAG_KEY: &str = "ticket_source";
 
 /// Canonical fallback source for legacy rows (pre-R1.3) that carry a
 /// `ticket_id` tag but no sibling `ticket_source` tag. The alphanumeric
-/// extractor was the only producer before R1.3 — everything else was
-/// proxy-only — so this default keeps analytics consistent without a
-/// reindex.
+/// extractor was the only producer before R1.3; the numeric fallback
+/// shipped later with the unified extractor. This default keeps older
+/// analytics readable without a reindex.
 pub const TICKET_SOURCE_BRANCH: &str = crate::pipeline::TICKET_SOURCE_BRANCH;
 
 /// Query cost grouped by ticket, sorted by cost descending. Includes an

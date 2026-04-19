@@ -430,8 +430,8 @@ pub const TICKET_SOURCE_BRANCH: &str = "branch";
 pub const TICKET_SOURCE_BRANCH_NUMERIC: &str = "branch_numeric";
 
 /// Branch names that are never tickets — integration branches and the
-/// literal detached-HEAD sentinel. Kept in one place so proxy ingest and
-/// the import pipeline agree.
+/// literal detached-HEAD sentinel. Kept in one place so live tailing,
+/// `budi import`, and legacy-history handling stay aligned.
 const INTEGRATION_BRANCHES: &[&str] = &["main", "master", "develop", "HEAD"];
 
 /// Extract a ticket ID (e.g. `PAVA-2057`) from a branch name.
@@ -447,8 +447,8 @@ pub fn extract_ticket_id(branch: &str) -> Option<String> {
     extract_ticket_alpha(branch)
 }
 
-/// Unified ticket extractor used by both the proxy ingest path and the
-/// batch import pipeline. Returns `(ticket_id, source)` where `source` is
+/// Unified ticket extractor used by both the live tailer and `budi import`.
+/// Returns `(ticket_id, source)` where `source` is
 /// one of `TICKET_SOURCE_BRANCH` or `TICKET_SOURCE_BRANCH_NUMERIC`.
 ///
 /// Behavior (R1.3, #221):
@@ -461,8 +461,8 @@ pub fn extract_ticket_id(branch: &str) -> Option<String> {
 /// 3. Falls back to the pure-numeric pattern from ADR-0082 §9 — a
 ///    leading numeric segment in the last `/`-separated path component,
 ///    followed by `-` or end-of-string. This handles `fix/1234-typo`
-///    conventions that many GitHub-flow teams rely on and keeps proxy
-///    behaviour consistent with batch ingest.
+///    conventions that many GitHub-flow teams rely on and keeps
+///    transcript-derived rows consistent with retained legacy data.
 pub fn extract_ticket_from_branch(branch: &str) -> Option<(String, &'static str)> {
     if branch.is_empty() || INTEGRATION_BRANCHES.contains(&branch) {
         return None;

@@ -4,6 +4,8 @@
 - **Purpose**: Inform roadmap planning for Budi 9.0+ by mapping the competitive landscape
 - **Last updated**: 2026-04-12
 
+> **Stale after 2026-04-17 (ADR-0089).** This note captures pre-8.2 proxy-first assumptions and is preserved as historical research only. Current live-path/product-direction decisions are governed by [ADR-0089](../adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md).
+
 ## Market Summary
 
 The AI coding cost analytics space has exploded from ~5 tools in early 2025 to **50+ tools** by April 2026. Most are small open-source projects by individual developers targeting Claude Code. The team/manager tier remains underserved.
