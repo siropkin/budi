@@ -21,7 +21,16 @@
 #      every POLL_INTERVAL seconds (default: 5). The API returns the most
 #      recent ~100 events newest-first; we only ever look at the first
 #      page so each poll costs one HTTP request.
-#   3. For every event we have not seen before (keyed on
+#   3. *Baseline pass* (critical for measurement validity): the very
+#      first successful poll snapshots whichever events are already on
+#      page 1 (typically up to ~100 historical events going back ~24h
+#      for an active Cursor user) and marks them as seen WITHOUT
+#      logging any lag samples. If we logged those, the "lag" would
+#      really be the events' historical age (now - timestamp), not
+#      the time the API took to surface them — which is what we
+#      actually want to measure. After baselining, only events that
+#      appear on subsequent polls are recorded.
+#   4. For every event we have not seen before (keyed on
 #      `(timestamp, model, inputTokens, outputTokens, cacheReadTokens, totalCents)`
 #      — the API does not expose a stable request_id), record:
 #        - `event_timestamp_ms`    — the `timestamp` the API attaches
@@ -37,12 +46,12 @@
 #                                    slightly negative — we treat that as
 #                                    "lag below measurement floor" and
 #                                    record it as 0)
-#   4. Stream rows to a CSV as they happen so a SIGINT mid-run still
+#   5. Stream rows to a CSV as they happen so a SIGINT mid-run still
 #      preserves data. On exit (Ctrl-C, --duration expiry, or the
 #      operator running --analyze on an existing CSV), compute p50 / p90
 #      / p99 of `lag_ms` plus the min / max / count, and write a JSON
 #      summary file alongside the CSV.
-#   5. The operator drives a real Cursor session in parallel — typical
+#   6. The operator drives a real Cursor session in parallel — typical
 #      coding interactions in Cursor's chat / composer / inline edit
 #      flows. To get a meaningful sample the script keeps polling until
 #      it has logged at least --min-events events (default: 100) or the
@@ -320,6 +329,13 @@ fi
 START_MS="$(now_ms)"
 END_MS=$(( START_MS + MAX_DURATION * 1000 ))
 NEW_EVENTS=0
+# BASELINED=0: the first successful poll snapshots whatever is already on
+# page 1 (up to ~100 historical events) into SEEN without logging lag.
+# Without this, the first poll would log a fake "lag" for every existing
+# event equal to (now - event_timestamp), which is the event's age, not
+# the time it took the API to surface it. We only want to measure lag for
+# events that appear *after* we start polling.
+BASELINED=0
 
 cleanup() {
   printf "\n[stopping] writing summary...\n" >&2
@@ -338,25 +354,64 @@ while :; do
     break
   fi
 
-  response="$(curl --silent --show-error --fail \
-    --max-time 8 \
+  body_file="$(mktemp -t cursor-usage-lag.XXXXXX)"
+  err_file="$(mktemp -t cursor-usage-lag-err.XXXXXX)"
+  http_code="$(curl --silent --show-error \
+    --max-time 15 \
+    --output "$body_file" \
+    --write-out '%{http_code}' \
     --header "Cookie: ${COOKIE}" \
     --header "Origin: https://cursor.com" \
     --header "Referer: https://cursor.com/dashboard" \
     --header "Content-Type: application/json" \
+    --header "User-Agent: budi-cursor-usage-lag/1.0 (+https://github.com/siropkin/budi/issues/321)" \
     --data '{}' \
-    https://cursor.com/api/dashboard/get-filtered-usage-events 2>/dev/null || true)"
+    https://cursor.com/api/dashboard/get-filtered-usage-events 2>"$err_file")"
+  curl_exit=$?
+  observed_at="$(now_ms)"
+  body_size="$(wc -c <"$body_file" 2>/dev/null | tr -d ' ')"
+  body_snippet="$(head -c 200 "$body_file" 2>/dev/null | tr '\n\r\t' '   ')"
+  curl_err="$(tr '\n' ' ' <"$err_file" 2>/dev/null)"
 
-  if [[ -z "$response" ]]; then
-    printf "[cursor-usage-lag] empty response (network or auth issue) — retrying in %ss\n" "$POLL_INTERVAL" >&2
+  if [[ "$curl_exit" -ne 0 ]]; then
+    printf "[cursor-usage-lag] curl failed (exit=%d, http=%s): %s — retrying in %ss\n" \
+      "$curl_exit" "${http_code:-000}" "${curl_err:-no stderr}" "$POLL_INTERVAL" >&2
+    rm -f "$body_file" "$err_file"
     sleep "$POLL_INTERVAL"
     continue
   fi
 
-  observed_at="$(now_ms)"
+  if [[ "$http_code" != "200" ]]; then
+    printf "[cursor-usage-lag] HTTP %s (body %s bytes): %s — retrying in %ss\n" \
+      "$http_code" "${body_size:-0}" "${body_snippet:-<empty>}" "$POLL_INTERVAL" >&2
+    case "$http_code" in
+      401|403)
+        printf "[cursor-usage-lag] hint: HTTP %s usually means the JWT expired or the session was invalidated.\n" "$http_code" >&2
+        printf "[cursor-usage-lag] hint: restart Cursor (it auto-refreshes the token in state.vscdb), then re-run.\n" >&2
+        ;;
+      429)
+        printf "[cursor-usage-lag] hint: HTTP 429 = rate-limited; raise --interval.\n" >&2
+        ;;
+      000)
+        printf "[cursor-usage-lag] hint: HTTP 000 = no HTTP response (network unreachable, DNS, or TLS handshake failure).\n" >&2
+        ;;
+    esac
+    rm -f "$body_file" "$err_file"
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
 
-  # Extract events into TSV columns we can iterate without re-invoking jq.
-  rows="$(printf "%s" "$response" | jq -r '
+  # 200 OK but body isn't JSON — surface the snippet so we can tell whether
+  # it's an HTML Cloudflare challenge page or some other content.
+  if ! jq -e . <"$body_file" >/dev/null 2>&1; then
+    printf "[cursor-usage-lag] HTTP 200 but body is not JSON (%s bytes): %s — retrying in %ss\n" \
+      "${body_size:-0}" "${body_snippet:-<empty>}" "$POLL_INTERVAL" >&2
+    rm -f "$body_file" "$err_file"
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
+
+  rows="$(jq -r '
     .usageEventsDisplay // []
     | .[]
     | [
@@ -369,9 +424,28 @@ while :; do
         (.kind // "")
       ]
     | @tsv
-  ' 2>/dev/null || true)"
+  ' <"$body_file" 2>/dev/null || true)"
+  rm -f "$body_file" "$err_file"
 
   if [[ -z "$rows" ]]; then
+    printf "[cursor-usage-lag] HTTP 200, valid JSON, no usage events on this page (waiting for new activity)\n" >&2
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
+
+  if (( BASELINED == 0 )); then
+    baseline_count=0
+    while IFS=$'\t' read -r ts model in_t out_t cache_t cents kind; do
+      [[ -z "$ts" || "$ts" == "0" ]] && continue
+      key="${ts}|${model}|${in_t}|${out_t}|${cache_t}|${cents}|${kind}"
+      SEEN["$key"]=1
+      baseline_count=$(( baseline_count + 1 ))
+    done <<<"$rows"
+    BASELINED=1
+    printf "[cursor-usage-lag] baseline established: %d existing event(s) on page 1 marked as seen.\n" \
+      "$baseline_count" >&2
+    printf "[cursor-usage-lag] only events that appear on subsequent polls will be logged as lag samples.\n" >&2
+    printf "[cursor-usage-lag] keep using Cursor normally; new agent calls will appear here as fresh events.\n" >&2
     sleep "$POLL_INTERVAL"
     continue
   fi
