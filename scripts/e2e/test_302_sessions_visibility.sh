@@ -18,7 +18,6 @@ export HOME="$TMPDIR_ROOT"
 mkdir -p "$HOME/.config/budi"
 
 DAEMON_PORT=17878
-PROXY_PORT=19878
 
 cleanup() {
   local status=$?
@@ -41,10 +40,6 @@ mkdir -p "$REPO_ROOT/.budi"
 cat >"$REPO_ROOT/.budi/budi.toml" <<CFG
 daemon_host = "127.0.0.1"
 daemon_port = $DAEMON_PORT
-
-[proxy]
-enabled = true
-port = $PROXY_PORT
 CFG
 
 (
@@ -62,7 +57,6 @@ RUST_LOG=info \
   "$BUDI_DAEMON" serve \
     --host 127.0.0.1 \
     --port $DAEMON_PORT \
-    --proxy-port $PROXY_PORT \
     >"$TMPDIR_ROOT/daemon.log" 2>&1 &
 DAEMON_PID=$!
 

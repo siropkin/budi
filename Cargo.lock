@@ -215,7 +215,6 @@ dependencies = [
  "budi-core",
  "chrono",
  "clap",
- "futures-util",
  "http-body-util",
  "notify",
  "notify-debouncer-mini",

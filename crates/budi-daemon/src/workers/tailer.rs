@@ -11,11 +11,9 @@
 //! ## Lifecycle (R1.4 — default-on)
 //!
 //! 1. `main.rs` spawns [`run`] unconditionally on every daemon start (the
-//!    `BUDI_LIVE_TAIL` gate from R1.3 was removed in R1.4 / #320). The proxy
-//!    is still live in parallel for HTTP forwarding, but its ingestion path
-//!    in `budi_core::proxy::insert_proxy_*` is now a no-op — the tailer is
-//!    the sole live writer to `messages` / `tags` / `sessions`. R2.1 (#322)
-//!    deletes the proxy module entirely.
+//!    `BUDI_LIVE_TAIL` gate from R1.3 was removed in R1.4 / #320). In R2.1
+//!    (#322) the proxy runtime was removed, so the tailer is the only live
+//!    writer to `messages` / `tags` / `sessions`.
 //! 2. [`run`] hops into a blocking thread (`notify` is fundamentally
 //!    blocking and we don't want to bind a Tokio worker thread for it),
 //!    snapshots `enabled_providers()`, builds a `(provider, watch_root)`

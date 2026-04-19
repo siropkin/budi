@@ -479,46 +479,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
         }
     }
 
-    // Auto-proxy configuration checks (shell profile + IDE config files)
-    {
-        let agents = budi_core::config::load_agents_config()
-            .unwrap_or_else(budi_core::config::AgentsConfig::all_enabled);
-        let proxy_issues =
-            super::proxy_install::doctor_auto_proxy_issues(&agents, config.proxy.effective_port());
-        if proxy_issues.is_empty() {
-            println!(
-                "  {green}\u{2713}{reset} auto-proxy config: shell profile and IDE settings look good"
-            );
-        } else {
-            println!(
-                "  {red}\u{2717}{reset} auto-proxy config: {} issue(s)",
-                proxy_issues.len()
-            );
-            for issue in proxy_issues {
-                println!("    - {issue}");
-                issues.push(issue);
-            }
-        }
-    }
-
-    // Proxy health check
-    {
-        let proxy_port = config.proxy.effective_port();
-        let proxy_enabled = config.proxy.effective_enabled();
-        if proxy_enabled {
-            let proxy_ok = check_proxy_port(proxy_port);
-            if proxy_ok {
-                println!("  {green}\u{2713}{reset} proxy: running on port {proxy_port}");
-            } else {
-                println!("  {red}\u{2717}{reset} proxy: not responding on port {proxy_port}");
-                issues.push(format!(
-                    "Proxy not running on port {proxy_port}. Start budi daemon with `budi init`."
-                ));
-            }
-        } else {
-            println!("  {dim}-{reset} proxy: disabled in config");
-        }
-    }
+    println!("  {dim}-{reset} proxy: removed in 8.2 (tailer is the live path)");
 
     // Autostart service check
     {
@@ -590,15 +551,6 @@ fn integrity_check_mode_label(deep: bool) -> &'static str {
     } else {
         "quick_check"
     }
-}
-
-/// TCP probe to check if the proxy is listening on the given port.
-fn check_proxy_port(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        std::time::Duration::from_millis(500),
-    )
-    .is_ok()
 }
 
 /// v1 contract for `~/.local/share/budi/cursor-onboarding.json`. This is

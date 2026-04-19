@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi enable claude      Enable proxy routing for Claude Code\n  budi disable cursor     Disable proxy routing for Cursor\n  budi launch claude      Explicitly launch Claude Code through the budi proxy\n  budi launch codex       Explicitly launch Codex CLI through the budi proxy\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon, proxy, today's spend\n  budi doctor             Full diagnostic: daemon, proxy, database, config\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, database, config\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -224,7 +224,7 @@ Examples:
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
     },
-    /// Quick overview: daemon, proxy, today's cost (is everything working?)
+    /// Quick overview: daemon and today's cost (is everything working?)
     Status,
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     ///
@@ -256,16 +256,6 @@ Examples:
         #[command(subcommand)]
         action: IntegrationAction,
     },
-    /// Enable proxy auto-configuration for one agent (claude, codex, cursor, copilot)
-    Enable {
-        /// Agent name or alias (claude, codex, cursor, copilot)
-        agent: String,
-    },
-    /// Disable proxy auto-configuration for one agent (claude, codex, cursor, copilot)
-    Disable {
-        /// Agent name or alias (claude, codex, cursor, copilot)
-        agent: String,
-    },
     /// Manage the daemon autostart service (launchd / systemd / Task Scheduler)
     #[command(after_help = "\
 Examples:
@@ -291,32 +281,6 @@ Examples:
     Cloud {
         #[command(subcommand)]
         action: CloudAction,
-    },
-    /// Launch an AI agent through the budi proxy (e.g. budi launch claude)
-    #[command(after_help = "\
-Supported agents:
-  claude    Claude Code (Tier 1) — sets ANTHROPIC_BASE_URL
-  codex     Codex CLI   (Tier 1) — sets OPENAI_BASE_URL
-  copilot   Copilot CLI (Tier 2) — sets COPILOT_PROVIDER_BASE_URL
-  cursor    Cursor      (Tier 2) — prints setup instructions (GUI only)
-  gemini    Gemini CLI  (Tier 3) — not yet supported
-
-Examples:
-  budi launch claude
-  budi launch codex -- --model o3
-  budi launch copilot
-  budi launch cursor
-  BUDI_BYPASS=1 budi launch codex
-  budi launch claude --proxy-port 9999")]
-    Launch {
-        /// Agent to launch: claude, codex, copilot, cursor, gemini
-        agent: String,
-        /// Override proxy port (default: 9878). Precedence: BUDI_PROXY_PORT env > this flag > config.toml.
-        #[arg(long)]
-        proxy_port: Option<u16>,
-        /// Arguments to pass through to the agent (use -- to separate)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
     },
 }
 
@@ -538,8 +502,6 @@ fn main() -> Result<()> {
         }
         Commands::Status => commands::status::cmd_status(),
         Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
-        Commands::Enable { agent } => commands::proxy_install::cmd_enable(&agent),
-        Commands::Disable { agent } => commands::proxy_install::cmd_disable(&agent),
         Commands::Autostart { action } => match action {
             AutostartAction::Status => commands::autostart::cmd_autostart_status(),
             AutostartAction::Install => commands::autostart::cmd_autostart_install(),
@@ -549,11 +511,6 @@ fn main() -> Result<()> {
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
             CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
         },
-        Commands::Launch {
-            agent,
-            proxy_port,
-            args,
-        } => commands::launch::cmd_launch(&agent, proxy_port, &args),
     }
 }
 
@@ -603,6 +560,13 @@ mod tests {
             Cli::try_parse_from(["budi", "autostart", sub])
                 .unwrap_or_else(|_| panic!("budi autostart {sub} should parse"));
         }
+    }
+
+    #[test]
+    fn cli_rejects_removed_proxy_commands() {
+        assert!(Cli::try_parse_from(["budi", "launch", "claude"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "enable", "claude"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "disable", "cursor"]).is_err());
     }
 
     #[test]

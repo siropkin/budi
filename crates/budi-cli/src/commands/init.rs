@@ -65,10 +65,6 @@ pub fn cmd_init(
         );
     }
     print_agents_summary(&agents_config);
-    let proxy_warnings = super::proxy_install::apply_auto_proxy_configuration(
-        &agents_config,
-        config.proxy.effective_port(),
-    );
 
     let selected_integrations = resolve_init_integrations(
         local,
@@ -98,12 +94,7 @@ pub fn cmd_init(
 
     let install_report =
         super::integrations::install_selected(&config, &selected_integrations, statusline_preset);
-    let mut integration_warnings = install_report.warnings;
-    integration_warnings.extend(
-        proxy_warnings
-            .into_iter()
-            .map(|warning| format!("Auto-proxy config: {warning}")),
-    );
+    let integration_warnings = install_report.warnings;
 
     if repo_root.is_none() {
         let mut prefs = super::integrations::load_preferences();
@@ -182,23 +173,11 @@ pub fn cmd_init(
                 .unwrap_or_else(|_| "<unable to resolve budi home>".to_string())
         );
     }
-    let has_cli_agents = agents_config.claude_code.enabled
-        || agents_config.codex_cli.enabled
-        || agents_config.copilot_cli.enabled;
-
     println!();
     println!("  {bold}Next steps:{reset}");
-    if has_cli_agents {
-        let yellow = super::ansi("\x1b[33m");
+    if !selected_integrations.is_empty() {
         println!(
-            "    1. {yellow}Restart your terminal{reset} {dim}(or `source ~/.zshrc`){reset} so CLI agents pick up proxy env vars."
-        );
-        println!(
-            "       {dim}Already-running shells are NOT going through the proxy yet. For immediate routing: `budi launch <agent>`.{reset}"
-        );
-    } else if !selected_integrations.is_empty() {
-        println!(
-            "    1. Restart your IDE (Cursor, etc.) so the updated proxy settings take effect."
+            "    1. Restart your IDE (Cursor, etc.) so newly installed integrations are loaded."
         );
     } else {
         println!(
@@ -206,10 +185,10 @@ pub fn cmd_init(
         );
     }
     println!(
-        "    2. Start coding as usual {dim}(`claude`, `codex`, `cursor`, `gh copilot` — proxy is auto-configured){reset}"
+        "    2. Start coding as usual {dim}(`claude`, `codex`, `cursor`, `gh copilot` — budi tails local transcripts automatically){reset}"
     );
     println!(
-        "    3. Verify setup:      {bold}budi doctor{reset} {dim}(checks daemon, proxy, agents, attribution){reset}"
+        "    3. Verify setup:      {bold}budi doctor{reset} {dim}(checks daemon, tailer, agents, attribution){reset}"
     );
     println!(
         "    4. Check today's cost: {bold}budi status{reset} {dim}(quick snapshot, no data yet? see step 2){reset}"

@@ -6,7 +6,7 @@ Rust integration tests so they can:
 
 - exercise the real release binaries (not a test harness compiled against
   the crates),
-- boot the full daemon + proxy + CLI surface,
+- boot the daemon + CLI surface against the live filesystem tailer path,
 - drive the system over HTTP exactly the way an agent or user would,
 - be run locally, in CI, or during PR review without extra tooling beyond
   `bash`, `curl`, `sqlite3`, and `python3`.
@@ -39,12 +39,11 @@ cleans up its temp directory on exit (unless `KEEP_TMP=1`).
 3. **Isolation.** Always:
    - `export HOME="$(mktemp -d …)"` so the DB under
      `$HOME/.local/share/budi/analytics.db` is fresh;
-   - allocate non-default daemon / proxy / upstream ports so multiple
+   - allocate non-default daemon ports so multiple
      scripts can run in parallel;
    - kill children via a `trap cleanup EXIT INT TERM`.
-4. **No real network.** Run a tiny Python `http.server`-based mock upstream
-   on loopback and point the daemon at it via
-   `BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM`.
+4. **No real network.** Tailer tests should append transcript fixtures under
+   provider watch roots and assert daemon/API behavior from local data only.
 5. **Assertions.** Prefer explicit, easy-to-read assertions over clever
    one-liners. Fail with a clear `[e2e] FAIL: …` message and include the
    most recent daemon log tail.
@@ -57,9 +56,6 @@ cleans up its temp directory on exit (unless `KEEP_TMP=1`).
 | Variable | Purpose |
 |---|---|
 | `HOME` | Isolates the Budi data dir (`$HOME/.local/share/budi/`) and repo config (`$HOME/repo/.budi/budi.toml`). |
-| `BUDI_ANTHROPIC_UPSTREAM` | Overrides the hard-coded `https://api.anthropic.com` so the proxy calls a loopback mock. |
-| `BUDI_OPENAI_UPSTREAM` | Same, for the OpenAI upstream. |
-| `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` | Existing overrides on `ProxyConfig`; rarely needed directly because scripts pass `--proxy-port` to `budi-daemon serve`. |
 | `KEEP_TMP=1` | Tells the cleanup trap to leave the temp HOME in place for debugging. |
 
 ## Adding a new script

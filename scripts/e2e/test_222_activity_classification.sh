@@ -18,7 +18,6 @@ export HOME="$TMPDIR_ROOT"
 mkdir -p "$HOME/.config/budi"
 
 DAEMON_PORT=17880
-PROXY_PORT=19880
 
 cleanup() {
   local status=$?
@@ -40,10 +39,6 @@ mkdir -p "$REPO_ROOT/.budi"
 cat >"$REPO_ROOT/.budi/budi.toml" <<CFG
 daemon_host = "127.0.0.1"
 daemon_port = $DAEMON_PORT
-
-[proxy]
-enabled = true
-port = $PROXY_PORT
 CFG
 
 (
@@ -61,7 +56,6 @@ RUST_LOG=info \
   "$BUDI_DAEMON" serve \
     --host 127.0.0.1 \
     --port $DAEMON_PORT \
-    --proxy-port $PROXY_PORT \
     >"$TMPDIR_ROOT/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -277,11 +271,7 @@ UNION ALL
 SELECT 'tags', message_id FROM tags
   WHERE value LIKE '%login bug%'
      OR value LIKE '%explain the error%'
-     OR value LIKE '%patch the regression%'
-UNION ALL
-SELECT 'proxy_events', CAST(id AS TEXT) FROM proxy_events
-  WHERE COALESCE(model,'') LIKE '%login bug%'
-     OR COALESCE(model,'') LIKE '%explain the error%';
+     OR value LIKE '%patch the regression%';
 SQL
 )"
 if [[ -n "$LEAK" ]]; then

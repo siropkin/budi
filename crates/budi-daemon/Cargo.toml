@@ -12,7 +12,6 @@ axum.workspace = true
 budi-core = { path = "../budi-core" }
 chrono.workspace = true
 clap.workspace = true
-futures-util.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 rusqlite.workspace = true
