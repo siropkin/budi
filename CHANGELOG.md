@@ -1,5 +1,26 @@
 # Changelog
 
+## 8.2.0 — 2026-04-19
+
+8.2 is the "Invisible Budi" release: Budi is now invisible by default, reading agent transcripts directly from disk instead of intercepting network traffic.
+
+### Added
+
+- **`budi init --cleanup`** — A new command to explicitly remove legacy 8.1 injected configuration (shell profiles, editor settings) from your machine.
+
+### Changed
+
+- **JSONL tailing is the sole live path** — Budi now watches your agent's transcript files on disk instead of acting as a local proxy. This provides the exact same cost classification and privacy model, but with zero network interception and zero configuration changes to your tools. Latency is now measured in seconds rather than milliseconds. See [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) for the full rationale.
+- **Removed proxy and wrapper UX** — `budi launch`, `budi enable <agent>`, and `budi disable <agent>` have been removed. The proxy binary, proxy port, and `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `COPILOT_PROVIDER_BASE_URL` injections are gone.
+- **Removed config mutation** — Budi no longer mutates your shell profile, Cursor `settings.json`, or `~/.codex/config.toml`.
+- **`proxy_events` migration** — The obsolete `proxy_events` table is dropped on upgrade. Existing proxy-sourced `messages` rows remain read-only so your historical analytics stay intact. `budi doctor` will report this retained legacy state.
+
+### Upgrade Checklist for 8.1 Users
+
+1. Run `budi init --cleanup` to remove legacy proxy configuration from your shell and editors.
+2. Restart your terminal.
+3. Run `budi doctor` to verify the new tailer-based daemon is healthy.
+
 ## 8.1.0 — 2026-04-18
 
 ### Fixed
