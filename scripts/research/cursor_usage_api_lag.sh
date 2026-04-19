@@ -338,25 +338,64 @@ while :; do
     break
   fi
 
-  response="$(curl --silent --show-error --fail \
-    --max-time 8 \
+  body_file="$(mktemp -t cursor-usage-lag.XXXXXX)"
+  err_file="$(mktemp -t cursor-usage-lag-err.XXXXXX)"
+  http_code="$(curl --silent --show-error \
+    --max-time 15 \
+    --output "$body_file" \
+    --write-out '%{http_code}' \
     --header "Cookie: ${COOKIE}" \
     --header "Origin: https://cursor.com" \
     --header "Referer: https://cursor.com/dashboard" \
     --header "Content-Type: application/json" \
+    --header "User-Agent: budi-cursor-usage-lag/1.0 (+https://github.com/siropkin/budi/issues/321)" \
     --data '{}' \
-    https://cursor.com/api/dashboard/get-filtered-usage-events 2>/dev/null || true)"
+    https://cursor.com/api/dashboard/get-filtered-usage-events 2>"$err_file")"
+  curl_exit=$?
+  observed_at="$(now_ms)"
+  body_size="$(wc -c <"$body_file" 2>/dev/null | tr -d ' ')"
+  body_snippet="$(head -c 200 "$body_file" 2>/dev/null | tr '\n\r\t' '   ')"
+  curl_err="$(tr '\n' ' ' <"$err_file" 2>/dev/null)"
 
-  if [[ -z "$response" ]]; then
-    printf "[cursor-usage-lag] empty response (network or auth issue) — retrying in %ss\n" "$POLL_INTERVAL" >&2
+  if [[ "$curl_exit" -ne 0 ]]; then
+    printf "[cursor-usage-lag] curl failed (exit=%d, http=%s): %s — retrying in %ss\n" \
+      "$curl_exit" "${http_code:-000}" "${curl_err:-no stderr}" "$POLL_INTERVAL" >&2
+    rm -f "$body_file" "$err_file"
     sleep "$POLL_INTERVAL"
     continue
   fi
 
-  observed_at="$(now_ms)"
+  if [[ "$http_code" != "200" ]]; then
+    printf "[cursor-usage-lag] HTTP %s (body %s bytes): %s — retrying in %ss\n" \
+      "$http_code" "${body_size:-0}" "${body_snippet:-<empty>}" "$POLL_INTERVAL" >&2
+    case "$http_code" in
+      401|403)
+        printf "[cursor-usage-lag] hint: HTTP %s usually means the JWT expired or the session was invalidated.\n" "$http_code" >&2
+        printf "[cursor-usage-lag] hint: restart Cursor (it auto-refreshes the token in state.vscdb), then re-run.\n" >&2
+        ;;
+      429)
+        printf "[cursor-usage-lag] hint: HTTP 429 = rate-limited; raise --interval.\n" >&2
+        ;;
+      000)
+        printf "[cursor-usage-lag] hint: HTTP 000 = no HTTP response (network unreachable, DNS, or TLS handshake failure).\n" >&2
+        ;;
+    esac
+    rm -f "$body_file" "$err_file"
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
 
-  # Extract events into TSV columns we can iterate without re-invoking jq.
-  rows="$(printf "%s" "$response" | jq -r '
+  # 200 OK but body isn't JSON — surface the snippet so we can tell whether
+  # it's an HTML Cloudflare challenge page or some other content.
+  if ! jq -e . <"$body_file" >/dev/null 2>&1; then
+    printf "[cursor-usage-lag] HTTP 200 but body is not JSON (%s bytes): %s — retrying in %ss\n" \
+      "${body_size:-0}" "${body_snippet:-<empty>}" "$POLL_INTERVAL" >&2
+    rm -f "$body_file" "$err_file"
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
+
+  rows="$(jq -r '
     .usageEventsDisplay // []
     | .[]
     | [
@@ -369,9 +408,11 @@ while :; do
         (.kind // "")
       ]
     | @tsv
-  ' 2>/dev/null || true)"
+  ' <"$body_file" 2>/dev/null || true)"
+  rm -f "$body_file" "$err_file"
 
   if [[ -z "$rows" ]]; then
+    printf "[cursor-usage-lag] HTTP 200, valid JSON, no usage events on this page (waiting for new activity)\n" >&2
     sleep "$POLL_INTERVAL"
     continue
   fi
