@@ -50,7 +50,7 @@ pub fn cmd_init(cleanup: bool, no_daemon: bool) -> Result<()> {
         "  Start coding as usual {dim}(`claude`, `codex`, `cursor`, `gh copilot` — budi tails local transcripts automatically){reset}"
     );
     println!(
-        "  Run `budi doctor` for a full health check {dim}(daemon, tailer, attribution, autostart){reset}"
+        "  Run `budi doctor` for a full health check {dim}(daemon, tailer, schema, transcript visibility){reset}"
     );
 
     Ok(())
