@@ -83,12 +83,12 @@ The proxy solves data ingestion generically — no dedicated provider needed. Bu
 
 ### Provider System
 
-The existing provider trait (`Provider` in `crates/budi-core/src/provider.rs`) and its two implementations (Claude Code, Cursor) are **removed from the ongoing sync pipeline** when the proxy ships in R2. However, they may be retained as a **one-time historical import** mechanism.
+The existing provider trait (`Provider` in `crates/budi-core/src/provider.rs`) remains the core ingestion extension point after the ADR-0089 pivot.
 
-- **R0–R1**: Providers still exist as the primary ingestion path (the proxy hasn't shipped yet).
-- **R2**: Proxy ships and becomes the primary ingestion path. Providers are removed from the continuous sync loop.
-- **Historical import**: Providers may be kept (or re-scoped) behind a `budi import` command for one-time backfill of pre-proxy data (Claude Code transcripts on disk, Cursor usage history). This lets new users load their existing data when they first set up budi. The decision on whether to keep or rebuild this is made during R2 implementation based on actual complexity.
-- **New agents**: Supported via proxy traffic classification only. No new `Provider` implementations for ongoing sync.
+- **R0–R1 historical context**: Providers were the original file-import path before 8.0's proxy-first contract.
+- **8.2+ live contract**: Providers power both the live tailer and `budi import`. `watch_roots()` declares the transcript directories the daemon watches live; `discover_files()` remains the one-shot backfill enumerator; `parse_file()` stays shared between both modes.
+- **Historical import**: `budi import` continues to use the same providers for one-time backfill of transcript/API history (Claude Code, Codex, Copilot CLI, Cursor Usage API).
+- **New agents**: Added by implementing `Provider` for that agent's local transcript/API surface, not by introducing a proxy adapter or env-var wrapper.
 
 ### Downstream Impact on R2.4
 
@@ -102,7 +102,7 @@ Issue #92 ([R2.4] "Keep hooks, OTEL, and historical importers as transition fall
 ### Expected
 
 - Clear scope lock for R1–R5 implementation.
-- Simpler codebase — one ingestion path (proxy), one local UX (Rich CLI), one web UX (cloud dashboard).
+- Simpler codebase — one ingestion path (tailer/import pipeline), one local UX (Rich CLI), one web UX (cloud dashboard).
 - Less code to maintain, test, and reason about.
 - Faster iteration — no energy spent on backward compatibility with paths that are being replaced.
 

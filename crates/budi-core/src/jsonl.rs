@@ -332,7 +332,7 @@ fn truncate_utf8_at_char_boundary(s: &mut String, max: usize) {
 }
 
 /// Bounded label constants for `tool_outcome` tag values. Pinned here so
-/// analytics, tests, and proxy/import ingest all agree.
+/// analytics, tests, live tailing, and `budi import` all agree.
 pub const TOOL_OUTCOME_SUCCESS: &str = "success";
 pub const TOOL_OUTCOME_ERROR: &str = "error";
 pub const TOOL_OUTCOME_DENIED: &str = "denied";
@@ -367,8 +367,8 @@ const USER_DENIAL_SENTINELS: &[&str] = &[
 ];
 
 /// Classify a single `tool_result` block given its `is_error` flag and
-/// flattened content text. Exposed for tests and for the proxy path (if
-/// we ever grow one that inspects follow-up request bodies).
+/// flattened content text. Exposed for tests and any parser/pipeline code
+/// that needs the shared bounded outcome labels.
 pub fn classify_tool_outcome(is_error: bool, text: Option<&str>) -> &'static str {
     if let Some(t) = text {
         let lower = t.to_ascii_lowercase();

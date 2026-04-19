@@ -51,11 +51,10 @@ impl Enricher for GitEnricher {
         }
 
         // Extract ticket_id from git_branch (branch itself is stored as a
-        // column, not a tag). R1.3 (#221) unifies the extractor with the
-        // proxy ingest path so imported Claude Code / Cursor data agrees
-        // with live proxy rows — in particular, pure-numeric tickets from
-        // branches like `fix/1234-typo` (ADR-0082 §9) now tag consistently
-        // on both paths.
+        // column, not a tag). R1.3 (#221) unified the extractor so live
+        // tailing and `budi import` tag pure-numeric branches like
+        // `fix/1234-typo` consistently, while staying readable against
+        // retained 8.1 legacy history.
         if let Some(ref branch) = msg.git_branch
             && let Some((ticket, source)) = extract_ticket_from_branch(branch)
         {
@@ -643,10 +642,10 @@ mod tests {
         assert!(!tags.iter().any(|t| t.key == "branch"));
     }
 
-    /// R1.3 (#221): the import path must also honour the ADR-0082 §9
-    /// numeric-only ticket fallback, matching the proxy ingest path.
-    /// Before R1.3, `fix/1234-typo` produced a ticket tag on the proxy
-    /// path but not on `budi import`, so analytics disagreed.
+    /// R1.3 (#221): `budi import` must also honour the ADR-0082 §9
+    /// numeric-only ticket fallback so it matches the live tailer.
+    /// Before R1.3, `fix/1234-typo` produced a ticket tag in legacy
+    /// proxy-era rows but not on `budi import`, so analytics disagreed.
     #[test]
     fn git_enricher_extracts_numeric_only_ticket() {
         let mut enricher = GitEnricher {

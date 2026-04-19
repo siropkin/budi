@@ -1,7 +1,8 @@
 # ADR-0089: Reverse Proxy-First Architecture — JSONL Tailing as Sole Live Path
 
 - **Date**: 2026-04-17
-- **Status**: Accepted (2026-04-18 — promotion criteria below all satisfied; recorded in [#356](https://github.com/siropkin/budi/issues/356) R1.7 docs review pass)
+- **Status**: Accepted
+- **Accepted on**: 2026-04-18 (promotion criteria below all satisfied; recorded in [#356](https://github.com/siropkin/budi/issues/356) R1.7 docs review pass)
 - **Issue**: [#317](https://github.com/siropkin/budi/issues/317)
 - **Milestone**: 8.2.0 (epic: [#316](https://github.com/siropkin/budi/issues/316))
 - **Supersedes**: [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md)
@@ -99,7 +100,7 @@ Caveats are spelled out in the verdict comment: N = 12 is small (so `p99` ≈ `m
 
 ### 8. Plugin model is preserved
 
-The `Provider` trait is the only extension point. Adding a new agent in 8.3 (#294) is one new `Provider` impl plus its registration — no proxy adapter, no base URL matrix, no env-var injection, no shell profile work. The plugin model survives intact; what changes is that it is also the live model, not just the import model.
+The `Provider` trait is the only extension point. Adding a new agent under the future coverage epic ([#294](https://github.com/siropkin/budi/issues/294)) is one new `Provider` impl plus its registration — no proxy adapter, no base URL matrix, no env-var injection, no shell profile work. The plugin model survives intact; what changes is that it is also the live model, not just the import model.
 
 ## Consequences
 
@@ -171,7 +172,7 @@ Rewritten in full in [#317](https://github.com/siropkin/budi/issues/317) as "JSO
 
 ### `SOUL.md`
 
-Any section that still describes the proxy as the live path is updated in the R1.1 PR.
+Any section that still describes the proxy as the live path is updated during the 8.2 docs passes; `#359` is the Round 2 scrub that removes the remaining misleading live-path language.
 
 ## Promotion Criteria
 
@@ -194,4 +195,4 @@ The 8.2 R2 proxy-removal work is unblocked once the R1 exit gate ([#362](https:/
 - [#316](https://github.com/siropkin/budi/issues/316) — 8.2.0 Invisible Budi epic
 - [#317](https://github.com/siropkin/budi/issues/317) — this ADR's tracking issue
 - [#201](https://github.com/siropkin/budi/issues/201) — 8.1.0 epic (must ship before 8.2 work starts)
-- [#294](https://github.com/siropkin/budi/issues/294) — 8.3.0 AI coding tool coverage epic (built on the tailer)
+- [#294](https://github.com/siropkin/budi/issues/294) — future AI coding tool coverage epic (built on the tailer)

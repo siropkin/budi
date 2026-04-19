@@ -4,6 +4,8 @@
 - **Status**: Proposed (partially planned in R5 #106, #107)
 - **Related issues**: #106 (budget engine warn-only), #107 (hard budget blocking)
 
+> **Stale after 2026-04-17 (ADR-0089).** This design note assumes a proxy-enforced live path and is preserved as historical research only. Any future alerts/budget design should start from the transcript-tailer contract in [ADR-0089](../adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md), not from proxy blocking.
+
 ## Concept
 
 Alerts are a separate entity from tags. Tags are for attribution/grouping. Alerts are for thresholds and notifications.

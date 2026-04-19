@@ -111,16 +111,16 @@ If a review issue leads to "no code changes needed", still include a small artif
 
 ## Adding support for a new agent
 
-New agents are supported via **proxy traffic classification** — no new `Provider` implementation needed for live data (see [ADR-0081](docs/adr/0081-product-contract-and-deprecation-policy.md)).
+New agents are supported via the shared transcript/provider ingest path (see [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)).
 
-1. Update the agent compatibility matrix in [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md)
-2. If the agent uses an existing protocol family (OpenAI Chat Completions or Anthropic Messages), add the agent's env var / config key to the `budi launch` CLI wrapper in `crates/budi-cli/src/commands/launch.rs`
-3. If the agent uses a new protocol family (e.g., Gemini), implement a new protocol handler in the proxy (`crates/budi-daemon/src/routes/proxy.rs`)
+1. Implement or extend a `Provider` in `crates/budi-core/src/provider.rs` / `crates/budi-core/src/providers/`
+2. Add `watch_roots()`, `discover_files()`, and `parse_file()` support for the agent's local artifacts
+3. If the agent has a trustworthy direct usage API, wire any optional reconciliation path alongside the provider (Cursor-style) without introducing a second live path
 4. Add pricing data for the agent's models in `crates/budi-core/src/cost.rs`
-5. Add onboarding instructions to README.md and update the supported agents table
+5. Update README / SOUL / ADR references that describe supported agents
 6. Add tests
 
-The existing `Provider` trait is retained only for historical import via `budi import`. Do not create new `Provider` implementations for live data ingestion.
+The same `Provider` implementation powers both live tailing and `budi import`; do not introduce shell wrappers or proxy-based live ingestion for new agents.
 
 ## Adding a new enricher
 

@@ -29,7 +29,7 @@ After upgrading: the first CLI command now verifies daemon version and auto-rest
 
 ### Local end-to-end tests
 
-Shell-driven end-to-end tests live under `scripts/e2e/`. They exercise the full stack — real release binaries (`budi` + `budi-daemon`), a mock upstream over loopback, the HTTP proxy path, and the CLI — against an isolated `$HOME` so they never touch real user data.
+Shell-driven end-to-end tests live under `scripts/e2e/`. They exercise the full stack — real release binaries (`budi` + `budi-daemon`), the transcript tailer, the CLI, and upgrade/compatibility edges — against an isolated `$HOME` so they never touch real user data.
 
 ```bash
 cargo build --release                                 # once per change
@@ -45,7 +45,7 @@ Each script is a single self-contained bash file that:
 
 1. Builds a throwaway `HOME` in `mktemp` and exports it for the whole run.
 2. Boots a tiny Python mock upstream on loopback.
-3. Starts `budi-daemon serve --port … --proxy-port …` with `BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM` pointed at the mock (these env vars override the hard-coded upstreams — see `ProxyConfig::effective_anthropic_upstream` / `effective_openai_upstream`).
+3. Starts `budi-daemon serve ...` inside that throwaway home; some upgrade-compatibility scripts also point `BUDI_ANTHROPIC_UPSTREAM` / `BUDI_OPENAI_UPSTREAM` at a mock so legacy proxy-era state can be exercised without touching real upstreams.
 4. Drives real CLI/HTTP commands and asserts DB rows, API responses, and CLI output.
 5. Tears down the temp HOME and child processes via a `trap`.
 
@@ -89,8 +89,8 @@ Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extra
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Codex, Copilot CLI, Cursor) including each provider's `watch_roots()` for live tailing, pipeline (enrichment), cost calculation, config, migrations, autostart (platform-native daemon service management). The 8.1-era proxy runtime is deleted in R2.1 (#322); R2.5 (#326) keeps proxy-sourced `messages` rows read-only for historical analytics while dropping the obsolete `proxy_events` table on upgrade. Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed).
-- **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, update, integrations, autostart, uninstall, migrate, repair (the launch / enable / disable / proxy-install commands are deleted in 8.2 R2.1 #322 — R2.3 #324 also reduces `budi init` to daemon-+-autostart only)
-- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API and runs the daemon-side filesystem tailer that watches each `Provider::watch_roots()` directory, parses incremental JSONL appends through `Pipeline::default_pipeline()`, and writes to the canonical `messages` / tag tables. JSONL tailing is the sole live ingestion path per [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md); the legacy proxy server on port 9878 still runs in 8.1.x for the transition window and is removed in 8.2 R2.1 (#322). One-shot historical backfill remains user-initiated via `budi import`.
+- **budi-cli** - Thin HTTP client to the daemon. Commands include `init`, `stats`, `sessions`, `status`, `sync`, `import`, `statusline`, `doctor`, `health`, `update`, `integrations`, `autostart`, `uninstall`, `migrate`, `repair`, and `cloud`. `budi init` is the daemon + autostart entry point; legacy launch / enable / disable / proxy-install commands are removed in 8.2.
+- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API and runs the daemon-side filesystem tailer that watches each `Provider::watch_roots()` directory, parses incremental JSONL appends through `Pipeline::default_pipeline()`, and writes to the canonical `messages` / tag tables. JSONL tailing is the sole live ingestion path per [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md). One-shot historical backfill remains user-initiated via `budi import`.
 
 ### Data flow
 
@@ -382,8 +382,8 @@ status contract. It is consumed by the CLI statusline, the Cursor
 extension ([#232](https://github.com/siropkin/budi/issues/232)), and the
 cloud dashboard ([#235](https://github.com/siropkin/budi/issues/235)).
 Provider is an explicit filter rather than a family of per-surface
-shapes — new agents added in 8.2 under
-[#294](https://github.com/siropkin/budi/issues/294) slot into the same
+shapes — future agent coverage under
+[#294](https://github.com/siropkin/budi/issues/294) slots into the same
 shape. See [`docs/statusline-contract.md`](docs/statusline-contract.md)
 for the full schema.
 
@@ -440,7 +440,7 @@ Key points:
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
 - **Historical import**: `budi import` = full history backfill, `budi import --force` = clear all data and re-ingest from scratch
-- **Proxy mode**: Daemon runs a second HTTP server on port 9878 that acts as a transparent proxy between AI agents and upstream providers (Anthropic, OpenAI). `budi init` auto-installs proxy routing for selected agents: shell-profile env block for Claude Code/Codex/Copilot, Cursor settings patch (`openai.baseUrl`), and Codex Desktop config patch (`openai_base_url` in `~/.codex/config.toml`). `budi enable <agent>` / `budi disable <agent>` toggle this configuration. `budi launch <agent>` remains an explicit fallback launcher, and `BUDI_BYPASS=1 budi launch <agent>` skips proxy injection for one run. Gemini CLI is deferred (Tier 3, different API format). Path-based routing: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI. SSE streaming responses are passed through chunk-by-chunk with no buffering; a tee/tap on the byte stream extracts token metadata (input/output tokens) from SSE events without modifying the data. Non-streaming responses are buffered and parsed for usage data. Duration is measured from request start to stream end (not to first headers). Mid-stream failures and client disconnects are handled gracefully — partial metadata is recorded via Drop. No read timeout on streaming; non-streaming uses 300s. Config: `[proxy]` section in `config.toml`, `BUDI_PROXY_PORT` / `BUDI_PROXY_ENABLED` env vars, `--proxy-port` / `--no-proxy` CLI flags. See [ADR-0082](docs/adr/0082-proxy-compatibility-matrix-and-gateway-contract.md) for the full contract.
+- **Legacy proxy residue (upgrade only)**: 8.2 does not route live traffic through a proxy. The only remaining proxy-related code scans for 8.0/8.1 residue in shell profiles and agent configs, reports retained `proxy_estimated` history honestly, and lets users remove managed blocks via `budi init --cleanup` (consent-first) or `budi uninstall` (managed cleanup parity).
 
 ## Key files
 
@@ -461,19 +461,20 @@ Key points:
 - `crates/budi-core/src/migration.rs` - Schema v1, all migration paths
 - `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
 - `crates/budi-core/src/autostart.rs` - Platform-native daemon autostart: launchd (macOS), systemd (Linux), Task Scheduler (Windows). Install/uninstall/status.
-- `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
+- `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig (legacy test/compat knobs), AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
-- `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + cloud sync worker + (in 8.1.x only) the legacy proxy server on port 9878, ~40 routes. The proxy server, its routes, and the port-9878 listener are removed in 8.2 R2.1 (#322); the daemon-side filesystem tailer worker added in 8.2 R1.3 (#319) replaces the proxy as the live ingestion source.
+- `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + cloud sync worker + startup hooks for tailer / migration / legacy-residue notices.
 - `crates/budi-daemon/src/workers/cloud_sync.rs` - Background cloud sync loop: configurable interval, backoff, auth/schema error handling
 - `crates/budi-daemon/src/routes/hooks.rs` - /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints (hook ingestion removed)
 - `crates/budi-daemon/src/routes/cloud.rs` - /cloud/sync (loopback-only manual cloud flush) and /cloud/status (cloud readiness + watermarks); added in R2.1 (#225)
 - `crates/budi-cli/src/commands/cloud.rs` - `budi cloud sync` / `budi cloud status` (R2.1 #225): text + JSON output, exit code 2 on non-ok sync
 - `crates/budi-daemon/src/routes/analytics.rs` - All analytics + admin endpoints (summary, messages, projects, cost, models, activity, branches, tags, providers, statusline, cache-efficiency, session-cost-curve, cost-confidence, subagent-cost, sessions, session-health, session-audit, admin/providers, admin/schema, admin/migrate, admin/repair)
-- `crates/budi-daemon/src/routes/proxy.rs` - Legacy 8.1 proxy handlers for Anthropic Messages and OpenAI Chat Completions. **Slated for deletion in 8.2 R2.1 (#322)** along with `crates/budi-core/src/proxy.rs` and the launch / enable / disable CLI commands.
-- `crates/budi-cli/src/commands/proxy_install.rs` - Legacy 8.1 auto-proxy installer and verifier: shell profile block + Cursor/Codex config patching + `budi enable/disable`. **Slated for deletion in 8.2 R2.1 (#322)**; existing user state is cleaned up via the consent-first `budi init --cleanup` path added in R2.6 (#357).
-- `crates/budi-cli/src/commands/launch.rs` - Legacy 8.1 `budi launch <agent>` explicit launcher (fallback path, supports `BUDI_BYPASS=1`). **Slated for deletion in 8.2 R2.1 (#322)** — agents are launched directly in 8.2+ (no Budi wrapper); the tailer sees activity via the transcript files the agent already writes.
+- `crates/budi-core/src/legacy_proxy.rs` - Upgrade-only detection/cleanup for managed 8.0/8.1 proxy residue in shell profiles and agent configs.
+- `crates/budi-cli/src/commands/init.rs` - `budi init` (daemon + autostart + detected-agent output) plus consent-first `--cleanup`.
+- `crates/budi-cli/src/commands/doctor.rs` - `budi doctor` checks daemon health, schema, transcript visibility, leftover legacy proxy residue, and retained proxy-era history.
+- `crates/budi-cli/src/commands/uninstall.rs` - `budi uninstall` removes autostart, Claude/Cursor integrations, and managed legacy proxy residue.
 - `crates/budi-cli/src/commands/sessions.rs` - `budi sessions` list and detail view (Rich CLI)
-- `crates/budi-cli/src/commands/status.rs` - `budi status` quick overview (daemon, proxy, today's cost). When the daemon is healthy but no messages are recorded for today, the command prints a first-run hint pointing the user at their agents and at `budi doctor` (R2.2, #228)
+- `crates/budi-cli/src/commands/status.rs` - `budi status` quick overview (daemon, tailer contract hints, today's cost). When the daemon is healthy but no messages are recorded for today, the command prints a first-run hint pointing the user at their agents and at `budi doctor` (R2.2, #228)
 - `crates/budi-cli/src/commands/statusline.rs` - Statusline rendering (default: quiet rolling `1d` / `7d` / `30d`, provider-scoped per ADR-0088 §4 / [docs/statusline-contract.md](docs/statusline-contract.md); `coach` / `full` presets remain as opt-in advanced variants) + installation
 <!-- budi-cursor and budi-cloud live in their own repos: siropkin/budi-cursor, siropkin/budi-cloud -->
 
@@ -481,8 +482,7 @@ Key points:
 
 - CLI never touches SQLite directly - all queries go through the daemon HTTP API
 - CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
-- `budi init` prompts for per-agent enablement (Claude Code, Codex CLI, Cursor, Copilot CLI), persists choices to `~/.config/budi/agents.toml`, and auto-configures proxy routing for enabled agents (shell profile + Cursor/Codex settings). `budi enable/disable <agent>` updates this config later. Legacy installs (no `agents.toml`) treat all available agents as enabled for backward compatibility. After configuring CLI agents (Claude, Codex, Copilot), both `budi init` and `budi enable` warn that a shell restart is required for proxy env vars to take effect and suggest `budi launch <agent>` for immediate routing. `budi doctor` detects when proxy env vars are configured in the shell profile but not set in the current process. R2.2 (#228) reshaped the `budi init` "Next steps" output so the restart-terminal prompt is step 1 (previously buried in a trailing warning), `budi doctor` is framed as the canonical end-to-end verifier, and `budi status` is framed as a today-only snapshot. `budi status` adds a friendly "no activity recorded today yet — open your agent and send a prompt" hint when the daemon is healthy but today has zero messages; `budi doctor` prints a matching first-run nudge when the DB has no assistant activity yet, so day-zero users don't misread empty attribution as a setup failure. Install scripts (`scripts/install.sh`, `scripts/install-standalone.sh`, `scripts/install-standalone.ps1`) close with the same `budi doctor` recommendation.
-- `budi init` configures integrations (statusline, extension) for enabled agents
+- `budi init` creates the data dir, validates schema/binary state, starts the daemon, installs autostart, prints detected agents from `Provider::watch_roots()`, and exits. It does not mutate shell profiles or editor configs on the live path. `budi init --cleanup` is the explicit upgrade-only path for reviewing/removing managed 8.0/8.1 proxy residue. `budi doctor` is the canonical end-to-end verifier and prints the matching first-run nudge when the DB has no assistant activity yet, so day-zero users do not misread empty attribution as a setup failure. Install scripts close with the same `budi doctor` recommendation.
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, `tool_outcome`, `tool_outcome_source`, `tool_outcome_confidence`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries
 - **Session health**: Four vitals computed per session - context growth (context-size growth), cache reuse (cache hit rate), cost acceleration (per-reply cost growth), retry loops (currently disabled — hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1). Each vital has green/yellow/red state. New sessions start green - the default is always positive; vitals only degrade to yellow/red when there is clear evidence of a problem. Tips are provider-aware via `ProviderKind` enum (Claude Code -> `/compact`/`/clear`, Cursor -> "new composer session", Other -> neutral). When no session ID is provided, health auto-select prefers the latest session with assistant activity, then falls back to session timestamps. Statusline "coach" mode shows health icon + session cost + tip. Dashboard session detail page has a health panel with vitals grid and tips section.
