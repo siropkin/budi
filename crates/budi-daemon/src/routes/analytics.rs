@@ -368,6 +368,7 @@ pub struct RepairResponse {
     pub repaired: bool,
     pub added_columns: Vec<String>,
     pub added_indexes: Vec<String>,
+    pub removed_tables: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1166,9 +1167,12 @@ pub async fn analytics_repair(
                 from_version: report.from_version,
                 to_version: report.to_version,
                 migrated: report.migrated,
-                repaired: !report.added_columns.is_empty() || !report.added_indexes.is_empty(),
+                repaired: !report.added_columns.is_empty()
+                    || !report.added_indexes.is_empty()
+                    || !report.removed_tables.is_empty(),
                 added_columns: report.added_columns,
                 added_indexes: report.added_indexes,
+                removed_tables: report.removed_tables,
             })
         })()
     })

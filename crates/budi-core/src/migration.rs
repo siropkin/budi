@@ -18,6 +18,7 @@ pub struct RepairReport {
     pub migrated: bool,
     pub added_columns: Vec<String>,
     pub added_indexes: Vec<String>,
+    pub removed_tables: Vec<String>,
 }
 
 /// Report from [`reconcile_schema`] (additive repairs and rollup healing).
@@ -25,6 +26,7 @@ pub struct RepairReport {
 pub struct SchemaReconcileReport {
     pub added_columns: Vec<String>,
     pub added_indexes: Vec<String>,
+    pub removed_tables: Vec<String>,
 }
 
 /// Check the current schema version without migrating.
@@ -73,6 +75,7 @@ pub fn repair(conn: &Connection) -> Result<RepairReport> {
         migrated: from_version != to_version,
         added_columns: reconcile.added_columns,
         added_indexes: reconcile.added_indexes,
+        removed_tables: reconcile.removed_tables,
     })
 }
 
@@ -914,6 +917,16 @@ fn trigger_exists(conn: &Connection, name: &str) -> Result<bool> {
     Ok(exists)
 }
 
+fn drop_legacy_proxy_events_table(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "proxy_events")? {
+        return Ok(false);
+    }
+
+    conn.execute_batch("DROP TABLE proxy_events;")?;
+    tracing::info!("Schema reconcile: dropped obsolete proxy_events table");
+    Ok(true)
+}
+
 fn expected_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
     let mut indexes = vec![
         "idx_messages_session".to_string(),
@@ -970,6 +983,7 @@ fn missing_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
 
 fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
     let mut added_columns: Vec<String> = Vec::new();
+    let mut removed_tables: Vec<String> = Vec::new();
 
     let has_hourly_rollups = table_exists(conn, "message_rollups_hourly")?;
     let has_daily_rollups = table_exists(conn, "message_rollups_daily")?;
@@ -1006,16 +1020,21 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         added_columns.push("tail_offsets".to_string());
     }
 
+    if drop_legacy_proxy_events_table(conn)? {
+        removed_tables.push("proxy_events".to_string());
+    }
+
     let added_indexes = missing_reconcile_indexes(conn)?;
 
     create_indexes(conn)?;
 
-    if !added_columns.is_empty() || !added_indexes.is_empty() {
+    if !added_columns.is_empty() || !added_indexes.is_empty() || !removed_tables.is_empty() {
         tracing::info!("Schema reconcile completed");
     }
     Ok(SchemaReconcileReport {
         added_columns,
         added_indexes,
+        removed_tables,
     })
 }
 
@@ -1063,12 +1082,14 @@ mod tests {
         assert!(!first.migrated);
         assert!(first.added_columns.is_empty());
         assert!(first.added_indexes.is_empty());
+        assert!(first.removed_tables.is_empty());
 
         let second = repair(&conn).unwrap();
         assert_eq!(second.from_version, SCHEMA_VERSION);
         assert!(!second.migrated);
         assert!(second.added_columns.is_empty());
         assert!(second.added_indexes.is_empty());
+        assert!(second.removed_tables.is_empty());
     }
 
     #[test]
@@ -1128,5 +1149,36 @@ mod tests {
             report.added_columns
         );
         assert!(table_exists(&conn, "tail_offsets").unwrap());
+        assert!(report.removed_tables.is_empty());
+    }
+
+    /// 8.1 -> 8.2 upgrade: keep proxy-sourced `messages` rows but remove the
+    /// orphaned `proxy_events` table now that the proxy runtime is gone.
+    #[test]
+    fn reconcile_drops_legacy_proxy_events_table_from_existing_v1_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE proxy_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+        assert!(table_exists(&conn, "proxy_events").unwrap());
+
+        let report = repair(&conn).unwrap();
+
+        assert_eq!(report.from_version, SCHEMA_VERSION);
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+        assert!(!report.migrated, "cleanup should not bump schema version");
+        assert!(
+            report.removed_tables.iter().any(|t| t == "proxy_events"),
+            "report should mention the removed table; got {:?}",
+            report.removed_tables
+        );
+        assert!(!table_exists(&conn, "proxy_events").unwrap());
     }
 }

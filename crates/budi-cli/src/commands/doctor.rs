@@ -48,6 +48,12 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     proxy_residue.print();
     report.record(&proxy_residue);
 
+    if let Some(conn) = schema.conn.as_ref() {
+        let legacy_proxy_history = check_legacy_proxy_history(conn);
+        legacy_proxy_history.print();
+        report.record(&legacy_proxy_history);
+    }
+
     let providers = doctor_providers();
     if providers.is_empty() {
         let no_providers = CheckResult::warn(
@@ -427,6 +433,98 @@ fn looks_like_legacy_proxy_value(value: &str) -> bool {
         || lower.contains("[::1]:9878")
 }
 
+#[derive(Debug, Clone, Default)]
+struct LegacyProxyHistoryData {
+    retained_assistant_messages: usize,
+    oldest_message: Option<DateTime<Utc>>,
+    newest_message: Option<DateTime<Utc>>,
+    proxy_events_table_present: bool,
+}
+
+fn check_legacy_proxy_history(conn: &Connection) -> CheckResult {
+    match load_legacy_proxy_history(conn) {
+        Ok(data) => summarize_legacy_proxy_history(&data),
+        Err(e) => CheckResult::fail(
+            "legacy proxy history",
+            format!("could not inspect retained 8.1 proxy-era data ({e})"),
+            Some("Run `budi repair`, then rerun `budi doctor`.".to_string()),
+        ),
+    }
+}
+
+fn load_legacy_proxy_history(conn: &Connection) -> Result<LegacyProxyHistoryData> {
+    let proxy_events_table_present = sqlite_table_exists(conn, "proxy_events")?;
+    let (retained_assistant_messages, oldest_message, newest_message) = conn
+        .query_row(
+            "SELECT
+                COUNT(*),
+                MIN(timestamp),
+                MAX(timestamp)
+             FROM messages
+             WHERE role = 'assistant'
+               AND cost_confidence = 'proxy_estimated'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .context("failed to read proxy_estimated assistant rows")?;
+
+    Ok(LegacyProxyHistoryData {
+        retained_assistant_messages: retained_assistant_messages.max(0) as usize,
+        oldest_message: oldest_message.and_then(|value| parse_rfc3339_utc(&value)),
+        newest_message: newest_message.and_then(|value| parse_rfc3339_utc(&value)),
+        proxy_events_table_present,
+    })
+}
+
+fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn summarize_legacy_proxy_history(data: &LegacyProxyHistoryData) -> CheckResult {
+    let label = "legacy proxy history";
+    let row_word = if data.retained_assistant_messages == 1 {
+        "row"
+    } else {
+        "rows"
+    };
+
+    let retained_detail = if data.retained_assistant_messages == 0 {
+        "no retained 8.1 proxy-sourced assistant history remains".to_string()
+    } else {
+        format!(
+            "retaining {} proxy-sourced assistant {} read-only (oldest {}, newest {}); newer live data comes from transcript tailing and legacy attribution may be weaker",
+            data.retained_assistant_messages,
+            row_word,
+            format_timestamp_local(data.oldest_message),
+            format_timestamp_local(data.newest_message)
+        )
+    };
+
+    if data.proxy_events_table_present {
+        return CheckResult::warn(
+            label,
+            format!("{retained_detail}; obsolete `proxy_events` table is still present"),
+            Some(
+                "Run `budi init` or `budi repair` with the current 8.2 build to remove the old `proxy_events` table."
+                    .to_string(),
+            ),
+        );
+    }
+
+    CheckResult::pass(label, retained_detail)
+}
+
 fn doctor_providers() -> Vec<Box<dyn Provider>> {
     match budi_core::config::load_agents_config() {
         Some(cfg) => budi_core::provider::all_providers()
@@ -802,6 +900,77 @@ mod tests {
         assert!(looks_like_legacy_proxy_value("http://localhost:9878/v1"));
         assert!(looks_like_legacy_proxy_value("http://[::1]:9878"));
         assert!(!looks_like_legacy_proxy_value("https://api.anthropic.com"));
+    }
+
+    #[test]
+    fn legacy_proxy_history_passes_when_only_retained_messages_remain() {
+        let result = summarize_legacy_proxy_history(&LegacyProxyHistoryData {
+            retained_assistant_messages: 2,
+            oldest_message: Some(Utc::now() - chrono::Duration::days(1)),
+            newest_message: Some(Utc::now()),
+            proxy_events_table_present: false,
+        });
+
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(
+            result
+                .detail
+                .contains("retaining 2 proxy-sourced assistant rows")
+        );
+        assert!(result.detail.contains("transcript tailing"));
+    }
+
+    #[test]
+    fn legacy_proxy_history_warns_when_proxy_events_table_is_still_present() {
+        let result = summarize_legacy_proxy_history(&LegacyProxyHistoryData {
+            retained_assistant_messages: 1,
+            oldest_message: Some(Utc::now()),
+            newest_message: Some(Utc::now()),
+            proxy_events_table_present: true,
+        });
+
+        assert_eq!(result.state, CheckState::Warn);
+        assert!(result.detail.contains("obsolete `proxy_events` table"));
+        assert!(
+            result
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("budi repair")
+        );
+    }
+
+    #[test]
+    fn legacy_proxy_history_loader_reads_proxy_rows_and_table_presence() {
+        let conn = Connection::open_in_memory().unwrap();
+        budi_core::migration::migrate(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE proxy_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL
+            );
+            INSERT INTO messages (
+                id, role, timestamp, model, provider, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence
+            ) VALUES (
+                'legacy-proxy-row', 'assistant', '2026-04-19T17:00:00Z', 'gpt-4o',
+                'openai', 1, 1, 0, 0, 0.5, 'proxy_estimated'
+            );
+            ",
+        )
+        .unwrap();
+
+        let data = load_legacy_proxy_history(&conn).unwrap();
+
+        assert_eq!(data.retained_assistant_messages, 1);
+        assert!(data.proxy_events_table_present);
+        assert_eq!(
+            data.newest_message
+                .expect("newest proxy timestamp should parse")
+                .to_rfc3339(),
+            "2026-04-19T17:00:00+00:00"
+        );
     }
 
     #[test]
