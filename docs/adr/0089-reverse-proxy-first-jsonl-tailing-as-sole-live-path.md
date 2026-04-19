@@ -118,7 +118,7 @@ The `Provider` trait is the only extension point. Adding a new agent in 8.3 (#29
 - **Forces an 8.1 → 8.2 breaking upgrade.** Users with 8.1 exports in their shell profile need to run `budi init --cleanup`. Release notes must lead on this.
 - **Concedes that agents not writing transcripts cannot be supported.** Any future agent that only holds state in-memory is out of scope for the tailer path until that agent ships a transcript option. We treat this as a scoping decision per agent, not a whole-product fallback.
 - **Cursor cost/token accuracy depends on Usage API cadence.** This is an existing limitation, but it stops being mitigated by proxy pass-through. The [#321](https://github.com/siropkin/budi/issues/321) measurement is the gate on whether any compensating work is needed.
-- **`proxy_events` rows become historical artifacts.** Their fate on upgrade is decided in [#326](https://github.com/siropkin/budi/issues/326). At minimum they are read-only; at most they are reprocessed from JSONL.
+- **Proxy-era history stays in `messages`, not in `proxy_events`.** [#326](https://github.com/siropkin/budi/issues/326) settles the upgrade policy: 8.2 drops the obsolete `proxy_events` table on migration, keeps proxy-sourced `messages` rows read-only for historical analytics, and surfaces that retained legacy state in `budi doctor`.
 
 ### Neutral
 

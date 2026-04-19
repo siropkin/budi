@@ -40,6 +40,15 @@ pub fn cmd_repair() -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
+    let removed_tables: Vec<String> = result
+        .get("removed_tables")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
 
     if migrated {
         println!("Migrated database v{from} -> v{to}.");
@@ -59,6 +68,12 @@ pub fn cmd_repair() -> Result<()> {
             println!("Recreated missing indexes:");
             for idx in &added_indexes {
                 println!("  - {idx}");
+            }
+        }
+        if !removed_tables.is_empty() {
+            println!("Removed obsolete tables:");
+            for table in &removed_tables {
+                println!("  - {table}");
             }
         }
     } else {

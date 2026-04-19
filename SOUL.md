@@ -88,7 +88,7 @@ Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extra
 
 ### Crates
 
-- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Codex, Copilot CLI, Cursor) including each provider's `watch_roots()` for live tailing, pipeline (enrichment), cost calculation, config, migrations, autostart (platform-native daemon service management). The 8.1-era `proxy_events` table and `proxy.rs` storage helpers remain for the 8.1 → 8.2 transition window (read-only after R1.4 #320; deleted in R2.1 #322). Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed).
+- **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Codex, Copilot CLI, Cursor) including each provider's `watch_roots()` for live tailing, pipeline (enrichment), cost calculation, config, migrations, autostart (platform-native daemon service management). The 8.1-era proxy runtime is deleted in R2.1 (#322); R2.5 (#326) keeps proxy-sourced `messages` rows read-only for historical analytics while dropping the obsolete `proxy_events` table on upgrade. Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed).
 - **budi-cli** - Thin HTTP client to the daemon. Commands: init, launch, stats, sessions, status, sync, import, statusline, doctor, health, update, integrations, autostart, uninstall, migrate, repair (the launch / enable / disable / proxy-install commands are deleted in 8.2 R2.1 #322 — R2.3 #324 also reduces `budi init` to daemon-+-autostart only)
 - **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API and runs the daemon-side filesystem tailer that watches each `Provider::watch_roots()` directory, parses incremental JSONL appends through `Pipeline::default_pipeline()`, and writes to the canonical `messages` / tag tables. JSONL tailing is the sole live ingestion path per [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md); the legacy proxy server on port 9878 still runs in 8.1.x for the transition window and is removed in 8.2 R2.1 (#322). One-shot historical backfill remains user-initiated via `budi import`.
 
@@ -112,7 +112,7 @@ Sources (Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage A
 
 Enricher order is critical — each depends on prior enrichers. Do not reorder. The live tailer and `budi import` run the **same** pipeline against the **same** transcript files, so every classification feature (ticket extraction, file-level attribution, activity classification, tool outcomes) lands for both paths automatically.
 
-> **Transition window (8.1.x → 8.2)**: in 8.1.x the daemon also runs an HTTP proxy on port 9878 that captures live LLM traffic into a separate `proxy_events` table and a parallel `insert_proxy_message` write path. That path is shipped behind `BUDI_LIVE_TAIL=1` cross-validation in 8.2 R1.3 (#319), made the default in R1.4 (#320 — proxy stops writing `proxy_events`), and the proxy code itself is deleted in 8.2 R2.1 (#322). The dedup rule in `analytics/sync.rs` (`proxy_cutoff`) exists only to keep these two paths from double-counting during the transition.
+> **Transition window (8.1.x → 8.2)**: in 8.1.x the daemon also runs an HTTP proxy on port 9878 that captures live LLM traffic into a separate `proxy_events` table and a parallel `insert_proxy_message` write path. That path is shipped behind `BUDI_LIVE_TAIL=1` cross-validation in 8.2 R1.3 (#319), made the default in R1.4 (#320 — proxy stops writing `proxy_events`), and the proxy code itself is deleted in 8.2 R2.1 (#322). R2.5 (#326) removes the now-unused `proxy_events` table on upgrade while keeping proxy-sourced `messages` rows read-only; the dedup rule in `analytics/sync.rs` (`proxy_cutoff`) remains only to keep those historical rows from double-counting during the transition.
 
 ```
 Cloud sync (optional, disabled by default):
@@ -136,10 +136,9 @@ AppState.cloud_syncing AtomicBool guards worker and manual path from double-post
 
 ### Database (SQLite, WAL mode, schema v1)
 
-Nine tables, seven data entities + two supporting:
+Core tables:
 - **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation. Primary key field: id
-- **proxy_events** - Legacy 8.1 append-only log of proxied LLM API requests (timestamp, provider, model, input/output_tokens, duration_ms, status_code, is_streaming, repo_id, git_branch, ticket_id, cost_cents). Retained read-only during the 8.1 → 8.2 transition window per R2.5 (#326). New writes stop in R1.4 (#320 — tailer becomes the default and the proxy stops emitting `proxy_events`). The proxy code path itself is deleted in R2.1 (#322); existing rows remain queryable so 8.1-era analytics queries still resolve. The `proxy_cutoff` dedup in `analytics/sync.rs` exists solely to keep the legacy proxy rows from racing the new tailer rows during the cross-validation window.
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync. Also stores cloud sync watermarks (`__budi_cloud_sync__` keys) for idempotent cloud uploads
 - **message_rollups_hourly** - Derived hourly aggregates (provider/model/repo/branch/role dimensions) for low-latency analytics reads
@@ -460,7 +459,6 @@ Key points:
 - `crates/budi-core/src/providers/copilot.rs` - Copilot CLI provider (transcript import from `~/.copilot/session-state/`, delegates pricing to Claude/OpenAI based on model)
 - `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
 - `crates/budi-core/src/migration.rs` - Schema v1, all migration paths
-- `crates/budi-core/src/proxy.rs` - Legacy 8.1 proxy module: ProxyEvent types with attribution (repo, branch, ticket, cost), `proxy_events` and `messages` table storage, ProxyAttribution resolution from headers/git. **Slated for deletion in 8.2 R2.1 (#322)** — listed here for the audit trail; new live ingestion goes through the daemon-side tailer (per-provider `Provider::watch_roots()`) instead.
 - `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
 - `crates/budi-core/src/autostart.rs` - Platform-native daemon autostart: launchd (macOS), systemd (Linux), Task Scheduler (Windows). Install/uninstall/status.
 - `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig, AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
