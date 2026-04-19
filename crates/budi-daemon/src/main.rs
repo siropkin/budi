@@ -181,6 +181,9 @@ async fn main() -> Result<()> {
     {
         tracing::warn!("Failed to initialize database: {e}");
     }
+    if let Err(e) = budi_core::legacy_proxy::emit_upgrade_notice_once() {
+        tracing::warn!("Failed to scan legacy proxy residue on startup: {e}");
+    }
 
     // --- Start filesystem tailer (ADR-0089 §1 / R1.4 #320) ---
     //

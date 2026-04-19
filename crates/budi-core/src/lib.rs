@@ -8,6 +8,7 @@ pub mod hooks;
 pub mod identity;
 pub mod integrations;
 pub mod jsonl;
+pub mod legacy_proxy;
 pub mod migration;
 pub mod pipeline;
 pub mod privacy;

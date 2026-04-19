@@ -31,6 +31,9 @@ enum Commands {
         /// Remove legacy 8.0/8.1 proxy residue after showing a consent-first cleanup flow
         #[arg(long, default_value_t = false)]
         cleanup: bool,
+        /// Skip cleanup confirmation prompts
+        #[arg(long, default_value_t = false)]
+        yes: bool,
         #[arg(long, hide = true)]
         no_daemon: bool,
     },
@@ -344,7 +347,11 @@ fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Init { cleanup, no_daemon } => commands::init::cmd_init(cleanup, no_daemon),
+        Commands::Init {
+            cleanup,
+            yes,
+            no_daemon,
+        } => commands::init::cmd_init(cleanup, yes, no_daemon),
         Commands::Doctor { deep, repo_root } => commands::doctor::cmd_doctor(repo_root, deep),
         Commands::Stats {
             period,
