@@ -306,16 +306,6 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn schema_version(&self) -> Result<Value> {
-        let resp = self
-            .client
-            .get(format!("{}/admin/schema", self.base_url))
-            .send()
-            .map_err(describe_send_error)?;
-        let resp = check_response(resp)?;
-        Ok(resp.json()?)
-    }
-
     /// `POST /cloud/sync` — trigger an immediate cloud flush.
     ///
     /// The daemon runs the same code path as the background worker
