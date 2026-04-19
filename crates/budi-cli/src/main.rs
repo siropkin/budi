@@ -567,6 +567,7 @@ mod tests {
         assert!(Cli::try_parse_from(["budi", "launch", "claude"]).is_err());
         assert!(Cli::try_parse_from(["budi", "enable", "claude"]).is_err());
         assert!(Cli::try_parse_from(["budi", "disable", "cursor"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "proxy-install", "claude"]).is_err());
     }
 
     #[test]
