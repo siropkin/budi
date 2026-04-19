@@ -229,6 +229,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Start dummy proxy listener if legacy proxy residue exists ---
+    if let Ok(scan) = budi_core::legacy_proxy::scan()
+        && scan.has_managed_blocks()
+    {
+        tracing::info!(
+            target: "budi_daemon::dummy_proxy",
+            "legacy proxy residue detected; starting dummy proxy on 9878 to return actionable 400s to agents"
+        );
+        tokio::spawn(async move {
+            let dummy_app = axum::Router::new().fallback(axum::routing::any(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "Budi proxy is removed in 8.2.0. Please run `budi init --cleanup` to fix your shell profile."
+                )
+            }));
+            if let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:9878").await {
+                let _ = axum::serve(listener, dummy_app).await;
+            }
+        });
+    }
+
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("budi-daemon listening on {}", addr);

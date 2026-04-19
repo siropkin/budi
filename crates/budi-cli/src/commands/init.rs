@@ -13,6 +13,14 @@ use crate::daemon::ensure_daemon_running;
 pub fn cmd_init(cleanup: bool, yes: bool, no_daemon: bool) -> Result<()> {
     if cleanup {
         run_cleanup_flow(yes)?;
+    } else if let Ok(scan) = legacy_proxy::scan()
+        && scan.has_managed_blocks()
+    {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        println!("\n{yellow}Critical:{reset} Detected legacy 8.0/8.1 proxy configuration.");
+        println!("This configuration will break Claude Code in 8.2.0 and must be removed.");
+        run_cleanup_flow(yes)?;
     }
 
     clean_duplicate_binaries();
