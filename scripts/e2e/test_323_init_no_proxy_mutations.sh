@@ -42,12 +42,7 @@ assert_absent() {
 }
 
 run_init_once() {
-  "$BUDI" init \
-    --yes \
-    --integrations none \
-    --no-daemon \
-    --no-open \
-    --no-sync
+  "$BUDI" init --no-daemon
 }
 
 assert_no_legacy_proxy_mutations() {

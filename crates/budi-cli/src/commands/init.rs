@@ -1,424 +1,118 @@
-use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use budi_core::config;
+use budi_core::provider::Provider;
 
 use crate::daemon::ensure_daemon_running;
-use crate::{InitIntegrationsMode, StatuslinePreset};
 
-/// Run `budi init`. Prints warnings to stderr if integration setup had issues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitOutcome {
-    Success,
-    PartialSuccess,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn cmd_init(
-    local: bool,
-    yes: bool,
-    with: Vec<super::integrations::IntegrationComponent>,
-    without: Vec<super::integrations::IntegrationComponent>,
-    integrations_mode: InitIntegrationsMode,
-    statusline_preset: Option<StatuslinePreset>,
-    repo_root: Option<PathBuf>,
-    no_daemon: bool,
-    _no_open: bool,
-    _no_sync: bool,
-) -> Result<InitOutcome> {
-    let repo_root = if local || repo_root.is_some() {
-        let root = super::try_resolve_repo_root(repo_root);
-        if root.is_none() {
-            anyhow::bail!(
-                "Not in a git repository. Use `budi init` (without --local) for global setup,\n\
-                 or run from inside a git repo."
-            );
-        }
-        root
-    } else {
-        None
-    };
-
-    let config = match &repo_root {
-        Some(root) => {
-            let cfg = config::load_or_default(root)?;
-            config::ensure_repo_layout(root)?;
-            config::save(root, &cfg)?;
-            cfg
-        }
-        None => config::BudiConfig::default(),
-    };
+pub fn cmd_init(cleanup: bool, no_daemon: bool) -> Result<()> {
+    if cleanup {
+        anyhow::bail!(
+            "`budi init --cleanup` is reserved for the consent-first upgrade cleanup tracked by #357 and is not implemented yet."
+        );
+    }
 
     clean_duplicate_binaries();
     check_daemon_binary_and_version();
 
-    let agents_config = resolve_agents(yes, io::stdin().is_terminal())?;
-    if let Err(e) = config::save_agents_config(&agents_config) {
-        eprintln!(
-            "{}  Warning:{} could not persist agent preferences: {e}",
-            super::ansi("\x1b[33m"),
-            super::ansi("\x1b[0m")
-        );
-    }
-    print_agents_summary(&agents_config);
+    let config = config::BudiConfig::default();
+    let data_dir = config::budi_home_dir()?;
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("Failed to create {}", data_dir.display()))?;
 
-    let selected_integrations = resolve_init_integrations(
-        local,
-        yes,
-        with,
-        without,
-        integrations_mode,
-        io::stdin().is_terminal(),
-        &agents_config,
-    )?;
-    let statusline_preset = resolve_statusline_preset(
-        &selected_integrations,
-        statusline_preset,
-        !yes && io::stdin().is_terminal(),
-    )?;
-
-    if selected_integrations.is_empty() {
-        println!("  Integrations: skipped");
-    } else {
-        let names = selected_integrations
-            .iter()
-            .map(|c| c.display_name())
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("  Integrations: {names}");
-    }
-
-    let install_report =
-        super::integrations::install_selected(&config, &selected_integrations, statusline_preset);
-    let integration_warnings = install_report.warnings;
-
-    if repo_root.is_none() {
-        let mut prefs = super::integrations::load_preferences();
-        prefs.enabled = selected_integrations.clone();
-        if statusline_preset.is_some() {
-            prefs.statusline_preset = statusline_preset;
-        }
-        if let Err(e) = super::integrations::save_preferences(&prefs) {
-            eprintln!(
-                "{}  Warning:{} could not persist integration preferences: {e}",
-                super::ansi("\x1b[33m"),
-                super::ansi("\x1b[0m")
-            );
-        }
-    }
-
-    let had_integration_warnings = !integration_warnings.is_empty();
-
-    if had_integration_warnings {
-        eprintln!("  Warning: integration setup had issues:");
-        for w in &integration_warnings {
-            eprintln!("    - {w}");
-        }
-        eprintln!("  Run `budi doctor` to diagnose.");
-    }
-
-    // Ensure database schema is ready BEFORE starting daemon.
     if let Ok(db_path) = budi_core::analytics::db_path()
         && let Err(e) = budi_core::analytics::open_db_with_migration(&db_path)
     {
         eprintln!("  Database: schema setup failed: {e}");
     }
 
-    if !no_daemon {
-        println!("  Daemon: starting...");
-        ensure_daemon_running(repo_root.as_deref(), &config)?;
-        println!("  Daemon: running on {}", config.daemon_base_url());
+    let detected_agents = detect_agents();
 
-        // Install autostart service so daemon survives reboots
-        install_autostart_service(&config);
+    if !no_daemon {
+        ensure_daemon_running(None, &config)?;
+        println!("  Daemon: ready on {}", config.daemon_base_url());
+        print_autostart_status(&config);
     }
 
     let bold_cyan = super::ansi("\x1b[1;36m");
-    let bold = super::ansi("\x1b[1m");
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
 
-    let status_suffix = if had_integration_warnings {
-        " with warnings"
-    } else {
-        ""
-    };
+    println!();
+    println!("{bold_cyan}  budi{reset} initialized");
+    println!("  Data dir: {}", data_dir.display());
+    print_detected_agents(&detected_agents);
+    println!();
+    println!(
+        "  Start coding as usual {dim}(`claude`, `codex`, `cursor`, `gh copilot` — budi tails local transcripts automatically){reset}"
+    );
+    println!(
+        "  Run `budi doctor` for a full health check {dim}(daemon, tailer, attribution, autostart){reset}"
+    );
 
-    println!();
-    if let Some(ref root) = repo_root {
-        println!(
-            "{bold_cyan}  budi{reset} initialized{status_suffix} in {}",
-            root.display()
-        );
-    } else {
-        println!("{bold_cyan}  budi{reset} initialized{status_suffix} (global)");
-    }
-    println!();
-    if let Some(ref root) = repo_root {
-        println!(
-            "  Data:      {}",
-            config::repo_paths(root)
-                .map(|p| p.data_dir.display().to_string())
-                .unwrap_or_else(|_| "<unable to resolve repo data path>".to_string())
-        );
-    } else {
-        println!(
-            "  Data:      {}",
-            config::budi_home_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "<unable to resolve budi home>".to_string())
-        );
-    }
-    println!();
-    println!("  {bold}Next steps:{reset}");
-    if !selected_integrations.is_empty() {
-        println!(
-            "    1. Restart your IDE (Cursor, etc.) so newly installed integrations are loaded."
-        );
-    } else {
-        println!(
-            "    1. Install an integration later with `budi integrations install ...` when you're ready."
-        );
-    }
-    println!(
-        "    2. Start coding as usual {dim}(`claude`, `codex`, `cursor`, `gh copilot` — budi tails local transcripts automatically){reset}"
-    );
-    println!(
-        "    3. Verify setup:      {bold}budi doctor{reset} {dim}(checks daemon, tailer, agents, attribution){reset}"
-    );
-    println!(
-        "    4. Check today's cost: {bold}budi status{reset} {dim}(quick snapshot, no data yet? see step 2){reset}"
-    );
-    println!(
-        "    5. Import history {dim}(optional):{reset} `budi import` {dim}(loads past Claude Code / Codex / Copilot / Cursor transcripts){reset}"
-    );
-    println!();
-    if selected_integrations.is_empty() {
-        println!(
-            "  {dim}No integrations were installed. Run `budi integrations install ...` anytime to add the Claude Code status line or Cursor extension.{reset}"
-        );
-        println!();
-    }
-    println!(
-        "  {dim}Cloud dashboard (optional):{reset} https://app.getbudi.dev {dim}— local stays local; cloud sync is off by default.{reset}"
-    );
-    println!();
-
-    if had_integration_warnings {
-        let yellow = super::ansi("\x1b[33m");
-        let reset2 = super::ansi("\x1b[0m");
-        eprintln!(
-            "{yellow}  Warning:{reset2} {} integration issue(s) detected. Run `budi doctor` for details.",
-            integration_warnings.len()
-        );
-    }
-
-    if had_integration_warnings {
-        Ok(InitOutcome::PartialSuccess)
-    } else {
-        Ok(InitOutcome::Success)
-    }
+    Ok(())
 }
 
-fn resolve_agents(yes: bool, is_tty: bool) -> Result<config::AgentsConfig> {
-    if let Some(existing) = config::load_agents_config()
-        && (yes || !is_tty)
-    {
-        return Ok(existing);
-    }
-
-    if !is_tty || yes {
-        return Ok(config::AgentsConfig::all_enabled());
-    }
-
-    println!();
-    println!("  Select agents to track:");
-    let claude_enabled = prompt_yes_no("  - Claude Code?", true)?;
-    let codex_enabled = prompt_yes_no("  - Codex CLI?", true)?;
-    let cursor_enabled = prompt_yes_no("  - Cursor?", true)?;
-    let copilot_enabled = prompt_yes_no("  - Copilot CLI?", true)?;
-    println!();
-
-    Ok(config::AgentsConfig {
-        claude_code: config::AgentEntry {
-            enabled: claude_enabled,
-        },
-        codex_cli: config::AgentEntry {
-            enabled: codex_enabled,
-        },
-        cursor: config::AgentEntry {
-            enabled: cursor_enabled,
-        },
-        copilot_cli: config::AgentEntry {
-            enabled: copilot_enabled,
-        },
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedAgent {
+    display_name: &'static str,
+    roots: Vec<PathBuf>,
 }
 
-fn print_agents_summary(agents: &config::AgentsConfig) {
+fn detect_agents() -> Vec<DetectedAgent> {
+    detect_agents_from_providers(budi_core::provider::all_providers())
+}
+
+fn detect_agents_from_providers(providers: Vec<Box<dyn Provider>>) -> Vec<DetectedAgent> {
+    let mut detected = providers
+        .into_iter()
+        .filter_map(|provider| {
+            let display_name = provider.display_name();
+            let mut roots = provider.watch_roots();
+            roots.sort();
+            roots.dedup();
+            if roots.is_empty() {
+                None
+            } else {
+                Some(DetectedAgent {
+                    display_name,
+                    roots,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    detected.sort_by(|a, b| a.display_name.cmp(b.display_name));
+    detected
+}
+
+fn print_detected_agents(agents: &[DetectedAgent]) {
     let green = super::ansi("\x1b[32m");
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
-    let agents_list: Vec<&str> = [
-        agents.claude_code.enabled.then_some("Claude Code"),
-        agents.codex_cli.enabled.then_some("Codex CLI"),
-        agents.cursor.enabled.then_some("Cursor"),
-        agents.copilot_cli.enabled.then_some("Copilot CLI"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if agents_list.is_empty() {
-        println!("  {dim}Agents: none enabled{reset}");
-    } else {
-        println!("  {green}Agents:{reset} {}", agents_list.join(", "));
-    }
-}
-
-fn resolve_init_integrations(
-    local: bool,
-    yes: bool,
-    with: Vec<super::integrations::IntegrationComponent>,
-    without: Vec<super::integrations::IntegrationComponent>,
-    mode: InitIntegrationsMode,
-    is_tty: bool,
-    agents_config: &config::AgentsConfig,
-) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
-    let mut selected = match mode {
-        InitIntegrationsMode::None => BTreeSet::new(),
-        InitIntegrationsMode::All => super::integrations::all_components(),
-        InitIntegrationsMode::Auto => {
-            if !is_tty || yes {
-                if local {
-                    BTreeSet::new()
-                } else {
-                    super::integrations::default_recommended_components()
-                }
-            } else {
-                prompt_for_integrations(local)?
-            }
-        }
-    };
-
-    for component in with {
-        selected.insert(component);
-    }
-    for component in without {
-        selected.remove(&component);
+    if agents.is_empty() {
+        println!("  {dim}Detected agents:{reset} none yet (no transcript roots found on disk)");
+        return;
     }
 
-    filter_integrations_by_agents(&mut selected, agents_config);
-
-    let removed: Vec<_> = selected
+    let names = agents
         .iter()
-        .copied()
-        .filter(|c| c.is_removed_surface())
-        .collect();
-    for c in removed {
-        selected.remove(&c);
-        eprintln!(
-            "{}  Note:{} {} was removed in 8.0 and was skipped.",
-            super::ansi("\x1b[33m"),
-            super::ansi("\x1b[0m"),
-            c.display_name(),
-        );
-    }
-
-    Ok(selected)
+        .map(|agent| agent.display_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("  {green}Detected agents:{reset} {names}");
 }
 
-/// Remove integration components for agents that are not enabled.
-fn filter_integrations_by_agents(
-    selected: &mut BTreeSet<super::integrations::IntegrationComponent>,
-    agents: &config::AgentsConfig,
-) {
-    use super::integrations::IntegrationComponent;
-    if !agents.claude_code.enabled {
-        selected.remove(&IntegrationComponent::ClaudeCodeHooks);
-        selected.remove(&IntegrationComponent::ClaudeCodeOtel);
-        selected.remove(&IntegrationComponent::ClaudeCodeStatusline);
-    }
-    if !agents.cursor.enabled {
-        selected.remove(&IntegrationComponent::CursorHooks);
-        selected.remove(&IntegrationComponent::CursorExtension);
-    }
-}
+fn print_autostart_status(config: &config::BudiConfig) {
+    use budi_core::autostart::ServiceStatus;
 
-fn resolve_statusline_preset(
-    selected: &BTreeSet<super::integrations::IntegrationComponent>,
-    preset: Option<StatuslinePreset>,
-    _prompt: bool,
-) -> Result<Option<StatuslinePreset>> {
-    if !selected.contains(&super::integrations::IntegrationComponent::ClaudeCodeStatusline) {
-        return Ok(None);
-    }
-    // ADR-0088 §4 / #224: the default statusline is the quiet `1d` / `7d` /
-    // `30d` cost view. `coach` / `full` remain opt-in advanced variants
-    // documented in the README; `budi init` no longer prompts for a preset
-    // so the default path stays simple. Honor `--statusline-preset` when
-    // passed so power users can still opt in non-interactively.
-    Ok(preset)
-}
-
-fn prompt_for_integrations(
-    local: bool,
-) -> Result<BTreeSet<super::integrations::IntegrationComponent>> {
-    if local {
-        let enable_global = prompt_yes_no(
-            "  Install global integrations too (Claude status line and Cursor extension)?",
-            false,
-        )?;
-        if !enable_global {
-            return Ok(BTreeSet::new());
-        }
-    }
-
-    println!();
-    println!("  Select integrations to install:");
-    let mut selected = BTreeSet::new();
-    let defaults = [
-        (
-            super::integrations::IntegrationComponent::ClaudeCodeStatusline,
-            true,
-        ),
-        (
-            super::integrations::IntegrationComponent::CursorExtension,
-            true,
-        ),
-    ];
-    for (component, default_enabled) in defaults {
-        let question = format!("  - {}?", component.display_name());
-        if prompt_yes_no(&question, default_enabled)? {
-            selected.insert(component);
-        }
-    }
-    println!();
-    Ok(selected)
-}
-
-fn prompt_yes_no(question: &str, default_yes: bool) -> Result<bool> {
-    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-    loop {
-        eprint!("{question} {hint} ");
-        io::stdout().flush().ok();
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context("Failed to read stdin")?;
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Ok(default_yes);
-        }
-        match trimmed {
-            "y" | "Y" | "yes" | "YES" | "Yes" => return Ok(true),
-            "n" | "N" | "no" | "NO" | "No" => return Ok(false),
-            _ => {
-                println!("  Please enter y or n.");
-            }
+    let mechanism = budi_core::autostart::service_mechanism();
+    match budi_core::autostart::service_status() {
+        ServiceStatus::NotInstalled => install_autostart_service(config),
+        ServiceStatus::Installed | ServiceStatus::Running => {
+            println!("  Autostart: already installed ({mechanism})");
         }
     }
 }
@@ -595,5 +289,103 @@ fn install_autostart_service(config: &config::BudiConfig) {
                 "  The daemon will not auto-restart after reboot. Run `budi init` again to retry."
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DetectedAgent, detect_agents_from_providers};
+    use anyhow::Result;
+    use budi_core::provider::{DiscoveredFile, Provider};
+    use std::path::{Path, PathBuf};
+
+    struct StubProvider {
+        display_name: &'static str,
+        roots: Vec<PathBuf>,
+    }
+
+    impl Provider for StubProvider {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn display_name(&self) -> &'static str {
+            self.display_name
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn discover_files(&self) -> Result<Vec<DiscoveredFile>> {
+            Ok(Vec::new())
+        }
+
+        fn parse_file(
+            &self,
+            _path: &Path,
+            _content: &str,
+            _offset: usize,
+        ) -> Result<(Vec<budi_core::jsonl::ParsedMessage>, usize)> {
+            Ok((Vec::new(), 0))
+        }
+
+        fn watch_roots(&self) -> Vec<PathBuf> {
+            self.roots.clone()
+        }
+    }
+
+    #[test]
+    fn detect_agents_only_includes_providers_with_existing_roots() {
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(StubProvider {
+                display_name: "Claude Code",
+                roots: vec![PathBuf::from("/tmp/.claude/projects")],
+            }),
+            Box::new(StubProvider {
+                display_name: "Cursor",
+                roots: Vec::new(),
+            }),
+        ];
+
+        let detected = detect_agents_from_providers(providers);
+
+        assert_eq!(
+            detected,
+            vec![DetectedAgent {
+                display_name: "Claude Code",
+                roots: vec![PathBuf::from("/tmp/.claude/projects")],
+            }]
+        );
+    }
+
+    #[test]
+    fn detect_agents_sorts_and_dedups_roots() {
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(StubProvider {
+                display_name: "Codex",
+                roots: vec![
+                    PathBuf::from("/tmp/.codex/archived_sessions"),
+                    PathBuf::from("/tmp/.codex/sessions"),
+                    PathBuf::from("/tmp/.codex/sessions"),
+                ],
+            }),
+            Box::new(StubProvider {
+                display_name: "Claude Code",
+                roots: vec![PathBuf::from("/tmp/.claude/projects")],
+            }),
+        ];
+
+        let detected = detect_agents_from_providers(providers);
+
+        assert_eq!(detected[0].display_name, "Claude Code");
+        assert_eq!(detected[1].display_name, "Codex");
+        assert_eq!(
+            detected[1].roots,
+            vec![
+                PathBuf::from("/tmp/.codex/archived_sessions"),
+                PathBuf::from("/tmp/.codex/sessions"),
+            ]
+        );
     }
 }

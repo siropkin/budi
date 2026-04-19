@@ -26,36 +26,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Set up budi (starts daemon, lets you choose integrations, syncs existing data).
+    /// Set up budi (daemon + autostart) and show detected agents.
     Init {
-        /// Initialize for the current git repo only (default: global)
-        #[arg(long)]
-        local: bool,
-        /// Skip prompts and use default integration selection
+        /// Remove legacy 8.0/8.1 proxy residue after showing a consent-first cleanup flow
         #[arg(long, default_value_t = false)]
-        yes: bool,
-        /// Explicitly install these integrations (repeatable, kebab-case names)
-        #[arg(long = "with", value_enum)]
-        with: Vec<IntegrationComponent>,
-        /// Explicitly skip these integrations (repeatable, kebab-case names)
-        #[arg(long = "without", value_enum)]
-        without: Vec<IntegrationComponent>,
-        /// Integration selection mode: auto (default), all, or none
-        #[arg(long, value_enum, default_value_t = InitIntegrationsMode::Auto)]
-        integrations: InitIntegrationsMode,
-        /// Claude Code status line preset (coach=session health, cost=period)
-        #[arg(long, value_enum)]
-        statusline_preset: Option<StatuslinePreset>,
-        #[arg(long, hide = true)]
-        repo_root: Option<PathBuf>,
+        cleanup: bool,
         #[arg(long, hide = true)]
         no_daemon: bool,
-        /// Don't open the dashboard in the browser
-        #[arg(long)]
-        no_open: bool,
-        /// Skip automatic sync of existing transcripts
-        #[arg(long)]
-        no_sync: bool,
     },
     /// Check health: daemon, database, config
     Doctor {
@@ -331,13 +308,6 @@ enum AutostartAction {
     Uninstall,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-enum InitIntegrationsMode {
-    Auto,
-    All,
-    None,
-}
-
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum StatsPeriod {
     Today,
@@ -374,35 +344,7 @@ fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Init {
-            local,
-            yes,
-            with,
-            without,
-            integrations,
-            statusline_preset,
-            repo_root,
-            no_daemon,
-            no_open,
-            no_sync,
-        } => {
-            let outcome = commands::init::cmd_init(
-                local,
-                yes,
-                with,
-                without,
-                integrations,
-                statusline_preset,
-                repo_root,
-                no_daemon,
-                no_open,
-                no_sync,
-            )?;
-            if matches!(outcome, commands::init::InitOutcome::PartialSuccess) {
-                std::process::exit(2);
-            }
-            Ok(())
-        }
+        Commands::Init { cleanup, no_daemon } => commands::init::cmd_init(cleanup, no_daemon),
         Commands::Doctor { deep, repo_root } => commands::doctor::cmd_doctor(repo_root, deep),
         Commands::Stats {
             period,
