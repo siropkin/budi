@@ -1,4 +1,4 @@
-//! Prompt classification heuristics for JSONL and proxy ingestion.
+//! Prompt classification heuristics for JSONL-derived ingestion.
 //!
 //! The activity classifier is intentionally rule-based and explainable — every
 //! label can be traced back to a keyword match in this file. See ADR-0088 §5:
@@ -14,9 +14,9 @@
 //!
 //! ## Contract (R1.2 / #222)
 //!
-//! - `source` is a stable string label for the producer. The primary 8.1 path
-//!   is always [`SOURCE_RULE`]; the proxy layer tags explicit caller intent
-//!   (via `X-Budi-Activity`) as [`SOURCE_HEADER`] in 9.0+.
+//! - `source` is a stable string label for the producer. The primary path is
+//!   always [`SOURCE_RULE`]; [`SOURCE_HEADER`] is reserved for a future
+//!   explicit caller hint if one is ever reintroduced.
 //! - `confidence` is one of [`CONF_HIGH`], [`CONF_MEDIUM`], [`CONF_LOW`].
 //!   It is derived from how many distinct keyword signals a prompt produced
 //!   within the chosen category and whether the prompt is short enough that
@@ -31,10 +31,9 @@
 /// Every label emitted by [`classify_prompt_detailed`] reports this source.
 pub const SOURCE_RULE: &str = "rule";
 
-/// Reserved classifier source for explicit caller intent (e.g. a proxy
-/// `X-Budi-Activity` header). Not emitted by this function today but kept
-/// as part of the stable label set so surfaces can render it without
-/// special-casing.
+/// Reserved classifier source for explicit caller intent. Not emitted by this
+/// function today, but kept as part of the stable label set so surfaces can
+/// render it without special-casing.
 pub const SOURCE_HEADER: &str = "header";
 
 /// Classifier is confident: multiple independent keyword signals matched in

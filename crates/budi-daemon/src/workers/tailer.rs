@@ -43,11 +43,10 @@
 //!   `sessions`, and `tail_offsets` only.
 //! - No changes to `Pipeline` signature or the enricher list — the tailer
 //!   uses `Pipeline::default_pipeline` exactly as `budi import` does.
-//! - No edits to `analytics/sync.rs` `proxy_cutoff`. Cross-path dedup stays
-//!   on until R2.5 (#326) decides the fate of pre-existing
-//!   `cost_confidence='proxy_estimated'` rows from 8.1.x users; while those
-//!   rows live in the DB, `budi import` still needs the cutoff to avoid
-//!   double-counting JSONL backfill against historical proxy ingest.
+//! - No writes that mutate or reinterpret retained legacy proxy history.
+//!   After #326, 8.1-era `cost_confidence='proxy_estimated'` rows remain
+//!   queryable read-only; `budi import` carries its own overlap guard so a
+//!   later historical backfill does not double-count that retained window.
 //!
 //! [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
 

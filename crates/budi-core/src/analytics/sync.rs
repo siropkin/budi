@@ -38,14 +38,14 @@ fn sync_with_max_age(
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
     let mut total_files = 0;
     let mut total_messages = 0;
-    let mut total_messages_skipped_after_proxy_cutoff = 0usize;
+    let mut total_messages_skipped_after_legacy_overlap = 0usize;
     let mut cursor_file_messages_ingested = 0usize;
     let mut warnings: Vec<String> = Vec::new();
-    let proxy_cutoff = first_proxy_message_timestamp(conn);
+    let legacy_overlap_cutoff = first_legacy_proxy_message_timestamp(conn);
 
-    if let Some(cutoff) = proxy_cutoff {
+    if let Some(cutoff) = legacy_overlap_cutoff {
         warnings.push(format!(
-            "Proxy data detected; importing transcript history only before {} to avoid double-counting.",
+            "Retained 8.1 proxy history detected; importing transcript history only before {} to avoid double-counting against legacy proxy-estimated rows.",
             cutoff.to_rfc3339()
         ));
     }
@@ -106,10 +106,14 @@ fn sync_with_max_age(
             // this slice, so we add the original file offset back afterward.
             let (mut messages, relative_offset) = provider.parse_file(file_path, &content, 0)?;
             let new_offset = parse_start_offset.saturating_add(relative_offset);
-            if let Some(cutoff) = proxy_cutoff {
+            // 8.2 keeps legacy `proxy_estimated` messages queryable after upgrade.
+            // Historical transcript imports must avoid re-ingesting the same time
+            // window on top of those retained rows.
+            if let Some(cutoff) = legacy_overlap_cutoff {
                 let before = messages.len();
                 messages.retain(|msg| msg.timestamp < cutoff);
-                total_messages_skipped_after_proxy_cutoff += before.saturating_sub(messages.len());
+                total_messages_skipped_after_legacy_overlap +=
+                    before.saturating_sub(messages.len());
             }
             if messages.is_empty() {
                 set_sync_offset(conn, &path_str, new_offset)?;
@@ -133,10 +137,10 @@ fn sync_with_max_age(
         crate::providers::cursor::run_cursor_repairs(conn);
     }
 
-    if total_messages_skipped_after_proxy_cutoff > 0 {
+    if total_messages_skipped_after_legacy_overlap > 0 {
         warnings.push(format!(
-            "Skipped {} transcript messages at/after the first proxy event to prevent duplicate accounting.",
-            total_messages_skipped_after_proxy_cutoff
+            "Skipped {} transcript messages at/after the retained legacy overlap boundary to prevent duplicate accounting.",
+            total_messages_skipped_after_legacy_overlap
         ));
     }
 
@@ -216,7 +220,7 @@ fn sync_with_max_age(
     Ok((total_files, total_messages, warnings))
 }
 
-fn first_proxy_message_timestamp(conn: &Connection) -> Option<DateTime<Utc>> {
+fn first_legacy_proxy_message_timestamp(conn: &Connection) -> Option<DateTime<Utc>> {
     let ts: Option<String> = conn
         .query_row(
             "SELECT MIN(timestamp) FROM messages WHERE role = 'assistant' AND cost_confidence = 'proxy_estimated'",
@@ -606,7 +610,7 @@ fn truncate_title(text: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_proxy_message_timestamp, read_transcript_tail};
+    use super::{first_legacy_proxy_message_timestamp, read_transcript_tail};
 
     fn temp_file_path(test_name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -646,14 +650,14 @@ mod tests {
     }
 
     #[test]
-    fn first_proxy_message_timestamp_returns_none_without_proxy_rows() {
+    fn first_legacy_proxy_message_timestamp_returns_none_without_proxy_rows() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
         crate::migration::migrate(&conn).expect("migrate schema");
-        assert!(first_proxy_message_timestamp(&conn).is_none());
+        assert!(first_legacy_proxy_message_timestamp(&conn).is_none());
     }
 
     #[test]
-    fn first_proxy_message_timestamp_returns_earliest_proxy_row() {
+    fn first_legacy_proxy_message_timestamp_returns_earliest_proxy_row() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
         crate::migration::migrate(&conn).expect("migrate schema");
         conn.execute(
@@ -667,7 +671,7 @@ mod tests {
         )
         .expect("insert messages");
 
-        let ts = first_proxy_message_timestamp(&conn).expect("timestamp exists");
+        let ts = first_legacy_proxy_message_timestamp(&conn).expect("timestamp exists");
         assert_eq!(ts.to_rfc3339(), "2026-04-10T09:00:00+00:00");
     }
 }
