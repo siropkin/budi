@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use budi_core::legacy_proxy;
 use serde_json::Value;
 
 use super::statusline::CLAUDE_USER_SETTINGS;
@@ -30,6 +31,8 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
             "{yellow}warning: could not determine home directory — skipping hook/config cleanup{reset}"
         );
     } else {
+        cleanup_legacy_proxy_residue(green, yellow, reset);
+
         // 2-6. Remove Claude Code integrations (single file pass)
         match remove_all_from_claude_code(&home) {
             Ok((hooks, otel, mcp, statusline)) => {
@@ -123,6 +126,63 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     print_binary_removal_hint();
 
     Ok(())
+}
+
+fn cleanup_legacy_proxy_residue(green: &str, yellow: &str, reset: &str) {
+    print!("Removing legacy 8.0/8.1 proxy residue... ");
+    let scan = match legacy_proxy::scan() {
+        Ok(scan) => scan,
+        Err(e) => {
+            println!("{yellow}warning: {e}{reset}");
+            return;
+        }
+    };
+
+    let mut removed_paths = Vec::new();
+    for file in scan.files.iter().filter(|file| file.has_managed_blocks()) {
+        match file.apply_cleanup() {
+            Ok(true) => removed_paths.push(file.path.display().to_string()),
+            Ok(false) => {}
+            Err(e) => {
+                println!("{yellow}warning: {e}{reset}");
+                return;
+            }
+        }
+    }
+
+    if removed_paths.is_empty() {
+        println!("none found");
+    } else {
+        println!("{green}✓{reset} removed from {}", removed_paths.join(", "));
+    }
+
+    if scan.total_fuzzy_findings() > 0 {
+        println!(
+            "  {yellow}warning:{reset} manual edits still reference the old proxy and were not auto-removed:"
+        );
+        for file in scan.files.iter().filter(|file| file.has_fuzzy_findings()) {
+            println!("    {}:", file.path.display());
+            for finding in &file.fuzzy_findings {
+                println!(
+                    "      line {} ({}) {}",
+                    finding.line_number, finding.label, finding.snippet
+                );
+            }
+        }
+    }
+
+    if !scan.exported_env_vars.is_empty() {
+        let rendered = scan
+            .exported_env_vars
+            .iter()
+            .map(|entry| format!("{}={}", entry.key, entry.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  Current shell still exports legacy proxy env vars: {rendered}");
+        println!(
+            "  Open a fresh terminal if you want the current session to drop those values too."
+        );
+    }
 }
 
 fn stop_daemon() -> Result<bool> {

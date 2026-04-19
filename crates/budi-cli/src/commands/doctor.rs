@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::config;
+use budi_core::legacy_proxy;
 use budi_core::provider::Provider;
 use chrono::{DateTime, Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -44,7 +45,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     schema.result.print();
     report.record(&schema.result);
 
-    let proxy_residue = check_legacy_proxy_env();
+    let proxy_residue = check_legacy_proxy_residue();
     proxy_residue.print();
     report.record(&proxy_residue);
 
@@ -384,53 +385,70 @@ fn integrity_check_mode_label(deep: bool) -> &'static str {
     }
 }
 
-fn check_legacy_proxy_env() -> CheckResult {
-    let residue = legacy_proxy_env_vars();
-    if residue.is_empty() {
+fn check_legacy_proxy_residue() -> CheckResult {
+    let scan = match legacy_proxy::scan() {
+        Ok(scan) => scan,
+        Err(e) => {
+            return CheckResult::warn(
+                "leftover proxy config",
+                format!("could not inspect legacy proxy residue ({e})"),
+                Some("Run `budi init --cleanup` once the affected files are readable.".to_string()),
+            );
+        }
+    };
+
+    if !scan.has_any_residue() {
         return CheckResult::pass(
             "leftover proxy config",
-            "no legacy proxy-routing env vars are exported",
+            "no legacy proxy-routing residue detected in known config files or the current shell",
         );
     }
 
-    let rendered = residue
+    let mut details = Vec::new();
+    let managed_paths = scan
+        .files
         .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .filter(|file| file.has_managed_blocks())
+        .map(|file| file.path.display().to_string())
+        .collect::<Vec<_>>();
+    if !managed_paths.is_empty() {
+        details.push(format!(
+            "managed Budi proxy block(s) remain in {}",
+            managed_paths.join(", ")
+        ));
+    }
+
+    if scan.total_fuzzy_findings() > 0 {
+        let fuzzy_paths = scan
+            .files
+            .iter()
+            .filter(|file| file.has_fuzzy_findings())
+            .map(|file| file.path.display().to_string())
+            .collect::<Vec<_>>();
+        details.push(format!(
+            "manual edits still reference the old proxy in {}",
+            fuzzy_paths.join(", ")
+        ));
+    }
+
+    if !scan.exported_env_vars.is_empty() {
+        let rendered = scan
+            .exported_env_vars
+            .iter()
+            .map(|entry| format!("{}={}", entry.key, entry.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        details.push(format!("current shell still exports {rendered}"));
+    }
 
     CheckResult::warn(
         "leftover proxy config",
-        format!("legacy proxy env vars are still exported ({rendered})"),
+        details.join("; "),
         Some(
             "Run `budi init --cleanup` to review and remove old 8.0/8.1 proxy residue with explicit consent."
                 .to_string(),
         ),
     )
-}
-
-fn legacy_proxy_env_vars() -> Vec<(String, String)> {
-    [
-        "ANTHROPIC_BASE_URL",
-        "OPENAI_BASE_URL",
-        "COPILOT_PROVIDER_BASE_URL",
-    ]
-    .into_iter()
-    .filter_map(|key| {
-        let value = std::env::var(key).ok()?;
-        looks_like_legacy_proxy_value(&value).then_some((key.to_string(), value))
-    })
-    .collect()
-}
-
-fn looks_like_legacy_proxy_value(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    lower.contains("localhost:9878")
-        || lower.contains("127.0.0.1:9878")
-        || lower.contains("[::1]:9878")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -892,14 +910,6 @@ mod tests {
     fn integrity_check_uses_full_check_in_deep_mode() {
         assert_eq!(integrity_check_pragma(true), "PRAGMA integrity_check");
         assert_eq!(integrity_check_mode_label(true), "integrity_check");
-    }
-
-    #[test]
-    fn detects_legacy_proxy_env_values() {
-        assert!(looks_like_legacy_proxy_value("http://127.0.0.1:9878"));
-        assert!(looks_like_legacy_proxy_value("http://localhost:9878/v1"));
-        assert!(looks_like_legacy_proxy_value("http://[::1]:9878"));
-        assert!(!looks_like_legacy_proxy_value("https://api.anthropic.com"));
     }
 
     #[test]
