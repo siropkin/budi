@@ -68,6 +68,8 @@ pub struct SessionHealth {
     pub state: String,
     pub message_count: u64,
     pub total_cost_cents: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_lag_hint: Option<String>,
     pub vitals: SessionVitals,
     pub tip: String,
     pub details: Vec<HealthDetail>,
@@ -168,6 +170,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
                         state: "green".to_string(),
                         message_count: 0,
                         total_cost_cents: 0.0,
+                        cost_lag_hint: None,
                         vitals: SessionVitals {
                             context_drag: None,
                             cache_efficiency: None,
@@ -233,10 +236,30 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     let details = generate_details(&all_vitals, provider);
     let tip = generate_tip(&overall_state, &details, provider, msg_count);
 
+    let cost_lag_hint = if provider == ProviderKind::Cursor {
+        if let Some(last_msg) = messages.last() {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&last_msg.timestamp) {
+                let age = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
+                if age.num_minutes() < 10 {
+                    Some(crate::analytics::CURSOR_LAG_HINT.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(SessionHealth {
         state: overall_state,
         message_count: msg_count,
         total_cost_cents: total_cost,
+        cost_lag_hint,
         vitals,
         tip,
         details,

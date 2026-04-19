@@ -108,13 +108,24 @@ pub fn cmd_sessions(
             _ => format!("{dim}○{reset}"),
         };
 
+        let cost_str = if s.cost_lag_hint.is_some() {
+            format!("{}*", format_cost_cents(s.cost_cents))
+        } else {
+            format_cost_cents(s.cost_cents)
+        };
+
         println!(
             "  {health} {dim}{time}{reset}  {dim}{}{reset}  {:<20}  {:<12}  {yellow}{:>8}{reset}",
             &s.id,
             format!("{model_short}{model_extra}"),
             repo,
-            format_cost_cents(s.cost_cents),
+            cost_str,
         );
+    }
+
+    let has_lag = sessions.sessions.iter().any(|s| s.cost_lag_hint.is_some());
+    if has_lag {
+        println!("  {dim}* {}{reset}", budi_core::analytics::CURSOR_LAG_HINT);
     }
 
     if sessions.total_count > sessions.sessions.len() as u64 {
@@ -223,6 +234,9 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
         "  {bold}Est. cost{reset}  {yellow}{}{reset}",
         format_cost_cents(s.cost_cents)
     );
+    if let Some(ref hint) = s.cost_lag_hint {
+        println!("             {dim}{hint}{reset}");
+    }
 
     // Tags
     if let Ok(tags) = client.session_tags(session_id)

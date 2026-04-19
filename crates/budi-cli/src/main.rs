@@ -69,8 +69,8 @@ Examples:
   budi stats --format json         JSON output for scripting"
     )]
     Stats {
-        /// Time period to show (default: today)
-        #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
+        /// Time period to show (today, week, month, all, or relative like 1d, 7d, 1m)
+        #[arg(long, short, default_value = "today")]
         period: StatsPeriod,
         /// Show repositories ranked by cost
         #[arg(long, default_value_t = false)]
@@ -181,8 +181,8 @@ Examples:
         /// Session ID for detail view (omit for session list)
         #[arg()]
         session_id: Option<String>,
-        /// Time period for session list (default: today)
-        #[arg(long, short, value_enum, default_value_t = StatsPeriod::Today)]
+        /// Time period for session list (today, week, month, all, or relative like 1d, 7d, 1m)
+        #[arg(long, short, default_value = "today")]
         period: StatsPeriod,
         /// Filter sessions by search term (model, repo, branch, provider)
         #[arg(long)]
@@ -311,12 +311,44 @@ enum AutostartAction {
     Uninstall,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StatsPeriod {
     Today,
     Week,
     Month,
     All,
+    Days(u32),
+    Weeks(u32),
+    Months(u32),
+}
+
+impl std::str::FromStr for StatsPeriod {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "today" => Ok(StatsPeriod::Today),
+            "week" => Ok(StatsPeriod::Week),
+            "month" => Ok(StatsPeriod::Month),
+            "all" => Ok(StatsPeriod::All),
+            _ => {
+                let len = s.len();
+                if len < 2 {
+                    return Err(format!("Invalid period format: {}", s));
+                }
+                let (num_str, unit) = s.split_at(len - 1);
+                let num = num_str
+                    .parse::<u32>()
+                    .map_err(|_| format!("Invalid number in period: {}", s))?;
+                match unit.to_lowercase().as_str() {
+                    "d" => Ok(StatsPeriod::Days(num)),
+                    "w" => Ok(StatsPeriod::Weeks(num)),
+                    "m" => Ok(StatsPeriod::Months(num)),
+                    _ => Err(format!("Invalid unit in period: {}. Use d, w, or m.", s)),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]

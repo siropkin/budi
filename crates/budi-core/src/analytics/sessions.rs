@@ -314,6 +314,8 @@ pub fn activity_attribution_stats(conn: &Connection) -> Result<Vec<ActivityAttri
 // Session List
 // ---------------------------------------------------------------------------
 
+pub const CURSOR_LAG_HINT: &str = "Cursor cost data may lag up to ~10 minutes";
+
 /// Session list entry for the Sessions page.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionListEntry {
@@ -346,6 +348,10 @@ pub struct SessionListEntry {
     /// file names or commit messages (ADR-0083).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_outcome_rationale: Option<String>,
+    /// Disclaimer for Cursor sessions that ended recently, as their cost data
+    /// may lag up to ~10 minutes per the Usage API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_lag_hint: Option<String>,
 }
 
 /// Paginated session list result.
@@ -711,9 +717,14 @@ pub fn session_list_with_filters(
                 title: row.get(14)?,
                 work_outcome: None,
                 work_outcome_rationale: None,
+                cost_lag_hint: None,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            let mut entry: SessionListEntry = r.ok()?;
+            entry.cost_lag_hint = derive_cost_lag_hint(&entry);
+            Some(entry)
+        })
         .collect();
 
     Ok(PaginatedSessions {
@@ -871,6 +882,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                 title: row.get(13)?,
                 work_outcome: None,
                 work_outcome_rationale: None,
+                cost_lag_hint: None,
             })
         },
     );
@@ -885,6 +897,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                 entry.work_outcome = Some(label);
                 entry.work_outcome_rationale = Some(rationale);
             }
+            entry.cost_lag_hint = derive_cost_lag_hint(&entry);
             Ok(Some(entry))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -943,6 +956,26 @@ fn derive_session_work_outcome(
     };
     let outcome = crate::work_outcome::derive_work_outcome(&inputs);
     Some((outcome.label.as_str().to_string(), outcome.rationale))
+}
+
+/// Returns a disclaimer if the session is from Cursor and ended recently enough
+/// that its cost data may still be lagging in the Usage API (up to ~10 minutes).
+fn derive_cost_lag_hint(entry: &SessionListEntry) -> Option<String> {
+    if entry.provider != "cursor" {
+        return None;
+    }
+    let ended = entry
+        .ended_at
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .or_else(|| entry.started_at.as_deref().and_then(parse_rfc3339))?;
+
+    let age = chrono::Utc::now().signed_duration_since(ended);
+    if age.num_minutes() < 10 {
+        Some(CURSOR_LAG_HINT.to_string())
+    } else {
+        None
+    }
 }
 
 fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {

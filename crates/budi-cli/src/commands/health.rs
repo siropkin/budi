@@ -61,6 +61,9 @@ fn render_health(h: &SessionHealth) {
         "  {dim}{} messages · ${:.2} total{reset}",
         h.message_count, cost_display
     );
+    if let Some(ref hint) = h.cost_lag_hint {
+        println!("  {dim}* {hint}{reset}");
+    }
     println!();
 
     let vitals: Vec<(&str, &Option<budi_core::analytics::VitalScore>)> = vec![

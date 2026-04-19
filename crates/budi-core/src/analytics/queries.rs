@@ -2995,6 +2995,10 @@ pub struct StatuslineStats {
     /// Per-message cost in cents for the active session (for statusline rate display).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_msg_cost: Option<f64>,
+    /// Disclaimer for Cursor sessions that ended recently, as their cost data
+    /// may lag up to ~10 minutes per the Usage API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_lag_hint: Option<String>,
 }
 
 /// Parameters for requesting extra statusline data.
@@ -3176,6 +3180,12 @@ pub fn statusline_stats(
         })
         .unwrap_or((None, None, None));
 
+    let cost_lag_hint = if active_provider.as_deref() == Some("cursor") {
+        Some(crate::analytics::CURSOR_LAG_HINT.to_string())
+    } else {
+        None
+    };
+
     Ok(StatuslineStats {
         cost_1d,
         cost_7d,
@@ -3191,6 +3201,7 @@ pub fn statusline_stats(
         health_state,
         health_tip,
         session_msg_cost,
+        cost_lag_hint,
     })
 }
 
