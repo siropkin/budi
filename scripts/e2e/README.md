@@ -19,6 +19,7 @@ cargo build --release
 
 # Run one test:
 bash scripts/e2e/test_302_sessions_visibility.sh
+bash scripts/e2e/test_323_init_no_proxy_mutations.sh
 
 # Keep the temp HOME around for post-mortem inspection:
 KEEP_TMP=1 bash scripts/e2e/test_302_sessions_visibility.sh
