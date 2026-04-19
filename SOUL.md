@@ -149,7 +149,7 @@ Nine tables, seven data entities + two supporting:
 | Source | Confidence | What it provides |
 |--------|-----------|-----------------|
 | **JSONL tailer** (Claude Code, Codex, Copilot CLI) | `estimated` | Per-message tokens parsed from the agent's local transcript as it grows. Same parser as `budi import`; same enricher chain. Live in 8.2+ via [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md). |
-| **Cursor Usage API** | `exact` | Per-request tokens + totalCents pulled from Cursor's API. Reconciles cost/token data the JSONL doesn't carry; lag profile measured in #321 before ADR-0089 promotes from Proposed to Accepted. |
+| **Cursor Usage API** | `exact` | Per-request tokens + totalCents pulled from Cursor's API. Reconciles cost/token data the JSONL doesn't carry; lag profile was measured in #321 (p50 ≈ 70 s, p99 ≈ 6 min, N = 12) and embedded in [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) §7 — the Usage API stays a scheduled pull (not a live path) and a "Cursor cost may lag up to ~10 min" UX disclaimer follow-up is tracked in #381. |
 | **JSONL backfill** (`budi import`) | `estimated` (Claude Code / Codex / Copilot CLI) / `exact` (Cursor) | Same providers, one-shot mode for historical backfill. Used after install or after `budi import --force`. |
 | **Legacy proxy** (8.1.x only, transition window) | `proxy_estimated` | Pre-8.2 real-time per-request tokens captured by the proxy on port 9878. New writes stop in 8.2 R1.4 (#320); the proxy is deleted in R2.1 (#322). Existing `proxy_estimated` rows remain queryable. |
 

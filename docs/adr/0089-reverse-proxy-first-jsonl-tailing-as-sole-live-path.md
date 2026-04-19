@@ -1,7 +1,7 @@
 # ADR-0089: Reverse Proxy-First Architecture — JSONL Tailing as Sole Live Path
 
 - **Date**: 2026-04-17
-- **Status**: Proposed
+- **Status**: Accepted (2026-04-18 — promotion criteria below all satisfied; recorded in [#356](https://github.com/siropkin/budi/issues/356) R1.7 docs review pass)
 - **Issue**: [#317](https://github.com/siropkin/budi/issues/317)
 - **Milestone**: 8.2.0 (epic: [#316](https://github.com/siropkin/budi/issues/316))
 - **Supersedes**: [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md)
@@ -175,14 +175,14 @@ Any section that still describes the proxy as the live path is updated in the R1
 
 ## Promotion Criteria
 
-This ADR is promoted from `Proposed` to `Accepted` only when all of the following are true:
+This ADR is promoted from `Proposed` to `Accepted` only when all of the following are true. As of 2026-04-18 every entry below is satisfied and the status banner at the top of this document reads `Accepted`.
 
 - [#321](https://github.com/siropkin/budi/issues/321) Cursor Usage API lag verdict is published — **satisfied**: instrument shipped (`scripts/research/cursor_usage_api_lag.sh`), real-machine run completed, numeric verdict and §C.c recommendation posted as a [comment on #321](https://github.com/siropkin/budi/issues/321#issuecomment-4275063605), §7 above embeds those findings, and the recommendation is consistent with this ADR's §7
-- [#318](https://github.com/siropkin/budi/issues/318) `Provider::watch_roots()` is merged
-- [#319](https://github.com/siropkin/budi/issues/319) daemon tailer is merged behind `BUDI_LIVE_TAIL=1`
-- [#320](https://github.com/siropkin/budi/issues/320) tailer is promoted to default and proxy ingestion is short-circuited
+- [#318](https://github.com/siropkin/budi/issues/318) `Provider::watch_roots()` is merged — **satisfied** (PR #369)
+- [#319](https://github.com/siropkin/budi/issues/319) daemon tailer is merged behind `BUDI_LIVE_TAIL=1` — **satisfied** (PR #370)
+- [#320](https://github.com/siropkin/budi/issues/320) tailer is promoted to default and proxy ingestion is short-circuited — **satisfied** (PR #372)
 
-Until those gates close, this ADR remains `Proposed` and the 8.2 R2 proxy-removal work is explicitly blocked. That gating is intentional: removing the proxy before the tailer is trusted is the one failure mode this ADR is trying to avoid.
+The 8.2 R2 proxy-removal work is unblocked once the R1 exit gate ([#362](https://github.com/siropkin/budi/issues/362), R1.8 smoke + E2E) closes with a full PASS — proxy + tailer must demonstrate analytics parity through at least one RC before the proxy module is deleted in [#322](https://github.com/siropkin/budi/issues/322). That gating is intentional: removing the proxy before the tailer is trusted is the one failure mode this ADR is trying to avoid.
 
 ## References
 
