@@ -6,7 +6,7 @@ use crate::commands::stats::{format_cost_cents, format_tokens, period_date_range
 
 use super::ansi;
 
-/// Quick operational overview: daemon, proxy, today's cost.
+/// Quick operational overview: daemon and today's cost.
 pub fn cmd_status() -> Result<()> {
     let bold_cyan = ansi("\x1b[1;36m");
     let bold = ansi("\x1b[1m");
@@ -39,18 +39,7 @@ pub fn cmd_status() -> Result<()> {
         return Ok(());
     }
 
-    // Proxy health: try connecting to the proxy port
-    let proxy_port = config.proxy.effective_port();
-    let proxy_ok = check_proxy_port(proxy_port);
-    if proxy_ok {
-        println!("  {green}✓{reset} {bold}Proxy{reset}    running (port {proxy_port})");
-    } else if config.proxy.effective_enabled() {
-        println!(
-            "  {red}✗{reset} {bold}Proxy{reset}    not running (expected on port {proxy_port})"
-        );
-    } else {
-        println!("  {dim}-{reset} {bold}Proxy{reset}    disabled");
-    }
+    println!("  {dim}-{reset} {bold}Proxy{reset}    removed in 8.2 (tailer is live)");
 
     // Today's cost summary
     let client = match DaemonClient::connect() {
@@ -95,13 +84,4 @@ pub fn cmd_status() -> Result<()> {
 
     println!();
     Ok(())
-}
-
-/// TCP probe to check if the proxy is listening on the given port.
-fn check_proxy_port(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        std::time::Duration::from_millis(500),
-    )
-    .is_ok()
 }

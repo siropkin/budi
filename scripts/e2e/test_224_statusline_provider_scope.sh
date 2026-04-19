@@ -38,7 +38,6 @@ export HOME="$TMPDIR_ROOT"
 mkdir -p "$HOME/.config/budi"
 
 DAEMON_PORT=17882
-PROXY_PORT=19882
 
 cleanup() {
   local status=$?
@@ -55,12 +54,11 @@ trap cleanup EXIT INT TERM
 
 echo "[e2e] HOME=$HOME"
 
-echo "[e2e] starting budi-daemon on :$DAEMON_PORT / proxy :$PROXY_PORT"
+echo "[e2e] starting budi-daemon on :$DAEMON_PORT"
 RUST_LOG=warn \
   "$BUDI_DAEMON" serve \
     --host 127.0.0.1 \
     --port $DAEMON_PORT \
-    --proxy-port $PROXY_PORT \
     >"$TMPDIR_ROOT/daemon.log" 2>&1 &
 DAEMON_PID=$!
 

@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use axum::Router;
@@ -7,7 +6,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use budi_core::analytics;
-use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT, ProxyConfig};
+use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -31,10 +30,6 @@ enum Commands {
         host: String,
         #[arg(long, default_value_t = DEFAULT_DAEMON_PORT)]
         port: u16,
-        #[arg(long)]
-        proxy_port: Option<u16>,
-        #[arg(long)]
-        no_proxy: bool,
     },
 }
 
@@ -46,30 +41,6 @@ pub struct AppState {
     /// Owned by the `/cloud/sync` route (see `routes::cloud`) and the
     /// background worker in `workers::cloud_sync`.
     pub cloud_syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[derive(Clone)]
-pub struct ProxyState {
-    pub http_client: reqwest::Client,
-    pub anthropic_upstream: String,
-    pub openai_upstream: String,
-    pub analytics_db_path: PathBuf,
-    /// Test-only channel: `record_event` signals here after the DB write
-    /// completes, allowing tests to await it instead of polling.
-    #[cfg(test)]
-    pub record_tx: Option<std::sync::mpsc::Sender<()>>,
-}
-
-fn build_proxy_router(proxy_state: ProxyState) -> Router {
-    use routes::proxy as p;
-
-    Router::new()
-        .route("/v1/messages", post(p::anthropic_messages))
-        .route("/v1/chat/completions", post(p::openai_chat_completions))
-        .route("/v1/models", get(p::openai_models))
-        .layer(from_fn(p::catch_proxy_panic))
-        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
-        .with_state(proxy_state)
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -183,18 +154,11 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let (host, port, proxy_port_override, no_proxy) = match cli.command.unwrap_or(Commands::Serve {
+    let (host, port) = match cli.command.unwrap_or(Commands::Serve {
         host: DEFAULT_DAEMON_HOST.to_string(),
         port: DEFAULT_DAEMON_PORT,
-        proxy_port: None,
-        no_proxy: false,
     }) {
-        Commands::Serve {
-            host,
-            port,
-            proxy_port,
-            no_proxy,
-        } => (host, port, proxy_port, no_proxy),
+        Commands::Serve { host, port } => (host, port),
     };
 
     // Kill any existing budi-daemon on the same port so a fresh binary can
@@ -218,63 +182,11 @@ async fn main() -> Result<()> {
         tracing::warn!("Failed to initialize database: {e}");
     }
 
-    // --- Start proxy server if enabled ---
-    let proxy_config = ProxyConfig::default();
-    let proxy_enabled = !no_proxy && proxy_config.effective_enabled();
-    let proxy_port = proxy_port_override.unwrap_or_else(|| proxy_config.effective_port());
-
-    if proxy_enabled {
-        let analytics_db_path = analytics::db_path().unwrap_or_default();
-        let proxy_state = ProxyState {
-            http_client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build proxy HTTP client"),
-            anthropic_upstream: proxy_config.effective_anthropic_upstream(),
-            openai_upstream: proxy_config.effective_openai_upstream(),
-            analytics_db_path,
-            #[cfg(test)]
-            record_tx: None,
-        };
-
-        if let Ok(db_path) = analytics::db_path()
-            && let Ok(conn) = analytics::open_db(&db_path)
-            && let Err(e) = budi_core::proxy::ensure_proxy_schema(&conn)
-        {
-            tracing::warn!("Failed to initialize proxy schema: {e}");
-        }
-
-        let proxy_app = build_proxy_router(proxy_state);
-        let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse()?;
-
-        kill_existing_daemon(proxy_port);
-
-        match tokio::net::TcpListener::bind(proxy_addr).await {
-            Ok(proxy_listener) => {
-                tracing::info!("budi proxy listening on {}", proxy_addr);
-                tokio::spawn(async move {
-                    if let Err(e) = axum::serve(proxy_listener, proxy_app).await {
-                        tracing::error!("Proxy server error: {e}");
-                    }
-                });
-            }
-            Err(e) => {
-                let message = format!(
-                    "Failed to bind proxy on {proxy_addr}: {e}. \
-                     Check if another process is using port {proxy_port}."
-                );
-                tracing::error!("{message}");
-                anyhow::bail!("{message}");
-            }
-        }
-    }
-
     // --- Start filesystem tailer (ADR-0089 §1 / R1.4 #320) ---
     //
     // R1.3 (#319) shipped the tailer behind `BUDI_LIVE_TAIL=1`. R1.4 (#320)
-    // promotes it to the default and short-circuits proxy ingestion in
-    // `budi_core::proxy::insert_proxy_*` so only one path writes. The proxy
-    // still forwards traffic until R2.1 (#322) deletes it wholesale.
+    // promoted it to the default. R2.1 (#322) removes the proxy runtime, so
+    // tailer ingestion is now the only live path.
     match analytics::db_path() {
         Ok(db_path) => {
             tracing::info!(
@@ -443,20 +355,6 @@ mod tests {
         })
     }
 
-    fn test_proxy_app() -> Router {
-        let tmp = std::env::temp_dir().join("budi-proxy-test-db");
-        std::fs::create_dir_all(&tmp).ok();
-        let db_path = tmp.join("analytics.db");
-        let proxy_state = ProxyState {
-            http_client: reqwest::Client::new(),
-            anthropic_upstream: "http://127.0.0.1:19999".to_string(),
-            openai_upstream: "http://127.0.0.1:19999".to_string(),
-            analytics_db_path: db_path,
-            record_tx: None,
-        };
-        build_proxy_router(proxy_state)
-    }
-
     #[tokio::test]
     async fn health_returns_ok() {
         let app = test_app();
@@ -565,330 +463,5 @@ mod tests {
             json.get("endpoint").is_some(),
             "cloud/status should include `endpoint`"
         );
-    }
-
-    #[tokio::test]
-    async fn proxy_anthropic_returns_bad_gateway_when_upstream_unreachable() {
-        let app = test_proxy_app();
-        let body = serde_json::json!({
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "hello"}]
-        });
-        let resp = app
-            .oneshot(
-                Request::post("/v1/messages")
-                    .header("content-type", "application/json")
-                    .header("x-api-key", "test-key")
-                    .header("anthropic-version", "2023-06-01")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"]["type"], "proxy_error");
-    }
-
-    #[tokio::test]
-    async fn proxy_openai_returns_bad_gateway_when_upstream_unreachable() {
-        let app = test_proxy_app();
-        let body = serde_json::json!({
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hello"}]
-        });
-        let resp = app
-            .oneshot(
-                Request::post("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-key")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"]["type"], "proxy_error");
-    }
-
-    #[tokio::test]
-    async fn proxy_models_returns_bad_gateway_when_upstream_unreachable() {
-        let app = test_proxy_app();
-        let resp = app
-            .oneshot(
-                Request::get("/v1/models")
-                    .header("authorization", "Bearer test-key")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    }
-
-    #[tokio::test]
-    async fn proxy_rejects_oversized_body() {
-        let app = test_proxy_app();
-        let huge_body = vec![0u8; 17 * 1024 * 1024]; // 17 MiB > 16 MiB limit
-        let resp = app
-            .oneshot(
-                Request::post("/v1/messages")
-                    .header("content-type", "application/json")
-                    .body(Body::from(huge_body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    // --- SSE streaming tests ---
-
-    /// Start a mock HTTP server that returns an SSE response, then closes.
-    async fn start_mock_sse_server(sse_body: String) -> std::net::SocketAddr {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 16384];
-            let _ = socket.read(&mut buf).await;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Type: text/event-stream\r\n\
-                 Connection: close\r\n\
-                 \r\n\
-                 {sse_body}"
-            );
-            let _ = socket.write_all(resp.as_bytes()).await;
-        });
-
-        addr
-    }
-
-    /// Wait for `record_event`'s `spawn_blocking` ingestion path to complete
-    /// via the test channel, then assert the R1.4 (#320, ADR-0089 §1)
-    /// no-op contract: the proxy did not write to `proxy_events` or
-    /// `messages`. The channel signal still fires because the no-op runs
-    /// inside the same `spawn_blocking` task that sends on `record_tx`.
-    ///
-    /// The full migration is run so both tables exist for the `COUNT(*)`
-    /// queries even though the no-op never reaches a `CREATE TABLE`.
-    fn wait_for_record_then_assert_noop_ingest(
-        rx: &std::sync::mpsc::Receiver<()>,
-        db_path: &std::path::Path,
-    ) {
-        rx.recv_timeout(std::time::Duration::from_secs(30))
-            .expect("timed out waiting for record_event to complete");
-        let conn = rusqlite::Connection::open(db_path).unwrap();
-        budi_core::migration::migrate(&conn).unwrap();
-        budi_core::proxy::ensure_proxy_schema(&conn).unwrap();
-        let proxy_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM proxy_events", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            proxy_rows, 0,
-            "proxy ingestion is a no-op after R1.4 (#320, ADR-0089 §1); \
-             `proxy_events` must not receive new writes — the JSONL tailer \
-             is the sole live writer."
-        );
-        let message_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            message_rows, 0,
-            "no proxy-derived row may land in `messages` after R1.4 (#320). \
-             Live ingestion runs through the tailer worker only."
-        );
-    }
-
-    struct ProxyTestHarness {
-        app: Router,
-        db_path: PathBuf,
-        record_rx: std::sync::mpsc::Receiver<()>,
-    }
-
-    fn proxy_with_upstream(upstream: &str) -> ProxyTestHarness {
-        let safe_name = std::thread::current()
-            .name()
-            .unwrap_or("t")
-            .replace("::", "_");
-        let tmp = std::env::temp_dir().join(format!("budi-sse-test-{safe_name}"));
-        std::fs::create_dir_all(&tmp).ok();
-        let db_path = tmp.join("analytics.db");
-        let _ = std::fs::remove_file(&db_path);
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let proxy_state = ProxyState {
-            http_client: reqwest::Client::new(),
-            anthropic_upstream: upstream.to_string(),
-            openai_upstream: upstream.to_string(),
-            analytics_db_path: db_path.clone(),
-            record_tx: Some(tx),
-        };
-        ProxyTestHarness {
-            app: build_proxy_router(proxy_state),
-            db_path,
-            record_rx: rx,
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proxy_streams_anthropic_sse_and_does_not_ingest() {
-        let sse_body = [
-            "event: message_start\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_t\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
-            "event: message_delta\n",
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n",
-            "event: message_stop\n",
-            "data: {\"type\":\"message_stop\"}\n\n",
-        ].concat();
-
-        let addr = start_mock_sse_server(sse_body).await;
-        let h = proxy_with_upstream(&format!("http://{addr}"));
-
-        let body = serde_json::json!({
-            "model": "claude-sonnet-4-6",
-            "stream": true,
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "hello"}]
-        });
-        let resp = h
-            .app
-            .oneshot(
-                Request::post("/v1/messages")
-                    .header("content-type", "application/json")
-                    .header("x-api-key", "test-key")
-                    .header("anthropic-version", "2023-06-01")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(
-            ct.contains("text/event-stream"),
-            "expected SSE content-type"
-        );
-
-        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let text = String::from_utf8_lossy(&resp_bytes);
-        assert!(
-            text.contains("message_start"),
-            "SSE data should pass through"
-        );
-        assert!(text.contains("Hello"), "content delta should pass through");
-
-        // R1.4 (#320, ADR-0089 §1): the proxy still streams data through
-        // upstream → client, but its ingestion path is a no-op. No row
-        // should land in `proxy_events` or `messages`. Token / streaming
-        // extraction logic is dead code that R2.1 (#322) deletes wholesale.
-        wait_for_record_then_assert_noop_ingest(&h.record_rx, &h.db_path);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proxy_streams_openai_sse_and_does_not_ingest() {
-        let sse_body = [
-            "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n",
-            "data: [DONE]\n\n",
-        ].concat();
-
-        let addr = start_mock_sse_server(sse_body).await;
-        let h = proxy_with_upstream(&format!("http://{addr}"));
-
-        let body = serde_json::json!({
-            "model": "gpt-4o",
-            "stream": true,
-            "messages": [{"role": "user", "content": "hello"}]
-        });
-        let resp = h
-            .app
-            .oneshot(
-                Request::post("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-key")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let text = String::from_utf8_lossy(&resp_bytes);
-        assert!(text.contains("Hi"), "content should pass through");
-        assert!(
-            text.contains("[DONE]"),
-            "terminal event should pass through"
-        );
-
-        // R1.4 (#320, ADR-0089 §1): proxy passthrough still works, but
-        // ingestion is a no-op. Same contract as the Anthropic test above.
-        wait_for_record_then_assert_noop_ingest(&h.record_rx, &h.db_path);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proxy_sse_completes_full_stream_without_ingest() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 16384];
-            let _ = socket.read(&mut buf).await;
-            let headers =
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
-            let _ = socket.write_all(headers.as_bytes()).await;
-            let _ = socket
-                .write_all(b"data: {\"type\":\"message_start\"}\n\n")
-                .await;
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let _ = socket
-                .write_all(b"data: {\"type\":\"message_stop\"}\n\n")
-                .await;
-        });
-
-        let h = proxy_with_upstream(&format!("http://{addr}"));
-        let body = serde_json::json!({
-            "model": "claude-sonnet-4-6",
-            "stream": true,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        let resp = h
-            .app
-            .oneshot(
-                Request::post("/v1/messages")
-                    .header("content-type", "application/json")
-                    .header("x-api-key", "k")
-                    .header("anthropic-version", "2023-06-01")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let _ = resp.into_body().collect().await.unwrap();
-
-        // R1.4 (#320, ADR-0089 §1): the proxy still consumes the upstream
-        // SSE stream end-to-end (delayed `message_stop`), but the duration
-        // measurement is observed only as the no-op ingest signal. Test
-        // pins the contract: passthrough completes, no DB rows written.
-        wait_for_record_then_assert_noop_ingest(&h.record_rx, &h.db_path);
     }
 }
