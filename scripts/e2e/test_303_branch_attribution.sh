@@ -192,18 +192,25 @@ if ! echo "$BRANCHES_JSON" | grep -Fq "\"git_branch\":\"$BRANCH\""; then
 fi
 echo "[e2e] OK: branch '$BRANCH' visible via /analytics/branches"
 
-echo "[e2e] budi doctor (branch attribution section):"
+echo "[e2e] budi doctor (tailer-contract output, post-#325):"
 DOCTOR_OUT="$(cd "$REPO_ROOT" && "$BUDI" doctor --repo-root "$REPO_ROOT" 2>&1 || true)"
-echo "$DOCTOR_OUT" | grep -E "branch attribution" || {
-  echo "[e2e] FAIL: budi doctor did not print a branch-attribution check" >&2
+# After R2.4 (#325) the doctor is reorganized around the tailer contract:
+# transcript visibility / tailer health replace the standalone "branch
+# attribution" section. The branch surfacing for #303 is now proven by the
+# /analytics/branches assertion above; here we just guard that doctor still
+# reports tailer health as PASS for the Claude provider on the seeded
+# transcript so a future regression that breaks attribution-by-tailer is
+# caught loudly.
+echo "$DOCTOR_OUT" | grep -E "tailer health / Claude Code" || {
+  echo "[e2e] FAIL: budi doctor did not print a tailer-health section for Claude Code" >&2
   echo "$DOCTOR_OUT" | tail -n 60 >&2
   exit 1
 }
-if echo "$DOCTOR_OUT" | grep -q "Branch attribution is broken"; then
-  echo "[e2e] FAIL: budi doctor reported a red branch-attribution result" >&2
+if echo "$DOCTOR_OUT" | grep -q "FAIL tailer health / Claude Code"; then
+  echo "[e2e] FAIL: budi doctor reported a red tailer-health result for Claude Code" >&2
   echo "$DOCTOR_OUT" | tail -n 60 >&2
   exit 1
 fi
-echo "[e2e] OK: budi doctor branch-attribution check is not red"
+echo "[e2e] OK: budi doctor tailer-health for Claude Code is not red"
 
 echo "[e2e] PASS"

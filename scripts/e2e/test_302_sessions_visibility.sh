@@ -219,18 +219,24 @@ if [[ "$FOUND_CLI_SHAPE" != "1" ]]; then
 fi
 echo "[e2e] OK: /analytics/sessions CLI query shape includes the session"
 
-echo "[e2e] budi doctor (sessions visibility section):"
+echo "[e2e] budi doctor (tailer-contract output, post-#325):"
 DOCTOR_OUT="$(cd "$REPO_ROOT" && "$BUDI" doctor --repo-root "$REPO_ROOT" 2>&1 || true)"
-echo "$DOCTOR_OUT" | grep -E "sessions visibility" || {
-  echo "[e2e] FAIL: budi doctor did not print a sessions-visibility check" >&2
+# After R2.4 (#325) the doctor is reorganized around the tailer contract.
+# Session visibility is proven directly by the /analytics/sessions assertion
+# above; here we keep a doctor-level guard that tailer health and transcript
+# visibility for the seeded session are PASS, so a regression that breaks
+# the live-tail surface (and therefore breaks `budi sessions`) still trips
+# this script.
+echo "$DOCTOR_OUT" | grep -E "transcript visibility / Claude Code" || {
+  echo "[e2e] FAIL: budi doctor did not print a transcript-visibility section for Claude Code" >&2
   echo "$DOCTOR_OUT" | tail -n 60 >&2
   exit 1
 }
-if echo "$DOCTOR_OUT" | grep -q "Sessions visibility mismatch"; then
-  echo "[e2e] FAIL: budi doctor reported a sessions-visibility mismatch" >&2
+if echo "$DOCTOR_OUT" | grep -E "FAIL (transcript visibility|tailer health) / Claude Code"; then
+  echo "[e2e] FAIL: budi doctor reported a red tailer/transcript section for Claude Code" >&2
   echo "$DOCTOR_OUT" | tail -n 60 >&2
   exit 1
 fi
-echo "[e2e] OK: budi doctor sessions-visibility check is green"
+echo "[e2e] OK: budi doctor tailer/transcript sections for Claude Code are not red"
 
 echo "[e2e] PASS"
