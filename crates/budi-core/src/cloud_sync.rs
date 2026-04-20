@@ -203,7 +203,10 @@ pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncSt
     let endpoint = config.effective_endpoint();
     let enabled = config.effective_enabled();
     let ready = config.is_ready();
-    let configured = config.api_key.is_some() || config.effective_api_key().is_some();
+    // `effective_api_key()` already returns `api_key.clone().or_else(env lookups)`,
+    // so the earlier `api_key.is_some() || effective_api_key().is_some()` was
+    // strictly dominated by the second check (see #346).
+    let configured = config.effective_api_key().is_some();
 
     let mut last_synced_at = None;
     let mut rollup_watermark = None;
