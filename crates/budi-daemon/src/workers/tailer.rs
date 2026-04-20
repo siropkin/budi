@@ -885,6 +885,42 @@ mod tests {
         );
     }
 
+    /// Acceptance for #384: flipping the `shutdown` flag must cause
+    /// `run_blocking` to return at the next backstop tick (≤ 5 s) and
+    /// log `shutdown requested`. The production wiring that flips the
+    /// flag lives in `daemon::main::install_shutdown_listener` — this
+    /// test covers the tailer-side contract the listener depends on.
+    #[test]
+    fn run_blocking_exits_when_shutdown_flag_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let (db_path, _) = open_test_db(tmp.path());
+
+        let provider: Box<dyn Provider> = Box::new(StubProvider::new("stub", root.clone()));
+        let providers = vec![provider];
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let shutdown_clone = shutdown.clone();
+        let handle = std::thread::spawn(move || run_blocking(db_path, providers, shutdown_clone));
+
+        // Give the watcher a moment to settle before we ask it to stop.
+        std::thread::sleep(Duration::from_millis(50));
+        shutdown.store(true, Ordering::SeqCst);
+
+        let started = std::time::Instant::now();
+        let deadline = started + BACKSTOP_POLL + Duration::from_secs(2);
+        while !handle.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "run_blocking did not exit within {:?} of shutdown flag flip",
+                    deadline - started
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        handle.join().expect("tailer thread panicked");
+    }
+
     #[test]
     fn process_path_recovers_from_truncation() {
         let tmp = tempfile::tempdir().unwrap();
