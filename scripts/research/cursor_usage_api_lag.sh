@@ -70,9 +70,12 @@
 #       to `Accepted` until this section is filled in — see
 #       ADR-0089 Promotion Criteria).
 #
-#   Per #316 rule 12 the verdict memo lives in the wiki, not in
-#   `docs/research/`. This script is the durable in-tree artifact; the
-#   numeric memo is the perishable run output.
+#   Per #316 rule 12 (8.2.0) and the #407 / #396 amendment (8.2.1)
+#   the verdict memo lives in the wiki, not in `docs/research/`. This
+#   script is the durable in-tree artifact kept under `scripts/research/`
+#   as the operator-only measurement instrument explicitly permitted by
+#   the amended 8.2.1 docs / research discipline rule; the numeric memo
+#   is the perishable run output.
 #
 # Privacy
 #   The script reads only:
