@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use budi_core::analytics;
-use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Local, Months, NaiveDate, TimeZone};
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
@@ -64,8 +64,15 @@ pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>
             (Some(since), None)
         }
         StatsPeriod::Months(n) => {
-            // A simple approximation for months is 30 days
-            let past = today - chrono::Duration::days((n * 30) as i64);
+            // Use calendar months (chrono clamps to the end of the
+            // target month if the current day-of-month doesn't exist
+            // there, e.g. 2026-03-31 - 1 month = 2026-02-28). Falls
+            // back to a 30-day-per-month approximation only for the
+            // unreachable overflow case so we never panic on the
+            // `--period` axis.
+            let past = today
+                .checked_sub_months(Months::new(n))
+                .unwrap_or_else(|| today - chrono::Duration::days((n as i64) * 30));
             let since = local_midnight_to_utc(past);
             (Some(since), None)
         }
@@ -1292,4 +1299,92 @@ fn cmd_stats_tags(
     }
     println!();
     Ok(())
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn period_label_covers_relative_windows() {
+        assert_eq!(period_label(StatsPeriod::Today), "Today");
+        assert_eq!(period_label(StatsPeriod::Week), "This week");
+        assert_eq!(period_label(StatsPeriod::Month), "This month");
+        assert_eq!(period_label(StatsPeriod::All), "All time");
+
+        // Singular forms avoid the "Last 1 days" infelicity.
+        assert_eq!(period_label(StatsPeriod::Days(1)), "Last 1 day");
+        assert_eq!(period_label(StatsPeriod::Weeks(1)), "Last 1 week");
+        assert_eq!(period_label(StatsPeriod::Months(1)), "Last 1 month");
+
+        assert_eq!(period_label(StatsPeriod::Days(7)), "Last 7 days");
+        assert_eq!(period_label(StatsPeriod::Weeks(2)), "Last 2 weeks");
+        assert_eq!(period_label(StatsPeriod::Months(3)), "Last 3 months");
+    }
+
+    #[test]
+    fn period_date_range_all_has_no_since() {
+        let (since, until) = period_date_range(StatsPeriod::All);
+        assert!(since.is_none(), "`all` must not clamp the since bound");
+        assert!(until.is_none());
+    }
+
+    #[test]
+    fn period_date_range_today_pins_local_midnight() {
+        let (since, until) = period_date_range(StatsPeriod::Today);
+        assert!(since.is_some(), "`today` must anchor a since bound");
+        assert!(until.is_none());
+    }
+
+    #[test]
+    fn period_date_range_relative_windows_go_backwards() {
+        // Rolling windows must produce a `since` strictly earlier than
+        // `today`'s `since` for any N >= 1. This is the behavior the
+        // statusline and cloud dashboard rely on for rolling 1d/7d/30d
+        // semantics (#404, ADR-0088 §4).
+        let (today_since, _) = period_date_range(StatsPeriod::Today);
+        let today_since = today_since.expect("today has a since bound");
+
+        for period in [
+            StatsPeriod::Days(1),
+            StatsPeriod::Days(7),
+            StatsPeriod::Weeks(1),
+            StatsPeriod::Weeks(2),
+            StatsPeriod::Months(1),
+            StatsPeriod::Months(3),
+        ] {
+            let (since, until) = period_date_range(period);
+            let since = since.unwrap_or_else(|| panic!("{:?} must produce a since bound", period));
+            assert!(until.is_none(), "{:?} must not clamp until", period);
+            assert!(
+                since < today_since,
+                "relative window {:?} must start before today ({} vs {})",
+                period,
+                since,
+                today_since
+            );
+        }
+    }
+
+    #[test]
+    fn period_date_range_months_uses_calendar_subtraction() {
+        // `StatsPeriod::Months(12)` should land roughly 12 calendar
+        // months before today — i.e. at least 360 days back — rather
+        // than the 30-day-per-month approximation used before #404.
+        // We assert a conservative lower bound so the test is stable
+        // regardless of which months are currently in view.
+        let today = Local::now().date_naive();
+        let (since_rfc, _) = period_date_range(StatsPeriod::Months(12));
+        let since_rfc = since_rfc.expect("months(12) has a since bound");
+        let since_dt = chrono::DateTime::parse_from_rfc3339(&since_rfc)
+            .expect("since is a valid RFC3339 timestamp");
+        let since_local = since_dt.with_timezone(&Local).date_naive();
+        let delta_days = (today - since_local).num_days();
+        assert!(
+            delta_days >= 360,
+            "Months(12) should span at least 360 days (got {delta_days})"
+        );
+    }
 }
