@@ -332,6 +332,15 @@ budi uninstall --keep-data         # uninstall but keep analytics database
 
 All data commands support `--period today|week|month|all` and `--format json`.
 
+## Windows: rolling vs calendar
+
+Budi's `1d` / `7d` / `30d` labels show up on two surfaces that deliberately mean different things, so a developer clicking from the statusline into the cloud dashboard with the same window selected can legitimately see different totals:
+
+- **Rolling** — `budi statusline` (and, by inheritance, the Cursor extension that renders the shared status contract) reports the last 24 hours, the last 7 days, and the last 30 days ending at "now". These are the primary live signals and never reset at midnight (ADR-0088 §4, [`docs/statusline-contract.md`](docs/statusline-contract.md)).
+- **Calendar** — `budi stats --period today|week|month` and the cloud dashboard's cost charts use calendar-day ranges (`today` = today-so-far, `week` / `month` = the last 7 / 30 calendar days including today). These are the reporting views and reset with the local calendar.
+
+Same chip label, different denominator: a fresh-morning `1d` rolling window still carries yesterday's afternoon spend; a `today` calendar window does not. Pick the surface that matches the question you are asking — "am I spending too fast right now?" is rolling, "what did this week cost?" is calendar.
+
 ## Tags & cost attribution
 
 Assistant messages are tagged with core attribution keys: `provider`, `model`, `ticket_id`, `ticket_prefix`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, `tool_outcome`, `tool_outcome_source`, `tool_outcome_confidence`, `composer_mode`, `permission_mode`, `duration`, `tool`, `tool_use_id`, `user_email`, `platform`, `machine`, `user`, `git_user`.
