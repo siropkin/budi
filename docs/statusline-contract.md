@@ -54,7 +54,7 @@ All parameters are optional. Omit them to get unscoped, context-free totals.
 
 ### Field semantics
 
-- **Windows are rolling**, not calendar. `cost_1d` = spend in the last 24 hours. `cost_7d` = spend in the last 7 days. `cost_30d` = spend in the last 30 days. This is a deliberate shift from 8.0 (which used calendar today / Monday-of-week / first-of-month), governed by ADR-0088 §4. `budi stats` keeps its calendar semantics — the rolling windows live only on the statusline surface.
+- **Windows are rolling**, not calendar. `cost_1d` = spend in the last 24 hours. `cost_7d` = spend in the last 7 days. `cost_30d` = spend in the last 30 days. This is a deliberate shift from 8.0 (which used calendar today / Monday-of-week / first-of-month), governed by ADR-0088 §4. `budi stats` and the cloud dashboard's cost charts keep calendar semantics — the rolling windows live only on the statusline surface and the Cursor extension that renders this contract. See [README → Windows: rolling vs calendar](../README.md#windows-rolling-vs-calendar) for the user-facing explanation.
 - **Costs are in dollars**, rounded to two decimal places at the rendering layer.
 - **Provider scoping is strict.** When `provider=claude_code`, a machine that also uses Cursor will not see Cursor spend in `cost_1d` / `cost_7d` / `cost_30d`. This is the fix for the 8.0 bug where Claude Code's statusline showed blended multi-provider totals (ADR-0088 §4, #224).
 - **Empty window vs stalled data.** All three cost fields are always present and default to `0.0` when the DB has no matching rows. An empty 30d window with a healthy daemon means "you have not used this provider in 30 days", not "the daemon is broken".
