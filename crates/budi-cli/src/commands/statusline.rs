@@ -303,6 +303,16 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     }
     if let Some(ref b) = branch {
         query_params.push(("branch", b.clone()));
+        // Scope branch_cost to `(repo_id, branch)` so developers who sit on
+        // `main` / `master` in multiple local repos don't see a silent
+        // cross-repo sum (#347). We only send `repo_id` when we already
+        // send `branch`, since the daemon only uses it for `branch_cost`.
+        if let Some(ref root) = repo_root {
+            let repo_id = budi_core::repo_id::resolve_repo_id(root);
+            if !repo_id.is_empty() {
+                query_params.push(("repo_id", repo_id));
+            }
+        }
     }
     if let Some(ref root) = repo_root
         && needed.contains(&"project".to_string())

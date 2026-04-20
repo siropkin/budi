@@ -968,6 +968,115 @@ fn statusline_stats_with_branch_filter() {
 }
 
 #[test]
+fn statusline_stats_branch_cost_scopes_to_repo_id() {
+    // Regression guard for #347: developers who use `main` / `master` /
+    // `develop` across multiple local repos must see only the current
+    // repo's branch spend when `repo_id` is passed alongside `branch`,
+    // not a silent sum across every repo with the same branch name.
+    let mut conn = test_db();
+    let mk = |uuid: &str, session: &str, repo: &str, cost_cents: f64| ParsedMessage {
+        uuid: uuid.to_string(),
+        session_id: Some(session.to_string()),
+        timestamp: "2026-04-15T10:00:00Z".parse().unwrap(),
+        cwd: Some("/proj".to_string()),
+        role: "assistant".to_string(),
+        model: Some("claude-sonnet".to_string()),
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: Some("main".to_string()),
+        repo_id: Some(repo.to_string()),
+        provider: "claude_code".to_string(),
+        cost_cents: Some(cost_cents),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "exact".to_string(),
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    };
+    let msgs = vec![
+        mk("repo-a-1", "sess-a", "github.com/org/repo-a", 300.0),
+        mk("repo-b-1", "sess-b", "github.com/org/repo-b", 400.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let since_1d = "2026-04-15T00:00:00Z";
+    let since_7d = "2026-04-10T00:00:00Z";
+    let since_30d = "2026-03-20T00:00:00Z";
+
+    // No repo scope → pre-#347 behavior: both repos summed under `main`.
+    let blended = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            branch: Some("main".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(blended.branch_cost, Some(7.0));
+
+    // repo-a → only repo-a's `main` spend.
+    let repo_a = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            branch: Some("main".to_string()),
+            repo_id: Some("github.com/org/repo-a".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(repo_a.branch_cost, Some(3.0));
+
+    // repo-b → only repo-b's `main` spend.
+    let repo_b = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            branch: Some("main".to_string()),
+            repo_id: Some("github.com/org/repo-b".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(repo_b.branch_cost, Some(4.0));
+
+    // A repo with no matching rows reports $0, not a cross-repo fallback.
+    let empty = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            branch: Some("main".to_string()),
+            repo_id: Some("github.com/org/does-not-exist".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(empty.branch_cost, Some(0.0));
+}
+
+#[test]
 fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
     // Regression guard for ADR-0088 §4 + #224: the Claude Code statusline
     // must show Claude Code usage only, not blended multi-provider totals.
@@ -1067,6 +1176,7 @@ fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
             session_id: Some("claude-sess".to_string()),
             branch: Some("main".to_string()),
             project_dir: Some("/proj/a".to_string()),
+            ..Default::default()
         },
     )
     .unwrap();
