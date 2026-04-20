@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::config;
+use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::StatuslineFormat;
@@ -157,6 +158,79 @@ fn render_coach(
     Some(parts.join(&sep))
 }
 
+/// Legacy custom-template tokens whose values silently shifted from calendar
+/// to rolling semantics in 8.2 (ADR-0088 §4). Users with a custom
+/// `statusline.toml` referencing these keep rendering, but the underlying
+/// number moved, so we nudge them once per day to switch.
+const LEGACY_STATUSLINE_TOKENS: &[&str] = &["{today}", "{week}", "{month}"];
+
+/// Relative name (under `BUDI_HOME`) of the marker file that remembers the
+/// last UTC date on which we emitted the legacy-token nudge. One marker
+/// covers all legacy tokens — the nudge text already names all three.
+const LEGACY_STATUSLINE_NUDGE_MARKER: &str = "statusline-legacy-nudge";
+
+/// Returns the sorted set of legacy tokens present in `template`.
+fn detect_legacy_statusline_tokens(template: &str) -> Vec<&'static str> {
+    LEGACY_STATUSLINE_TOKENS
+        .iter()
+        .copied()
+        .filter(|tok| template.contains(tok))
+        .collect()
+}
+
+fn legacy_nudge_marker_path() -> Option<PathBuf> {
+    config::budi_home_dir()
+        .ok()
+        .map(|d| d.join(LEGACY_STATUSLINE_NUDGE_MARKER))
+}
+
+/// If `template` uses legacy tokens and we haven't already nudged today,
+/// print a one-line deprecation note to stderr and persist today's UTC date
+/// in the marker file so subsequent renders on the same day stay quiet.
+///
+/// All filesystem errors are swallowed: a prompt-hot path must never fail a
+/// render because a marker couldn't be written.
+fn nudge_legacy_statusline_tokens(template: &str) {
+    nudge_legacy_statusline_tokens_inner(template, legacy_nudge_marker_path, &mut io::stderr());
+}
+
+fn nudge_legacy_statusline_tokens_inner(
+    template: &str,
+    marker_path: impl FnOnce() -> Option<PathBuf>,
+    sink: &mut dyn io::Write,
+) {
+    let found = detect_legacy_statusline_tokens(template);
+    if found.is_empty() {
+        return;
+    }
+
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let marker = marker_path();
+
+    if let Some(ref path) = marker
+        && let Ok(existing) = fs::read_to_string(path)
+        && existing.trim() == today
+    {
+        return;
+    }
+
+    // Nudge first, persist second — if the write fails we still want the
+    // user to see the note.
+    let _ = writeln!(
+        sink,
+        "budi: `{{today}}` / `{{week}}` / `{{month}}` in ~/.config/budi/statusline.toml \
+         now render the rolling `1d` / `7d` / `30d` values from the statusline contract. \
+         Switch to `{{1d}}` / `{{7d}}` / `{{30d}}` to silence this notice."
+    );
+
+    if let Some(path) = marker {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, format!("{today}\n"));
+    }
+}
+
 pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Result<()> {
     let stdin_json = if io::stdin().is_terminal() {
         None
@@ -284,6 +358,7 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
         }
         StatuslineFormat::Custom => {
             if let Some(ref template) = sl_config.format {
+                nudge_legacy_statusline_tokens(template);
                 println!("{}", render_template(template, &values));
             } else if has_health {
                 let line = render_coach(&statusline_data, &extra, false, "budi")
@@ -662,5 +737,92 @@ mod tests {
         ));
         assert!(!statusline_has_budi("echo hello"));
         assert!(!statusline_has_budi("other-tool --flag"));
+    }
+
+    #[test]
+    fn detect_legacy_statusline_tokens_finds_all() {
+        assert_eq!(
+            detect_legacy_statusline_tokens("{1d} | {7d}"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            detect_legacy_statusline_tokens("{today} | {week} | {month}"),
+            vec!["{today}", "{week}", "{month}"]
+        );
+        assert_eq!(
+            detect_legacy_statusline_tokens("spent {today} so far"),
+            vec!["{today}"]
+        );
+        assert_eq!(
+            detect_legacy_statusline_tokens("{week} {branch} {1d}"),
+            vec!["{week}"]
+        );
+    }
+
+    #[test]
+    fn nudge_legacy_statusline_tokens_silent_without_legacy() {
+        let dir =
+            std::env::temp_dir().join(format!("budi-nudge-test-silent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let marker = dir.join("marker");
+        let mut out = Vec::<u8>::new();
+        nudge_legacy_statusline_tokens_inner("{1d} {7d} {30d}", || Some(marker.clone()), &mut out);
+        assert!(out.is_empty(), "no nudge expected for canonical tokens");
+        assert!(!marker.exists(), "no marker should be written");
+    }
+
+    #[test]
+    fn nudge_legacy_statusline_tokens_writes_once_per_day() {
+        let dir = std::env::temp_dir().join(format!("budi-nudge-test-once-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let marker = dir.join("statusline-legacy-nudge");
+
+        let marker_fn = || Some(marker.clone());
+
+        let mut first = Vec::<u8>::new();
+        nudge_legacy_statusline_tokens_inner("{today} | {week}", marker_fn, &mut first);
+        let first_text = String::from_utf8(first).unwrap();
+        assert!(
+            first_text.contains("now render the rolling"),
+            "first render should nudge, got {first_text:?}"
+        );
+        assert!(marker.exists(), "marker should be written after nudging");
+        let stored = fs::read_to_string(&marker).unwrap();
+        assert_eq!(stored.trim(), Utc::now().format("%Y-%m-%d").to_string());
+
+        let mut second = Vec::<u8>::new();
+        nudge_legacy_statusline_tokens_inner("{today} | {week}", marker_fn, &mut second);
+        assert!(
+            second.is_empty(),
+            "second render on the same day should stay quiet"
+        );
+
+        // Simulate "yesterday" — nudge should fire again and overwrite.
+        fs::write(&marker, "1970-01-01\n").unwrap();
+        let mut third = Vec::<u8>::new();
+        nudge_legacy_statusline_tokens_inner("{month}", marker_fn, &mut third);
+        assert!(
+            !third.is_empty(),
+            "stale marker should allow the nudge to fire again"
+        );
+        let refreshed = fs::read_to_string(&marker).unwrap();
+        assert_eq!(refreshed.trim(), Utc::now().format("%Y-%m-%d").to_string());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nudge_legacy_statusline_tokens_survives_missing_marker_dir() {
+        // Marker path whose parent does not yet exist — nudge must still
+        // emit, and the marker gets written after directory creation.
+        let dir =
+            std::env::temp_dir().join(format!("budi-nudge-test-mkdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let marker = dir.join("nested").join("statusline-legacy-nudge");
+        let mut out = Vec::<u8>::new();
+        nudge_legacy_statusline_tokens_inner("{today}", || Some(marker.clone()), &mut out);
+        assert!(!out.is_empty());
+        assert!(marker.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
