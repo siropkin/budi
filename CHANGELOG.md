@@ -2,6 +2,10 @@
 
 ## 8.2.1 — Unreleased
 
+### Added
+
+- **Relative `--period` / `-p` windows for `budi stats` and `budi sessions`** (#404) — in addition to the calendar windows (`today`, `week`, `month`, `all`), the CLI now accepts rolling windows of the form `Nd` / `Nw` / `Nm` where `N` is a positive integer (e.g. `budi stats -p 7d`, `budi sessions -p 2w`, `budi stats -p 3m --models`). Days and weeks subtract exactly that many local calendar days / weeks from today; months use calendar-month subtraction (clamped to the end of the target month, so `2026-03-31 - 1m = 2026-02-28`). This aligns the CLI time axis with the rolling `1d` / `7d` / `30d` windows used by the statusline surface and the cloud dashboard (ADR-0088 §4, #350). Parsing is UTF-8 safe, rejects zero (`0d` / `0w` / `0m`), rejects unknown units with an actionable error, and is case-insensitive on the unit suffix. `period_label` renders singular forms (`Last 1 day`, `Last 1 week`, `Last 1 month`) so the output never reads "Last 1 days". No wire-format changes — the daemon still consumes UTC RFC3339 `since` / `until` bounds.
+
 ### Changed
 
 - **`budi health` renamed to `budi vitals`** (#367) — the old `budi health` verb overlapped too easily with `budi doctor` (daemon/install self-check). The session-vitals command is now `budi vitals` with identical output and the same `--session` flag. `budi health` keeps working in 8.2.x as a hidden backward-compatibility alias: the first invocation each UTC day prints a one-line stderr hint pointing users at `budi vitals`, subsequent invocations on the same day stay quiet. Slated for removal in 8.3. Help output, `after_help`, `README.md`, and `SOUL.md` all describe `budi vitals` as the canonical command.

@@ -53,6 +53,9 @@ Examples:
   budi stats                       Today's cost summary (default)
   budi stats -p week               This week's summary
   budi stats -p month --models     Model breakdown for the month
+  budi stats -p 7d                 Last 7 days (rolling window)
+  budi stats -p 2w                 Last 2 weeks (rolling window)
+  budi stats -p 1m                 Last 1 month (rolling, calendar months)
   budi stats --branches            Branches ranked by cost (today)
   budi stats --branch main         Cost details for a specific branch
   budi stats --branch main --repo github.com/acme/app
@@ -198,6 +201,8 @@ Examples:
 Examples:
   budi sessions                    Recent sessions (today)
   budi sessions -p week            This week's sessions
+  budi sessions -p 7d              Sessions in the last 7 days (rolling)
+  budi sessions -p 2w              Sessions in the last 2 weeks (rolling)
   budi sessions --search claude    Filter by search term
   budi sessions --ticket ENG-123   Sessions tagged with a ticket
   budi sessions --activity bugfix  Sessions classified as bug-fix work
@@ -354,6 +359,21 @@ enum AutostartAction {
     Uninstall,
 }
 
+/// `--period` / `-p` argument for `budi stats` and `budi sessions`.
+///
+/// Two flavors are supported (#404):
+///
+/// * **Calendar windows** (`today`, `week`, `month`, `all`) — anchored to the
+///   start of the current local calendar day / ISO week (Monday) / month.
+///   These are the historical CLI semantics and match what `budi stats`
+///   has always shown.
+/// * **Rolling windows** (`Nd`, `Nw`, `Nm` where `N` is a positive integer) —
+///   e.g. `1d`, `7d`, `2w`, `3m`. `Nd` / `Nw` go back exactly that many
+///   days / weeks from the local calendar day, and `Nm` uses calendar
+///   months (same day-of-month N months ago, clamped to the end of the
+///   target month). This matches the rolling `1d` / `7d` / `30d`
+///   windows used by the statusline surface and the cloud dashboard
+///   (ADR-0088 §4, #350).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StatsPeriod {
     Today,
@@ -369,27 +389,57 @@ impl std::str::FromStr for StatsPeriod {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "today" => Ok(StatsPeriod::Today),
-            "week" => Ok(StatsPeriod::Week),
-            "month" => Ok(StatsPeriod::Month),
-            "all" => Ok(StatsPeriod::All),
-            _ => {
-                let len = s.len();
-                if len < 2 {
-                    return Err(format!("Invalid period format: {}", s));
-                }
-                let (num_str, unit) = s.split_at(len - 1);
-                let num = num_str
-                    .parse::<u32>()
-                    .map_err(|_| format!("Invalid number in period: {}", s))?;
-                match unit.to_lowercase().as_str() {
-                    "d" => Ok(StatsPeriod::Days(num)),
-                    "w" => Ok(StatsPeriod::Weeks(num)),
-                    "m" => Ok(StatsPeriod::Months(num)),
-                    _ => Err(format!("Invalid unit in period: {}. Use d, w, or m.", s)),
-                }
-            }
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err("period is empty; use today, week, month, all, or a relative window like 1d, 7d, 2w, 1m".to_string());
+        }
+
+        match trimmed.to_ascii_lowercase().as_str() {
+            "today" => return Ok(StatsPeriod::Today),
+            "week" => return Ok(StatsPeriod::Week),
+            "month" => return Ok(StatsPeriod::Month),
+            "all" => return Ok(StatsPeriod::All),
+            _ => {}
+        }
+
+        // Relative window: split into digit prefix + unit suffix using
+        // char boundaries so non-ASCII input cannot panic `split_at`.
+        let mut chars = trimmed.chars();
+        let unit = chars.next_back().ok_or_else(|| {
+            format!(
+                "invalid period '{}'; use today, week, month, all, or a relative window like 1d, 7d, 2w, 1m",
+                s
+            )
+        })?;
+        let num_str: String = chars.collect();
+        if num_str.is_empty() {
+            return Err(format!(
+                "invalid period '{}'; relative windows need a count, e.g. 1d, 7d, 2w, 1m",
+                s
+            ));
+        }
+
+        let num: u32 = num_str.parse().map_err(|_| {
+            format!(
+                "invalid number in period '{}'; use a positive integer like 1d, 7d, 2w, 1m",
+                s
+            )
+        })?;
+        if num == 0 {
+            return Err(format!(
+                "invalid period '{}'; relative windows must be at least 1 (e.g. 1d, 1w, 1m)",
+                s
+            ));
+        }
+
+        match unit.to_ascii_lowercase() {
+            'd' => Ok(StatsPeriod::Days(num)),
+            'w' => Ok(StatsPeriod::Weeks(num)),
+            'm' => Ok(StatsPeriod::Months(num)),
+            _ => Err(format!(
+                "invalid period unit in '{}'; use d (days), w (weeks), or m (months), e.g. 7d, 2w, 1m",
+                s
+            )),
         }
     }
 }
@@ -978,6 +1028,117 @@ mod tests {
             !help.contains("\n  health "),
             "deprecated `budi health` should not appear in the subcommand list"
         );
+    }
+
+    #[test]
+    fn stats_period_parses_calendar_windows() {
+        use std::str::FromStr;
+        assert_eq!(StatsPeriod::from_str("today").unwrap(), StatsPeriod::Today);
+        assert_eq!(StatsPeriod::from_str("Today").unwrap(), StatsPeriod::Today);
+        assert_eq!(StatsPeriod::from_str("week").unwrap(), StatsPeriod::Week);
+        assert_eq!(StatsPeriod::from_str("month").unwrap(), StatsPeriod::Month);
+        assert_eq!(StatsPeriod::from_str("all").unwrap(), StatsPeriod::All);
+    }
+
+    #[test]
+    fn stats_period_parses_relative_windows() {
+        use std::str::FromStr;
+        assert_eq!(
+            StatsPeriod::from_str("1d").unwrap(),
+            StatsPeriod::Days(1),
+            "1d should parse as a 1-day rolling window"
+        );
+        assert_eq!(StatsPeriod::from_str("7d").unwrap(), StatsPeriod::Days(7));
+        assert_eq!(
+            StatsPeriod::from_str("30D").unwrap(),
+            StatsPeriod::Days(30),
+            "unit suffix should be case-insensitive"
+        );
+        assert_eq!(StatsPeriod::from_str("1w").unwrap(), StatsPeriod::Weeks(1));
+        assert_eq!(StatsPeriod::from_str("2w").unwrap(), StatsPeriod::Weeks(2));
+        assert_eq!(StatsPeriod::from_str("1m").unwrap(), StatsPeriod::Months(1));
+        assert_eq!(StatsPeriod::from_str("3m").unwrap(), StatsPeriod::Months(3));
+        assert_eq!(
+            StatsPeriod::from_str(" 7d ").unwrap(),
+            StatsPeriod::Days(7),
+            "whitespace should be trimmed"
+        );
+    }
+
+    #[test]
+    fn stats_period_rejects_invalid_input() {
+        use std::str::FromStr;
+
+        // Zero is rejected with a hint rather than silently collapsing
+        // the window to "today" (0d) and producing confusing stats.
+        assert!(StatsPeriod::from_str("0d").is_err());
+        assert!(StatsPeriod::from_str("0w").is_err());
+        assert!(StatsPeriod::from_str("0m").is_err());
+
+        // Empty / whitespace / missing count.
+        assert!(StatsPeriod::from_str("").is_err());
+        assert!(StatsPeriod::from_str("   ").is_err());
+        assert!(StatsPeriod::from_str("d").is_err());
+        assert!(StatsPeriod::from_str("w").is_err());
+
+        // Unknown unit.
+        assert!(StatsPeriod::from_str("7y").is_err());
+        assert!(StatsPeriod::from_str("7h").is_err());
+
+        // Non-numeric count.
+        assert!(StatsPeriod::from_str("abcd").is_err());
+        assert!(StatsPeriod::from_str("-1d").is_err());
+
+        // Multi-byte UTF-8 input must not panic (`split_at` byte
+        // safety — regression guard for the pre-#404 implementation).
+        assert!(StatsPeriod::from_str("1日").is_err());
+        assert!(StatsPeriod::from_str("日").is_err());
+    }
+
+    #[test]
+    fn cli_stats_parses_relative_period_flag() {
+        let cli = Cli::try_parse_from(["budi", "stats", "-p", "7d"])
+            .expect("budi stats -p 7d should parse");
+        match cli.command {
+            Commands::Stats { period, .. } => assert_eq!(period, StatsPeriod::Days(7)),
+            _ => panic!("expected stats command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "stats", "--period", "2w"])
+            .expect("budi stats --period 2w should parse");
+        match cli.command {
+            Commands::Stats { period, .. } => assert_eq!(period, StatsPeriod::Weeks(2)),
+            _ => panic!("expected stats command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "stats", "-p", "1m"])
+            .expect("budi stats -p 1m should parse");
+        match cli.command {
+            Commands::Stats { period, .. } => assert_eq!(period, StatsPeriod::Months(1)),
+            _ => panic!("expected stats command"),
+        }
+
+        // Invalid relative period must be rejected by clap with a clear
+        // message (the `FromStr::Err` string is surfaced by clap).
+        assert!(Cli::try_parse_from(["budi", "stats", "-p", "0d"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "-p", "7y"]).is_err());
+    }
+
+    #[test]
+    fn cli_sessions_parses_relative_period_flag() {
+        let cli = Cli::try_parse_from(["budi", "sessions", "-p", "7d"])
+            .expect("budi sessions -p 7d should parse");
+        match cli.command {
+            Commands::Sessions { period, .. } => assert_eq!(period, StatsPeriod::Days(7)),
+            _ => panic!("expected sessions command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "sessions", "--period", "2w"])
+            .expect("budi sessions --period 2w should parse");
+        match cli.command {
+            Commands::Sessions { period, .. } => assert_eq!(period, StatsPeriod::Weeks(2)),
+            _ => panic!("expected sessions command"),
+        }
     }
 
     #[test]
