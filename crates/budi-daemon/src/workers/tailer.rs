@@ -450,6 +450,17 @@ fn is_jsonl(path: &Path) -> bool {
 /// Read appended bytes since `stored_offset`, mirroring the truncation
 /// behaviour of `analytics::sync::read_transcript_tail` so a single file
 /// rotation does not desync the tailer from `budi import`.
+///
+/// Tolerates partial UTF-8 at the file boundary (#383): under live
+/// tailing the agent may be mid-write of a multi-byte character when
+/// our notify event fires. Rather than failing the whole batch with
+/// `InvalidData` (which would spam `read_tail failed` warnings on
+/// non-ASCII transcripts until the next tick completed the write), we
+/// truncate the read to the longest valid-UTF-8, line-aligned prefix.
+/// The partial character (and any trailing incomplete line) is left on
+/// disk for the next event / backstop tick. This matches the
+/// incomplete-final-line contract `jsonl::parse_transcript` already
+/// applies at the line layer.
 fn read_tail(path: &Path, stored_offset: usize, file_len: usize) -> Result<(String, usize)> {
     let effective_offset = if stored_offset > file_len {
         tracing::info!(
@@ -469,9 +480,24 @@ fn read_tail(path: &Path, stored_offset: usize, file_len: usize) -> Result<(Stri
     let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     file.seek(SeekFrom::Start(effective_offset as u64))
         .with_context(|| format!("seek {}", path.display()))?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)
+    let mut bytes = Vec::with_capacity(file_len.saturating_sub(effective_offset));
+    file.read_to_end(&mut bytes)
         .with_context(|| format!("read {}", path.display()))?;
+    let valid_up_to = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    let valid = &bytes[..valid_up_to];
+    let consume_len = valid
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // `consume_len <= valid_up_to`, and every byte at or before a `\n`
+    // is inside the valid-UTF-8 prefix, so this conversion cannot fail.
+    let content = std::str::from_utf8(&bytes[..consume_len])
+        .expect("valid UTF-8 up to last newline by construction")
+        .to_string();
     Ok((content, effective_offset))
 }
 
@@ -777,6 +803,86 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(final_offset, std::fs::metadata(&f).unwrap().len() as usize);
+    }
+
+    /// Acceptance for #383: a 4-byte UTF-8 character (emoji) split
+    /// across two appends must not cause a `read_tail failed` warning
+    /// or lose the message. The first tick sees a partial trailing
+    /// character; it must consume through the previous line boundary
+    /// (zero bytes here) without error. The second tick, after the
+    /// agent flushes the rest of the character and the line
+    /// terminator, must ingest exactly one message with no duplicates
+    /// and leave the offset at EOF.
+    #[test]
+    fn process_path_tolerates_partial_utf8_at_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let f = root.join("session.jsonl");
+        std::fs::write(&f, "").unwrap();
+
+        let provider = StubProvider::new("stub", root.clone());
+        provider.add_file(f.clone());
+        let (db_path, _) = open_test_db(tmp.path());
+        let mut conn = budi_core::analytics::open_db(&db_path).unwrap();
+        let mut providers_by_name: HashMap<String, Box<dyn Provider>> = HashMap::new();
+        providers_by_name.insert("stub".to_string(), Box::new(provider));
+        let routes: Routes = vec![(root.clone(), "stub".to_string())];
+        let mut pipeline = Pipeline::default_pipeline(None);
+
+        // U+1F600 GRINNING FACE encodes to 0xF0 0x9F 0x98 0x80. Build
+        // the full line bytes, then flush only the first chunk so the
+        // reader sees 3 of the 4 UTF-8 bytes of the emoji and no
+        // terminating newline.
+        let full_line: Vec<u8> = {
+            let mut v = b"prefix ".to_vec();
+            v.extend_from_slice("\u{1F600}".as_bytes());
+            v.extend_from_slice(b" suffix\n");
+            v
+        };
+        let split = "prefix ".len() + 3; // last byte of emoji withheld
+
+        {
+            let mut handle = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+            handle.write_all(&full_line[..split]).unwrap();
+        }
+
+        process_path(&mut conn, &mut pipeline, &providers_by_name, &routes, &f);
+        let first_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            first_count, 0,
+            "partial-UTF-8 + no line terminator must ingest zero messages, not error out"
+        );
+        let first_offset = get_tail_offset(&conn, "stub", &f.display().to_string())
+            .unwrap()
+            .unwrap_or(0);
+        assert_eq!(
+            first_offset, 0,
+            "offset must not advance past the partial character"
+        );
+
+        {
+            let mut handle = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+            handle.write_all(&full_line[split..]).unwrap();
+        }
+
+        process_path(&mut conn, &mut pipeline, &providers_by_name, &routes, &f);
+        let second_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            second_count, 1,
+            "once the rest of the emoji and newline arrive, the line ingests exactly once"
+        );
+        let final_offset = get_tail_offset(&conn, "stub", &f.display().to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            final_offset,
+            std::fs::metadata(&f).unwrap().len() as usize,
+            "offset must land at EOF after the completing write"
+        );
     }
 
     #[test]
