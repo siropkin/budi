@@ -20,6 +20,7 @@ use budi_core::config::{self, CloudConfig};
 use serde_json::{Value, json};
 
 use crate::AppState;
+use crate::workers::cloud_sync::CloudBusyFlagGuard;
 
 /// Variants are snake_case so CLI / dashboard consumers can switch on a
 /// stable string rather than parsing free-form error messages. Mirrors the
@@ -172,25 +173,6 @@ fn report_to_json(report: SyncTickReport) -> Value {
         "sessions_attempted": envelope_sessions,
         "watermark": server_watermark,
     })
-}
-
-/// RAII guard that clears the `cloud_syncing` flag on drop. Mirrors the
-/// existing `BusyFlagGuard` used by transcript ingest — kept local so the
-/// two busy flags stay independent.
-struct CloudBusyFlagGuard {
-    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl CloudBusyFlagGuard {
-    fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        Self { flag }
-    }
-}
-
-impl Drop for CloudBusyFlagGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
 }
 
 #[cfg(test)]

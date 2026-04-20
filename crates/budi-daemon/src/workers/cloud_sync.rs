@@ -67,14 +67,20 @@ pub async fn run(db_path: PathBuf, config: CloudConfig, cloud_syncing: Arc<Atomi
             continue;
         }
 
-        // Normal sync tick
+        // Normal sync tick.
+        //
+        // We clear the `cloud_syncing` flag via an RAII guard rather than a
+        // trailing `flag.store(false)`. If `sync_tick` ever panics inside
+        // `spawn_blocking`, a manual reset would be skipped and the flag
+        // would stay `true` forever — wedging both this worker and every
+        // `POST /cloud/sync` (409 Conflict) until the daemon was restarted.
+        // See issue #343.
         let db = db_path.clone();
         let cfg = config.clone();
         let flag = cloud_syncing.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let res = cloud_sync::sync_tick(&db, &cfg);
-            flag.store(false, Ordering::SeqCst);
-            res
+            let _guard = CloudBusyFlagGuard::new(flag);
+            cloud_sync::sync_tick(&db, &cfg)
         })
         .await;
 
@@ -126,5 +132,60 @@ pub async fn run(db_path: PathBuf, config: CloudConfig, cloud_syncing: Arc<Atomi
 
         // Normal interval sleep
         tokio::time::sleep(interval).await;
+    }
+}
+
+/// RAII guard that clears the `cloud_syncing` busy flag on drop.
+///
+/// Shared between the background worker and the manual `POST /cloud/sync`
+/// route so a panic inside either sync path still releases the flag. Without
+/// this guard, a panicking `sync_tick` would leave `cloud_syncing = true`
+/// forever — every subsequent background tick would log "another sync
+/// already in progress" and every manual flush would return 409 Conflict
+/// until the daemon restarted.
+pub(crate) struct CloudBusyFlagGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl CloudBusyFlagGuard {
+    pub(crate) fn new(flag: Arc<AtomicBool>) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for CloudBusyFlagGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_clears_flag_on_normal_drop() {
+        let flag = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = CloudBusyFlagGuard::new(flag.clone());
+        }
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn guard_clears_flag_on_panic_unwind() {
+        // Simulates `sync_tick` panicking inside `spawn_blocking`: the
+        // worker would otherwise leave `cloud_syncing` stuck at `true`.
+        let flag = Arc::new(AtomicBool::new(true));
+        let flag_in = flag.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = CloudBusyFlagGuard::new(flag_in);
+            panic!("sync_tick blew up");
+        }));
+        assert!(result.is_err(), "expected the closure to panic");
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "guard must reset the cloud_syncing flag even on panic"
+        );
     }
 }
