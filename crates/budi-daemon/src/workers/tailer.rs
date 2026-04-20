@@ -304,10 +304,19 @@ fn backstop_scan(
 
 /// Process a single path event. Pure data flow:
 /// `read tail → provider.parse_file → Pipeline::process →
-/// ingest_messages_with_sync → set_tail_offset`. Logs at the
+/// ingest_messages_with_sync (writes messages, tags, and the new
+/// tail_offsets row in a single transaction)`. Logs at the
 /// `budi_daemon::tailer` target with `provider`, `path`, `bytes_read`,
 /// `messages_parsed`, `ingested` per the ticket's structured-logging
 /// requirement.
+///
+/// Atomicity (#382): when there are messages to ingest, the offset
+/// advance is inlined into the ingest transaction so a daemon crash or
+/// power loss between persisting messages and persisting the offset
+/// cannot leave the tailer pointing at a pre-batch byte position. The
+/// no-message branch (line discipline only) still calls
+/// [`set_tail_offset`] directly because it has no other write to atomize
+/// with.
 fn process_path(
     conn: &mut Connection,
     pipeline: &mut Pipeline,
@@ -400,18 +409,14 @@ fn process_path(
     let messages_parsed = messages.len();
     let tags = pipeline.process(&mut messages);
 
-    match ingest_messages_with_sync(conn, &messages, Some(&tags), None) {
+    match ingest_messages_with_sync(
+        conn,
+        &messages,
+        Some(&tags),
+        None,
+        Some((provider_name, &path_str, new_offset)),
+    ) {
         Ok(ingested) => {
-            if let Err(e) = set_tail_offset(conn, provider_name, &path_str, new_offset) {
-                tracing::warn!(
-                    target: "budi_daemon::tailer",
-                    provider = %provider_name,
-                    path = %path.display(),
-                    error = %format!("{e:#}"),
-                    "set_tail_offset failed after ingest"
-                );
-                return;
-            }
             tracing::info!(
                 target: "budi_daemon::tailer",
                 provider = %provider_name,
@@ -419,6 +424,7 @@ fn process_path(
                 bytes_read = bytes_read,
                 messages_parsed = messages_parsed,
                 ingested = ingested,
+                new_offset = new_offset,
                 "tail batch processed"
             );
         }
