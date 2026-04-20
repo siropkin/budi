@@ -259,6 +259,7 @@ fn ingest_in_batches(
             &messages[start..end],
             Some(&tags[start..end]),
             sync_file,
+            None,
         )?;
         start = end;
     }

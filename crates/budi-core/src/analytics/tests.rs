@@ -4653,3 +4653,105 @@ fn health_no_sessions_returns_green() {
     assert_eq!(h.tip, "No sessions yet");
     assert!(h.details.is_empty());
 }
+
+// --- #382: ingest_messages_with_sync `tail_file` atomic offset upsert ---
+
+fn tailer_assistant_msg(uuid: &str, session: &str, ts: &str) -> ParsedMessage {
+    ParsedMessage {
+        uuid: uuid.to_string(),
+        session_id: Some(session.to_string()),
+        timestamp: ts.parse().unwrap(),
+        role: "assistant".to_string(),
+        provider: "stub".to_string(),
+        cost_confidence: "estimated".to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn ingest_with_tail_file_upserts_offset_in_same_transaction() {
+    let mut conn = test_db();
+    let path = "/tmp/stub/session-382.jsonl";
+    let provider = "stub";
+
+    // Pre-seed the row at 100 so we can prove the inline upsert advances
+    // it to the post-batch offset, not just inserts a new row.
+    set_tail_offset(&conn, provider, path, 100).unwrap();
+    assert_eq!(
+        get_tail_offset(&conn, provider, path).unwrap(),
+        Some(100),
+        "precondition: pre-seeded tail offset"
+    );
+
+    let msgs = vec![tailer_assistant_msg(
+        "382-a",
+        "session-382",
+        "2026-04-19T10:00:00Z",
+    )];
+    let ingested =
+        ingest_messages_with_sync(&mut conn, &msgs, None, None, Some((provider, path, 250)))
+            .unwrap();
+    assert_eq!(ingested, 1, "exactly one new message ingested");
+
+    let stored: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE id = ?1",
+            ["382-a"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1, "message row committed");
+
+    assert_eq!(
+        get_tail_offset(&conn, provider, path).unwrap(),
+        Some(250),
+        "tail_offsets row advanced to the post-batch offset inline with the ingest commit",
+    );
+}
+
+#[test]
+fn ingest_without_tail_file_leaves_tail_offsets_untouched() {
+    let mut conn = test_db();
+    let path = "/tmp/stub/session-382-noop.jsonl";
+    let provider = "stub";
+
+    // Sentinel offset proves we are observing a no-touch, not a coincident
+    // re-insert at the same value.
+    set_tail_offset(&conn, provider, path, 17).unwrap();
+
+    let msgs = vec![tailer_assistant_msg(
+        "382-b",
+        "session-382-b",
+        "2026-04-19T11:00:00Z",
+    )];
+    let ingested = ingest_messages_with_sync(&mut conn, &msgs, None, None, None).unwrap();
+    assert_eq!(ingested, 1);
+
+    assert_eq!(
+        get_tail_offset(&conn, provider, path).unwrap(),
+        Some(17),
+        "tail_offsets row must not be touched when tail_file is None",
+    );
+}
+
+#[test]
+fn ingest_with_tail_file_writes_offset_atomically_for_empty_message_batch() {
+    // Empty message batch + Some(tail_file) is the parser-skip case
+    // from process_path: no rows to ingest, but the tailer has still
+    // advanced past a parseable region and wants the offset persisted.
+    // The single-tx contract should still hold so the offset write
+    // rides on the same commit as the (empty) ingest pass.
+    let mut conn = test_db();
+    let path = "/tmp/stub/session-382-empty.jsonl";
+    let provider = "stub";
+
+    let ingested =
+        ingest_messages_with_sync(&mut conn, &[], None, None, Some((provider, path, 64))).unwrap();
+    assert_eq!(ingested, 0);
+
+    assert_eq!(
+        get_tail_offset(&conn, provider, path).unwrap(),
+        Some(64),
+        "empty-batch ingest with tail_file must still upsert the offset",
+    );
+}

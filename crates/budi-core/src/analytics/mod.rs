@@ -304,15 +304,24 @@ pub fn ingest_messages(
     messages: &[ParsedMessage],
     tags: Option<&[Vec<Tag>]>,
 ) -> Result<usize> {
-    ingest_messages_with_sync(conn, messages, tags, None)
+    ingest_messages_with_sync(conn, messages, tags, None, None)
 }
 
-/// Ingest messages and optionally update sync offset atomically.
+/// Ingest messages and optionally update one or both offset tables atomically.
+///
+/// `sync_file` writes a `(file_path, byte_offset)` row into `sync_state` and is
+/// what `budi import` uses. `tail_file` writes a `(provider, path, byte_offset)`
+/// row into `tail_offsets` and is what the live tailer uses (#319, #382).
+///
+/// When both are `Some`, both writes happen inside the same transaction as the
+/// message inserts, so the daemon cannot crash between persisting messages and
+/// advancing its offset and end up reprocessing the same byte range on restart.
 pub fn ingest_messages_with_sync(
     conn: &mut Connection,
     messages: &[ParsedMessage],
     tags: Option<&[Vec<Tag>]>,
     sync_file: Option<(&str, usize)>,
+    tail_file: Option<(&str, &str, usize)>,
 ) -> Result<usize> {
     let tx = conn.transaction()?;
     let mut count = 0;
@@ -549,6 +558,19 @@ pub fn ingest_messages_with_sync(
              VALUES (?1, ?2, ?3)
              ON CONFLICT(file_path) DO UPDATE SET byte_offset = ?2, last_synced = ?3",
             params![file_path, offset as i64, now],
+        )?;
+    }
+
+    // Atomically update the live tailer's per-(provider, path) offset.
+    // Mirrors `set_tail_offset`'s upsert exactly so the in-tx and
+    // standalone code paths stay byte-for-byte equivalent (#382).
+    if let Some((provider, path, offset)) = tail_file {
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider, path) DO UPDATE SET byte_offset = ?3, last_seen = ?4",
+            params![provider, path, offset as i64, now],
         )?;
     }
 
