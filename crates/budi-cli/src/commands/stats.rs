@@ -546,7 +546,7 @@ fn cmd_stats_branch_detail(
         }
         None => {
             println!("  No data found for branch '{}'.", branch);
-            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
             println!("  Run `budi stats --branches` to see available branches.");
         }
     }
@@ -710,7 +710,7 @@ fn cmd_stats_ticket_detail(
         }
         None => {
             println!("  No data found for ticket '{}'.", ticket);
-            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
             println!("  Run `budi stats --tickets` to see available tickets.");
         }
     }
@@ -887,7 +887,7 @@ fn cmd_stats_activity_detail(
         }
         None => {
             println!("  No data found for activity '{}'.", activity);
-            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
             println!("  Run `budi stats --activities` to see available activities.");
         }
     }
@@ -1106,7 +1106,7 @@ fn cmd_stats_file_detail(
         }
         None => {
             println!("  No data found for file '{}'.", file_path);
-            println!("  Tip: run `budi import` first if you haven't imported data yet.");
+            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
             println!("  Run `budi stats --files` to see available files.");
         }
     }

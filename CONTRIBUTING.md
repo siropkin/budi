@@ -120,7 +120,7 @@ New agents are supported via the shared transcript/provider ingest path (see [AD
 5. Update README / SOUL / ADR references that describe supported agents
 6. Add tests
 
-The same `Provider` implementation powers both live tailing and `budi import`; do not introduce shell wrappers or proxy-based live ingestion for new agents.
+The same `Provider` implementation powers both live tailing and `budi db import`; do not introduce shell wrappers or proxy-based live ingestion for new agents.
 
 ## Adding a new enricher
 

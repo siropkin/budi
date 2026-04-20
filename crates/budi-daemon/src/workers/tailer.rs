@@ -3,7 +3,7 @@
 //! The tailer is the live ingestion path introduced by [ADR-0089] §1 / #319.
 //! It registers a recursive `notify` watcher on every directory returned by
 //! [`Provider::watch_roots`] and feeds appended JSONL content through
-//! [`Pipeline::default_pipeline`] into the same tables `budi import` writes
+//! [`Pipeline::default_pipeline`] into the same tables `budi db import` writes
 //! to. There is no second code path — the import command and the live tailer
 //! call the same provider parser, the same enricher chain, and the same
 //! `ingest_messages_with_sync` sink.
@@ -22,7 +22,7 @@
 //!    [`tail_offsets`](budi_core::analytics::set_tail_offset) with
 //!    `byte_offset = file_len` for every transcript that already exists
 //!    on disk. That is the "skip the backfill, leave history to
-//!    `budi import`" property called out in the ticket Acceptance.
+//!    `budi db import`" property called out in the ticket Acceptance.
 //!    `seed_offsets` is intentionally a one-shot boot step: a file that
 //!    first appears *after* boot (under a root that materializes later;
 //!    see #385 below) is treated as live content and ingested from
@@ -39,7 +39,7 @@
 //! ## Why a separate `tail_offsets` table
 //!
 //! The existing `sync_state` table is keyed on `file_path` only and is
-//! shared with `budi import`. If the user runs `budi import` and the live
+//! shared with `budi db import`. If the user runs `budi db import` and the live
 //! tailer concurrently, their offsets must not stomp on each other. Per-
 //! provider scope also lets the post-removal cleanup in #357 prune by
 //! provider when a user disables one. See
@@ -50,10 +50,10 @@
 //! - No writes to `proxy_events`. The pipeline writes to `messages`, `tags`,
 //!   `sessions`, and `tail_offsets` only.
 //! - No changes to `Pipeline` signature or the enricher list — the tailer
-//!   uses `Pipeline::default_pipeline` exactly as `budi import` does.
+//!   uses `Pipeline::default_pipeline` exactly as `budi db import` does.
 //! - No writes that mutate or reinterpret retained legacy proxy history.
 //!   After #326, 8.1-era `cost_confidence='proxy_estimated'` rows remain
-//!   queryable read-only; `budi import` carries its own overlap guard so a
+//!   queryable read-only; `budi db import` carries its own overlap guard so a
 //!   later historical backfill does not double-count that retained window.
 //!
 //! [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
@@ -212,7 +212,7 @@ pub fn run_blocking(
                 // materialized roots. We deliberately do NOT re-run
                 // `seed_offsets` here: seed_offsets marks discovered
                 // files at EOF on the assumption that they are
-                // pre-existing history (left to `budi import` per
+                // pre-existing history (left to `budi db import` per
                 // ADR-0089 §1). A file first appearing between backstop
                 // ticks under a post-boot-materialized root is live
                 // content, not history, and must ingest from offset 0
@@ -315,7 +315,7 @@ fn provider_for_path<'a>(path: &Path, routes: &'a Routes) -> Option<&'a str> {
 
 /// Skip the backfill on first observation: every transcript already on
 /// disk gets `byte_offset = file_len`. Any later append (via `notify`) is
-/// what we ingest. This is how the ticket says we keep `budi import` as
+/// what we ingest. This is how the ticket says we keep `budi db import` as
 /// the only path that processes history.
 fn seed_offsets(
     conn: &mut Connection,
@@ -522,7 +522,7 @@ fn is_jsonl(path: &Path) -> bool {
 
 /// Read appended bytes since `stored_offset`, mirroring the truncation
 /// behaviour of `analytics::sync::read_transcript_tail` so a single file
-/// rotation does not desync the tailer from `budi import`.
+/// rotation does not desync the tailer from `budi db import`.
 ///
 /// Tolerates partial UTF-8 at the file boundary (#383): under live
 /// tailing the agent may be mid-write of a multi-byte character when

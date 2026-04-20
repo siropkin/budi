@@ -45,7 +45,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 - **Session health** — detects context bloat, cache degradation, cost acceleration, and retry loops with actionable, provider-aware tips
 - **Cloud dashboard** at [`app.getbudi.dev`](https://app.getbudi.dev) — team-wide cost visibility across users, repos, models, branches, and tickets (daily granularity, opt-in via `~/.config/budi/cloud.toml`)
 - Provider-scoped cost status line in Claude Code and Cursor (quiet rolling `1d` / `7d` / `30d`)
-- **One-time import** of historical transcripts via `budi import` (Claude Code JSONL, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API)
+- **One-time import** of historical transcripts via `budi db import` (Claude Code JSONL, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API)
 - ~6 MB Rust binary, minimal footprint
 
 ## Platforms
@@ -64,7 +64,7 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 
 Supported means Budi can observe the agent's normal local transcript/session artifacts. `budi init` does not wrap the agent, patch shell profiles, or rewrite editor settings in 8.2.
 
-All agents also support one-time historical import via `budi import` (Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API).
+All agents also support one-time historical import via `budi db import` (Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API).
 
 ## Ecosystem
 
@@ -169,7 +169,7 @@ Use this sequence if you want the fastest "did setup really work?" path:
 4. **See today's cost** with `budi status`
    - Quick snapshot: daemon health, today's cost, and first-run hints when the DB is still quiet
 5. **Import historical data** (optional)
-   - Run `budi import` to backfill from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API
+   - Run `budi db import` to backfill from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API
 6. **Upgraded from 8.0/8.1?** (only if `budi doctor` warns)
    - Run `budi init --cleanup` to preview and remove managed proxy-era shell/editor config residue
 
@@ -281,7 +281,9 @@ Environment variable overrides: `BUDI_CLOUD_ENABLED=true`, `BUDI_CLOUD_API_KEY=b
 ```bash
 budi init                          # start daemon + install autostart + show detected agents
 budi init --cleanup                # review/remove managed 8.0/8.1 proxy residue
-budi import                        # one-time import of historical transcripts
+budi db import                     # one-time import of historical transcripts
+                                   # (the bare `budi import` still works in 8.2
+                                   #  and prints a one-per-day deprecation hint)
 ```
 
 **Monitoring and analytics:**
@@ -322,8 +324,9 @@ budi cloud sync                    # push queued local rollups/sessions to the c
 budi autostart status              # check daemon autostart service
 budi autostart install             # install the autostart service
 budi autostart uninstall           # remove the autostart service
-budi import --force                # re-ingest all data from scratch (use after upgrades)
-budi repair                        # repair schema drift + run migration checks
+budi db import --force             # re-ingest all data from scratch (use after upgrades)
+budi db repair                     # repair schema drift + run migration checks
+budi db migrate                    # run database migration explicitly (usually automatic)
 budi update                        # check for updates (auto-detects Homebrew)
 budi update --version <name>       # update to a specific version
 budi integrations list             # show what is installed vs available
@@ -454,10 +457,10 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
                                 │
        Claude/Codex/Copilot JSONL/session files  ─┐
        Cursor transcripts + Usage API pull        ├──▶ shared ingest path
-       Historical import (`budi import`)          ┘
+       Historical import (`budi db import`)       ┘
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. The transcript tailer is the sole live data path in 8.2. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API can be imported via `budi import` for one-time backfill.
+The daemon is the single source of truth — the CLI never opens the database directly. The transcript tailer is the sole live data path in 8.2. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API can be imported via `budi db import` for one-time backfill.
 
 **Data model** — nine tables, seven data entities + two supporting:
 
@@ -605,7 +608,7 @@ Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 2. Run `budi doctor` to verify transcript visibility and any leftover 8.0/8.1 proxy residue
 3. If `budi doctor` warns about legacy proxy residue, run `budi init --cleanup` and follow the consent flow
 4. Send a prompt and check `budi stats` for non-zero usage
-5. For historical data: `budi import` (one-time backfill from Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage API)
+5. For historical data: `budi db import` (one-time backfill from Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage API)
 
 **Daemon won't start:**
 1. Check if port 7878 is in use: `lsof -i :7878`

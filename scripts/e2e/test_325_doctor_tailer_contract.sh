@@ -81,7 +81,7 @@ assert_contains "$LOG" "Run \`budi init\` or \`budi update\`"
 assert_contains "$LOG" "WARN leftover proxy config:"
 assert_contains "$LOG" "budi init --cleanup"
 assert_contains "$LOG" "FAIL transcript visibility / Claude Code:"
-assert_contains "$LOG" "Run \`budi import\` if you also need older history backfilled."
+assert_contains "$LOG" "Run \`budi db import\` if you also need older history backfilled."
 assert_contains "$LOG" "doctor found"
 
 echo "[e2e] PASS"

@@ -721,7 +721,7 @@ DAEMON_PID=""
 start_daemon
 
 # Existing transcripts are intentionally seeded at EOF on daemon start
-# (ADR-0089 §3 — `budi import` is the only path that backfills history),
+# (ADR-0089 §3 — `budi db import` is the only path that backfills history),
 # so the RO_SESSION file written while the daemon was down will not
 # auto-replay. Instead we write a *new* session after restoring write
 # access and confirm the tailer is alive again.

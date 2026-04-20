@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi vitals             Session health vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi vitals             Session health vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db repair          Repair schema drift and run migration\n  budi db migrate         Run database migration explicitly\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -149,12 +149,31 @@ Examples:
         #[arg(long)]
         yes: bool,
     },
-    /// Run database migration explicitly (usually automatic with init/update)
+    /// Database admin commands (migrate, repair, import historical transcripts)
+    ///
+    /// Groups the previously-bare `budi migrate` / `budi repair` /
+    /// `budi import` verbs under a single namespace (R2.1 CLI audit
+    /// follow-up, #368). The bare verbs still parse in 8.2.x as hidden
+    /// backward-compatibility aliases but print a one-per-day stderr
+    /// deprecation hint and are slated for removal in 8.3.
+    #[command(after_help = "\
+Examples:
+  budi db migrate            Run database migration explicitly
+  budi db repair             Repair schema drift and run migration checks
+  budi db import             Import historical transcripts from disk
+  budi db import --force     Re-ingest all data from scratch (use after upgrades)")]
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+    /// Deprecated: moved to `budi db migrate`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
+    #[command(hide = true)]
     Migrate,
-    /// Repair schema drift and run migration checks
+    /// Deprecated: moved to `budi db repair`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
+    #[command(hide = true)]
     Repair,
-    /// Import historical transcripts from Claude Code, Codex, Copilot CLI, and Cursor into the analytics database.
-    /// Use --force to clear all data and re-ingest from scratch (e.g. after upgrades).
+    /// Deprecated: moved to `budi db import`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
+    #[command(hide = true)]
     Import {
         /// Clear all data and re-ingest from scratch.
         /// Use after upgrading budi when the cost calculation has changed.
@@ -309,6 +328,23 @@ enum CloudAction {
 }
 
 #[derive(Debug, Subcommand)]
+enum DbAction {
+    /// Run database migration explicitly (usually automatic with init/update)
+    Migrate,
+    /// Repair schema drift and run migration checks
+    Repair,
+    /// Import historical transcripts from Claude Code, Codex, Copilot CLI, and Cursor into the analytics database.
+    ///
+    /// Use --force to clear all data and re-ingest from scratch (e.g. after upgrades).
+    Import {
+        /// Clear all data and re-ingest from scratch.
+        /// Use after upgrading budi when the cost calculation has changed.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum AutostartAction {
     /// Show whether the autostart service is installed and running
     Status,
@@ -432,27 +468,23 @@ fn main() -> Result<()> {
         Commands::Uninstall { keep_data, yes } => {
             commands::uninstall::cmd_uninstall(keep_data, yes)
         }
+        Commands::Db { action } => match action {
+            DbAction::Migrate => commands::db::cmd_db_migrate(),
+            DbAction::Repair => commands::repair::cmd_repair(),
+            DbAction::Import { force } => commands::import::cmd_import(force),
+        },
         Commands::Migrate => {
-            let c = client::DaemonClient::connect()?;
-            let result = c.migrate()?;
-            let migrated = result
-                .get("migrated")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let current = result.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
-            if migrated {
-                let from = result.get("from").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!("Migrated database v{} → v{}.", from, current);
-                let green = commands::ansi("\x1b[32m");
-                let reset = commands::ansi("\x1b[0m");
-                println!("{green}✓{reset} Migration complete.");
-            } else {
-                println!("Database schema is up to date (v{}).", current);
-            }
-            Ok(())
+            commands::db::nudge_db_alias("migrate");
+            commands::db::cmd_db_migrate()
         }
-        Commands::Repair => commands::repair::cmd_repair(),
-        Commands::Import { force } => commands::import::cmd_import(force),
+        Commands::Repair => {
+            commands::db::nudge_db_alias("repair");
+            commands::repair::cmd_repair()
+        }
+        Commands::Import { force } => {
+            commands::db::nudge_db_alias("import");
+            commands::import::cmd_import(force)
+        }
         Commands::Vitals { session } => commands::vitals::cmd_vitals(session),
         Commands::Health { session } => {
             commands::vitals::nudge_health_alias();
@@ -537,13 +569,87 @@ mod tests {
         assert!(lower.contains("init"));
         assert!(lower.contains("doctor"));
         assert!(lower.contains("stats"));
-        assert!(lower.contains("import"));
-        assert!(lower.contains("repair"));
         assert!(lower.contains("autostart"));
+        // `budi db` is the canonical DB admin namespace in 8.2.1
+        // (#368). The bare `budi migrate` / `budi repair` / `budi import`
+        // verbs are hidden aliases and must not appear in the subcommand
+        // list so new users learn the canonical names.
+        assert!(
+            lower.contains("\n  db "),
+            "top-level help should advertise the `budi db` namespace"
+        );
+        assert!(
+            !lower.contains("\n  migrate "),
+            "deprecated bare `budi migrate` should be hidden from help"
+        );
+        assert!(
+            !lower.contains("\n  repair "),
+            "deprecated bare `budi repair` should be hidden from help"
+        );
+        assert!(
+            !lower.contains("\n  import "),
+            "deprecated bare `budi import` should be hidden from help"
+        );
         assert!(
             !lower.contains("\n  sync"),
             "sync command should be removed"
         );
+    }
+
+    #[test]
+    fn cli_parses_db_subcommands() {
+        let cli = Cli::try_parse_from(["budi", "db", "migrate"]).expect("budi db migrate parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Db {
+                action: DbAction::Migrate
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["budi", "db", "repair"]).expect("budi db repair parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Db {
+                action: DbAction::Repair
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["budi", "db", "import"]).expect("budi db import parses");
+        match cli.command {
+            Commands::Db {
+                action: DbAction::Import { force },
+            } => assert!(!force),
+            _ => panic!("expected db import command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "db", "import", "--force"])
+            .expect("budi db import --force parses");
+        match cli.command {
+            Commands::Db {
+                action: DbAction::Import { force },
+            } => assert!(force),
+            _ => panic!("expected db import --force command"),
+        }
+    }
+
+    #[test]
+    fn cli_still_parses_deprecated_db_bare_verbs() {
+        // The bare `budi migrate` / `budi repair` / `budi import` verbs
+        // keep parsing in 8.2.x so existing aliases, wiki docs, and
+        // third-party scripts keep working for the full deprecation
+        // window (slated for removal in 8.3, see #368).
+        let cli = Cli::try_parse_from(["budi", "migrate"]).expect("budi migrate (alias) parses");
+        assert!(matches!(cli.command, Commands::Migrate));
+
+        let cli = Cli::try_parse_from(["budi", "repair"]).expect("budi repair (alias) parses");
+        assert!(matches!(cli.command, Commands::Repair));
+
+        let cli = Cli::try_parse_from(["budi", "import"]).expect("budi import (alias) parses");
+        assert!(matches!(cli.command, Commands::Import { force: false }));
+
+        let cli = Cli::try_parse_from(["budi", "import", "--force"])
+            .expect("budi import --force (alias) parses");
+        assert!(matches!(cli.command, Commands::Import { force: true }));
     }
 
     #[test]

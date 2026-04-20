@@ -33,12 +33,17 @@ pub fn internal_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value
 /// ```json
 /// {
 ///   "ok": false,
-///   "error": "analytics schema is v<N>, daemon expects v<M>; run `budi migrate` (or `budi init`) to upgrade",
+///   "error": "analytics schema is v<N>, daemon expects v<M>; run `budi db migrate` (or `budi init`) to upgrade",
 ///   "needs_migration": true,
 ///   "current": N,
 ///   "target": M
 /// }
 /// ```
+///
+/// The CLI's `parse_needs_migration_error` pattern-matches on
+/// `needs_migration: true` (not on the verb text) so renaming
+/// `budi migrate` → `budi db migrate` in 8.2.1 (#368) is a pure
+/// user-facing string change; the wire contract is unchanged.
 ///
 /// Kept in one place so the `/analytics/*` middleware, the `POST /sync`
 /// handler, and any future endpoints emit byte-identical bodies — which
@@ -51,7 +56,7 @@ pub fn schema_unavailable(current: u32, target: u32) -> (StatusCode, Json<serde_
             "ok": false,
             "error": format!(
                 "analytics schema is v{current}, daemon expects v{target}; \
-                 run `budi migrate` (or `budi init`) to upgrade"
+                 run `budi db migrate` (or `budi init`) to upgrade"
             ),
             "needs_migration": true,
             "current": current,

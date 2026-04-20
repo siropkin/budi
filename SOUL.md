@@ -1,6 +1,6 @@
 # SOUL.md
 
-Local-first cost analytics for AI coding agents (Claude Code, Codex CLI, Cursor, Copilot CLI). Tracks tokens, costs, and usage per message by tailing the JSONL transcript files those agents already write to disk (see [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)). Historical data from the same transcripts and the Cursor Usage API can be backfilled via `budi import`. Optional cloud sync (disabled by default) pushes pre-aggregated daily rollups to a team dashboard — prompts, code, and responses never leave the machine (see [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md)).
+Local-first cost analytics for AI coding agents (Claude Code, Codex CLI, Cursor, Copilot CLI). Tracks tokens, costs, and usage per message by tailing the JSONL transcript files those agents already write to disk (see [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)). Historical data from the same transcripts and the Cursor Usage API can be backfilled via `budi db import`. Optional cloud sync (disabled by default) pushes pre-aggregated daily rollups to a team dashboard — prompts, code, and responses never leave the machine (see [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md)).
 
 > **As of 8.2.0**: JSONL tailing is the sole live ingestion path. The proxy is removed in 8.2 R2.1 (#322); 8.1.x still ships the proxy during the transition window. See [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md).
 
@@ -89,8 +89,8 @@ Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extra
 ### Crates
 
 - **budi-core** - Business logic: analytics (SQLite queries), providers (Claude Code, Codex, Copilot CLI, Cursor) including each provider's `watch_roots()` for live tailing, pipeline (enrichment), cost calculation, config, migrations, autostart (platform-native daemon service management). The 8.1-era proxy runtime is deleted in R2.1 (#322); R2.5 (#326) keeps proxy-sourced `messages` rows read-only for historical analytics while dropping the obsolete `proxy_events` table on upgrade. Historical hook/OTEL data is read-only (tables kept for schema compat, ingestion removed).
-- **budi-cli** - Thin HTTP client to the daemon. Commands include `init`, `stats`, `sessions`, `status`, `sync`, `import`, `statusline`, `doctor`, `vitals`, `update`, `integrations`, `autostart`, `uninstall`, `migrate`, `repair`, and `cloud`. `budi init` is the daemon + autostart entry point; legacy launch / enable / disable / proxy-install commands are removed in 8.2. `budi health` is a hidden 8.2.x-only backward-compatibility alias for `budi vitals` — it still runs, prints a one-per-day deprecation hint, and is slated for removal in 8.3 (#367).
-- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API and runs the daemon-side filesystem tailer that watches each `Provider::watch_roots()` directory, parses incremental JSONL appends through `Pipeline::default_pipeline()`, and writes to the canonical `messages` / tag tables. JSONL tailing is the sole live ingestion path per [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md). One-shot historical backfill remains user-initiated via `budi import`.
+- **budi-cli** - Thin HTTP client to the daemon. Commands include `init`, `stats`, `sessions`, `status`, `statusline`, `doctor`, `vitals`, `update`, `integrations`, `autostart`, `uninstall`, `cloud`, and the DB admin namespace `db` (`db migrate`, `db repair`, `db import`). `budi init` is the daemon + autostart entry point; legacy launch / enable / disable / proxy-install commands are removed in 8.2. `budi health` is a hidden 8.2.x-only backward-compatibility alias for `budi vitals` — it still runs, prints a one-per-day deprecation hint, and is slated for removal in 8.3 (#367). The bare `budi migrate` / `budi repair` / `budi import` verbs moved under `budi db` in 8.2.1 (#368) — they stay hidden aliases for the 8.2.x deprecation window and will be removed in 8.3.
+- **budi-daemon** - axum HTTP server (port 7878). Owns SQLite exclusively. Serves analytics API and runs the daemon-side filesystem tailer that watches each `Provider::watch_roots()` directory, parses incremental JSONL appends through `Pipeline::default_pipeline()`, and writes to the canonical `messages` / tag tables. JSONL tailing is the sole live ingestion path per [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md). One-shot historical backfill remains user-initiated via `budi db import`.
 
 ### Data flow
 
@@ -103,14 +103,14 @@ Provider watcher (notify FS events on Provider::watch_roots() dirs)
   -> SQLite (messages + tags + derived rollup tables)
   -> Dashboard / CLI stats / Statusline
 
-Historical import (budi import — same Provider trait, one-shot mode):
+Historical import (budi db import — same Provider trait, one-shot mode):
 Sources (Claude Code JSONL, Codex sessions, Copilot CLI sessions, Cursor Usage API)
   -> Provider::discover_files() -> ParsedMessage structs (full backfill)
   -> Same Pipeline as the live tailer (single code path)
   -> SQLite (messages + tags + derived rollup tables)
 ```
 
-Enricher order is critical — each depends on prior enrichers. Do not reorder. The live tailer and `budi import` run the **same** pipeline against the **same** transcript files, so every classification feature (ticket extraction, file-level attribution, activity classification, tool outcomes) lands for both paths automatically.
+Enricher order is critical — each depends on prior enrichers. Do not reorder. The live tailer and `budi db import` run the **same** pipeline against the **same** transcript files, so every classification feature (ticket extraction, file-level attribution, activity classification, tool outcomes) lands for both paths automatically.
 
 > **Transition window (8.1.x → 8.2)**: in 8.1.x the daemon also runs an HTTP proxy on port 9878 that captures live LLM traffic into a separate `proxy_events` table and a parallel `insert_proxy_message` write path. That path is shipped behind `BUDI_LIVE_TAIL=1` cross-validation in 8.2 R1.3 (#319), made the default in R1.4 (#320 — proxy stops writing `proxy_events`), and the proxy code itself is deleted in 8.2 R2.1 (#322). R2.5 (#326) removes the now-unused `proxy_events` table on upgrade while keeping proxy-sourced `messages` rows read-only; the dedup rule in `analytics/sync.rs` (`proxy_cutoff`) remains only to keep those historical rows from double-counting during the transition.
 
@@ -148,9 +148,9 @@ Core tables:
 
 | Source | Confidence | What it provides |
 |--------|-----------|-----------------|
-| **JSONL tailer** (Claude Code, Codex, Copilot CLI) | `estimated` | Per-message tokens parsed from the agent's local transcript as it grows. Same parser as `budi import`; same enricher chain. Live in 8.2+ via [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md). |
+| **JSONL tailer** (Claude Code, Codex, Copilot CLI) | `estimated` | Per-message tokens parsed from the agent's local transcript as it grows. Same parser as `budi db import`; same enricher chain. Live in 8.2+ via [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md). |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents pulled from Cursor's API. Reconciles cost/token data the JSONL doesn't carry; lag profile was measured in #321 (p50 ≈ 70 s, p99 ≈ 6 min, N = 12) and embedded in [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) §7 — the Usage API stays a scheduled pull (not a live path) and a "Cursor cost may lag up to ~10 min" UX disclaimer follow-up is tracked in #381. |
-| **JSONL backfill** (`budi import`) | `estimated` (Claude Code / Codex / Copilot CLI) / `exact` (Cursor) | Same providers, one-shot mode for historical backfill. Used after install or after `budi import --force`. |
+| **JSONL backfill** (`budi db import`) | `estimated` (Claude Code / Codex / Copilot CLI) / `exact` (Cursor) | Same providers, one-shot mode for historical backfill. Used after install or after `budi db import --force`. |
 | **Legacy proxy** (8.1.x only, transition window) | `proxy_estimated` | Pre-8.2 real-time per-request tokens captured by the proxy on port 9878. New writes stop in 8.2 R1.4 (#320); the proxy is deleted in R2.1 (#322). Existing `proxy_estimated` rows remain queryable. |
 
 Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingestion has been removed. JSONL tailing is the sole live data source in 8.2+ (ADR-0089).
@@ -197,7 +197,7 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
      transcript line lacks `gitBranch` but a sibling message in the same
      session has one, the pipeline adopts it; later messages backfill
      earlier NULL-branch rows in the same session. This is the same routine
-     `budi import` already runs.
+     `budi db import` already runs.
   3. **`Unassigned` repo + empty branch** — last-resort fallback. Rows in
      this state surface as `(untagged)` in `budi stats --branches`.
 
@@ -222,7 +222,7 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   `HEAD`), (2) prefers the canonical alphanumeric pattern (e.g. `ENG-123`,
   `PAVA-2120` anywhere in the branch), then (3) falls back to a
   numeric-only id for branches like `feature/1234` or `42-quick-fix`. In
-  8.2+ this runs inside the `GitEnricher` for both `budi import` and the
+  8.2+ this runs inside the `GitEnricher` for both `budi db import` and the
   live JSONL tailer (one code path, [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)
   §1). The 8.1.x proxy path called the same extractor from
   `ProxyAttribution::resolve`; that call site is removed with the rest of
@@ -364,7 +364,7 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   rather than silently widening this one. In 8.1.x the parallel proxy
   ingest path did not emit outcomes (tool names and IDs weren't
   captured on the wire), so outcomes were import-only for that release.
-  In 8.2+ the JSONL tailer runs the same pipeline as `budi import`, so
+  In 8.2+ the JSONL tailer runs the same pipeline as `budi db import`, so
   outcomes are emitted live from the transcript without a proxy
   round-trip ([ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)
   §1). The 8.1 proxy ingest path is removed in 8.2 R2.1 (#322).
@@ -454,7 +454,7 @@ Key points:
 - **Source of truth vs derived**: `messages` remains canonical; rollup tables are derived caches maintained incrementally via SQLite triggers during ingest/update/delete
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
-- **Historical import**: `budi import` = full history backfill, `budi import --force` = clear all data and re-ingest from scratch
+- **Historical import**: `budi db import` = full history backfill, `budi db import --force` = clear all data and re-ingest from scratch (bare `budi import` / `budi import --force` still work in 8.2 as deprecated aliases with a one-per-day stderr hint, #368)
 - **Legacy proxy residue (upgrade only)**: 8.2 does not route live traffic through a proxy. The only remaining proxy-related code scans for 8.0/8.1 residue in shell profiles and agent configs, reports retained `proxy_estimated` history honestly, and lets users remove managed blocks via `budi init --cleanup` (consent-first) or `budi uninstall` (managed cleanup parity).
 
 ## Key files

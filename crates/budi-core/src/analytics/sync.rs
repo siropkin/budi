@@ -15,13 +15,13 @@ use crate::jsonl::ParsedMessage;
 const INGEST_BATCH_SIZE: usize = 1000;
 
 /// Quick sync: only files modified in the last 30 days.
-/// Used by `budi import` and the daemon's 30s auto-sync.
+/// Used by `budi db import` and the daemon's 30s auto-sync.
 pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
     sync_with_max_age(conn, Some(30))
 }
 
 /// Full history sync: process ALL transcript files regardless of age.
-/// Used by `budi import` — may take minutes on large histories.
+/// Used by `budi db import` — may take minutes on large histories.
 pub fn sync_history(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
     sync_with_max_age(conn, None)
 }

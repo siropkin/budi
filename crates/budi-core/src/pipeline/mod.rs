@@ -421,7 +421,7 @@ pub const TICKET_SOURCE_BRANCH_NUMERIC: &str = "branch_numeric";
 
 /// Branch names that are never tickets — integration branches and the
 /// literal detached-HEAD sentinel. Kept in one place so live tailing,
-/// `budi import`, and legacy-history handling stay aligned. Prefer the
+/// `budi db import`, and legacy-history handling stay aligned. Prefer the
 /// [`is_integration_branch`] helper over touching this list directly so
 /// downstream derivations (ticket extraction, work-outcome correlation)
 /// can never disagree about what counts as a non-feature branch (#336).
@@ -452,7 +452,7 @@ pub fn extract_ticket_id(branch: &str) -> Option<String> {
     extract_ticket_alpha(branch)
 }
 
-/// Unified ticket extractor used by both the live tailer and `budi import`.
+/// Unified ticket extractor used by both the live tailer and `budi db import`.
 /// Returns `(ticket_id, source)` where `source` is
 /// one of `TICKET_SOURCE_BRANCH` or `TICKET_SOURCE_BRANCH_NUMERIC`.
 ///

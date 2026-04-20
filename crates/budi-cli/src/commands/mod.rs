@@ -7,6 +7,7 @@ use serde_json::Value;
 
 pub mod autostart;
 pub mod cloud;
+pub mod db;
 pub mod doctor;
 pub mod import;
 pub mod init;
