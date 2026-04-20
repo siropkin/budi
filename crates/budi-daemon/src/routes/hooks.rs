@@ -7,7 +7,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::internal_error;
+use super::{internal_error, schema_unavailable};
 use crate::AppState;
 
 #[derive(serde::Serialize)]
@@ -582,35 +582,45 @@ pub async fn analytics_sync(
         ));
     }
     let flag = state.syncing.clone();
-    let result = tokio::task::spawn_blocking(move || {
+
+    // Result variant carries an explicit "stale schema, migrate=false"
+    // signal so we can map it to the structured 503 that #366 mandates
+    // instead of the opaque 500 this used to bail with.
+    enum SyncOutcome {
+        Ok(SyncResponse),
+        StaleSchema { current: u32, target: u32 },
+    }
+
+    let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<SyncOutcome> {
         let _busy = BusyFlagGuard::new(flag);
-        (|| -> anyhow::Result<_> {
-            let db_path = budi_core::analytics::db_path()?;
-            let mut conn = if params.migrate {
-                budi_core::analytics::open_db_with_migration(&db_path)?
-            } else {
-                let c = budi_core::analytics::open_db(&db_path)?;
-                if budi_core::migration::needs_migration(&c) {
-                    anyhow::bail!(
-                        "Database needs migration. Use migrate=true or run `budi migrate`."
-                    );
-                }
-                c
-            };
-            let (files_synced, messages_ingested, warnings) =
-                budi_core::analytics::sync_all(&mut conn)?;
-            Ok(SyncResponse {
-                files_synced,
-                messages_ingested,
-                warnings,
-            })
-        })()
+        let db_path = budi_core::analytics::db_path()?;
+        let mut conn = if params.migrate {
+            budi_core::analytics::open_db_with_migration(&db_path)?
+        } else {
+            let c = budi_core::analytics::open_db(&db_path)?;
+            let current = budi_core::migration::current_version(&c);
+            let target = budi_core::migration::SCHEMA_VERSION;
+            if current < target {
+                return Ok(SyncOutcome::StaleSchema { current, target });
+            }
+            c
+        };
+        let (files_synced, messages_ingested, warnings) =
+            budi_core::analytics::sync_all(&mut conn)?;
+        Ok(SyncOutcome::Ok(SyncResponse {
+            files_synced,
+            messages_ingested,
+            warnings,
+        }))
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    match outcome {
+        SyncOutcome::Ok(resp) => Ok(Json(resp)),
+        SyncOutcome::StaleSchema { current, target } => Err(schema_unavailable(current, target)),
+    }
 }
 
 pub async fn analytics_sync_reset(
