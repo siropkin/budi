@@ -44,8 +44,19 @@ pub struct AppState {
 }
 
 fn build_router(app_state: AppState) -> Router {
-    use routes::{analytics as a, cloud as c, hooks as h, require_loopback};
+    use routes::{
+        analytics as a, cloud as c, hooks as h, require_current_schema, require_loopback,
+    };
 
+    // Loopback-only admin / sync / cloud mutation routes.
+    //
+    // `/sync/all` and `/sync/reset` call `open_db_with_migration` internally
+    // so they can't trip the schema guard; `POST /sync` contains its own
+    // bail-on-stale-schema branch that now returns a structured 503 (see
+    // `routes::hooks::analytics_sync`).  `/admin/migrate` and
+    // `/admin/repair` must NOT be gated by the schema guard — those are
+    // the escape hatches operators use to fix the very drift that trips
+    // it.
     let protected_routes = Router::new()
         .route("/sync", post(h::analytics_sync))
         .route("/sync/all", post(h::analytics_history))
@@ -61,13 +72,14 @@ fn build_router(app_state: AppState) -> Router {
         )
         .route_layer(from_fn(require_loopback));
 
-    Router::new()
-        .route("/favicon.ico", get(h::favicon))
-        .route("/health", get(h::health))
-        .route("/health/integrations", get(h::health_integrations))
-        .route("/health/check-update", get(h::health_check_update))
-        .route("/sync/status", get(h::sync_status))
-        .route("/cloud/status", get(routes::cloud::cloud_status))
+    // Public `/analytics/*` surface.  All of these read the analytics
+    // SQLite DB, so `require_current_schema` short-circuits them with
+    // `503 + needs_migration: true` when the DB is behind the schema
+    // this binary was built for (#366).  `/health`, `/health/*`,
+    // `/sync/status`, `/cloud/status`, and `/favicon.ico` stay
+    // un-gated so operators can still observe daemon status on a
+    // stale-schema box without seeing spurious 503s.
+    let analytics_routes = Router::new()
         .route("/analytics/summary", get(a::analytics_summary))
         .route("/analytics/messages", get(a::analytics_messages))
         .route("/analytics/projects", get(a::analytics_projects))
@@ -140,6 +152,16 @@ fn build_router(app_state: AppState) -> Router {
             "/analytics/messages/{message_uuid}/detail",
             get(a::analytics_message_detail),
         )
+        .route_layer(from_fn(require_current_schema));
+
+    Router::new()
+        .route("/favicon.ico", get(h::favicon))
+        .route("/health", get(h::health))
+        .route("/health/integrations", get(h::health_integrations))
+        .route("/health/check-update", get(h::health_check_update))
+        .route("/sync/status", get(h::sync_status))
+        .route("/cloud/status", get(routes::cloud::cloud_status))
+        .merge(analytics_routes)
         .merge(protected_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(app_state)
@@ -147,8 +169,17 @@ fn build_router(app_state: AppState) -> Router {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Default log level is `info` so `~/.local/share/budi/logs/daemon.log`
+    // is not a 0-byte file after boot (see #309 / #366 — the lingering
+    // "0-byte log file" audit finding that #309's closure disposition left
+    // on the R4.2 smoke set).  Operators can still override with
+    // `RUST_LOG=...`, and anything logged via `tracing::error!`
+    // (including the `anyhow` chain from `routes::internal_error`) is now
+    // retained by default.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,hyper=warn,reqwest=warn,h2=warn"));
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
         .with_target(false)
         .compact()
         .init();
@@ -176,10 +207,36 @@ async fn main() -> Result<()> {
 
     // Ensure the database exists and schema is up-to-date.
     // This makes the daemon self-sufficient — it doesn't require `budi init` to have run first.
-    if let Ok(db_path) = analytics::db_path()
-        && let Err(e) = analytics::open_db_with_migration(&db_path)
-    {
-        tracing::warn!("Failed to initialize database: {e}");
+    if let Ok(db_path) = analytics::db_path() {
+        if let Err(e) = analytics::open_db_with_migration(&db_path) {
+            tracing::warn!("Failed to initialize database: {e}");
+        }
+        // Post-migration sanity check.  If the DB still reports a version
+        // lower than this binary expects — e.g. auto-migration failed silently
+        // or the DB file is owned by another daemon build — emit a loud WARN
+        // so `daemon.log` makes the drift obvious.  `/analytics/*` requests
+        // on this daemon will return the structured 503 defined in #366.
+        if let Ok(conn) = analytics::open_db(&db_path) {
+            let current = budi_core::migration::current_version(&conn);
+            let target = budi_core::migration::SCHEMA_VERSION;
+            if current < target {
+                tracing::warn!(
+                    target: "budi_daemon::schema",
+                    current,
+                    target,
+                    db_path = %db_path.display(),
+                    "analytics schema is behind this daemon binary; /analytics/* and POST /sync will return 503 until `budi migrate` succeeds"
+                );
+            } else if current > target {
+                tracing::warn!(
+                    target: "budi_daemon::schema",
+                    current,
+                    target,
+                    db_path = %db_path.display(),
+                    "analytics schema is ahead of this daemon binary (downgrade?); results may be inconsistent"
+                );
+            }
+        }
     }
     if let Err(e) = budi_core::legacy_proxy::emit_upgrade_notice_once() {
         tracing::warn!("Failed to scan legacy proxy residue on startup: {e}");
@@ -621,5 +678,103 @@ mod tests {
             json.get("endpoint").is_some(),
             "cloud/status should include `endpoint`"
         );
+    }
+
+    // ─── #366 stale-schema 503 regression tests ──────────────────────────
+    //
+    // These tests cover the two halves of the schema-guard contract:
+    //
+    // 1. Wire-shape: `routes::schema_unavailable` must emit the exact body
+    //    that `budi-cli::client::parse_needs_migration_error` matches on.
+    // 2. Decision logic: `routes::schema_status_for` must correctly
+    //    classify a DB file as `Proceed`, `Stale`, or `Ahead` against
+    //    `SCHEMA_VERSION`.
+    //
+    // We intentionally do NOT drive the full axum router through a
+    // `BUDI_HOME`-overridden `analytics::db_path()` here.
+    // `std::env::set_var` is process-global and, on macOS, not sound
+    // across threads — doing so produced flaky `500 != 503` failures in
+    // CI on the initial cut of #366.  The pure helper above captures the
+    // middleware's only real business logic; `require_current_schema` is
+    // a five-line match over its output, exercised indirectly by every
+    // other router-level test in this file (they all land on `Proceed`).
+
+    #[test]
+    fn schema_unavailable_has_stable_body_shape() {
+        // Lock the wire shape the CLI pattern-matches on
+        // (`budi-cli::client::parse_needs_migration_error`).
+        let (status, body) = routes::schema_unavailable(0, 1);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let v = body.0;
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["needs_migration"], true);
+        assert_eq!(v["current"], 0);
+        assert_eq!(v["target"], 1);
+        let msg = v["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("analytics schema is v0"));
+        assert!(msg.contains("daemon expects v1"));
+        assert!(msg.contains("budi migrate"));
+    }
+
+    #[test]
+    fn schema_status_for_returns_proceed_when_db_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = routes::schema_status_for(&tmp.path().join("analytics.db"));
+        assert_eq!(status, routes::SchemaStatus::Proceed);
+    }
+
+    #[test]
+    fn schema_status_for_returns_stale_for_pre_migration_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("analytics.db");
+        // Materialize a DB file with `user_version = 0`, simulating the
+        // pre-migration beta DB that a newer daemon binary
+        // (SCHEMA_VERSION = 1) might be pointed at.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE dummy(x INTEGER);")
+                .unwrap();
+            // Defensive pin — don't depend on SQLite's default user_version.
+            conn.pragma_update(None, "user_version", 0_u32).unwrap();
+        }
+        assert_eq!(
+            routes::schema_status_for(&db_path),
+            routes::SchemaStatus::Stale {
+                current: 0,
+                target: budi_core::migration::SCHEMA_VERSION,
+            }
+        );
+    }
+
+    #[test]
+    fn schema_status_for_returns_proceed_at_current_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("analytics.db");
+        budi_core::analytics::open_db_with_migration(&db_path).unwrap();
+        assert_eq!(
+            routes::schema_status_for(&db_path),
+            routes::SchemaStatus::Proceed
+        );
+    }
+
+    #[test]
+    fn schema_status_for_returns_ahead_when_db_is_future_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("analytics.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let future = budi_core::migration::SCHEMA_VERSION + 99;
+            conn.pragma_update(None, "user_version", future).unwrap();
+        }
+        match routes::schema_status_for(&db_path) {
+            routes::SchemaStatus::Ahead { current, target } => {
+                assert!(
+                    current > target,
+                    "current {current} should be > target {target}"
+                );
+                assert_eq!(target, budi_core::migration::SCHEMA_VERSION);
+            }
+            other => panic!("expected SchemaStatus::Ahead, got {other:?}"),
+        }
     }
 }

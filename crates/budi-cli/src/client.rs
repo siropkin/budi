@@ -145,16 +145,42 @@ fn run_with_sync_heartbeat<T, E>(
 }
 
 /// Check the response status and return a descriptive error for non-success codes.
+///
+/// `503 Service Unavailable` with a `needs_migration: true` body (#366) is
+/// formatted as an actionable error message instead of being echoed as raw
+/// JSON. Other non-success codes preserve the body in the error so operators
+/// can still see whatever the daemon said.
 fn check_response(resp: Response) -> Result<Response> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
     }
     let body = resp.text().unwrap_or_default();
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && let Some(msg) = parse_needs_migration_error(&body)
+    {
+        anyhow::bail!("{msg}");
+    }
     if body.is_empty() {
         anyhow::bail!("Daemon returned {status}");
     } else {
         anyhow::bail!("Daemon returned {status}: {body}");
+    }
+}
+
+/// Return the daemon-provided `error` string from a stale-schema 503 body,
+/// or `None` if the body doesn't look like the #366 contract.
+///
+/// We key off `needs_migration: true` rather than the status code alone so
+/// an unrelated future 503 (e.g. "cloud backend unreachable") keeps its
+/// existing raw-body formatting.
+fn parse_needs_migration_error(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    if v.get("needs_migration")?.as_bool()? {
+        let msg = v.get("error")?.as_str()?;
+        Some(msg.to_string())
+    } else {
+        None
     }
 }
 
@@ -874,6 +900,29 @@ mod tests {
                 .contains("Failed to start budi daemon. Run `budi doctor` to diagnose."),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parse_needs_migration_error_extracts_message() {
+        let body = r#"{"ok":false,"error":"analytics schema is v0, daemon expects v1; run `budi migrate` (or `budi init`) to upgrade","needs_migration":true,"current":0,"target":1}"#;
+        let msg = parse_needs_migration_error(body).expect("body matches #366 contract");
+        assert!(
+            msg.contains("analytics schema is v0, daemon expects v1"),
+            "unexpected message: {msg}"
+        );
+        assert!(msg.contains("budi migrate"), "should mention budi migrate");
+    }
+
+    #[test]
+    fn parse_needs_migration_error_skips_unrelated_503() {
+        let body = r#"{"ok":false,"error":"cloud backend unreachable"}"#;
+        assert!(parse_needs_migration_error(body).is_none());
+    }
+
+    #[test]
+    fn parse_needs_migration_error_skips_non_json() {
+        assert!(parse_needs_migration_error("").is_none());
+        assert!(parse_needs_migration_error("not json").is_none());
     }
 
     #[test]
