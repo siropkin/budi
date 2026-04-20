@@ -3007,6 +3007,14 @@ pub struct StatuslineParams {
     pub session_id: Option<String>,
     pub branch: Option<String>,
     pub project_dir: Option<String>,
+    /// Optional repo identity (as produced by `budi_core::repo_id`). When
+    /// set together with `branch`, `branch_cost` is scoped to
+    /// `(repo_id, branch)` so developers who sit on `main` / `master` in
+    /// several repos see only the current repo's activity instead of a
+    /// cross-repo sum. Left as `None` preserves the pre-#347 behavior for
+    /// consumers that can't resolve a repo identity (no git, shell not in a
+    /// repo, etc.). See issue #347.
+    pub repo_id: Option<String>,
     /// Optional provider filter. When set, every numeric field
     /// (`cost_1d/7d/30d`, `session_cost`, `branch_cost`, `project_cost`) and
     /// `active_provider` are scoped to this provider. Provider-scoped
@@ -3110,14 +3118,23 @@ pub fn statusline_stats(
     });
 
     // Branch cost: total cost for messages on a specific branch.
+    //
+    // When `repo_id` is also provided, filter on `(repo_id, branch)` so
+    // developers who keep several local repos checked out on `main`
+    // (or `master` / `develop`) see only the current repo's branch spend
+    // instead of a silent cross-repo sum. See #347.
     let branch_cost = params.branch.as_ref().map(|branch| {
         let mut sql = String::from(
             "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
-             WHERE git_branch = ?1 AND role = 'assistant'",
+             WHERE git_branch = ? AND role = 'assistant'",
         );
         let mut bindings: Vec<String> = vec![branch.clone()];
+        if let Some(repo) = params.repo_id.as_deref() {
+            sql.push_str(" AND COALESCE(repo_id, '') = ?");
+            bindings.push(repo.to_string());
+        }
         if let Some(p) = provider_filter {
-            sql.push_str(" AND provider = ?2");
+            sql.push_str(" AND provider = ?");
             bindings.push(p.to_string());
         }
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings

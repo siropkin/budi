@@ -28,6 +28,7 @@ All parameters are optional. Omit them to get unscoped, context-free totals.
 | `provider`     | string | Scopes every numeric field (`cost_1d` / `cost_7d` / `cost_30d`, `session_cost`, `branch_cost`, `project_cost`) and `active_provider` to one provider. Canonical values: `claude_code`, `cursor`, `codex`, `copilot_cli`. Provider-scoped surfaces (the Claude Code statusline, the Cursor extension) **must** set this. |
 | `session_id`   | string | Additionally compute `session_cost` and session health (`health_state`, `health_tip`, `session_msg_cost`). |
 | `branch`       | string | Additionally compute `branch_cost` for this git branch. |
+| `repo_id`      | string | Scope `branch_cost` to `(repo_id, branch)` so developers who sit on `main` / `master` in multiple repos don't get a cross-repo sum. Only meaningful when `branch` is also set. Format matches `budi_core::repo_id` (e.g. `github.com/siropkin/budi`). |
 | `project_dir`  | string | Additionally compute `project_cost` for this directory. |
 
 ## Response shape
@@ -60,6 +61,7 @@ All parameters are optional. Omit them to get unscoped, context-free totals.
 - **`active_provider`** is the most recent `provider` value seen inside the 1d window, after the provider filter is applied. It exists so downstream surfaces can render "last touched" hints without a second API call.
 - **`provider_scope`** echoes back the filter the daemon applied. Consumers should display the scope alongside totals when the filter is active.
 - **Deprecated fields** (`today_cost`, `week_cost`, `month_cost`) are populated with the same rolling values as `cost_1d` / `cost_7d` / `cost_30d` for one release of backward compatibility with 8.0 consumers that predate this contract. They are removed in 9.0. New consumers MUST read the `cost_1d` / `cost_7d` / `cost_30d` fields.
+- **`branch_cost` is repo-scoped when `repo_id` is passed.** Consumers that can resolve a repo identity (the CLI does this via `budi_core::repo_id` when it has a cwd) should pass `repo_id` alongside `branch` so `branch_cost` reflects "this branch in this repo" rather than "this branch name across every repo on the machine". Omitting `repo_id` preserves the pre-8.2.1 behavior, which sums across all repos that share the branch name (#347).
 
 ## Stability guarantees
 
