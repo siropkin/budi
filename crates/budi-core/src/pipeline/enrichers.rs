@@ -6,7 +6,7 @@ use crate::analytics::Tag;
 use crate::config::TagsConfig;
 use crate::file_attribution;
 use crate::jsonl::ParsedMessage;
-use crate::pipeline::{Enricher, extract_ticket_from_branch, glob_match};
+use crate::pipeline::{Enricher, emit, extract_ticket_from_branch, glob_match};
 use crate::repo_id::{RepoIdCache, repo_root_for};
 use crate::tag_keys as tk;
 
@@ -54,24 +54,13 @@ impl Enricher for GitEnricher {
         // column, not a tag). R1.3 (#221) unified the extractor so live
         // tailing and `budi import` tag pure-numeric branches like
         // `fix/1234-typo` consistently, while staying readable against
-        // retained 8.1 legacy history.
+        // retained 8.1 legacy history. #335: emit the triplet through the
+        // shared helper so a future caller cannot land a `ticket_id`
+        // without its sibling `ticket_source` tag.
         if let Some(ref branch) = msg.git_branch
             && let Some((ticket, source)) = extract_ticket_from_branch(branch)
         {
-            tags.push(Tag {
-                key: tk::TICKET_ID.to_string(),
-                value: ticket.to_string(),
-            });
-            if let Some(dash) = ticket.find('-') {
-                tags.push(Tag {
-                    key: tk::TICKET_PREFIX.to_string(),
-                    value: ticket[..dash].to_string(),
-                });
-            }
-            tags.push(Tag {
-                key: tk::TICKET_SOURCE.to_string(),
-                value: source.to_string(),
-            });
+            emit::ticket(&mut tags, &ticket, source);
         }
 
         tags
@@ -185,25 +174,19 @@ impl Enricher for FileEnricher {
         if attribution.paths.is_empty() {
             return Vec::new();
         }
-        let mut tags = Vec::with_capacity(attribution.paths.len() + 2);
-        for path in attribution.paths {
-            tags.push(Tag {
-                key: tk::FILE_PATH.to_string(),
-                value: path,
-            });
-        }
-        if let Some(source) = attribution.source {
-            tags.push(Tag {
-                key: tk::FILE_PATH_SOURCE.to_string(),
-                value: source.to_string(),
-            });
-        }
-        if let Some(confidence) = attribution.confidence {
-            tags.push(Tag {
-                key: tk::FILE_PATH_CONFIDENCE.to_string(),
-                value: confidence.to_string(),
-            });
-        }
+        // `attribute_files` guarantees that `source` / `confidence` are
+        // `Some` whenever `paths` is non-empty; the `expect` calls pin
+        // that invariant so the shared helper (#335) can take
+        // non-optional siblings without smuggling in a silent-fallback
+        // path.
+        let source = attribution
+            .source
+            .expect("attribute_files sets source when paths is non-empty");
+        let confidence = attribution
+            .confidence
+            .expect("attribute_files sets confidence when paths is non-empty");
+        let mut tags = Vec::new();
+        emit::file_paths(&mut tags, attribution.paths, source, confidence);
         tags
     }
 }

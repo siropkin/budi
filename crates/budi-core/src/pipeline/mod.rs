@@ -3,6 +3,7 @@
 //! Provides a pluggable enrichment pipeline that transforms raw `ParsedMessage`s
 //! before they are ingested into the database.
 
+pub(crate) mod emit;
 pub mod enrichers;
 
 use crate::analytics::Tag;
@@ -136,23 +137,21 @@ impl Pipeline {
                 // R1.2 (#222) also emits source/confidence as sibling tags so
                 // aggregates in `activity_cost*` can render explainable
                 // labels per-activity instead of a global fallback.
+                // #335: emission goes through `emit::activity` so the
+                // headline can never ship without its siblings. If upstream
+                // left the source/confidence unset (e.g. a legacy code path
+                // that bypassed `propagate_session_context`) we fall back to
+                // the same `rule` / `medium` defaults the propagator uses.
                 if let Some(ref cat) = msg.prompt_category {
-                    msg_tags.push(Tag {
-                        key: tk::ACTIVITY.to_string(),
-                        value: cat.clone(),
-                    });
-                    if let Some(ref src) = msg.prompt_category_source {
-                        msg_tags.push(Tag {
-                            key: tk::ACTIVITY_SOURCE.to_string(),
-                            value: src.clone(),
-                        });
-                    }
-                    if let Some(ref conf) = msg.prompt_category_confidence {
-                        msg_tags.push(Tag {
-                            key: tk::ACTIVITY_CONFIDENCE.to_string(),
-                            value: conf.clone(),
-                        });
-                    }
+                    let src = msg
+                        .prompt_category_source
+                        .as_deref()
+                        .unwrap_or(crate::hooks::SOURCE_RULE);
+                    let conf = msg
+                        .prompt_category_confidence
+                        .as_deref()
+                        .unwrap_or(crate::hooks::CONF_MEDIUM);
+                    emit::activity(&mut msg_tags, cat, src, conf);
                 }
 
                 // R1.5 (#293): tool_outcome tags. For each tool_use on
@@ -267,12 +266,7 @@ fn emit_tool_outcome_tags(
             last_tool_outcome.insert((sid.clone(), name.clone()), raw);
         }
 
-        if seen.insert(outcome.clone()) {
-            msg_tags.push(Tag {
-                key: tk::TOOL_OUTCOME.to_string(),
-                value: outcome,
-            });
-        }
+        seen.insert(outcome);
     }
 
     if seen.is_empty() {
@@ -293,14 +287,10 @@ fn emit_tool_outcome_tags(
     } else {
         j::TOOL_OUTCOME_CONFIDENCE_MEDIUM
     };
-    msg_tags.push(Tag {
-        key: tk::TOOL_OUTCOME_SOURCE.to_string(),
-        value: source.to_string(),
-    });
-    msg_tags.push(Tag {
-        key: tk::TOOL_OUTCOME_CONFIDENCE.to_string(),
-        value: confidence.to_string(),
-    });
+    // #335: emit the full triplet through the shared helper so headline
+    // `tool_outcome` tags can never ship without their sibling
+    // source/confidence pair.
+    emit::tool_outcomes(msg_tags, seen.iter(), source, confidence);
 }
 
 /// Propagate git_branch, repo_id, cwd, prompt_category, and the R1.2
