@@ -1,5 +1,11 @@
 # Changelog
 
+## 8.2.1 — Unreleased
+
+### Changed
+
+- **`budi health` renamed to `budi vitals`** (#367) — the old `budi health` verb overlapped too easily with `budi doctor` (daemon/install self-check). The session-vitals command is now `budi vitals` with identical output and the same `--session` flag. `budi health` keeps working in 8.2.x as a hidden backward-compatibility alias: the first invocation each UTC day prints a one-line stderr hint pointing users at `budi vitals`, subsequent invocations on the same day stay quiet. Slated for removal in 8.3. Help output, `after_help`, `README.md`, and `SOUL.md` all describe `budi vitals` as the canonical command.
+
 ## 8.2.0 — 2026-04-19
 
 8.2 is the "Invisible Budi" release: Budi is now invisible by default, reading agent transcripts directly from disk instead of intercepting network traffic.
@@ -105,7 +111,7 @@ Budi 8.0 is a ground-up rearchitecture: proxy-first live cost tracking replaces 
 
 ### CLI improvements
 
-- **Rich CLI is the primary local UX** — `budi stats`, `budi sessions`, `budi health`, `budi status` (#97)
+- **Rich CLI is the primary local UX** — `budi stats`, `budi sessions`, `budi health` (renamed to `budi vitals` in 8.2.1 — #367), `budi status` (#97)
 - **`budi import`** consolidates historical transcript import (replaces removed `budi sync`) (#175)
 - **Session ID** shown in `budi sessions` output with prefix matching for detail view (#174)
 - **Total cost line** in multi-agent `budi stats` output (#184)
