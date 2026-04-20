@@ -48,11 +48,15 @@ use chrono::{DateTime, Utc};
 /// round, debuggable default; callers can override for tests.
 pub const DEFAULT_GRACE: chrono::Duration = chrono::Duration::hours(24);
 
-/// Integration branches we treat as the merge target when asking
-/// whether a session's branch shipped. Same list the pipeline uses to
-/// filter out integration branches from ticket extraction, kept in sync
-/// so the two derivations agree on what "merged" means.
-const INTEGRATION_BRANCHES: &[&str] = &["main", "master", "develop"];
+/// Integration branches we use as the *merge target* when asking
+/// whether a session's branch shipped. Intentionally narrower than
+/// [`crate::pipeline::is_integration_branch`]: `HEAD` is never a
+/// meaningful ref to resolve against or run `git merge-base` against
+/// here — it would either alias the current checkout (noisy) or fail
+/// silently. The "is this a non-feature branch?" check is delegated to
+/// the shared helper so ticket extraction and work-outcome correlation
+/// can never disagree (#336).
+const MERGE_TARGETS: &[&str] = &["main", "master", "develop"];
 
 /// Bounded set of outcome labels. Matches the set listed in #293 plus
 /// `Unknown`; analytics queries pivot on the raw string value so the
@@ -124,7 +128,7 @@ pub struct WorkOutcomeInputs<'a> {
 /// hiding the session entirely.
 pub fn derive_work_outcome(inputs: &WorkOutcomeInputs<'_>) -> WorkOutcome {
     let branch = inputs.branch.trim();
-    if branch.is_empty() || INTEGRATION_BRANCHES.contains(&branch) {
+    if branch.is_empty() || crate::pipeline::is_integration_branch(branch) {
         return WorkOutcome::unknown("no non-integration branch on session — nothing to correlate");
     }
     if !inputs.repo_root.exists() || !inputs.repo_root.join(".git").exists() {
@@ -234,7 +238,7 @@ fn branch_shares_tip_with_integration(repo: &Path, branch: &str) -> bool {
     let Some(branch_tip) = resolve_ref(repo, branch) else {
         return false;
     };
-    for integration in INTEGRATION_BRANCHES {
+    for integration in MERGE_TARGETS {
         if let Some(tip) = resolve_ref(repo, integration)
             && tip == branch_tip
         {
@@ -264,7 +268,7 @@ fn branch_was_merged(repo: &Path, branch: &str) -> bool {
     // which is the definition we care about. Skip integration refs
     // that don't exist locally so we don't spray `fatal:` messages to
     // stderr on scratch repos that only carry `main`.
-    for integration in INTEGRATION_BRANCHES {
+    for integration in MERGE_TARGETS {
         if resolve_ref(repo, integration).is_none() {
             continue;
         }
@@ -293,7 +297,7 @@ fn count_commits_on_branch(
     // from being credited with main's shared history just because the
     // bootstrap commit landed inside the correlation window.
     let mut args: Vec<String> = vec!["log".into(), branch.into()];
-    for integration in INTEGRATION_BRANCHES {
+    for integration in MERGE_TARGETS {
         // `--not` excludes commits reachable from this ref. Silently
         // skipped when the ref doesn't exist (the command still
         // succeeds), which matches the behavior of scratch repos that
@@ -345,7 +349,13 @@ mod tests {
 
     #[test]
     fn unknown_on_integration_branch() {
-        for b in ["main", "master", "develop"] {
+        // Includes `HEAD` (the detached-HEAD sentinel) so work-outcome
+        // correlation agrees with the pipeline ticket extractor's
+        // integration-branch set (#336). Under normal ingest the proxy
+        // / JSONL path normalizes detached HEAD to empty, but a future
+        // importer that lets the literal string through must not be
+        // credited as a `branch_merged` via the merge-base fallback.
+        for b in ["main", "master", "develop", "HEAD"] {
             let inputs = WorkOutcomeInputs {
                 repo_root: Path::new("/"),
                 branch: b,
@@ -357,6 +367,26 @@ mod tests {
                 derive_work_outcome(&inputs).label,
                 WorkOutcomeLabel::Unknown,
                 "{b} must not correlate as work outcome"
+            );
+        }
+    }
+
+    #[test]
+    fn is_integration_branch_is_shared_across_pipeline_and_work_outcome() {
+        // Guard against the asymmetry called out in #336: if someone
+        // narrows the work-outcome set to drop `HEAD`, the pipeline
+        // ticket extractor would still skip HEAD while work-outcome
+        // correlation would attempt to merge-base against it.
+        for b in ["main", "master", "develop", "HEAD"] {
+            assert!(
+                crate::pipeline::is_integration_branch(b),
+                "{b} must be treated as an integration branch"
+            );
+        }
+        for b in ["PROJ-1-feature", "03-20-pava-2120_desc", "", "feature/x"] {
+            assert!(
+                !crate::pipeline::is_integration_branch(b),
+                "{b} must not be treated as an integration branch"
             );
         }
     }

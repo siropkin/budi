@@ -421,8 +421,23 @@ pub const TICKET_SOURCE_BRANCH_NUMERIC: &str = "branch_numeric";
 
 /// Branch names that are never tickets — integration branches and the
 /// literal detached-HEAD sentinel. Kept in one place so live tailing,
-/// `budi import`, and legacy-history handling stay aligned.
+/// `budi import`, and legacy-history handling stay aligned. Prefer the
+/// [`is_integration_branch`] helper over touching this list directly so
+/// downstream derivations (ticket extraction, work-outcome correlation)
+/// can never disagree about what counts as a non-feature branch (#336).
 const INTEGRATION_BRANCHES: &[&str] = &["main", "master", "develop", "HEAD"];
+
+/// Return `true` when `branch` is an integration / non-feature branch
+/// and therefore should not be treated as a ticket source or as a
+/// session's feature branch for work-outcome correlation.
+///
+/// Centralized for #336 so the pipeline ticket extractor and
+/// `derive_work_outcome` agree on the same bounded set. Matching is
+/// case-sensitive and exact — callers are expected to hand in the
+/// already-normalized branch name as it appears in the transcript.
+pub fn is_integration_branch(branch: &str) -> bool {
+    INTEGRATION_BRANCHES.contains(&branch)
+}
 
 /// Extract a ticket ID (e.g. `PAVA-2057`) from a branch name.
 /// Matches `[a-zA-Z]{2,}-\d+` and returns it uppercased.
@@ -454,7 +469,7 @@ pub fn extract_ticket_id(branch: &str) -> Option<String> {
 ///    conventions that many GitHub-flow teams rely on and keeps
 ///    transcript-derived rows consistent with retained legacy data.
 pub fn extract_ticket_from_branch(branch: &str) -> Option<(String, &'static str)> {
-    if branch.is_empty() || INTEGRATION_BRANCHES.contains(&branch) {
+    if branch.is_empty() || is_integration_branch(branch) {
         return None;
     }
     if let Some(id) = extract_ticket_alpha(branch) {
