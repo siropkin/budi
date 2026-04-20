@@ -100,6 +100,7 @@ One record per unique `(bucket_day, role, provider, model, repo_id, git_branch)`
   "repo_id": "sha256:a1b2c3d4e5f6",
   "git_branch": "feature/PROJ-1234-add-auth",
   "ticket": "PROJ-1234",
+  "ticket_source": "branch",
   "message_count": 47,
   "input_tokens": 125000,
   "output_tokens": 89000,
@@ -108,6 +109,14 @@ One record per unique `(bucket_day, role, provider, model, repo_id, git_branch)`
   "cost_cents": 3.42
 }
 ```
+
+`ticket_source` is optional and only set when `ticket` is present. Its
+value matches the `ticket_source` sibling tag in the local analytics
+pipeline (`branch` for the alphanumeric `<PREFIX>-<NUM>` pattern,
+`branch_numeric` for the ADR-0082 §9 numeric fallback). Cloud
+dashboards that surface a provenance marker alongside the ticket
+render the same bucketing local `budi stats --tickets` does. Absent
+values round-trip as `NULL` server-side (8.2.1, #333).
 
 #### Session Summary Record
 
@@ -123,6 +132,7 @@ A scrubbed per-session summary (no content, no paths):
   "repo_id": "sha256:a1b2c3d4e5f6",
   "git_branch": "feature/PROJ-1234-add-auth",
   "ticket": "PROJ-1234",
+  "ticket_source": "branch",
   "message_count": 47,
   "total_input_tokens": 125000,
   "total_output_tokens": 89000,
@@ -317,6 +327,7 @@ CREATE TABLE daily_rollups (
     repo_id                TEXT NOT NULL,
     git_branch             TEXT NOT NULL,
     ticket                 TEXT,
+    ticket_source          TEXT,               -- 'branch' | 'branch_numeric' | NULL
     message_count          INTEGER NOT NULL DEFAULT 0,
     input_tokens           BIGINT NOT NULL DEFAULT 0,
     output_tokens          BIGINT NOT NULL DEFAULT 0,
@@ -338,6 +349,7 @@ CREATE TABLE session_summaries (
     repo_id              TEXT,
     git_branch           TEXT,
     ticket               TEXT,
+    ticket_source        TEXT,                 -- 'branch' | 'branch_numeric' | NULL
     message_count        INTEGER NOT NULL DEFAULT 0,
     total_input_tokens   BIGINT NOT NULL DEFAULT 0,
     total_output_tokens  BIGINT NOT NULL DEFAULT 0,

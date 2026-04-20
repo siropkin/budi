@@ -46,6 +46,12 @@ pub struct DailyRollupRecord {
     pub git_branch: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// Provenance marker matching the canonical pipeline extractor
+    /// (`branch` or `branch_numeric`). Only set when `ticket` is `Some`,
+    /// so cloud-side dashboards can distinguish the two sources the same
+    /// way local `budi stats --tickets` does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket_source: Option<String>,
     pub message_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -70,6 +76,10 @@ pub struct SessionSummaryRecord {
     pub git_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// Provenance marker matching the canonical pipeline extractor
+    /// (`branch` or `branch_numeric`). Only set when `ticket` is `Some`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket_source: Option<String>,
     pub message_count: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -225,44 +235,16 @@ pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncSt
 // Data extraction from local SQLite (privacy-safe: rollups + session summaries)
 // ---------------------------------------------------------------------------
 
-/// Extract ticket ID from a git branch name (e.g. "feature/PROJ-1234-add-auth" → "PROJ-1234").
-fn extract_ticket_from_branch(branch: &str) -> Option<String> {
-    // Common patterns: PROJ-123, ABC-1234, etc.
-    let re_like = |s: &str| -> Option<String> {
-        let mut start = None;
-        let chars: Vec<char> = s.chars().collect();
-        for i in 0..chars.len() {
-            if chars[i].is_ascii_uppercase() {
-                if start.is_none() {
-                    start = Some(i);
-                }
-            } else if chars[i] == '-' {
-                if let Some(s) = start {
-                    // Check if what follows is digits
-                    let rest = &chars[i + 1..];
-                    let digits: String = rest.iter().take_while(|c| c.is_ascii_digit()).collect();
-                    if !digits.is_empty() {
-                        let prefix: String = chars[s..i].iter().collect();
-                        if prefix.len() >= 2 {
-                            return Some(format!("{prefix}-{digits}"));
-                        }
-                    }
-                }
-                start = None;
-            } else if !chars[i].is_ascii_alphanumeric() {
-                start = None;
-            }
-        }
-        None
-    };
-
-    // Try the branch name after any "/" delimiter
-    for segment in branch.split('/') {
-        if let Some(ticket) = re_like(segment) {
-            return Some(ticket);
-        }
-    }
-    re_like(branch)
+/// Extract ticket ID and source provenance from a git branch name.
+///
+/// Delegates to `pipeline::extract_ticket_from_branch` so cloud rollups
+/// apply the same filter / alpha-first / numeric-fallback rules as
+/// analytics and `budi stats --tickets`. See ADR-0082 §9 and
+/// issue #333 for context — cloud previously carried its own helper
+/// that diverged on integration-branch filtering and the numeric
+/// fallback.
+fn extract_ticket(branch: &str) -> Option<(String, &'static str)> {
+    crate::pipeline::extract_ticket_from_branch(branch)
 }
 
 /// Fetch daily rollups that need syncing.
@@ -296,6 +278,7 @@ pub fn fetch_daily_rollups(
                 repo_id: row.get(4)?,
                 git_branch: row.get(5)?,
                 ticket: None,
+                ticket_source: None,
                 message_count: row.get(6)?,
                 input_tokens: row.get(7)?,
                 output_tokens: row.get(8)?,
@@ -324,6 +307,7 @@ pub fn fetch_daily_rollups(
                 repo_id: row.get(4)?,
                 git_branch: row.get(5)?,
                 ticket: None,
+                ticket_source: None,
                 message_count: row.get(6)?,
                 input_tokens: row.get(7)?,
                 output_tokens: row.get(8)?,
@@ -337,7 +321,10 @@ pub fn fetch_daily_rollups(
     };
 
     for mut record in rows {
-        record.ticket = extract_ticket_from_branch(&record.git_branch);
+        if let Some((id, source)) = extract_ticket(&record.git_branch) {
+            record.ticket = Some(id);
+            record.ticket_source = Some(source.to_string());
+        }
         records.push(record);
     }
 
@@ -402,10 +389,10 @@ pub fn fetch_session_summaries(
 
     let mut summaries = Vec::new();
     for mut summary in rows.flatten() {
-        summary.ticket = summary
-            .git_branch
-            .as_deref()
-            .and_then(extract_ticket_from_branch);
+        if let Some((id, source)) = summary.git_branch.as_deref().and_then(extract_ticket) {
+            summary.ticket = Some(id);
+            summary.ticket_source = Some(source.to_string());
+        }
         summaries.push(summary);
     }
 
@@ -422,6 +409,7 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummaryRe
         repo_id: row.get(5)?,
         git_branch: row.get(6)?,
         ticket: None,
+        ticket_source: None,
         message_count: row.get(7)?,
         total_input_tokens: row.get(8)?,
         total_output_tokens: row.get(9)?,
@@ -669,20 +657,23 @@ mod tests {
 
     #[test]
     fn extract_ticket_basic() {
+        // After #333, cloud_sync delegates to `pipeline::extract_ticket_from_branch`;
+        // keep the spot-checks in place to confirm the thin wrapper preserves
+        // alpha-pattern, integration-branch, and non-branch-like behavior.
         assert_eq!(
-            extract_ticket_from_branch("feature/PROJ-1234-add-auth"),
+            extract_ticket("feature/PROJ-1234-add-auth").map(|(id, _)| id),
             Some("PROJ-1234".to_string())
         );
         assert_eq!(
-            extract_ticket_from_branch("PROJ-1234"),
+            extract_ticket("PROJ-1234").map(|(id, _)| id),
             Some("PROJ-1234".to_string())
         );
         assert_eq!(
-            extract_ticket_from_branch("fix/ABC-42-hotfix"),
+            extract_ticket("fix/ABC-42-hotfix").map(|(id, _)| id),
             Some("ABC-42".to_string())
         );
-        assert_eq!(extract_ticket_from_branch("main"), None);
-        assert_eq!(extract_ticket_from_branch("(untagged)"), None);
+        assert_eq!(extract_ticket("main"), None);
+        assert_eq!(extract_ticket("(untagged)"), None);
     }
 
     #[test]
@@ -790,6 +781,10 @@ mod tests {
         assert_eq!(rollups[0].input_tokens, 100);
         assert_eq!(rollups[0].output_tokens, 200);
         assert_eq!(rollups[0].ticket.as_deref(), Some("PROJ-42"));
+        assert_eq!(
+            rollups[0].ticket_source.as_deref(),
+            Some(crate::pipeline::TICKET_SOURCE_BRANCH)
+        );
 
         // Fetch with watermark that excludes the data
         let rollups = fetch_daily_rollups(&conn, Some("2026-04-10")).unwrap();
@@ -924,6 +919,7 @@ mod tests {
                     repo_id: "sha256:abc".into(),
                     git_branch: "main".into(),
                     ticket: None,
+                    ticket_source: None,
                     message_count: 5,
                     input_tokens: 1000,
                     output_tokens: 500,
@@ -944,5 +940,100 @@ mod tests {
         );
         // ticket should be absent (None → skipped)
         assert!(json["payload"]["daily_rollups"][0].get("ticket").is_none());
+        // ticket_source should also be absent when ticket is None
+        assert!(
+            json["payload"]["daily_rollups"][0]
+                .get("ticket_source")
+                .is_none()
+        );
+    }
+
+    // Regression for #333: cloud_sync must produce the same ticket_id as the
+    // canonical pipeline extractor on the divergent cases that motivated the
+    // ticket — the numeric fallback and the nested alphanumeric form — and
+    // integration branches must not leak a ticket to the cloud.
+    #[test]
+    fn rollup_extraction_matches_pipeline_extractor() {
+        let cases = [
+            "feature/1234",
+            "bugfix/ENG-99/refactor",
+            "feature/PROJ-42-auth",
+            "42-stabilize-auth",
+            "main",
+            "master",
+            "develop",
+            "HEAD",
+            "kiyoshi/pava-searchbars", // no ticket at all
+        ];
+        for branch in cases {
+            let pipeline = crate::pipeline::extract_ticket_from_branch(branch);
+            let local = extract_ticket(branch);
+            assert_eq!(
+                pipeline, local,
+                "cloud_sync extractor diverged from pipeline for {branch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rollup_numeric_branch_preserves_source_marker() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-ticket-source");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        // A numeric-only branch — previously the local helper returned
+        // None here, so cloud ticket buckets disagreed with local CLI.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES ('msg-num-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
+                     'sha256:num', 'feature/1234', 10, 20, 0, 0, 0.1)",
+            [],
+        )
+        .unwrap();
+
+        let rollups = fetch_daily_rollups(&conn, None).unwrap();
+        let numeric = rollups
+            .iter()
+            .find(|r| r.git_branch == "feature/1234")
+            .expect("numeric rollup present");
+        assert_eq!(numeric.ticket.as_deref(), Some("1234"));
+        assert_eq!(
+            numeric.ticket_source.as_deref(),
+            Some(crate::pipeline::TICKET_SOURCE_BRANCH_NUMERIC)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollup_integration_branches_do_not_emit_ticket() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-integration");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES ('msg-int-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
+                     'sha256:int', 'main', 10, 20, 0, 0, 0.1)",
+            [],
+        )
+        .unwrap();
+
+        let rollups = fetch_daily_rollups(&conn, None).unwrap();
+        let main_rollup = rollups
+            .iter()
+            .find(|r| r.git_branch == "main")
+            .expect("rollup for main present");
+        assert!(main_rollup.ticket.is_none());
+        assert!(main_rollup.ticket_source.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
