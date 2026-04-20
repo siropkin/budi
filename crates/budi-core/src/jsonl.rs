@@ -356,7 +356,7 @@ fn truncate_utf8_at_char_boundary(s: &mut String, max: usize) {
 }
 
 /// Bounded label constants for `tool_outcome` tag values. Pinned here so
-/// analytics, tests, live tailing, and `budi import` all agree.
+/// analytics, tests, live tailing, and `budi db import` all agree.
 pub const TOOL_OUTCOME_SUCCESS: &str = "success";
 pub const TOOL_OUTCOME_ERROR: &str = "error";
 pub const TOOL_OUTCOME_DENIED: &str = "denied";

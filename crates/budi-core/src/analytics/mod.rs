@@ -48,7 +48,7 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
 }
 
 /// Open the analytics database and run pending migrations.
-/// Used by `budi init`, `budi update`, and `budi migrate`.
+/// Used by `budi init`, `budi update`, and `budi db migrate`.
 pub fn open_db_with_migration(db_path: &Path) -> Result<Connection> {
     let conn = open_db(db_path)?;
     crate::migration::migrate(&conn)?;
@@ -86,7 +86,7 @@ pub fn set_sync_offset(conn: &Connection, file_path: &str, offset: usize) -> Res
 /// Returns `Ok(None)` when no row exists, signalling that the tailer has
 /// never observed this file before. Callers use that signal to decide
 /// whether to seek to end-of-file (the daemon's "skip the backfill"
-/// behaviour, owned by `budi import`) or to resume from the stored
+/// behaviour, owned by `budi db import`) or to resume from the stored
 /// offset. See [ADR-0089] §1 / #319.
 ///
 /// [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
@@ -158,7 +158,7 @@ pub fn newest_ingested_data_at(conn: &Connection) -> Result<Option<String>> {
 }
 
 /// Reset sync state and re-ingested data so the next sync starts from scratch.
-/// Used by `budi import --force` after schema/parser changes.
+/// Used by `budi db import --force` after schema/parser changes.
 pub fn reset_sync_state(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "DELETE FROM sync_state;
@@ -310,7 +310,7 @@ pub fn ingest_messages(
 /// Ingest messages and optionally update one or both offset tables atomically.
 ///
 /// `sync_file` writes a `(file_path, byte_offset)` row into `sync_state` and is
-/// what `budi import` uses. `tail_file` writes a `(provider, path, byte_offset)`
+/// what `budi db import` uses. `tail_file` writes a `(provider, path, byte_offset)`
 /// row into `tail_offsets` and is what the live tailer uses (#319, #382).
 ///
 /// When both are `Some`, both writes happen inside the same transaction as the

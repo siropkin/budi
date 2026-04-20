@@ -904,13 +904,20 @@ mod tests {
 
     #[test]
     fn parse_needs_migration_error_extracts_message() {
-        let body = r#"{"ok":false,"error":"analytics schema is v0, daemon expects v1; run `budi migrate` (or `budi init`) to upgrade","needs_migration":true,"current":0,"target":1}"#;
+        // Body text was renamed `budi migrate` → `budi db migrate` in
+        // 8.2.1 (#368). The wire contract (`needs_migration: true`) is
+        // unchanged; only the human-readable verb in `error` moved to
+        // the new namespace.
+        let body = r#"{"ok":false,"error":"analytics schema is v0, daemon expects v1; run `budi db migrate` (or `budi init`) to upgrade","needs_migration":true,"current":0,"target":1}"#;
         let msg = parse_needs_migration_error(body).expect("body matches #366 contract");
         assert!(
             msg.contains("analytics schema is v0, daemon expects v1"),
             "unexpected message: {msg}"
         );
-        assert!(msg.contains("budi migrate"), "should mention budi migrate");
+        assert!(
+            msg.contains("budi db migrate"),
+            "should mention budi db migrate"
+        );
     }
 
     #[test]

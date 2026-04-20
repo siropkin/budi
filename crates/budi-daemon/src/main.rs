@@ -225,7 +225,7 @@ async fn main() -> Result<()> {
                     current,
                     target,
                     db_path = %db_path.display(),
-                    "analytics schema is behind this daemon binary; /analytics/* and POST /sync will return 503 until `budi migrate` succeeds"
+                    "analytics schema is behind this daemon binary; /analytics/* and POST /sync will return 503 until `budi db migrate` succeeds"
                 );
             } else if current > target {
                 tracing::warn!(
@@ -713,7 +713,7 @@ mod tests {
         let msg = v["error"].as_str().unwrap_or_default();
         assert!(msg.contains("analytics schema is v0"));
         assert!(msg.contains("daemon expects v1"));
-        assert!(msg.contains("budi migrate"));
+        assert!(msg.contains("budi db migrate"));
     }
 
     #[test]

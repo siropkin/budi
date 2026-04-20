@@ -168,7 +168,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
 /// (see [ADR-0089] §1 and #319).
 ///
 /// This is intentionally distinct from `sync_state` (which is keyed on file
-/// path alone and shared with `budi import`). The tailer needs:
+/// path alone and shared with `budi db import`). The tailer needs:
 /// - a per-provider scope so two providers sharing a watch root cannot
 ///   stomp on each other's offsets,
 /// - a `last_seen` timestamp so future tooling can prune stale rows

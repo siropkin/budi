@@ -41,7 +41,7 @@ Budi's live data source is a filesystem tailer over the transcript files agents 
 - Daemon outage must not break the user's agent — the agent keeps working; Budi catches up on next tail
 - Adding a new agent = one `Provider` impl (`discover_files` + `parse_file` + `watch_roots`) — no proxy matrix, no base-URL injection, no agent wrapper
 - Latency budget: single-digit seconds end-to-end is acceptable for every downstream surface (stats, sessions, statusline, doctor, cloud sync)
-- Privacy boundary is unchanged ([ADR-0083](./adr/0083-cloud-ingest-identity-and-privacy-contract.md)): the tailer reads the same files `budi import` already reads; nothing leaves the machine
+- Privacy boundary is unchanged ([ADR-0083](./adr/0083-cloud-ingest-identity-and-privacy-contract.md)): the tailer reads the same files `budi db import` already reads; nothing leaves the machine
 
 ## 5. Local-First, Cloud-Optional
 

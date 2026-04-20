@@ -352,7 +352,7 @@ fn check_schema(db_path: &Path, deep: bool) -> SchemaCheck {
                 "schema drift",
                 format!("{mode} returned `{result}`"),
                 Some(
-                    "Run `budi repair` after backing up the database, then rerun `budi doctor`."
+                    "Run `budi db repair` after backing up the database, then rerun `budi doctor`."
                         .to_string(),
                 ),
             ),
@@ -362,7 +362,7 @@ fn check_schema(db_path: &Path, deep: bool) -> SchemaCheck {
             result: CheckResult::fail(
                 "schema drift",
                 format!("could not run {mode} on {} ({e})", db_path.display()),
-                Some("Run `budi repair` or recreate the database with `budi init`.".to_string()),
+                Some("Run `budi db repair` or recreate the database with `budi init`.".to_string()),
             ),
             conn: Some(conn),
         },
@@ -465,7 +465,7 @@ fn check_legacy_proxy_history(conn: &Connection) -> CheckResult {
         Err(e) => CheckResult::fail(
             "legacy proxy history",
             format!("could not inspect retained 8.1 proxy-era data ({e})"),
-            Some("Run `budi repair`, then rerun `budi doctor`.".to_string()),
+            Some("Run `budi db repair`, then rerun `budi doctor`.".to_string()),
         ),
     }
 }
@@ -534,7 +534,7 @@ fn summarize_legacy_proxy_history(data: &LegacyProxyHistoryData) -> CheckResult 
             label,
             format!("{retained_detail}; obsolete `proxy_events` table is still present"),
             Some(
-                "Run `budi init` or `budi repair` with the current 8.2 build to remove the old `proxy_events` table."
+                "Run `budi init` or `budi db repair` with the current 8.2 build to remove the old `proxy_events` table."
                     .to_string(),
             ),
         );
@@ -813,7 +813,7 @@ fn summarize_transcript_visibility(diag: &ProviderDoctorData) -> CheckResult {
             label,
             format!("latest transcript is {} and is not tracked by the tailer yet", latest_file.display()),
             Some(
-                "Make sure `budi-daemon` is running so the tailer can seed this file, then rerun `budi doctor`. Run `budi import` if you also need older history backfilled."
+                "Make sure `budi-daemon` is running so the tailer can seed this file, then rerun `budi doctor`. Run `budi db import` if you also need older history backfilled."
                     .to_string(),
             ),
         );
@@ -946,7 +946,7 @@ mod tests {
                 .fix
                 .as_deref()
                 .unwrap_or_default()
-                .contains("budi repair")
+                .contains("budi db repair")
         );
     }
 
