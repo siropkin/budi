@@ -8,7 +8,6 @@ use serde_json::Value;
 pub mod autostart;
 pub mod cloud;
 pub mod doctor;
-pub mod health;
 pub mod import;
 pub mod init;
 pub mod integrations;
@@ -19,6 +18,7 @@ pub mod status;
 pub mod statusline;
 pub mod uninstall;
 pub mod update;
+pub mod vitals;
 
 // ---------------------------------------------------------------------------
 // Hook event constants and detection helpers — re-exported from budi-core

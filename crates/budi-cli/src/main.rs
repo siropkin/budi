@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and health\n  budi sessions <id>      Session detail: cost, models, health, tags\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi vitals             Session health vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi import             Import historical transcripts from disk\n  budi import --force     Re-ingest all data from scratch (use after upgrades)\n  budi repair             Repair schema drift and run migration\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -162,6 +162,13 @@ Examples:
         force: bool,
     },
     /// Show session health vitals (context drag, cache efficiency, thrashing, cost acceleration)
+    Vitals {
+        /// Session ID to check (default: most recent session)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Deprecated: renamed to `budi vitals`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
+    #[command(hide = true)]
     Health {
         /// Session ID to check (default: most recent session)
         #[arg(long)]
@@ -446,7 +453,11 @@ fn main() -> Result<()> {
         }
         Commands::Repair => commands::repair::cmd_repair(),
         Commands::Import { force } => commands::import::cmd_import(force),
-        Commands::Health { session } => commands::health::cmd_health(session),
+        Commands::Vitals { session } => commands::vitals::cmd_vitals(session),
+        Commands::Health { session } => {
+            commands::vitals::nudge_health_alias();
+            commands::vitals::cmd_vitals(session)
+        }
         Commands::Statusline {
             install,
             format,
@@ -810,6 +821,56 @@ mod tests {
         assert!(
             lower.contains("budi cloud sync"),
             "top-level help should mention `budi cloud sync`"
+        );
+    }
+
+    #[test]
+    fn cli_parses_vitals_command() {
+        let cli = Cli::try_parse_from(["budi", "vitals"]).expect("budi vitals parses");
+        match cli.command {
+            Commands::Vitals { session } => assert!(session.is_none()),
+            _ => panic!("expected vitals command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "vitals", "--session", "abc"])
+            .expect("budi vitals --session abc parses");
+        match cli.command {
+            Commands::Vitals { session } => assert_eq!(session.as_deref(), Some("abc")),
+            _ => panic!("expected vitals command"),
+        }
+    }
+
+    #[test]
+    fn cli_still_parses_deprecated_health_alias() {
+        // `budi health` must keep parsing in 8.2.x so existing user aliases,
+        // statusline snippets, and third-party scripts keep working for the
+        // full deprecation window. The alias is hidden from `--help` but
+        // still wired through `Commands::Health`.
+        let cli = Cli::try_parse_from(["budi", "health"]).expect("budi health (alias) parses");
+        assert!(matches!(cli.command, Commands::Health { .. }));
+
+        let cli = Cli::try_parse_from(["budi", "health", "--session", "abc"])
+            .expect("budi health --session abc (alias) parses");
+        match cli.command {
+            Commands::Health { session } => assert_eq!(session.as_deref(), Some("abc")),
+            _ => panic!("expected deprecated health alias"),
+        }
+    }
+
+    #[test]
+    fn help_advertises_vitals_and_hides_health_alias() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        let lower = help.to_ascii_lowercase();
+        assert!(
+            lower.contains("vitals"),
+            "top-level help should advertise `budi vitals`"
+        );
+        // The deprecated alias stays functional but is hidden from the
+        // primary help output so new users learn the canonical name.
+        assert!(
+            !help.contains("\n  health "),
+            "deprecated `budi health` should not appear in the subcommand list"
         );
     }
 

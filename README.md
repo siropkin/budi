@@ -306,8 +306,10 @@ budi sessions                      # list recent sessions with cost and health
 budi sessions --ticket <id>        # sessions tagged with a ticket id
 budi sessions --activity <name>    # sessions tagged with an activity (bugfix, refactor, …)
 budi sessions <id>                 # session detail: cost, models, health, tags, work outcome
-budi health                        # session health vitals for most recent session
-budi health --session <id>         # health vitals for a specific session
+budi vitals                        # session health vitals for most recent session
+budi vitals --session <id>         # health vitals for a specific session
+                                    # (the old `budi health` spelling still works in 8.2
+                                    #  and prints a one-per-day deprecation hint)
 ```
 
 **Diagnostics and maintenance:**
@@ -382,7 +384,7 @@ The scoring is intentionally conservative:
 - It measures the current working stretch, so a `/compact` resets context-based checks.
 - It looks at the active model stretch for cache reuse, so model switches do not poison the whole session.
 - Cost acceleration uses per-user-turn costs when prompt boundaries are available, and falls back to per-reply costs otherwise.
-- When `budi health` runs without `--session`, it picks the latest session by assistant activity first, then falls back to session timestamps.
+- When `budi vitals` runs without `--session`, it picks the latest session by assistant activity first, then falls back to session timestamps.
 - It prefers concrete next steps over internal jargon.
 
 Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`, Cursor suggestions point you toward a fresh composer session, and unknown providers receive neutral advice. Different providers may intentionally get different recommendations for the same health issue.
