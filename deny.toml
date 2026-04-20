@@ -1,0 +1,104 @@
+# cargo-deny policy for the budi workspace.
+#
+# Purpose: enforce a supply-chain baseline at PR time so future regressions
+# (new licenses, banned crates, advisories, unknown registries) are visible
+# in CI rather than discovered in a downstream audit.
+#
+# Filed per issue #409 (8.2.1 milestone, R3.5 audit follow-up F-3). Keep this
+# file in sync with CONTRIBUTING.md -> "Supply-chain policy".
+
+[graph]
+# Check all targets the workspace actually ships to. If a dependency only
+# pulls in something for a target we do not build, cargo-deny will skip it.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# --- Advisories ---------------------------------------------------------
+#
+# RustSec advisory DB thresholds. We treat unmaintained and unsound crates
+# as warnings (they surface in logs without blocking PRs on transitive
+# noise), while actual vulnerabilities (`vulnerability`) and yanked
+# versions (`yanked`) default to errors via cargo-deny.
+[advisories]
+version = 2
+ignore = []
+
+# --- Licenses -----------------------------------------------------------
+#
+# Allowlist is deliberately narrow to permissive, OSI/FSF-blessed licenses
+# that are compatible with budi's MIT license. Adding a new license here
+# is a policy change: document why in the PR body and in CONTRIBUTING.md.
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+exceptions = []
+
+[licenses.private]
+ignore = false
+
+# --- Bans ---------------------------------------------------------------
+#
+# `multiple-versions = "warn"` keeps transitive-duplicate noise visible
+# without blocking PRs. Promote to "deny" once the tree is clean.
+# `wildcards = "deny"` forbids workspace crates from depending on `*`
+# versions, which would defeat `--locked` guarantees.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates (e.g. `budi-cli` -> `budi-core`)
+# look like wildcard version requirements to cargo-deny. Allow them here so
+# the wildcard policy only applies to published-registry dependencies.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = [
+    # openssl-sys would pull in system OpenSSL and contradict our
+    # rustls-only TLS posture (see Cargo.toml reqwest feature set).
+    { crate = "openssl-sys", reason = "budi is rustls-only; adding openssl-sys would be an unintended TLS policy change" },
+    { crate = "openssl", reason = "budi is rustls-only; adding openssl would be an unintended TLS policy change" },
+    { crate = "native-tls", reason = "budi is rustls-only; native-tls would re-introduce platform TLS surface" },
+]
+skip = []
+skip-tree = []
+
+# --- Sources ------------------------------------------------------------
+#
+# Only crates.io and explicitly listed git sources are allowed. Any new
+# git dependency must be justified in the PR Risks section and added here.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

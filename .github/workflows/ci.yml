@@ -183,6 +183,28 @@ jobs:
           }
           Write-Host "PowerShell scripts have valid syntax"
 
+  # Supply-chain policy check (issue #409, R3.5 audit F-3).
+  #
+  # Runs `cargo deny check` against `deny.toml`. Non-blocking for now so we
+  # can land the policy file and observe one clean release cycle before
+  # promoting the job to a required status check. Treat any failure seen
+  # here as a real signal, not noise.
+  supply-chain:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
+        with:
+          command: check
+          arguments: --all-features
+
   ci-success:
     if: always()
     needs: [rust-checks, macos-build, windows-build]

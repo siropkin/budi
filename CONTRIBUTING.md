@@ -39,6 +39,35 @@ To mirror CI exactly for formatting, use:
 cargo fmt --all -- --check
 ```
 
+### Supply-chain policy (`cargo-deny`)
+
+The workspace ships a [`deny.toml`](deny.toml) that pins a permissive license
+allowlist, bans TLS backends outside our rustls-only posture (`openssl`,
+`native-tls`), and restricts dependency sources to `crates.io`. CI runs
+`cargo deny check` on every PR (see `.github/workflows/ci.yml`); the job is
+non-blocking today and will be promoted to a required status after one
+clean release cycle (issue #409 tracks the promotion).
+
+Run it locally whenever you add or bump a dependency:
+
+```bash
+cargo install cargo-deny --locked
+cargo deny check
+```
+
+Policy change workflow:
+
+- **New license.** If `cargo deny check licenses` fails, explain in the PR
+  body why the new license is acceptable before adding it to the `allow`
+  list in `deny.toml`.
+- **New git or private-registry source.** Add it to `[sources]` with a
+  justification in the PR Risks section, not silently.
+- **New duplicate crate versions.** These warn rather than block; reduce
+  duplication when feasible, and justify skips via `[bans.skip]` only when
+  upstream updates are blocked.
+- **New direct dependency.** Call it out in the PR `Risks` section so the
+  policy change is reviewable (per `SOUL.md`).
+
 ### Cursor extension
 
 See [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor).
