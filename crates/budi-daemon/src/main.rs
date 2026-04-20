@@ -190,21 +190,35 @@ async fn main() -> Result<()> {
     // R1.3 (#319) shipped the tailer behind `BUDI_LIVE_TAIL=1`. R1.4 (#320)
     // promoted it to the default. R2.1 (#322) removes the proxy runtime, so
     // tailer ingestion is now the only live path.
-    match analytics::db_path() {
+    //
+    // Graceful shutdown (#384): the tailer's blocking loop exits when
+    // `shutdown` flips to true at the next event or backstop tick (≤ 5 s).
+    // `install_shutdown_listener` below wires SIGINT / SIGTERM to flip the
+    // flag, wait up to one backstop interval for the tailer to drain, then
+    // exit the process cleanly.
+    let tailer_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let tailer_handle = match analytics::db_path() {
         Ok(db_path) => {
             tracing::info!(
                 target: "budi_daemon::tailer",
                 "starting filesystem tailer (ADR-0089 §1)"
             );
-            let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            tokio::spawn(workers::tailer::run(db_path, shutdown));
+            Some(tokio::spawn(workers::tailer::run(
+                db_path,
+                tailer_shutdown.clone(),
+            )))
         }
-        Err(e) => tracing::warn!(
-            target: "budi_daemon::tailer",
-            error = %e,
-            "db_path is not resolvable; tailer not started"
-        ),
-    }
+        Err(e) => {
+            tracing::warn!(
+                target: "budi_daemon::tailer",
+                error = %e,
+                "db_path is not resolvable; tailer not started"
+            );
+            None
+        }
+    };
+
+    install_shutdown_listener(tailer_shutdown, tailer_handle);
 
     // --- Start cloud sync worker if configured ---
     {
@@ -261,8 +275,96 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// How long we'll let the tailer drain after a shutdown signal before
+/// forcing process exit. The tailer loop checks `shutdown` once per
+/// `BACKSTOP_POLL` (5 s in `workers::tailer`); one backstop plus a small
+/// buffer gives it room to finish an in-flight `process_path` call and
+/// emit its final structured log line.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Install a SIGINT / SIGTERM listener that flips the tailer shutdown
+/// flag, waits up to [`SHUTDOWN_DRAIN_TIMEOUT`] for the blocking tailer
+/// loop to exit, and then terminates the process.
+///
+/// The tailer parameter on [`workers::tailer::run`] has always advertised
+/// a graceful-stop API (checked every iteration of `run_blocking`'s main
+/// loop), but without this listener nothing ever flipped the flag in
+/// production. See #384 for history.
+///
+/// Axum's HTTP serve loop is not given its own graceful-shutdown future
+/// here — `std::process::exit(0)` below ends it along with the rest of
+/// the runtime. If we want to drain in-flight HTTP requests on the same
+/// signal, that is a larger refactor tracked outside this ticket.
+fn install_shutdown_listener(
+    tailer_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tailer_handle: Option<tokio::task::JoinHandle<()>>,
+) {
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+
+        tracing::info!(
+            target: "budi_daemon",
+            "shutdown signal received; draining tailer"
+        );
+        tailer_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        if let Some(h) = tailer_handle {
+            match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, h).await {
+                Ok(Ok(())) => tracing::info!(
+                    target: "budi_daemon",
+                    "tailer drained cleanly; exiting"
+                ),
+                Ok(Err(e)) => tracing::warn!(
+                    target: "budi_daemon",
+                    error = %e,
+                    "tailer task join error; exiting"
+                ),
+                Err(_) => tracing::warn!(
+                    target: "budi_daemon",
+                    timeout_s = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+                    "tailer did not drain within budget; exiting anyway"
+                ),
+            }
+        }
+
+        std::process::exit(0);
+    });
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "budi_daemon",
+                error = %e,
+                "failed to install SIGTERM handler; falling back to SIGINT only"
+            );
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 /// Kill any existing budi-daemon process listening on the given port.
 /// This allows a new binary to take over seamlessly after an upgrade.
+///
+/// The old daemon may install a graceful-shutdown listener (#384) that
+/// needs up to one tailer backstop interval (~5 s) to drain, so we poll
+/// for the process to actually exit after SIGTERM and escalate to
+/// SIGKILL on timeout rather than assuming a fixed sleep is enough.
 #[cfg(unix)]
 fn kill_existing_daemon(port: u16) {
     use std::process::Command;
@@ -294,13 +396,45 @@ fn kill_existing_daemon(port: u16) {
             continue;
         };
         let cmd = String::from_utf8_lossy(&ps.stdout);
-        if cmd.contains("budi-daemon") {
-            tracing::info!("Killing old budi-daemon (pid {pid})");
+        if !cmd.contains("budi-daemon") {
+            continue;
+        }
+        tracing::info!("Killing old budi-daemon (pid {pid})");
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        wait_for_pid_exit_or_sigkill(pid);
+    }
+}
+
+/// Poll `kill -0 <pid>` for up to `SHUTDOWN_DRAIN_TIMEOUT + 1 s` so a
+/// graceful-shutdown-capable daemon has room to drain its tailer; fall
+/// back to `kill -KILL` if it is still alive at the end of the window.
+#[cfg(unix)]
+fn wait_for_pid_exit_or_sigkill(pid: u32) {
+    use std::process::Command;
+
+    let deadline =
+        std::time::Instant::now() + SHUTDOWN_DRAIN_TIMEOUT + std::time::Duration::from_secs(1);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                pid,
+                "old budi-daemon did not exit after SIGTERM within grace window; sending SIGKILL"
+            );
             let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
+                .args(["-KILL", &pid.to_string()])
                 .status();
-            // Brief wait for graceful shutdown
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            return;
         }
     }
 }
