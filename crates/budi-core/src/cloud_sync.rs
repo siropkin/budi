@@ -213,9 +213,17 @@ pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncSt
     if let Ok(conn) = crate::analytics::open_db(db_path) {
         last_synced_at = get_session_watermark(&conn).ok().flatten();
         rollup_watermark = get_cloud_watermark_value(&conn).ok().flatten();
-        if ready && let Ok(envelope) = build_sync_envelope(&conn, config) {
-            pending_rollups = envelope.payload.daily_rollups.len();
-            pending_sessions = envelope.payload.session_summaries.len();
+        if ready {
+            // Per #344: avoid running `build_sync_envelope` just to take
+            // two `.len()`s. Two bounded `COUNT(*)` queries against the
+            // same predicates the envelope uses are far cheaper for
+            // pollers that hit `/cloud/status` frequently.
+            pending_rollups = count_pending_rollups(&conn, rollup_watermark.as_deref())
+                .ok()
+                .unwrap_or(0);
+            pending_sessions = count_pending_sessions(&conn, last_synced_at.as_deref())
+                .ok()
+                .unwrap_or(0);
         }
     }
 
@@ -329,6 +337,54 @@ pub fn fetch_daily_rollups(
     }
 
     Ok(records)
+}
+
+/// Count the number of daily rollups that would be pushed on the next sync.
+///
+/// Mirrors the predicate in [`fetch_daily_rollups`] exactly — rows where
+/// `bucket_day > watermark` or `bucket_day = today` — so
+/// `count_pending_rollups` and the envelope returned by
+/// [`build_sync_envelope`] always agree on row count. Used by
+/// [`current_cloud_status`] so frequent `/cloud/status` pollers avoid
+/// materializing every unsynced row just to take `.len()` (#344).
+pub fn count_pending_rollups(conn: &Connection, watermark: Option<&str>) -> Result<usize> {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let count: i64 = if let Some(wm) = watermark {
+        conn.query_row(
+            "SELECT COUNT(*) FROM message_rollups_daily
+             WHERE bucket_day > ?1 OR bucket_day = ?2",
+            params![wm, today],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row("SELECT COUNT(*) FROM message_rollups_daily", [], |row| {
+            row.get(0)
+        })?
+    };
+    Ok(count.max(0) as usize)
+}
+
+/// Count the number of session summaries that would be pushed on the next
+/// sync. Mirrors the predicate in [`fetch_session_summaries`] so the count
+/// stays in lockstep with the envelope (#344).
+pub fn count_pending_sessions(conn: &Connection, since: Option<&str>) -> Result<usize> {
+    let count: i64 = if let Some(ts) = since {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sessions s
+             WHERE s.started_at > ?1 OR s.ended_at > ?1
+                OR (s.ended_at IS NULL AND s.started_at IS NOT NULL)",
+            params![ts],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sessions s
+             WHERE s.started_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?
+    };
+    Ok(count.max(0) as usize)
 }
 
 /// Fetch session summaries that need syncing.
@@ -1004,6 +1060,55 @@ mod tests {
         assert_eq!(
             numeric.ticket_source.as_deref(),
             Some(crate::pipeline::TICKET_SOURCE_BRANCH_NUMERIC)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Regression for #344: `count_pending_*` must return the same row
+    // counts as `build_sync_envelope` so `/cloud/status` pollers and the
+    // actual sync tick never disagree about what is pending.
+    #[test]
+    fn count_pending_matches_envelope() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-counts");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        // Seed a rollup via the message trigger, plus an explicit session row.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES ('msg-count-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
+                     'sha256:count', 'feature/PROJ-77-counts', 10, 20, 0, 0, 0.1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms, repo_id, git_branch)
+             VALUES ('sess-count-1', 'claude_code', '2026-04-10T14:00:00Z', '2026-04-10T14:30:00Z', 1800000,
+                     'sha256:count', 'feature/PROJ-77-counts')",
+            [],
+        ).unwrap();
+
+        let rollups = fetch_daily_rollups(&conn, None).unwrap();
+        let sessions = fetch_session_summaries(&conn, None).unwrap();
+        assert_eq!(count_pending_rollups(&conn, None).unwrap(), rollups.len());
+        assert_eq!(count_pending_sessions(&conn, None).unwrap(), sessions.len());
+
+        // Same contract holds once watermarks are in place.
+        let wm_rollup = "2026-04-10";
+        let wm_session = "2026-04-10T14:15:00Z";
+        let rollups_wm = fetch_daily_rollups(&conn, Some(wm_rollup)).unwrap();
+        let sessions_wm = fetch_session_summaries(&conn, Some(wm_session)).unwrap();
+        assert_eq!(
+            count_pending_rollups(&conn, Some(wm_rollup)).unwrap(),
+            rollups_wm.len()
+        );
+        assert_eq!(
+            count_pending_sessions(&conn, Some(wm_session)).unwrap(),
+            sessions_wm.len()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
