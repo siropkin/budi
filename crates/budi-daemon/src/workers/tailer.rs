@@ -14,19 +14,27 @@
 //!    `BUDI_LIVE_TAIL` gate from R1.3 was removed in R1.4 / #320). In R2.1
 //!    (#322) the proxy runtime was removed, so the tailer is the only live
 //!    writer to `messages` / `tags` / `sessions`.
-//! 2. [`run`] hops into a blocking thread (`notify` is fundamentally
-//!    blocking and we don't want to bind a Tokio worker thread for it),
-//!    snapshots `enabled_providers()`, builds a `(provider, watch_root)`
-//!    map, and seeds [`tail_offsets`](budi_core::analytics::set_tail_offset)
-//!    with `byte_offset = file_len` for every existing transcript. That is
-//!    the "skip the backfill, leave history to `budi import`" property
-//!    called out in the ticket Acceptance.
+//! 2. [`run`] snapshots the `agents.toml` enable/disable set at boot, then
+//!    hops into a blocking thread (`notify` is fundamentally blocking and
+//!    we don't want to bind a Tokio worker thread for it). The blocking
+//!    entry builds a `(provider, watch_root)` map from the current
+//!    [`Provider::watch_roots`] results and seeds
+//!    [`tail_offsets`](budi_core::analytics::set_tail_offset) with
+//!    `byte_offset = file_len` for every transcript that already exists
+//!    on disk. That is the "skip the backfill, leave history to
+//!    `budi import`" property called out in the ticket Acceptance.
+//!    `seed_offsets` is intentionally a one-shot boot step: a file that
+//!    first appears *after* boot (under a root that materializes later;
+//!    see #385 below) is treated as live content and ingested from
+//!    offset 0.
 //! 3. A `notify-debouncer-mini` watcher with a 500 ms debounce dispatches
 //!    grown / created `*.jsonl` paths into a `std::sync::mpsc` channel; the
 //!    main loop drains the channel and runs [`process_path`].
-//! 4. Every 5 s the loop also calls [`backstop_scan`] to cover the well-known
-//!    macOS / WSL `notify` edge cases (rotated files, mtime jitter, missed
-//!    events on network volumes).
+//! 4. Every 5 s the loop rebuilds routes + attaches watchers for any
+//!    newly-materialized roots (#385) and calls [`backstop_scan`] to cover
+//!    the well-known macOS / WSL `notify` edge cases (rotated files,
+//!    mtime jitter, missed events on network volumes) as well as the
+//!    "agent installed after daemon started" case.
 //!
 //! ## Why a separate `tail_offsets` table
 //!
@@ -50,7 +58,7 @@
 //!
 //! [ADR-0089]: https://github.com/siropkin/budi/blob/main/docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -61,8 +69,8 @@ use anyhow::{Context, Result};
 use budi_core::analytics::{self, get_tail_offset, ingest_messages_with_sync, set_tail_offset};
 use budi_core::pipeline::Pipeline;
 use budi_core::provider::Provider;
-use notify::RecursiveMode;
-use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
+use notify::{RecursiveMode, Watcher};
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 use rusqlite::Connection;
 
 /// `notify-debouncer-mini` collapses duplicate events that arrive within
@@ -82,12 +90,25 @@ const BACKSTOP_POLL: Duration = Duration::from_secs(5);
 /// causes the loop to exit at the next event or backstop tick. Dropping
 /// the flag without flipping is also fine; the worker just keeps running
 /// for the lifetime of the daemon process.
+///
+/// Provider enablement is snapshotted at boot from `agents.toml` and
+/// does not hot-reload (ADR-0089 §1; the #385 reconcile loop only
+/// rechecks filesystem-level availability, not config flags). If the
+/// snapshot has no enabled providers at all, the worker exits
+/// immediately because no later event could give it work.
 pub async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
-    let providers = budi_core::provider::enabled_providers();
+    let agents_config = budi_core::config::load_agents_config();
+    let providers: Vec<Box<dyn Provider>> = match &agents_config {
+        Some(cfg) => budi_core::provider::all_providers()
+            .into_iter()
+            .filter(|p| cfg.is_agent_enabled(p.name()))
+            .collect(),
+        None => budi_core::provider::all_providers(),
+    };
     if providers.is_empty() {
         tracing::info!(
             target: "budi_daemon::tailer",
-            "no enabled providers; tailer exiting"
+            "no enabled providers in config snapshot; tailer exiting"
         );
         return;
     }
@@ -97,20 +118,19 @@ pub async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
 /// Blocking entry point. Public for the integration test in
 /// `tests/tailer_offsets.rs`, which constructs a stub provider and drives
 /// the loop directly.
+///
+/// `providers` is the config-enabled snapshot handed in by [`run`]. Each
+/// provider's `watch_roots()` / `discover_files()` implementation is
+/// filesystem-sensitive, so the reconcile loop below can attach
+/// watchers as agent directories materialize (`#385`). We deliberately
+/// do not re-filter the set by `is_available()` — a provider whose home
+/// directory appears mid-run should start producing routes on the very
+/// next backstop tick without any daemon restart.
 pub fn run_blocking(
     db_path: PathBuf,
     providers: Vec<Box<dyn Provider>>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let routes = build_routes(&providers);
-    if routes.is_empty() {
-        tracing::info!(
-            target: "budi_daemon::tailer",
-            "no watch roots from enabled providers; tailer exiting"
-        );
-        return;
-    }
-
     let mut conn = match analytics::open_db(&db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -159,22 +179,19 @@ pub fn run_blocking(
         }
     };
 
-    for (root, provider_name) in &routes {
-        match debouncer.watcher().watch(root, RecursiveMode::Recursive) {
-            Ok(()) => tracing::info!(
-                target: "budi_daemon::tailer",
-                provider = %provider_name,
-                root = %root.display(),
-                "watching"
-            ),
-            Err(e) => tracing::warn!(
-                target: "budi_daemon::tailer",
-                provider = %provider_name,
-                root = %root.display(),
-                error = %e,
-                "failed to attach watcher; backstop poll will still cover this root"
-            ),
-        }
+    // #385: the worker no longer exits when `watch_roots()` is empty at
+    // boot. Instead we keep the loop alive and reconcile attached
+    // watchers on every backstop tick, so the watcher attaches the moment
+    // an agent dir materializes (e.g. user installs the agent after
+    // starting the daemon, or encrypted/network home is mounted late).
+    let mut routes = build_routes(&providers_by_name);
+    let mut attached_roots: HashSet<PathBuf> = HashSet::new();
+    attach_new_watchers(&mut debouncer, &routes, &mut attached_roots);
+    if routes.is_empty() {
+        tracing::debug!(
+            target: "budi_daemon::tailer",
+            "no watch roots available yet; will retry on every backstop tick"
+        );
     }
 
     loop {
@@ -191,6 +208,17 @@ pub fn run_blocking(
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // #385: rebuild routes + attach watchers for freshly
+                // materialized roots. We deliberately do NOT re-run
+                // `seed_offsets` here: seed_offsets marks discovered
+                // files at EOF on the assumption that they are
+                // pre-existing history (left to `budi import` per
+                // ADR-0089 §1). A file first appearing between backstop
+                // ticks under a post-boot-materialized root is live
+                // content, not history, and must ingest from offset 0
+                // through backstop_scan / notify events.
+                routes = build_routes(&providers_by_name);
+                attach_new_watchers(&mut debouncer, &routes, &mut attached_roots);
                 backstop_scan(&mut conn, &mut pipeline, &providers_by_name);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -209,18 +237,63 @@ pub fn run_blocking(
 /// deterministically.
 type Routes = Vec<(PathBuf, String)>;
 
-fn build_routes(providers: &[Box<dyn Provider>]) -> Routes {
-    let mut routes: Routes = providers
+/// Re-query every provider's `watch_roots()` and return a fresh [`Routes`].
+///
+/// Called once at boot and then on every backstop tick (#385). Providers
+/// whose watch-root directory doesn't exist yet return an empty vector,
+/// so their routes drop out until the directory materializes — at which
+/// point the next tick picks them up. The result is still sorted by
+/// longest-prefix so [`provider_for_path`] stays deterministic.
+fn build_routes(providers_by_name: &HashMap<String, Box<dyn Provider>>) -> Routes {
+    let mut routes: Routes = providers_by_name
         .iter()
-        .flat_map(|p| {
+        .flat_map(|(name, p)| {
             p.watch_roots()
                 .into_iter()
-                .map(|root| (root, p.name().to_string()))
+                .map(move |root| (root, name.clone()))
                 .collect::<Vec<_>>()
         })
         .collect();
     routes.sort_by_key(|r| std::cmp::Reverse(r.0.components().count()));
     routes
+}
+
+/// Attach a recursive watcher for every route we haven't attached yet.
+///
+/// Idempotent per-root (#385 acceptance): a root already present in
+/// `attached_roots` is skipped so repeated reconcile calls don't register
+/// duplicate watchers. Attach failures are logged at `debug` so we don't
+/// spam the operator's log once per 5 s tick on a persistently
+/// unreachable path (e.g. a network share that's currently detached);
+/// the backstop scan still covers that root through `discover_files`.
+fn attach_new_watchers<W: Watcher>(
+    debouncer: &mut Debouncer<W>,
+    routes: &Routes,
+    attached_roots: &mut HashSet<PathBuf>,
+) {
+    for (root, provider_name) in routes {
+        if attached_roots.contains(root) {
+            continue;
+        }
+        match debouncer.watcher().watch(root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                attached_roots.insert(root.clone());
+                tracing::info!(
+                    target: "budi_daemon::tailer",
+                    provider = %provider_name,
+                    root = %root.display(),
+                    "watching"
+                );
+            }
+            Err(e) => tracing::debug!(
+                target: "budi_daemon::tailer",
+                provider = %provider_name,
+                root = %root.display(),
+                error = %e,
+                "failed to attach watcher; backstop poll still covers this root, will retry next tick"
+            ),
+        }
+    }
 }
 
 fn index_providers_by_name(
@@ -518,18 +591,56 @@ mod tests {
     /// as the new offset.
     struct StubProvider {
         name: &'static str,
-        roots: Vec<PathBuf>,
-        files: Mutex<Vec<PathBuf>>,
+        roots: Arc<Mutex<Vec<PathBuf>>>,
+        files: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    /// Shared handles the test keeps so it can mutate the stub's
+    /// discovered files / watch roots while the tailer owns the
+    /// `Box<dyn Provider>` (#385).
+    #[derive(Clone)]
+    struct StubHandles {
+        roots: Arc<Mutex<Vec<PathBuf>>>,
+        files: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl StubHandles {
+        fn add_file(&self, path: PathBuf) {
+            self.files.lock().unwrap().push(path);
+        }
+
+        fn set_root(&self, root: PathBuf) {
+            let mut r = self.roots.lock().unwrap();
+            r.clear();
+            r.push(root);
+        }
     }
 
     impl StubProvider {
         fn new(name: &'static str, root: PathBuf) -> Self {
             Self {
                 name,
-                roots: vec![root],
-                files: Mutex::new(Vec::new()),
+                roots: Arc::new(Mutex::new(vec![root])),
+                files: Arc::new(Mutex::new(Vec::new())),
             }
         }
+
+        /// #385: exercises the "watch root materializes after boot" path.
+        fn with_no_roots(name: &'static str) -> Self {
+            Self {
+                name,
+                roots: Arc::new(Mutex::new(Vec::new())),
+                files: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn handles(&self) -> StubHandles {
+            StubHandles {
+                roots: Arc::clone(&self.roots),
+                files: Arc::clone(&self.files),
+            }
+        }
+
         fn add_file(&self, path: PathBuf) {
             self.files.lock().unwrap().push(path);
         }
@@ -581,7 +692,7 @@ mod tests {
             Ok((messages, offset + content.len()))
         }
         fn watch_roots(&self) -> Vec<PathBuf> {
-            self.roots.clone()
+            self.roots.lock().unwrap().clone()
         }
     }
 
@@ -666,15 +777,7 @@ mod tests {
 
         let mut providers_by_name: HashMap<String, Box<dyn Provider>> = HashMap::new();
         providers_by_name.insert("stub".to_string(), Box::new(provider));
-        let routes = build_routes(
-            &providers_by_name
-                .values()
-                .map(|p| {
-                    let p_ref: &dyn Provider = p.as_ref();
-                    Box::new(StubProvider::new(p_ref.name(), root.clone())) as Box<dyn Provider>
-                })
-                .collect::<Vec<_>>(),
-        );
+        let routes = build_routes(&providers_by_name);
         let mut pipeline = Pipeline::default_pipeline(None);
 
         process_path(&mut conn, &mut pipeline, &providers_by_name, &routes, &f);
@@ -919,6 +1022,147 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         handle.join().expect("tailer thread panicked");
+    }
+
+    /// #385: `build_routes` must surface a provider's watch root as
+    /// soon as `watch_roots()` starts returning it, without the
+    /// provider being re-registered. Models the "agent dir materializes
+    /// after boot" case (encrypted home mount, fresh-install sequence,
+    /// etc.).
+    #[test]
+    fn build_routes_picks_up_new_roots_after_materialization() {
+        let stub = StubProvider::with_no_roots("stub");
+        let handles = stub.handles();
+        let mut providers_by_name: HashMap<String, Box<dyn Provider>> = HashMap::new();
+        providers_by_name.insert("stub".to_string(), Box::new(stub));
+
+        assert!(
+            build_routes(&providers_by_name).is_empty(),
+            "no roots at boot snapshot must yield empty routes, not a panic or stale entry"
+        );
+
+        let root = PathBuf::from("/tmp/budi-385-materialized");
+        handles.set_root(root.clone());
+
+        assert_eq!(
+            build_routes(&providers_by_name),
+            vec![(root, "stub".to_string())],
+            "second call must see the new root without any provider reconstruction"
+        );
+    }
+
+    /// #385 acceptance: a root already present in `attached_roots` is
+    /// not re-attached. Prevents the reconcile tick from leaking
+    /// duplicate watchers on backends where `.watch()` is not itself
+    /// idempotent.
+    #[test]
+    fn attach_new_watchers_is_idempotent_across_reconcile_ticks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (tx, _rx) = std::sync::mpsc::channel::<PathBuf>();
+        let mut debouncer = new_debouncer(DEBOUNCE, move |res: DebounceEventResult| {
+            if let Ok(events) = res {
+                for ev in events {
+                    let _ = tx.send(ev.path);
+                }
+            }
+        })
+        .expect("create debouncer");
+
+        let routes: Routes = vec![(root.clone(), "stub".to_string())];
+        let mut attached: HashSet<PathBuf> = HashSet::new();
+
+        attach_new_watchers(&mut debouncer, &routes, &mut attached);
+        assert_eq!(attached.len(), 1, "first reconcile must attach the root");
+        assert!(attached.contains(&root));
+
+        attach_new_watchers(&mut debouncer, &routes, &mut attached);
+        assert_eq!(
+            attached.len(),
+            1,
+            "second reconcile must be a no-op for an already-attached root"
+        );
+    }
+
+    /// #385 end-to-end acceptance: a tailer started with zero
+    /// materialized watch roots (fresh install — Budi running before
+    /// any agent is installed) must not exit, and must attach the
+    /// watcher and ingest within one backstop interval after the root
+    /// appears.
+    #[test]
+    fn run_blocking_recovers_when_watch_root_materializes_post_boot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let future_root = tmp.path().join("projects");
+        let future_file = future_root.join("session.jsonl");
+        let (db_path, _) = open_test_db(tmp.path());
+
+        let stub = StubProvider::with_no_roots("stub");
+        let handles = stub.handles();
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(stub)];
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let shutdown_clone = shutdown.clone();
+        let db_path_for_thread = db_path.clone();
+        let thread_handle =
+            std::thread::spawn(move || run_blocking(db_path_for_thread, providers, shutdown_clone));
+
+        // Healthy idle state: no exit despite empty routes.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !thread_handle.is_finished(),
+            "tailer must not exit when no watch roots are available yet"
+        );
+
+        // Materialize the agent dir and tell the stub about the file
+        // that will be written to it. We deliberately do not create
+        // the file yet — at the next backstop tick the watcher
+        // attaches to the empty directory, and the *first* content we
+        // write after that is treated as live (not pre-existing
+        // history) because `seed_offsets` only runs at boot.
+        std::fs::create_dir_all(&future_root).unwrap();
+        handles.set_root(future_root.clone());
+        handles.add_file(future_file.clone());
+
+        // Give the reconcile tick room to run (BACKSTOP_POLL=5s) plus
+        // a small buffer so the watcher is attached before we write.
+        std::thread::sleep(BACKSTOP_POLL + Duration::from_millis(500));
+
+        // Simulate the agent's first transcript write. Either the
+        // notify event or the next backstop_scan must deliver this
+        // through process_path with stored_offset=None→0, ingesting
+        // one message.
+        std::fs::write(&future_file, "line1\n").unwrap();
+
+        // Wait up to one backstop + buffer for the event or backstop
+        // fallback to land the message.
+        let deadline = std::time::Instant::now() + BACKSTOP_POLL + Duration::from_secs(3);
+        let mut ingested: i64 = 0;
+        while std::time::Instant::now() < deadline {
+            let conn = budi_core::analytics::open_db(&db_path).unwrap();
+            ingested = conn
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+                .unwrap();
+            if ingested > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        assert!(
+            ingested >= 1,
+            "tailer must ingest the transcript content after the root materializes (got {ingested})"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        let stop_deadline = std::time::Instant::now() + BACKSTOP_POLL + Duration::from_secs(2);
+        while !thread_handle.is_finished() {
+            if std::time::Instant::now() >= stop_deadline {
+                panic!("tailer did not exit after shutdown flag flip");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        thread_handle.join().expect("tailer thread panicked");
     }
 
     #[test]
