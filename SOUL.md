@@ -353,12 +353,20 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   `tool_outcome_source` (`jsonl_tool_result` when direct,
   `heuristic_retry` when promoted) and `tool_outcome_confidence`
   (`high` / `medium`) mirror the `activity_source` / `file_path_source`
-  contract. Messages with no tool uses carry no outcome tag. In 8.1.x the
-  parallel proxy ingest path did not emit outcomes (tool names and IDs
-  weren't captured on the wire), so outcomes were import-only for that
-  release. In 8.2+ the JSONL tailer runs the same pipeline as `budi
-  import`, so outcomes are emitted live from the transcript without a
-  proxy round-trip ([ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)
+  contract. Messages with no tool uses carry no outcome tag. Scope
+  ([#336](https://github.com/siropkin/budi/issues/336)): the JSONL
+  extractor only walks the array-of-blocks (`UserContent::Blocks`)
+  encoding Claude Code has used since inception. Plain-string user
+  messages (`UserContent::Text`) never carry structured tool results
+  and are deliberately not string-probed for `"type":"tool_result"`
+  substrings — any future provider with a different tool-result shape
+  should land a dedicated extractor keyed on the `provider` label
+  rather than silently widening this one. In 8.1.x the parallel proxy
+  ingest path did not emit outcomes (tool names and IDs weren't
+  captured on the wire), so outcomes were import-only for that release.
+  In 8.2+ the JSONL tailer runs the same pipeline as `budi import`, so
+  outcomes are emitted live from the transcript without a proxy
+  round-trip ([ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)
   §1). The 8.1 proxy ingest path is removed in 8.2 R2.1 (#322).
 
 - **`work_outcome`** (session-scoped) — derived in R1.5 from local
@@ -368,11 +376,18 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   `branch_merged`, `no_commit`, or `unknown`. The derivation runs
   `git` locally — no remote Git/PR API calls, no content capture —
   and fails open to `unknown` whenever the branch is missing, is an
-  integration branch (`main`, `master`, `develop`), or the repo root
-  can't be resolved. A one-line rationale accompanies every label so
-  operators can see which rule fired. List surfaces skip the
-  derivation (one `git` invocation per session list row is too
-  expensive); only the detail view surfaces it.
+  integration branch, or the repo root can't be resolved. The
+  integration-branch set (`main`, `master`, `develop`, `HEAD`) is
+  shared with the pipeline ticket extractor via
+  `budi_core::pipeline::is_integration_branch`
+  ([#336](https://github.com/siropkin/budi/issues/336)) so the two
+  derivations can't disagree about what counts as a non-feature
+  branch; the literal `HEAD` sentinel is rejected here as well so a
+  detached-HEAD session can't be falsely credited as
+  `branch_merged` via the merge-base fallback. A one-line rationale
+  accompanies every label so operators can see which rule fired. List
+  surfaces skip the derivation (one `git` invocation per session list
+  row is too expensive); only the detail view surfaces it.
 
 ### Statusline contract (R2.3, #224)
 

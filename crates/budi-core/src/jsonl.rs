@@ -259,6 +259,30 @@ impl Default for ParsedMessage {
 ///
 /// The content text itself is inspected in-memory only — we never
 /// persist it. See ADR-0083 §3.
+///
+/// # Scope of supported user-content encodings (#336)
+///
+/// This extractor only walks the [`UserContent::Blocks`] variant — the
+/// array-of-blocks shape Claude Code has emitted since inception and the
+/// only shape known to carry `tool_result` entries in the wild. Plain
+/// [`UserContent::Text`] user messages (a single string body) do not
+/// contain structured tool results and are intentionally skipped by the
+/// caller in `parse_line`.
+///
+/// Intentional non-goals:
+///
+/// - **No raw-JSON fallback.** We do not string-probe the original line
+///   for `"type":"tool_result"`. The current providers never use that
+///   encoding for tool results, and a fallback would widen the classifier
+///   to partial / truncated / quoted matches with no test coverage.
+/// - **No cross-provider normalization.** If/when Cursor agents or
+///   another coverage target in #294 start emitting tool results in a
+///   different shape, they should land a dedicated extractor (keyed on
+///   the `ParsedMessage::provider` label) rather than quietly widening
+///   this one.
+///
+/// The tool-outcome contract in `SOUL.md` documents the same scope so
+/// operators know when this derivation is authoritative.
 pub(crate) fn extract_user_tool_outcomes(
     content: Option<&Vec<serde_json::Value>>,
 ) -> Vec<ToolOutcome> {
@@ -1019,6 +1043,21 @@ mod tests {
         assert_eq!(msg.tool_outcomes.len(), 1);
         assert_eq!(msg.tool_outcomes[0].tool_use_id, "t-1");
         assert_eq!(msg.tool_outcomes[0].outcome, TOOL_OUTCOME_SUCCESS);
+    }
+
+    #[test]
+    fn parse_user_text_message_has_no_tool_outcomes() {
+        // Scope guard for #336: plain-text user content is the
+        // `UserContent::Text` variant and carries no structured
+        // `tool_result` blocks. The extractor must not invent outcomes
+        // out of a body that happens to mention "tool_result" in prose.
+        let line = r#"{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":"please run the tool_result on this"},"uuid":"u1","timestamp":"2026-03-14T18:13:42.614Z","sessionId":"s1"}"#;
+        let msg = parse_line(line).expect("text-bodied user message should parse");
+        assert_eq!(msg.role, "user");
+        assert!(
+            msg.tool_outcomes.is_empty(),
+            "text-variant user content must not emit tool outcomes",
+        );
     }
 
     #[test]
