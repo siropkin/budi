@@ -24,6 +24,11 @@
 # the CLI's auto-scoping for `--format claude` and this script must fail.
 set -euo pipefail
 
+# Strip ANSI color codes from captured output so doctor / CLI
+# strings can be grep\'d without escape-sequence mismatches.
+# Callers can force color back on with `NO_COLOR=0 bash scripts/...`.
+export NO_COLOR="${NO_COLOR:-1}"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUDI="$ROOT/target/release/budi"
 BUDI_DAEMON="$ROOT/target/release/budi-daemon"
