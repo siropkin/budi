@@ -138,6 +138,12 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     // Clean up legacy hooks from settings.json
     crate::commands::statusline::remove_legacy_hooks();
 
+    // 8.3.0 (#428) removed the bare-verb aliases `budi migrate` /
+    // `budi repair` / `budi import`; sweep the 8.2.x deprecation-nudge
+    // marker file so upgrading users don't keep a stale date marker
+    // under `$BUDI_HOME`. Best-effort; failures are silent.
+    crate::commands::db::remove_db_alias_nudge_marker();
+
     // Remove stale binaries from the other install source (Homebrew vs standalone)
     crate::commands::init::clean_duplicate_binaries();
 
