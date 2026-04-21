@@ -6,6 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
 use super::{
     Tag, get_sync_offset, ingest_messages_with_sync, mark_sync_completed, set_sync_offset,
@@ -14,25 +15,94 @@ use crate::jsonl::ParsedMessage;
 
 const INGEST_BATCH_SIZE: usize = 1000;
 
+/// Per-provider progress/summary slice. Used both for live polling
+/// (via `SyncProgress`) and the final report (via `SyncReport`). `files_total`
+/// is the number of transcript files the provider discovered for this window;
+/// `files_synced` is the subset that actually had new messages to ingest; and
+/// `messages` is how many rows landed in the analytics DB as a result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderSyncStats {
+    /// Machine-stable name, e.g. `claude_code` (matches [`Provider::name`]).
+    pub name: String,
+    /// Human label, e.g. `Claude Code` (matches [`Provider::display_name`]).
+    pub display_name: String,
+    /// Files the provider discovered in this window (0 for direct-sync providers).
+    pub files_total: usize,
+    /// Files processed so far that actually yielded ingested messages.
+    pub files_synced: usize,
+    /// Messages ingested into the analytics DB for this provider.
+    pub messages: usize,
+}
+
+/// Live progress snapshot surfaced via `/sync/status` while a long-running
+/// `budi db import` is in flight. The CLI polls this every ~2 s so the user
+/// sees per-agent throughput rather than a silent 4-minute wait (#440).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncProgress {
+    /// Machine name of the provider currently being synced (`None` once
+    /// every provider has finished).
+    #[serde(default)]
+    pub current_provider: Option<String>,
+    /// Running per-provider totals. Ordering matches enabled-providers order
+    /// so the CLI can render a stable list even while providers are in flight.
+    #[serde(default)]
+    pub per_provider: Vec<ProviderSyncStats>,
+}
+
+/// Final report returned by `sync_all` / `sync_history`. Replaces the older
+/// `(files, messages, warnings)` tuple so the CLI can render a per-agent
+/// breakdown after import without a second round-trip (#440).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncReport {
+    pub files_synced: usize,
+    pub messages_ingested: usize,
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub per_provider: Vec<ProviderSyncStats>,
+}
+
 /// Quick sync: only files modified in the last 30 days.
-/// Used by `budi db import` and the daemon's 30s auto-sync.
-pub fn sync_all(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
-    sync_with_max_age(conn, Some(30))
+/// Used by the daemon's 30 s auto-sync and by `budi db import` when no
+/// `--force` flag is set.
+pub fn sync_all(conn: &mut Connection) -> Result<SyncReport> {
+    sync_with_max_age(conn, Some(30), |_| {})
 }
 
 /// Full history sync: process ALL transcript files regardless of age.
 /// Used by `budi db import` — may take minutes on large histories.
-pub fn sync_history(conn: &mut Connection) -> Result<(usize, usize, Vec<String>)> {
-    sync_with_max_age(conn, None)
+pub fn sync_history(conn: &mut Connection) -> Result<SyncReport> {
+    sync_with_max_age(conn, None, |_| {})
+}
+
+/// Variant that fires `on_progress` periodically while providers are being
+/// processed. The callback must not block; the daemon's `/sync/status`
+/// handler takes a cheap `Mutex` lock and returns. Progress is throttled
+/// to ~one call per second (plus one per provider transition) so chatty
+/// per-file work never turns the callback into a hot loop.
+pub fn sync_history_with_progress<F: FnMut(&SyncProgress)>(
+    conn: &mut Connection,
+    on_progress: F,
+) -> Result<SyncReport> {
+    sync_with_max_age(conn, None, on_progress)
+}
+
+/// Quick-sync variant with progress. Mirrors `sync_history_with_progress`
+/// for the 30-day window used by the daemon's live auto-sync path.
+pub fn sync_all_with_progress<F: FnMut(&SyncProgress)>(
+    conn: &mut Connection,
+    on_progress: F,
+) -> Result<SyncReport> {
+    sync_with_max_age(conn, Some(30), on_progress)
 }
 
 /// Internal sync implementation with optional max_age filter.
 /// When `max_age_days` is Some(N), only files modified in the last N days are processed.
 /// When None, all files are processed.
-fn sync_with_max_age(
+fn sync_with_max_age<F: FnMut(&SyncProgress)>(
     conn: &mut Connection,
     max_age_days: Option<u64>,
-) -> Result<(usize, usize, Vec<String>)> {
+    mut on_progress: F,
+) -> Result<SyncReport> {
     let providers = crate::provider::enabled_providers();
     let tags_config = crate::config::load_tags_config();
     let mut pipeline = crate::pipeline::Pipeline::default_pipeline(tags_config);
@@ -42,6 +112,27 @@ fn sync_with_max_age(
     let mut cursor_file_messages_ingested = 0usize;
     let mut warnings: Vec<String> = Vec::new();
     let legacy_overlap_cutoff = first_legacy_proxy_message_timestamp(conn);
+
+    let mut progress = SyncProgress {
+        current_provider: None,
+        per_provider: providers
+            .iter()
+            .map(|p| ProviderSyncStats {
+                name: p.name().to_string(),
+                display_name: p.display_name().to_string(),
+                ..Default::default()
+            })
+            .collect(),
+    };
+    // 900 ms, not 1000: makes the two-second CLI poll land at least one fresh
+    // tick each cycle even with a ~200 ms HTTP round-trip. The per-file loop
+    // reads this to throttle its chatty emits; phase-boundary emits
+    // (provider-start, post-discovery, post-loop) fire unconditionally.
+    const PROGRESS_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(900);
+    // Emit a zeroed snapshot before anything runs so the CLI's first poll
+    // already sees the full provider list (otherwise the first 0-2 s of
+    // progress output is empty on a fresh sync).
+    on_progress(&progress);
 
     if let Some(cutoff) = legacy_overlap_cutoff {
         warnings.push(format!(
@@ -53,7 +144,10 @@ fn sync_with_max_age(
     let cutoff = max_age_days
         .map(|days| std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86400));
 
-    for provider in &providers {
+    for (idx, provider) in providers.iter().enumerate() {
+        progress.current_provider = Some(provider.name().to_string());
+        on_progress(&progress);
+
         // Try direct sync first (e.g. Cursor Usage API).
         if let Some(result) = provider.sync_direct(conn, &mut pipeline, max_age_days) {
             match result {
@@ -61,6 +155,11 @@ fn sync_with_max_age(
                     total_files += files;
                     total_messages += messages;
                     warnings.extend(w);
+                    let stats = &mut progress.per_provider[idx];
+                    stats.files_total = files;
+                    stats.files_synced = files;
+                    stats.messages = messages;
+                    on_progress(&progress);
                     continue;
                 }
                 Err(e) => {
@@ -71,6 +170,12 @@ fn sync_with_max_age(
         }
 
         let files = provider.discover_files()?;
+        progress.per_provider[idx].files_total = files.len();
+        on_progress(&progress);
+        // Per-provider binding so the Drop-less default (`Instant::now()`)
+        // is always the initial read when the file loop spins up and never
+        // a stale value from a previous provider's throttle window.
+        let mut last_progress_emit = std::time::Instant::now();
 
         for discovered in &files {
             let file_path = &discovered.path;
@@ -129,9 +234,25 @@ fn sync_with_max_age(
                 if provider.name() == "cursor" {
                     cursor_file_messages_ingested += count;
                 }
+                let stats = &mut progress.per_provider[idx];
+                stats.files_synced += 1;
+                stats.messages += count;
+            }
+
+            if last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
+                on_progress(&progress);
+                last_progress_emit = std::time::Instant::now();
             }
         }
+
+        // Always flush one final tick so the CLI sees the final per-provider
+        // total before moving on to the next agent (it may be that no file
+        // ingested new bytes and the in-loop throttle never fired).
+        on_progress(&progress);
     }
+
+    progress.current_provider = None;
+    on_progress(&progress);
 
     if cursor_file_messages_ingested > 0 {
         crate::providers::cursor::run_cursor_repairs(conn);
@@ -217,7 +338,12 @@ fn sync_with_max_age(
     }
 
     mark_sync_completed(conn)?;
-    Ok((total_files, total_messages, warnings))
+    Ok(SyncReport {
+        files_synced: total_files,
+        messages_ingested: total_messages,
+        warnings,
+        per_provider: progress.per_provider,
+    })
 }
 
 fn first_legacy_proxy_message_timestamp(conn: &Connection) -> Option<DateTime<Utc>> {
@@ -611,7 +737,10 @@ fn truncate_title(text: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_legacy_proxy_message_timestamp, read_transcript_tail};
+    use super::{
+        ProviderSyncStats, SyncProgress, SyncReport, first_legacy_proxy_message_timestamp,
+        read_transcript_tail,
+    };
 
     fn temp_file_path(test_name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -655,6 +784,57 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
         crate::migration::migrate(&conn).expect("migrate schema");
         assert!(first_legacy_proxy_message_timestamp(&conn).is_none());
+    }
+
+    #[test]
+    fn sync_report_roundtrips_per_provider_through_json() {
+        // The daemon serializes `SyncReport` on `POST /sync/*` and the CLI
+        // deserializes it through `crate::client::SyncResponse`. This test
+        // pins the wire contract so a future rename of `per_provider` or
+        // `files_synced` in `ProviderSyncStats` can't silently break
+        // `budi db import`'s per-agent breakdown (#440).
+        let report = SyncReport {
+            files_synced: 2_159,
+            messages_ingested: 152_414,
+            warnings: vec!["retained legacy overlap".to_string()],
+            per_provider: vec![
+                ProviderSyncStats {
+                    name: "claude_code".to_string(),
+                    display_name: "Claude Code".to_string(),
+                    files_total: 2_035,
+                    files_synced: 2_035,
+                    messages: 118_442,
+                },
+                ProviderSyncStats {
+                    name: "cursor".to_string(),
+                    display_name: "Cursor".to_string(),
+                    files_total: 154,
+                    files_synced: 154,
+                    messages: 29_038,
+                },
+            ],
+        };
+
+        let wire = serde_json::to_string(&report).expect("serialize");
+        let parsed: SyncReport = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(parsed.files_synced, 2_159);
+        assert_eq!(parsed.messages_ingested, 152_414);
+        assert_eq!(parsed.per_provider.len(), 2);
+        assert_eq!(parsed.per_provider[0].name, "claude_code");
+        assert_eq!(parsed.per_provider[0].messages, 118_442);
+        assert_eq!(parsed.per_provider[1].files_total, 154);
+    }
+
+    #[test]
+    fn sync_progress_tolerates_missing_fields() {
+        // Deserialization must keep working if an older daemon doesn't know
+        // about `current_provider` / `per_provider` yet. This guards the
+        // "new CLI talking to old daemon" upgrade path so `budi db import`
+        // degrades to "no progress, final summary only" instead of
+        // throwing a parse error on every poll.
+        let empty: SyncProgress = serde_json::from_str("{}").expect("empty object parses");
+        assert!(empty.current_provider.is_none());
+        assert!(empty.per_provider.is_empty());
     }
 
     #[test]

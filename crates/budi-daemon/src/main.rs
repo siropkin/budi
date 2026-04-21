@@ -41,6 +41,12 @@ pub struct AppState {
     /// Owned by the `/cloud/sync` route (see `routes::cloud`) and the
     /// background worker in `workers::cloud_sync`.
     pub cloud_syncing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Live per-agent progress snapshot for the in-flight sync run, if any.
+    /// `Some(progress)` while `syncing == true`, `None` otherwise. Set from
+    /// the `/sync/*` handlers' progress callback and read by
+    /// `/sync/status` so `budi db import` can render per-agent progress
+    /// without a streaming API (#440).
+    pub sync_progress: std::sync::Arc<std::sync::Mutex<Option<budi_core::analytics::SyncProgress>>>,
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -204,6 +210,7 @@ async fn main() -> Result<()> {
         syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cloud_syncing: cloud_syncing.clone(),
+        sync_progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
 
     let app = build_router(app_state);
@@ -590,6 +597,7 @@ mod tests {
             syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cloud_syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sync_progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 

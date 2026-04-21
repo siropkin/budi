@@ -281,7 +281,8 @@ Environment variable overrides: `BUDI_CLOUD_ENABLED=true`, `BUDI_CLOUD_API_KEY=b
 ```bash
 budi init                          # start daemon + install autostart + show detected agents
 budi init --cleanup                # review/remove managed 8.0/8.1 proxy residue
-budi db import                     # one-time import of historical transcripts
+budi db import                     # one-time import of historical transcripts (shows per-agent progress)
+budi db import --format json       # JSON output with per-agent file/message breakdown (scripting)
 ```
 
 **Monitoring and analytics:**
