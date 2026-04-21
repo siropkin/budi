@@ -138,7 +138,8 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             parent_uuid            TEXT,
             git_branch             TEXT,
             cost_confidence        TEXT DEFAULT 'estimated',
-            request_id             TEXT
+            request_id             TEXT,
+            pricing_source         TEXT NOT NULL DEFAULT 'legacy:pre-manifest'
         );
 
         CREATE TABLE IF NOT EXISTS tags (
@@ -160,6 +161,8 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
     create_sessions(conn)?;
     ensure_rollup_schema(conn, false)?;
     ensure_tail_offsets(conn)?;
+    ensure_pricing_manifests(conn)?;
+    seed_pricing_manifests_baseline(conn)?;
     create_indexes(conn)?;
     Ok(())
 }
@@ -190,6 +193,58 @@ fn ensure_tail_offsets(conn: &Connection) -> Result<()> {
             PRIMARY KEY (provider, path)
         );
         ",
+    )?;
+    Ok(())
+}
+
+/// Pricing manifest audit log per ADR-0091 §7.
+///
+/// One row per successful manifest install — including the synthetic
+/// `version = 0` row for pre-manifest history and the `version = 1` row
+/// for the embedded baseline loaded at migration time. Subsequent refresh
+/// worker fetches append `version = 2, 3, ...`. `version` is the monotonic
+/// identifier embedded in `pricing_source` column values (`manifest:vNNN`
+/// / `backfilled:vNNN`).
+fn ensure_pricing_manifests(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS pricing_manifests (
+            version             INTEGER PRIMARY KEY,
+            fetched_at          TEXT,
+            source              TEXT NOT NULL,
+            upstream_etag       TEXT,
+            known_model_count   INTEGER NOT NULL DEFAULT 0
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+/// Seed the version-0 pre-manifest anchor and the version-1 embedded
+/// baseline row per ADR-0091 §7 steps 3 + 5.
+///
+/// DB-only — no network fetch happens here (§7 step 4 deferred to the
+/// daemon refresh worker so `budi init` stays fast on flaky networks).
+/// `INSERT OR IGNORE` keeps this idempotent across repeated migrations.
+fn seed_pricing_manifests_baseline(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO pricing_manifests
+            (version, fetched_at, source, upstream_etag, known_model_count)
+         VALUES (0, NULL, 'pre-manifest', NULL, 0);",
+    )?;
+    // Count the embedded baseline so the audit row is honest. If parsing
+    // fails (broken vendored JSON — caught by the #376 §10 CI guard in
+    // practice) we still insert the row so the version ladder is
+    // contiguous, but with a zero count.
+    let count = crate::pricing::load_embedded_manifest()
+        .map(|m| m.entries.len())
+        .unwrap_or(0) as i64;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO pricing_manifests
+            (version, fetched_at, source, upstream_etag, known_model_count)
+         VALUES (1, ?1, 'embedded', NULL, ?2);",
+        rusqlite::params![now, count],
     )?;
     Ok(())
 }
@@ -1019,6 +1074,24 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         ensure_tail_offsets(conn)?;
         added_columns.push("tail_offsets".to_string());
     }
+
+    // ADR-0091 §7: additive upgrade for existing v1 DBs predating 8.3.
+    // `pricing_source` defaults every existing row to `legacy:pre-manifest`;
+    // the `pricing_manifests` audit table gets seeded with the synthetic
+    // v0 row and the embedded-baseline v1 row.
+    if ensure_column(
+        conn,
+        "messages",
+        "pricing_source",
+        "pricing_source TEXT NOT NULL DEFAULT 'legacy:pre-manifest'",
+    )? {
+        added_columns.push("messages.pricing_source".to_string());
+    }
+    if !table_exists(conn, "pricing_manifests")? {
+        ensure_pricing_manifests(conn)?;
+        added_columns.push("pricing_manifests".to_string());
+    }
+    seed_pricing_manifests_baseline(conn)?;
 
     if drop_legacy_proxy_events_table(conn)? {
         removed_tables.push("proxy_events".to_string());

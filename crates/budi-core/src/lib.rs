@@ -11,6 +11,7 @@ pub mod jsonl;
 pub mod legacy_proxy;
 pub mod migration;
 pub mod pipeline;
+pub mod pricing;
 pub mod privacy;
 pub mod provider;
 pub mod providers;

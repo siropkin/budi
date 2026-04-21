@@ -470,14 +470,22 @@ pub fn ingest_messages_with_sync(
             }
         }
 
+        // `pricing_source` falls through to the column DEFAULT
+        // (`'legacy:pre-manifest'`) when the pipeline hasn't set one.
+        // In the normal live / import path CostEnricher and the Cursor
+        // ingest arm always set it — this COALESCE-style fallback exists
+        // so a hypothetical future writer that skips the enricher still
+        // produces a valid tag rather than NULL.
+        let pricing_source: Option<&str> = msg.pricing_source.as_deref();
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (id, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               cwd, repo_id, provider,
               cost_cents,
-              parent_uuid, git_branch, cost_confidence, request_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              parent_uuid, git_branch, cost_confidence, request_id, pricing_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                     COALESCE(?18, 'legacy:pre-manifest'))",
             params![
                 msg.uuid,
                 normalized_session_id.as_deref(),
@@ -496,6 +504,7 @@ pub fn ingest_messages_with_sync(
                 git_branch,
                 msg.cost_confidence,
                 msg.request_id,
+                pricing_source,
             ],
         )?;
 

@@ -321,6 +321,7 @@ fn parse_usage_event(
         user_name: None,
         machine_name: None,
         cost_confidence: "estimated".to_string(),
+        pricing_source: None,
         request_id: None,
         speed: None,
         cache_creation_1h_tokens: 0,

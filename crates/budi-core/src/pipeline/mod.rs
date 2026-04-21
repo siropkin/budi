@@ -706,6 +706,7 @@ mod tests {
             user_name: None,
             machine_name: None,
             cost_confidence: "n/a".to_string(),
+            pricing_source: None,
             request_id: None,
             speed: None,
             cache_creation_1h_tokens: 0,

@@ -363,6 +363,34 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    /// `GET /pricing/status` — snapshot of the in-memory pricing manifest
+    /// (layer, version, known model count, unknown models seen). Backs
+    /// `budi pricing status` (ADR-0091 §8).
+    pub fn pricing_status(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .get(format!("{}/pricing/status", self.base_url))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// `POST /pricing/refresh` — trigger an immediate LiteLLM manifest
+    /// refresh, bypassing the worker's 24 h cadence. Longer timeout than
+    /// `pricing_status` because this actually hits the network and runs
+    /// validation + atomic write + backfill.
+    pub fn pricing_refresh(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!("{}/pricing/refresh", self.base_url))
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     // ─── Analytics ───────────────────────────────────────────────────
 
     pub fn summary(
