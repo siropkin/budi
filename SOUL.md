@@ -132,6 +132,16 @@ Manual cloud sync (since 8.1, R2.1, #225):
 `budi cloud sync`     -> POST /cloud/sync (loopback-only) -> same sync_tick as worker
 `budi cloud status`   -> GET /cloud/status -> readiness + watermarks, no network call
 AppState.cloud_syncing AtomicBool guards worker and manual path from double-posting.
+
+Onboarding helper (since 8.3, F #446):
+`budi cloud init`                        -> write ~/.config/budi/cloud.toml from commented template
+`budi cloud init --api-key KEY`          -> one-shot: write key + `enabled = true`
+`budi cloud init --force [--yes]`        -> overwrite existing config (--yes skips confirm)
+Status renderer distinguishes disabled (no config) / disabled (stub key) /
+enabled-but-missing-api-key / enabled-but-not-fully-configured / ready.
+CloudSyncStatus carries `config_exists` + `api_key_stub` so the daemon's
+`GET /cloud/status` envelope drives the three-way UX without a separate
+filesystem poke on every render.
 ```
 
 ### Database (SQLite, WAL mode, schema v1)

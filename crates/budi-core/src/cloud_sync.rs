@@ -184,6 +184,16 @@ pub struct CloudSyncStatus {
     pub enabled: bool,
     pub configured: bool,
     pub ready: bool,
+    /// Whether `~/.config/budi/cloud.toml` exists on disk. Lets `budi cloud
+    /// status` and the dashboard distinguish "no config, run `budi cloud
+    /// init`" from the other not-ready shapes without re-running the TOML
+    /// loader on every render (#446).
+    pub config_exists: bool,
+    /// Whether the loaded `api_key` equals `CLOUD_API_KEY_STUB` — i.e. the
+    /// user ran `budi cloud init` but did not paste a real key yet. Surfaced
+    /// so the CLI can render "disabled (stub key)" separately from "disabled
+    /// (no config)" (#446).
+    pub api_key_stub: bool,
     pub endpoint: String,
     pub last_synced_at: Option<String>,
     pub rollup_watermark: Option<String>,
@@ -207,6 +217,8 @@ pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncSt
     // so the earlier `api_key.is_some() || effective_api_key().is_some()` was
     // strictly dominated by the second check (see #346).
     let configured = config.effective_api_key().is_some();
+    let config_exists = crate::config::cloud_config_exists();
+    let api_key_stub = config.is_api_key_stub();
 
     let mut last_synced_at = None;
     let mut rollup_watermark = None;
@@ -234,6 +246,8 @@ pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncSt
         enabled,
         configured,
         ready,
+        config_exists,
+        api_key_stub,
         endpoint,
         last_synced_at,
         rollup_watermark,
@@ -926,6 +940,31 @@ mod tests {
         assert!(!status.ready);
         assert_eq!(status.pending_rollups, 0);
         assert_eq!(status.pending_sessions, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_cloud_status_reports_api_key_stub_when_placeholder() {
+        let dir = std::env::temp_dir().join("budi-cloud-status-stub");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let _ = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        let config = CloudConfig {
+            api_key: Some(crate::config::CLOUD_API_KEY_STUB.to_string()),
+            ..CloudConfig::default()
+        };
+        let status = current_cloud_status(&db_path, &config);
+        assert!(
+            status.api_key_stub,
+            "placeholder api_key must surface as api_key_stub=true"
+        );
+        assert!(
+            !status.ready,
+            "stub key must never look ready even if enabled is true elsewhere"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

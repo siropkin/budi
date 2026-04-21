@@ -272,13 +272,17 @@ Examples:
     },
     /// Manual cloud sync and cloud freshness reporting
     ///
-    /// `budi cloud sync` pushes queued local rollups and session summaries
-    /// to the cloud now (same work the background worker runs on an
-    /// interval — ADR-0083 §9, issue #225). `budi cloud status` reports
-    /// whether cloud sync is enabled, when it last succeeded, and how many
-    /// records are queued locally.
+    /// `budi cloud init` generates a commented `~/.config/budi/cloud.toml`
+    /// template so the user can paste their API key without guessing the
+    /// schema (issue #446). `budi cloud sync` pushes queued local rollups
+    /// and session summaries to the cloud now (same work the background
+    /// worker runs on an interval — ADR-0083 §9, issue #225). `budi cloud
+    /// status` reports whether cloud sync is enabled, when it last
+    /// succeeded, and how many records are queued locally.
     #[command(after_help = "\
 Examples:
+  budi cloud init                Generate ~/.config/budi/cloud.toml template
+  budi cloud init --api-key KEY  Write the key and enable sync in one step
   budi cloud status              Show cloud sync readiness and last sync
   budi cloud sync                Push queued local data to the cloud now
   budi cloud sync --format json  JSON output (exit code 2 on failure)")]
@@ -334,6 +338,29 @@ enum IntegrationAction {
 
 #[derive(Debug, Subcommand)]
 enum CloudAction {
+    /// Generate `~/.config/budi/cloud.toml` from a commented template
+    ///
+    /// Writes a starter config with every field commented so a fresh user
+    /// never has to read ADR-0083 to bootstrap cloud sync. Without flags it
+    /// leaves `api_key = "PASTE_YOUR_KEY_HERE"` and `enabled = false`;
+    /// `--api-key <K>` writes the real key and flips `enabled = true` in
+    /// one shot.
+    Init {
+        /// Paste your API key directly and set `enabled = true` in the template.
+        /// Without this flag the template still writes a stub that must be
+        /// edited before `budi cloud sync` will do anything.
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Overwrite an existing `~/.config/budi/cloud.toml`. Refuses to run
+        /// without `--yes` when a real (non-stub) key is about to be replaced,
+        /// to avoid silently clobbering a working config.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Skip the interactive "are you sure?" confirmation when `--force`
+        /// would overwrite a non-stub config.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
     /// Show cloud sync readiness and last-synced-at
     Status {
         /// Output format: text (default) or json
@@ -601,6 +628,11 @@ fn main() -> Result<()> {
             AutostartAction::Uninstall => commands::autostart::cmd_autostart_uninstall(),
         },
         Commands::Cloud { action } => match action {
+            CloudAction::Init {
+                api_key,
+                force,
+                yes,
+            } => commands::cloud::cmd_cloud_init(api_key, force, yes),
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
             CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
         },
@@ -985,6 +1017,55 @@ mod tests {
                 action: CloudAction::Status { format },
             } => assert!(matches!(format, StatsFormat::Json)),
             _ => panic!("expected cloud status command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cloud_init_bare() {
+        let cli = Cli::try_parse_from(["budi", "cloud", "init"]).expect("budi cloud init parses");
+        match cli.command {
+            Commands::Cloud {
+                action:
+                    CloudAction::Init {
+                        api_key,
+                        force,
+                        yes,
+                    },
+            } => {
+                assert!(api_key.is_none());
+                assert!(!force);
+                assert!(!yes);
+            }
+            _ => panic!("expected cloud init command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cloud_init_with_flags() {
+        let cli = Cli::try_parse_from([
+            "budi",
+            "cloud",
+            "init",
+            "--api-key",
+            "fake-test-key",
+            "--force",
+            "--yes",
+        ])
+        .expect("budi cloud init --api-key --force --yes parses");
+        match cli.command {
+            Commands::Cloud {
+                action:
+                    CloudAction::Init {
+                        api_key,
+                        force,
+                        yes,
+                    },
+            } => {
+                assert_eq!(api_key.as_deref(), Some("fake-test-key"));
+                assert!(force);
+                assert!(yes);
+            }
+            _ => panic!("expected cloud init command"),
         }
     }
 

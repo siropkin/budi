@@ -540,6 +540,12 @@ pub const DEFAULT_CLOUD_ENDPOINT: &str = "https://app.getbudi.dev";
 pub const DEFAULT_CLOUD_SYNC_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_CLOUD_SYNC_RETRY_MAX_SECONDS: u64 = 300;
 
+/// Placeholder api_key string written by `budi cloud init` into a freshly
+/// generated `cloud.toml`. `budi cloud status` surfaces this as
+/// "disabled (stub key)" so the user sees a distinct next-step hint instead
+/// of the generic "disabled" line they see when no config exists at all.
+pub const CLOUD_API_KEY_STUB: &str = "PASTE_YOUR_KEY_HERE";
+
 /// Cloud sync configuration loaded from `~/.config/budi/cloud.toml`.
 /// Created by editing `~/.config/budi/cloud.toml` (see README § Cloud sync).
 /// Cloud sync is **disabled by default** — requires explicit opt-in.
@@ -622,11 +628,30 @@ impl CloudConfig {
             && self.device_id.is_some()
             && self.org_id.is_some()
     }
+
+    /// Returns true when the `api_key` in the loaded config is exactly the
+    /// placeholder string written by `budi cloud init`. Used by `budi cloud
+    /// status` to surface "disabled (stub key)" separately from
+    /// "disabled (no config)".
+    pub fn is_api_key_stub(&self) -> bool {
+        self.api_key.as_deref() == Some(CLOUD_API_KEY_STUB)
+    }
 }
 
 /// Path to the cloud config file.
 pub fn cloud_config_path() -> Result<PathBuf> {
     Ok(budi_config_dir()?.join("cloud.toml"))
+}
+
+/// Returns true when `~/.config/budi/cloud.toml` exists on disk.
+/// Swallows errors on path resolution so the callers (CLI render, daemon
+/// status endpoint) treat an unreadable home as "no config" rather than
+/// failing the surrounding command.
+pub fn cloud_config_exists() -> bool {
+    cloud_config_path()
+        .ok()
+        .map(|p| p.exists())
+        .unwrap_or(false)
 }
 
 /// Load cloud config. Returns default (disabled) if the file does not exist.
@@ -1154,6 +1179,24 @@ retry_max_seconds = 120
 
         config.org_id = Some("org_test".into());
         assert!(config.is_ready());
+    }
+
+    #[test]
+    fn cloud_config_is_api_key_stub_only_for_placeholder() {
+        let mut config = CloudConfig::default();
+        assert!(!config.is_api_key_stub());
+
+        config.api_key = Some(CLOUD_API_KEY_STUB.to_string());
+        assert!(config.is_api_key_stub());
+
+        config.api_key = Some("budi_real_key".to_string());
+        assert!(!config.is_api_key_stub());
+
+        config.api_key = Some(format!("  {CLOUD_API_KEY_STUB}  "));
+        assert!(
+            !config.is_api_key_stub(),
+            "stub detection is exact-match so accidental padding surfaces as a real (broken) key"
+        );
     }
 
     #[test]
