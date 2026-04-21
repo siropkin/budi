@@ -137,7 +137,7 @@ AppState.cloud_syncing AtomicBool guards worker and manual path from double-post
 ### Database (SQLite, WAL mode, schema v1)
 
 Core tables:
-- **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, git_branch, repo_id, cwd, request_id
+- **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, pricing_source (8.3+, [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md); one of `manifest:vNNN` / `backfilled:vNNN` / `embedded:vBUILD` / `legacy:pre-manifest` / `unknown`), git_branch, repo_id, cwd, request_id
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation. Primary key field: id
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync. Also stores cloud sync watermarks (`__budi_cloud_sync__` keys) for idempotent cloud uploads
@@ -489,7 +489,7 @@ Key points:
 - `crates/budi-core/src/pipeline/enrichers.rs` - All 6 enricher implementations (`IdentityEnricher`, `GitEnricher`, `ToolEnricher`, `FileEnricher`, `CostEnricher`, `TagEnricher`; `HookEnricher` removed in 8.0, `FileEnricher` added in R1.4 #292)
 - `crates/budi-core/src/file_attribution.rs` - R1.4 (#292) repo-relative file-path extractor, enforces ADR-0083 privacy limits (no absolute paths, no outside-of-repo paths, no file contents)
 - `crates/budi-core/src/work_outcome.rs` - R1.5 (#293) session-scoped `work_outcome` derivation (`committed`, `branch_merged`, `no_commit`, `unknown`) from local git state only — no remote API calls, no content capture
-- `crates/budi-core/src/cost.rs` - Cost estimation, ModelPricing, per-provider pricing tables
+- `crates/budi-core/src/cost.rs` - Cost estimation glue (aggregates `cost_cents` from `messages`). Pricing itself lives in `provider.rs::ModelPricing` + the per-provider `*_pricing_for_model()` functions in `providers/*.rs`; those tables are replaced in 8.3 by a manifest-driven `pricing::lookup` ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md), implementation #376, cleanup #377)
 - `crates/budi-core/src/hooks.rs` - Prompt classification and migration helpers (hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1)
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
 - `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
@@ -519,7 +519,7 @@ Key points:
 ## Dev notes
 
 - CLI never touches SQLite directly - all queries go through the daemon HTTP API
-- CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data)
+- CostEnricher is the single source of truth for cost - sets cost_cents during pipeline. Skips if cost already set (API data). In 8.3+ it calls `pricing::lookup(model_id, provider)` which resolves against a three-layer stack (on-disk cache → embedded LiteLLM baseline → `unknown`) per [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md); unknown models land with `cost_cents = 0`, `pricing_source = 'unknown'`, and a warn, then auto-backfill to `backfilled:vNNN` once upstream catches up. History is immutable — `manifest:vNNN` and `legacy:pre-manifest` rows are never auto-recomputed, and there is no `budi pricing recompute` command.
 - `budi init` creates the data dir, validates schema/binary state, starts the daemon, installs autostart, prints detected agents from `Provider::watch_roots()`, and exits. It does not mutate shell profiles or editor configs on the live path. `budi init --cleanup` is the explicit upgrade-only path for reviewing/removing managed 8.0/8.1 proxy residue. `budi doctor` is the canonical end-to-end verifier and prints the matching first-run nudge when the DB has no assistant activity yet, so day-zero users do not misread empty attribution as a setup failure. Install scripts close with the same `budi doctor` recommendation.
 - Tags are auto-detected (`provider`, `model`, `tool`, `tool_use_id`, `ticket_id`, `ticket_source`, `activity`, `activity_source`, `activity_confidence`, `file_path`, `file_path_source`, `file_path_confidence`, `tool_outcome`, `tool_outcome_source`, `tool_outcome_confidence`, and conditional tags like `cost_confidence` / `speed`) + custom rules via `~/.config/budi/tags.toml`
 - git_branch is a column on messages (not a tag) for fast queries

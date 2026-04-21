@@ -1,10 +1,12 @@
 # ADR-0083: Cloud Ingest, Identity, and Privacy Contract
 
 - **Date**: 2026-04-10
-- **Status**: Implemented
+- **Status**: Implemented (amended — see banner)
 - **Issue**: [#83](https://github.com/siropkin/budi/issues/83)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md)
+
+> **Amended by [ADR-0091](./0091-model-pricing-manifest-source-of-truth.md) (2026-04-21), §Neutral.** Budi's permitted outbound-network surface is extended by exactly one additional destination: an anonymous HTTPS `GET` to `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` issued by the daemon-side pricing refresher. The request carries no user content, no identifiers, and no headers beyond the standard `User-Agent` / `Accept` pair. Operator opt-out is `BUDI_PRICING_REFRESH=0`. The user-data privacy contract defined in §1 of this ADR is unchanged.
 
 ## Context
 

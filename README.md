@@ -527,8 +527,11 @@ Every message carries a `cost_confidence` tag that indicates how the cost was de
 | `proxy_estimated` | Retained 8.1 proxy-era rows (historical only) | Estimated from response body / SSE stream |
 | `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
 | `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
+| `estimated_unknown_model` | JSONL tokens × **unknown** model (8.3+) | `cost_cents = 0` — model id not in pricing manifest; backfilled automatically when upstream catches up ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md)) |
 
 Messages with `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
+
+In 8.3+ pricing is sourced from the community-maintained [LiteLLM pricing manifest](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) via a three-layer lookup (on-disk cache → embedded baseline → hard-fail to `unknown`), refreshed daily by the daemon (opt-out: `BUDI_PRICING_REFRESH=0`), with every row tagged `pricing_source` so history is auditable and immutable. See [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) for the full contract and `budi pricing status` for the operator surface.
 
 </details>
 
