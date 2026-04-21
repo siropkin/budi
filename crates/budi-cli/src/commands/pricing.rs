@@ -17,6 +17,7 @@
 //! scripts can branch on status without parsing the body.
 
 use anyhow::Result;
+use budi_core::pricing::display;
 use serde_json::Value;
 
 use crate::StatsFormat;
@@ -37,10 +38,16 @@ pub fn cmd_pricing_status(format: StatsFormat, refresh: bool) -> Result<()> {
     let status = client.pricing_status()?;
 
     if matches!(format, StatsFormat::Json) {
+        // #443 acceptance: JSON consumers see the Budi display-name
+        // alias overlay alongside the LiteLLM pricing status. The
+        // overlay answers "how does a raw provider model id map to
+        // the canonical `budi stats --models` display name?" without
+        // having to dump the whole 3k-entry LiteLLM manifest.
+        let aliases = json_alias_catalogue();
         let combined = if let Some(r) = &refresh_body {
-            serde_json::json!({ "refresh": r, "status": status })
+            serde_json::json!({ "refresh": r, "status": status, "aliases": aliases })
         } else {
-            status.clone()
+            serde_json::json!({ "status": status, "aliases": aliases })
         };
         println!("{}", serde_json::to_string_pretty(&combined)?);
         if let Some(r) = refresh_body.as_ref()
@@ -59,7 +66,67 @@ pub fn cmd_pricing_status(format: StatsFormat, refresh: bool) -> Result<()> {
         }
     }
     render_status_text(&status);
+    render_alias_map_text();
     Ok(())
+}
+
+/// Build the JSON shape for the #443 alias catalogue exposed by
+/// `budi pricing status --format json`. Each entry is
+/// `{raw_model, display_name, effort_modifier}` where
+/// `effort_modifier` is `null` for rows without one.
+fn json_alias_catalogue() -> Vec<serde_json::Value> {
+    display::known_aliases()
+        .iter()
+        .map(|(raw, display_name, effort)| {
+            serde_json::json!({
+                "raw_model": raw,
+                "display_name": display_name,
+                "effort_modifier": effort,
+            })
+        })
+        .collect()
+}
+
+/// Render the #443 display-name alias overlay so operators can answer
+/// "what does `claude-4.5-opus-high-thinking` actually resolve to?"
+/// without reading code. Kept compact — curated Budi-owned entries
+/// rather than every LiteLLM manifest id.
+fn render_alias_map_text() {
+    let bold = ansi("\x1b[1m");
+    let bold_cyan = ansi("\x1b[1;36m");
+    let dim = ansi("\x1b[90m");
+    let reset = ansi("\x1b[0m");
+
+    let entries = display::known_aliases();
+    if entries.is_empty() {
+        return;
+    }
+
+    // Label column width is the longest raw alias + 2 trailing
+    // spaces, capped so a freakishly long upstream id never pushes
+    // the display column off the right edge.
+    let label_width = entries
+        .iter()
+        .map(|(raw, _, _)| raw.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(40);
+
+    println!("  {bold_cyan} Display-name aliases{reset}");
+    println!("  {dim}{}{reset}", "─".repeat(40));
+    println!(
+        "  {bold}{:<w$}{reset}  {bold}DISPLAY NAME{reset}",
+        "RAW MODEL",
+        w = label_width
+    );
+    for (raw, display_name, effort) in entries {
+        let shown = match effort {
+            Some(e) => format!("{display_name} · {e}"),
+            None => (*display_name).to_string(),
+        };
+        println!("  {:<w$}  {shown}", raw, w = label_width);
+    }
+    println!();
 }
 
 fn render_refresh_text(body: &Value) {

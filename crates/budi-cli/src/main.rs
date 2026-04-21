@@ -144,11 +144,12 @@ Examples:
         /// natural length of file paths. (#450)
         #[arg(long, default_value_t = 40)]
         label_width: usize,
-        /// Include `(model pending)` rows in `--models` output. By
-        /// default, rows whose model name is still pending (a known
-        /// Cursor cost-lag transient) are suppressed and a footnote
-        /// reports how many rows were hidden. Pass `--include-pending`
-        /// to see the raw bucket. (#450)
+        /// Include zero-cost `(model not yet attributed)` rows in
+        /// `--models` output. By default, Cursor-lag transient rows
+        /// that carry no backing cost are collapsed into a
+        /// suppressed-count footnote; pass `--include-pending` to
+        /// see them as their own row. Rows with real Cursor-Auto
+        /// cost always render regardless of this flag. (#443, #450)
         #[arg(long, default_value_t = false)]
         include_pending: bool,
         /// Break out the `(no repository)` bucket in `--projects` into a
