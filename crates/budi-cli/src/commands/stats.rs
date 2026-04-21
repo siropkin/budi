@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use budi_core::analytics::{self, BreakdownPage, BreakdownRowCost};
+use budi_core::pricing::display::{self as display, Placeholder};
 use chrono::{Local, Months, NaiveDate, TimeZone};
 
 use crate::StatsPeriod;
@@ -1632,7 +1633,13 @@ fn cmd_stats_models(
     let page = client.models(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        // #443 acceptance: JSON exposes the Budi-canonical `display_name`
+        // and `effort_modifier` alongside the raw provider-emitted
+        // `model` / `provider_model_id`. `model` is preserved so
+        // existing scripting callers that read it continue to work; new
+        // callers can filter on `display_name` for cross-provider
+        // aggregation.
+        print_models_json(&page)?;
         return Ok(());
     }
 
@@ -1669,26 +1676,28 @@ fn cmd_stats_models(
         return Ok(());
     }
 
-    // #450 acceptance: suppress `(model pending)` rows by default. These
-    // are Cursor-lag transients where the model name hasn't reconciled
-    // yet; letting them surface in the default text output misleads
-    // users into thinking a phantom "(untagged)" model is active.
-    // Retained in `--format json` and behind `--include-pending`.
-    let (visible_rows, pending_count) = partition_pending_model_rows(&page.rows, include_pending);
+    // #443 acceptance: Cursor's `default` (Auto routing) and the
+    // `(untagged)` sentinel collapse into a single
+    // `(model not yet attributed)` bucket per provider — both mean
+    // "we don't have a specific model id for this cost". Summed
+    // per-provider so the grand-total footer from #448 still
+    // reconciles to the cent.
+    //
+    // #450 acceptance carry-forward: a merged bucket whose cost is
+    // zero is treated as a pending transient (the pure-`(untagged)`
+    // case with no backing `default` spend) and suppressed by
+    // default; `--include-pending` keeps it visible.
+    let (render_rows, suppressed_pending) =
+        merge_and_partition_pending(&page.rows, include_pending);
 
-    if visible_rows.is_empty() && page.other.is_none() && pending_count > 0 {
-        // Every row was a pending-model transient. Treat the same as
-        // "only untagged" empty-state so the output doesn't render a
-        // one-row table.
+    if render_rows.is_empty() && page.other.is_none() && suppressed_pending > 0 {
         render_untagged_only_empty_state(BreakdownView::Models, period);
-        if pending_count > 0 {
-            println!(
-                "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
-                pending_count,
-                if pending_count == 1 { "" } else { "s" },
-            );
-            println!();
-        }
+        println!(
+            "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
+            suppressed_pending,
+            if suppressed_pending == 1 { "" } else { "s" },
+        );
+        println!();
         return Ok(());
     }
 
@@ -1698,34 +1707,38 @@ fn cmd_stats_models(
         &format!("{:>MSGS_WIDTH$}  {:>TOK_WIDTH$}", "MSGS", "TOKENS"),
     );
 
-    let has_duplicate_models = {
+    let has_duplicate_display = {
         let mut seen = std::collections::HashSet::new();
-        visible_rows.iter().any(|m| !seen.insert(&m.model))
+        render_rows
+            .iter()
+            .any(|r| !seen.insert(r.display_label.clone()))
     };
 
     // #449 fix: bars scale by cost (the column they sit next to), not by
     // message count. A $66 row no longer renders with more blocks than a
     // $548 row just because it crossed a provider-specific high-volume
     // threshold.
-    let max_cost = max_cost_for_rows_refs(&visible_rows);
-    for m in &visible_rows {
-        let bar = render_bar(m.cost_cents, max_cost);
+    let max_cost = render_rows
+        .iter()
+        .map(|r| r.cost_cents)
+        .fold(0.0_f64, f64::max);
+    for r in &render_rows {
+        let bar = render_bar(r.cost_cents, max_cost);
         let total_tok =
-            m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
-        let raw_model_label = display_dimension(BreakdownView::Models, &m.model);
-        let raw_label = if has_duplicate_models {
-            format!("{} ({})", raw_model_label, m.provider)
+            r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens;
+        let raw_label = if has_duplicate_display {
+            format!("{} ({})", r.display_label, r.provider)
         } else {
-            raw_model_label
+            r.display_label.clone()
         };
         let label = truncate_label_middle(&raw_label, label_width);
-        let msgs_cell = format!("{} msgs", m.message_count);
+        let msgs_cell = format!("{} msgs", r.message_count);
         let tok_cell = format!("{} tok", format_tokens(total_tok));
         println!(
             "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:>MSGS_WIDTH$}{reset}  {dim}{:>TOK_WIDTH$}{reset}",
             label,
             bar,
-            format_cost_cents_fixed(m.cost_cents),
+            format_cost_cents_fixed(r.cost_cents),
             msgs_cell,
             tok_cell,
             label_w = label_width,
@@ -1734,57 +1747,216 @@ fn cmd_stats_models(
     }
 
     render_breakdown_footer(&page, label_width, rule_width);
-    if pending_count > 0 {
+    if suppressed_pending > 0 {
         println!(
             "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
-            pending_count,
-            if pending_count == 1 { "" } else { "s" },
+            suppressed_pending,
+            if suppressed_pending == 1 { "" } else { "s" },
         );
         println!();
     }
     Ok(())
 }
 
-/// Split `rows` into visible + pending buckets for the `--models` view.
-/// Pending rows are the `(untagged)` transient caused by Cursor
-/// cost-lag; they are dropped from the default output and reported in
-/// a footnote unless `include_pending` is set.
-fn partition_pending_model_rows<T>(rows: &[T], include_pending: bool) -> (Vec<&T>, usize)
-where
-    T: ModelRow,
-{
-    if include_pending {
-        return (rows.iter().collect(), 0);
-    }
-    let mut visible = Vec::with_capacity(rows.len());
-    let mut pending = 0usize;
-    for r in rows {
-        if is_untagged(r.model_name()) {
-            pending += 1;
-        } else {
-            visible.push(r);
+/// One row slated for text rendering in the `--models` view, after
+/// placeholder merge (#443) and pending suppression (#450) have run.
+#[derive(Debug, Clone)]
+struct RenderModelRow {
+    display_label: String,
+    provider: String,
+    message_count: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    cost_cents: f64,
+}
+
+/// Build the set of rows the text view should render, applying both
+/// the #443 placeholder merge and the #450 pending-suppression rule.
+///
+/// - Real rows (`Placeholder::None`) pass through as one
+///   [`RenderModelRow`] each, keyed on the resolved display label
+///   (display_name + optional effort).
+/// - Placeholder rows (`Placeholder::CursorAuto` /
+///   `Placeholder::NotAttributed`) merge per-provider into a single
+///   `(model not yet attributed)` row. Costs, tokens, and message
+///   counts are summed.
+/// - A merged row whose cost is exactly zero is treated as a pending
+///   transient and suppressed unless `include_pending` is set. The
+///   suppressed-row count flows to the footnote.
+///
+/// Rows are returned in descending-cost order so the bar scale cue
+/// keeps meaning after the merge.
+fn merge_and_partition_pending(
+    rows: &[budi_core::analytics::ModelUsage],
+    include_pending: bool,
+) -> (Vec<RenderModelRow>, usize) {
+    use std::collections::HashMap;
+
+    let mut real: Vec<RenderModelRow> = Vec::with_capacity(rows.len());
+    // Keyed on provider so Cursor's pending rows and (hypothetically)
+    // Claude-Code's pending rows render as separate buckets.
+    let mut placeholder_by_provider: HashMap<String, RenderModelRow> = HashMap::new();
+
+    for m in rows {
+        let d = display::resolve(&m.model);
+        match d.placeholder {
+            Placeholder::None => {
+                real.push(RenderModelRow {
+                    display_label: d.combined_label(),
+                    provider: m.provider.clone(),
+                    message_count: m.message_count,
+                    input_tokens: m.input_tokens,
+                    output_tokens: m.output_tokens,
+                    cache_read_tokens: m.cache_read_tokens,
+                    cache_creation_tokens: m.cache_creation_tokens,
+                    cost_cents: m.cost_cents,
+                });
+            }
+            Placeholder::CursorAuto | Placeholder::NotAttributed => {
+                let entry = placeholder_by_provider
+                    .entry(m.provider.clone())
+                    .or_insert_with(|| RenderModelRow {
+                        display_label: display::UNATTRIBUTED_LABEL.to_string(),
+                        provider: m.provider.clone(),
+                        message_count: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                        cost_cents: 0.0,
+                    });
+                entry.message_count += m.message_count;
+                entry.input_tokens += m.input_tokens;
+                entry.output_tokens += m.output_tokens;
+                entry.cache_read_tokens += m.cache_read_tokens;
+                entry.cache_creation_tokens += m.cache_creation_tokens;
+                entry.cost_cents += m.cost_cents;
+            }
         }
     }
-    (visible, pending)
+
+    let mut suppressed_pending = 0usize;
+    let mut merged: Vec<RenderModelRow> = real;
+    for (_, row) in placeholder_by_provider {
+        if !include_pending && row.cost_cents <= 0.0 {
+            suppressed_pending += 1;
+            continue;
+        }
+        merged.push(row);
+    }
+
+    // Descending cost keeps the bar scale meaningful after the merge
+    // reordered things.
+    merged.sort_by(|a, b| {
+        b.cost_cents
+            .partial_cmp(&a.cost_cents)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (merged, suppressed_pending)
 }
 
-/// Minimal read-only view over the fields `partition_pending_model_rows`
-/// needs. Implemented for the concrete `ModelUsage` row type; kept as a
-/// trait so tests can construct lightweight fixtures.
-trait ModelRow {
-    fn model_name(&self) -> &str;
+/// Enriched row emitted by `--models --format json` alongside the
+/// existing ModelUsage fields. `display_name` and `effort_modifier`
+/// are sourced from the #443 Budi display overlay (`pricing::display`);
+/// `provider_model_id` duplicates `model` so the acceptance criterion
+/// "JSON exposes both display_name and the raw provider_model_id"
+/// is satisfied without renaming the long-standing `model` key.
+#[derive(serde::Serialize)]
+struct EnrichedModelRow<'a> {
+    model: &'a str,
+    provider_model_id: &'a str,
+    display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort_modifier: Option<String>,
+    placeholder: &'static str,
+    provider: &'a str,
+    message_count: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    cost_cents: f64,
 }
 
-impl ModelRow for budi_core::analytics::ModelUsage {
-    fn model_name(&self) -> &str {
-        &self.model
+/// Enriched page envelope. Keeps the `other` / `total_cost_cents` /
+/// `total_rows` / `shown_rows` / `limit` fields in the exact shape #448
+/// locked down so reconciliation consumers are untouched.
+#[derive(serde::Serialize)]
+struct EnrichedModelPage<'a> {
+    rows: Vec<EnrichedModelRow<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    other: &'a Option<budi_core::analytics::BreakdownOther>,
+    total_cost_cents: f64,
+    total_rows: usize,
+    shown_rows: usize,
+    limit: usize,
+}
+
+/// Build the enriched page — shared between the CLI JSON output and
+/// the shape test.
+fn build_models_json_page<'a>(
+    page: &'a BreakdownPage<budi_core::analytics::ModelUsage>,
+) -> EnrichedModelPage<'a> {
+    let rows: Vec<EnrichedModelRow<'_>> = page
+        .rows
+        .iter()
+        .map(|m| {
+            let d = display::resolve(&m.model);
+            EnrichedModelRow {
+                model: &m.model,
+                provider_model_id: &m.model,
+                display_name: d.display_name,
+                effort_modifier: d.effort,
+                placeholder: placeholder_tag(d.placeholder),
+                provider: &m.provider,
+                message_count: m.message_count,
+                input_tokens: m.input_tokens,
+                output_tokens: m.output_tokens,
+                cache_read_tokens: m.cache_read_tokens,
+                cache_creation_tokens: m.cache_creation_tokens,
+                cost_cents: m.cost_cents,
+            }
+        })
+        .collect();
+
+    EnrichedModelPage {
+        rows,
+        other: &page.other,
+        total_cost_cents: page.total_cost_cents,
+        total_rows: page.total_rows,
+        shown_rows: page.shown_rows,
+        limit: page.limit,
     }
 }
 
-fn max_cost_for_rows_refs<T: BreakdownRowCost>(rows: &[&T]) -> f64 {
-    rows.iter()
-        .map(|r| BreakdownRowCost::cost_cents(*r))
-        .fold(0.0_f64, f64::max)
+/// Serialize a `--models` page with the #443 display-name enrichment:
+/// every row grows `display_name`, `effort_modifier`, and
+/// `provider_model_id` (alias for `model`) alongside the existing
+/// fields.
+fn print_models_json(page: &BreakdownPage<budi_core::analytics::ModelUsage>) -> Result<()> {
+    let enriched = build_models_json_page(page);
+    println!("{}", serde_json::to_string_pretty(&enriched)?);
+    Ok(())
+}
+
+#[cfg(test)]
+fn serde_models_page_for_test(
+    page: &BreakdownPage<budi_core::analytics::ModelUsage>,
+) -> serde_json::Value {
+    serde_json::to_value(build_models_json_page(page)).unwrap()
+}
+
+/// Serialize a [`Placeholder`] as a short tag used by the `--models`
+/// JSON envelope. Real rows carry `"none"` so consumers can filter on
+/// a single field without checking for key presence.
+fn placeholder_tag(p: Placeholder) -> &'static str {
+    match p {
+        Placeholder::None => "none",
+        Placeholder::CursorAuto => "cursor_auto",
+        Placeholder::NotAttributed => "not_attributed",
+    }
 }
 
 // ─── Breakdown Footer (#448) ─────────────────────────────────────────────────
@@ -1946,7 +2118,7 @@ impl BreakdownView {
             BreakdownView::Tickets => "(no ticket)",
             BreakdownView::Activities => "(unclassified)",
             BreakdownView::Files => "(no file tag)",
-            BreakdownView::Models => "(model pending)",
+            BreakdownView::Models => "(model not yet attributed)",
             BreakdownView::Tag => "(untagged)",
         }
     }
@@ -3014,7 +3186,10 @@ mod tests {
         assert_eq!(BreakdownView::Tickets.untagged_label(), "(no ticket)");
         assert_eq!(BreakdownView::Activities.untagged_label(), "(unclassified)");
         assert_eq!(BreakdownView::Files.untagged_label(), "(no file tag)");
-        assert_eq!(BreakdownView::Models.untagged_label(), "(model pending)");
+        assert_eq!(
+            BreakdownView::Models.untagged_label(),
+            "(model not yet attributed)"
+        );
         // Tag view keeps the generic sentinel because a tag key can
         // mean anything — "(no X)" would be misleading.
         assert_eq!(BreakdownView::Tag.untagged_label(), "(untagged)");
@@ -3038,42 +3213,162 @@ mod tests {
     }
 
     #[test]
-    fn partition_pending_model_rows_suppresses_untagged_by_default() {
-        // #450 acceptance: `--models` suppresses pending rows by
-        // default; `--include-pending` restores them.
-        #[derive(Clone)]
-        struct Row {
-            name: String,
-        }
-        impl ModelRow for Row {
-            fn model_name(&self) -> &str {
-                &self.name
+    fn merge_and_partition_pending_suppresses_zero_cost_placeholder() {
+        // #443 + #450 acceptance: placeholder rows merge into one
+        // `(model not yet attributed)` bucket per provider, and a
+        // merged bucket whose cost is zero stays suppressed by
+        // default (the pure `(untagged)`-transient case).
+        use budi_core::analytics::ModelUsage;
+
+        fn row(model: &str, provider: &str, cost: f64, msgs: u64) -> ModelUsage {
+            ModelUsage {
+                model: model.to_string(),
+                provider: provider.to_string(),
+                message_count: msgs,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: cost,
             }
         }
 
         let rows = vec![
-            Row {
-                name: "claude-opus-4-7".into(),
+            row("claude-opus-4-7", "claude_code", 210_000.0, 24_114),
+            row("(untagged)", "cursor", 0.0, 15),
+            row("claude-sonnet-4-6", "claude_code", 30_000.0, 6138),
+            row("(untagged)", "cursor", 0.0, 7),
+        ];
+
+        // Default: `(untagged)` collapses to one zero-cost Cursor
+        // bucket, which gets suppressed — two input transients fold
+        // into the one-row `suppressed_pending` count.
+        let (visible, suppressed) = merge_and_partition_pending(&rows, false);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(suppressed, 1);
+        assert!(
+            visible
+                .iter()
+                .all(|r| r.display_label != display::UNATTRIBUTED_LABEL)
+        );
+
+        // With --include-pending the merged placeholder shows.
+        let (visible_all, suppressed_all) = merge_and_partition_pending(&rows, true);
+        assert_eq!(visible_all.len(), 3);
+        assert_eq!(suppressed_all, 0);
+        assert!(
+            visible_all
+                .iter()
+                .any(|r| r.display_label == display::UNATTRIBUTED_LABEL)
+        );
+    }
+
+    #[test]
+    fn merge_and_partition_pending_surfaces_cursor_auto_cost_by_default() {
+        // #443 acceptance: Cursor's `default` (Auto mode) rows carry
+        // real cost; they must render by default, merged under the
+        // canonical `(model not yet attributed)` label — *not*
+        // suppressed the way pure-untagged zero-cost transients are.
+        use budi_core::analytics::ModelUsage;
+
+        let rows = vec![
+            ModelUsage {
+                model: "default".into(),
+                provider: "cursor".into(),
+                message_count: 25,
+                input_tokens: 1_000_000,
+                output_tokens: 200_000,
+                cache_read_tokens: 10_200_000,
+                cache_creation_tokens: 1_000_000,
+                cost_cents: 437.0,
             },
-            Row {
-                name: "(untagged)".into(),
-            },
-            Row {
-                name: "claude-sonnet-4-6".into(),
-            },
-            Row {
-                name: "(untagged)".into(),
+            ModelUsage {
+                model: "(untagged)".into(),
+                provider: "cursor".into(),
+                message_count: 15,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 0.0,
             },
         ];
 
-        let (visible, pending) = partition_pending_model_rows(&rows, false);
-        assert_eq!(visible.len(), 2);
-        assert_eq!(pending, 2);
-        assert!(visible.iter().all(|r| !is_untagged(r.model_name())));
+        let (visible, suppressed) = merge_and_partition_pending(&rows, false);
+        assert_eq!(suppressed, 0);
+        assert_eq!(visible.len(), 1);
+        let merged = &visible[0];
+        assert_eq!(merged.display_label, display::UNATTRIBUTED_LABEL);
+        assert_eq!(merged.provider, "cursor");
+        assert_eq!(merged.message_count, 40);
+        assert_eq!(merged.cost_cents, 437.0);
+    }
 
-        let (visible_all, pending_all) = partition_pending_model_rows(&rows, true);
-        assert_eq!(visible_all.len(), 4);
-        assert_eq!(pending_all, 0);
+    #[test]
+    fn models_json_carries_display_name_and_provider_model_id() {
+        // #443 acceptance 5: `--format json` must expose both the
+        // canonical `display_name` and the raw `provider_model_id`,
+        // plus the effort modifier as a separate field.
+        use budi_core::analytics::{BreakdownPage, ModelUsage};
+
+        let rows = vec![
+            ModelUsage {
+                model: "claude-opus-4-7-thinking-high".into(),
+                provider: "cursor".into(),
+                message_count: 249,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 45_300.0,
+            },
+            ModelUsage {
+                model: "claude-opus-4-7".into(),
+                provider: "claude_code".into(),
+                message_count: 890,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 45_600.0,
+            },
+        ];
+        let page = BreakdownPage {
+            rows,
+            other: None,
+            total_cost_cents: 90_900.0,
+            total_rows: 2,
+            shown_rows: 2,
+            limit: 50,
+        };
+
+        let json = serde_json::to_value(serde_models_page_for_test(&page)).unwrap();
+        let rows_json = json["rows"].as_array().unwrap();
+        assert_eq!(rows_json.len(), 2);
+
+        let cursor_row = &rows_json[0];
+        assert_eq!(
+            cursor_row["model"].as_str(),
+            Some("claude-opus-4-7-thinking-high")
+        );
+        assert_eq!(
+            cursor_row["provider_model_id"].as_str(),
+            Some("claude-opus-4-7-thinking-high")
+        );
+        assert_eq!(cursor_row["display_name"].as_str(), Some("Claude Opus 4.7"));
+        assert_eq!(
+            cursor_row["effort_modifier"].as_str(),
+            Some("thinking-high")
+        );
+        assert_eq!(cursor_row["placeholder"].as_str(), Some("none"));
+
+        let canonical_row = &rows_json[1];
+        assert_eq!(
+            canonical_row["display_name"].as_str(),
+            Some("Claude Opus 4.7")
+        );
+        // effort_modifier is omitted when None (serde skip).
+        assert!(canonical_row.get("effort_modifier").is_none());
     }
 
     #[test]
@@ -3267,10 +3562,11 @@ mod tests {
 
     #[test]
     fn snapshot_models_today_and_30d_layout_is_stable() {
-        // `--models` snapshot: untagged translation renders as
-        // `(model pending)` when forced visible (e.g. via
-        // `--include-pending`), the breakdown currency is fixed with
-        // thousands separators.
+        // `--models` snapshot: the `(untagged)` sentinel renders as
+        // `(model not yet attributed)` (#443 — same label the
+        // `display::resolve` overlay uses, so the empty-state tip
+        // and the row label agree). Breakdown currency is fixed
+        // with thousands separators.
         let opus = snapshot_row(
             BreakdownView::Models,
             "claude-opus-4-7",
@@ -3282,7 +3578,7 @@ mod tests {
 
         let pending_visible =
             snapshot_row(BreakdownView::Models, "(untagged)", 0.0, "162 msgs   0 tok");
-        assert!(pending_visible.contains("(model pending)"));
+        assert!(pending_visible.contains("(model not yet attributed)"));
     }
 
     #[test]
