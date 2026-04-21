@@ -866,6 +866,49 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// #442: normalize pre-8.3 bare-folder-name `repo_id` values to NULL.
+///
+/// Pre-8.3 `resolve_repo_id` fell back to the git-root folder name when
+/// a repo had no remote, and to the cwd's folder name when there was no
+/// git at all. That produced rows like `Desktop`, `ivan.seredkin`,
+/// `.cursor`, and `homebrew-budi` that sat alongside real
+/// `github.com/owner/repo` rows in `budi stats --projects`.
+///
+/// The 8.3 classifier returns `None` for any cwd that isn't inside a
+/// git repo with a remote, so new ingests stay clean. This one-shot
+/// cleanup touches historical rows: anything whose `repo_id` doesn't
+/// match the normalized `host/owner/repo` shape (host must contain a
+/// `.`, plus `owner/repo` segments) is rewritten to NULL in both the
+/// `messages` and `sessions` tables.
+///
+/// Idempotent: the `NOT (...)` predicate is already empty on rows that
+/// passed a previous run, so subsequent boots no-op.
+///
+/// Returns the number of messages+sessions rows updated (used by the
+/// caller to decide whether to rebuild rollups).
+fn backfill_non_repo_ids_to_null(conn: &Connection) -> Result<usize> {
+    // Matches `crate::repo_id::looks_like_repo_url` in SQL form: at least
+    // two `/` separators AND the first segment contains a `.`.
+    let predicate = "repo_id IS NOT NULL
+         AND repo_id != ''
+         AND NOT (
+             repo_id LIKE '%/%/%'
+             AND INSTR(repo_id, '/') > 1
+             AND SUBSTR(repo_id, 1, INSTR(repo_id, '/') - 1) LIKE '%.%'
+         )";
+
+    let mut total = 0usize;
+    total += conn.execute(
+        &format!("UPDATE messages SET repo_id = NULL WHERE {predicate}"),
+        [],
+    )?;
+    total += conn.execute(
+        &format!("UPDATE sessions SET repo_id = NULL WHERE {predicate}"),
+        [],
+    )?;
+    Ok(total)
+}
+
 fn create_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -1097,6 +1140,23 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         removed_tables.push("proxy_events".to_string());
     }
 
+    // #442: normalize pre-8.3 bare-folder-name `repo_id` values to NULL
+    // so `budi stats --projects` stops mixing real git remotes
+    // (`github.com/…`) with ad-hoc dirs (`Desktop`, `~`, `.cursor`,
+    // brew-tap checkouts). Idempotent — the predicate becomes empty on
+    // every subsequent run.
+    let scrubbed = backfill_non_repo_ids_to_null(conn)?;
+    if scrubbed > 0 {
+        tracing::info!(
+            rows = scrubbed,
+            "Normalized non-repo repo_id values to NULL (#442)"
+        );
+        // Rollups key on `repo_id`, so rebuild them whenever we mutate
+        // `messages.repo_id` in bulk. Cheaper than firing per-row
+        // UPDATE triggers across a large history.
+        backfill_rollup_tables(conn)?;
+    }
+
     let added_indexes = missing_reconcile_indexes(conn)?;
 
     create_indexes(conn)?;
@@ -1253,5 +1313,75 @@ mod tests {
             report.removed_tables
         );
         assert!(!table_exists(&conn, "proxy_events").unwrap());
+    }
+
+    /// #442: an existing v1 DB may carry bare-folder-name `repo_id`
+    /// values from pre-8.3 pipeline runs. `reconcile_schema` must rewrite
+    /// every non-URL value to NULL while leaving real remote URLs
+    /// untouched, and re-running must be a no-op.
+    #[test]
+    fn reconcile_scrubs_bare_folder_repo_ids_to_null() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // Seed the messages table with one real URL and several pre-8.3
+        // bare-folder-name rows drawn from the #442 repro table.
+        conn.execute_batch(
+            "INSERT INTO messages (id, role, timestamp, repo_id, cwd, provider)
+             VALUES
+                 ('m1', 'assistant', '2026-04-20T00:00:00Z', 'github.com/siropkin/budi', '/u/x/budi', 'claude_code'),
+                 ('m2', 'assistant', '2026-04-20T00:00:00Z', 'Desktop',                    '/u/x/Desktop', 'claude_code'),
+                 ('m3', 'assistant', '2026-04-20T00:00:00Z', 'ivan.seredkin',              '/u/x', 'claude_code'),
+                 ('m4', 'assistant', '2026-04-20T00:00:00Z', '.cursor',                    '/u/x/.cursor', 'claude_code'),
+                 ('m5', 'assistant', '2026-04-20T00:00:00Z', 'homebrew-budi',              '/u/x/h', 'claude_code'),
+                 ('m6', 'assistant', '2026-04-20T00:00:00Z', 'gitlab.com/acme/web',        '/u/x/web', 'claude_code');",
+        )
+        .unwrap();
+
+        let report = repair(&conn).unwrap();
+        assert_eq!(report.from_version, SCHEMA_VERSION);
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+
+        let real_url_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE repo_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            real_url_count, 2,
+            "only the two github/gitlab rows should keep their repo_id"
+        );
+
+        let nulled_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE repo_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            nulled_count, 4,
+            "Desktop / ivan.seredkin / .cursor / homebrew-budi must collapse to NULL"
+        );
+
+        // Second run: predicate is empty, so nothing changes.
+        let before: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT id, repo_id FROM messages ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let _ = repair(&conn).unwrap();
+        let after: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT id, repo_id FROM messages ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(before, after, "backfill must be idempotent");
     }
 }

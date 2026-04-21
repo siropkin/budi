@@ -299,7 +299,8 @@ budi db import --format json       # JSON output with per-agent file/message bre
 budi status                        # quick overview: daemon and today's cost
 budi stats                         # usage summary with cost breakdown
 budi stats --models                # model usage breakdown
-budi stats --projects              # repos ranked by cost
+budi stats --projects              # repos ranked by cost (non-repo work rolls up into (no repository))
+budi stats --projects --include-non-repo  # also show per-folder detail for non-repo work
 budi stats --branches              # branches ranked by cost
 budi stats --branch <name>         # cost for a specific branch
 budi stats --tickets               # tickets ranked by cost (sourced from ticket_id tag)

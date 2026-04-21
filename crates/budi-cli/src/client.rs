@@ -494,6 +494,32 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    /// Fetch per-cwd-basename breakdown of non-repo work for the
+    /// `--include-non-repo` view on `budi stats --projects` (#442).
+    pub fn non_repo(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RepoUsage>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = since {
+            params.push(("since", s.to_string()));
+        }
+        if let Some(u) = until {
+            params.push(("until", u.to_string()));
+        }
+        params.push(("limit", limit.to_string()));
+        let resp = self
+            .client
+            .get(format!("{}/analytics/non_repo", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     pub fn branches(
         &self,
         since: Option<&str>,
