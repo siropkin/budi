@@ -1,11 +1,176 @@
 use anyhow::{Context, Result};
-use budi_core::analytics::{self, BreakdownPage};
+use budi_core::analytics::{self, BreakdownPage, BreakdownRowCost};
 use chrono::{Local, Months, NaiveDate, TimeZone};
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
 
 use super::ansi;
+
+// ─── Shared Breakdown Rendering (#449) ───────────────────────────────────────
+//
+// Every `budi stats` breakdown view (`--projects / --branches / --tickets /
+// --activities / --files / --models / --tag`) ships through the same bar
+// renderer, header shape, and footer so the visual signal never drifts. The
+// contract, nailed down by #449:
+//
+//   1. Bar length is proportional to the row's cost (the column the bar sits
+//      next to), normalized against the max cost in the visible rows.
+//   2. Zero-cost rows render a blank bar slot, never a tiny sliver.
+//   3. Every view prints a header row so `src=`, `conf=`, dominant-branch,
+//      etc. have in-place labels.
+//   4. The bar column sits immediately before the cost column — the eye
+//      scans bar → cost without crossing any other field.
+
+/// Width of the bar column, in monospace cells, for every breakdown view.
+/// Chosen to stay readable at 80-column terminals while leaving room for
+/// the per-view extra columns.
+const BREAKDOWN_BAR_WIDTH: usize = 20;
+
+/// Cost column width for the right-aligned `$X` cell printed next to the bar.
+const BREAKDOWN_COST_WIDTH: usize = 10;
+
+/// Render a bar cell of exactly [`BREAKDOWN_BAR_WIDTH`] characters wide.
+///
+/// Returns a string of blocks + right-padding so adjacent columns always
+/// align. Zero-cost rows produce an all-spaces cell — the #449 "bar on $0
+/// row" regression class. Rows with non-zero cost always render at least
+/// one block so the reader can distinguish "tiny but real" from "exactly
+/// $0".
+fn render_bar(cost_cents: f64, max_cost: f64) -> String {
+    if cost_cents <= 0.0 || max_cost <= 0.0 {
+        return " ".repeat(BREAKDOWN_BAR_WIDTH);
+    }
+    let ratio = (cost_cents / max_cost).clamp(0.0, 1.0);
+    let raw_len = (ratio * BREAKDOWN_BAR_WIDTH as f64).round() as usize;
+    let bar_len = raw_len.clamp(1, BREAKDOWN_BAR_WIDTH);
+    let mut out = String::with_capacity(BREAKDOWN_BAR_WIDTH * 3);
+    for _ in 0..bar_len {
+        out.push('\u{2588}');
+    }
+    for _ in 0..(BREAKDOWN_BAR_WIDTH - bar_len) {
+        out.push(' ');
+    }
+    out
+}
+
+/// Max cost across the visible rows on a breakdown page, used to normalize
+/// the bar length. Zero when every row is $0 (in which case `render_bar`
+/// returns blank cells for every row).
+fn max_cost_for_rows<T: BreakdownRowCost>(rows: &[T]) -> f64 {
+    rows.iter()
+        .map(BreakdownRowCost::cost_cents)
+        .fold(0.0_f64, f64::max)
+}
+
+/// Truncate a display label to at most `max_chars` characters, prefixing
+/// the kept suffix with `…` when truncation happens. Operates on Unicode
+/// scalars (not bytes) to stay safe on multi-byte file paths / ticket
+/// ids — see #389 / #383 / #404 / #445 for the precedent bug class.
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = label.chars().count();
+    if char_count <= max_chars {
+        return label.to_string();
+    }
+    let tail_len = max_chars.saturating_sub(1);
+    let skip = char_count - tail_len;
+    let mut out = String::with_capacity(max_chars * 4);
+    out.push('…');
+    out.extend(label.chars().skip(skip));
+    out
+}
+
+/// Format the shared `LABEL   [bar gap]   COST   EXTRAS` header row that
+/// precedes every breakdown table. The bar column itself has no header —
+/// it's a scale cue, not a data column — but the `COST` title sits at the
+/// right edge of the bar+cost combined width so cost values line up
+/// under it.
+///
+/// Returns a plain-text (ANSI-free) string so tests can snapshot the
+/// layout deterministically. ANSI wrapping is applied by the caller at
+/// print time.
+fn format_breakdown_header_text(
+    label_header: &str,
+    label_width: usize,
+    extra_header: &str,
+) -> String {
+    // Bar + single space gap + right-aligned COST column width. The `+1`
+    // accounts for the blank column between the bar and the cost cell in
+    // the row formatter.
+    let cost_header_width = BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
+    if extra_header.is_empty() {
+        format!(
+            "  {:<label_w$} {:>cost_w$}",
+            label_header,
+            "COST",
+            label_w = label_width,
+            cost_w = cost_header_width,
+        )
+    } else {
+        format!(
+            "  {:<label_w$} {:>cost_w$}  {}",
+            label_header,
+            "COST",
+            extra_header,
+            label_w = label_width,
+            cost_w = cost_header_width,
+        )
+    }
+}
+
+/// Print the shared breakdown header to stdout, wrapped in the `dim`
+/// ANSI cue. See [`format_breakdown_header_text`] for the underlying
+/// layout.
+fn print_breakdown_header(label_header: &str, label_width: usize, extra_header: &str) {
+    let dim = ansi("\x1b[90m");
+    let reset = ansi("\x1b[0m");
+    let text = format_breakdown_header_text(label_header, label_width, extra_header);
+    println!("{dim}{}{reset}", text);
+}
+
+/// Format one breakdown row as plain text (no ANSI) in the canonical
+/// shared layout: `  LABEL  BAR  COST  EXTRAS`.
+///
+/// Kept alongside the production view code so snapshot tests can anchor
+/// the layout without simulating terminal ANSI state. Production views
+/// print the same layout with per-field colors applied; if they drift
+/// apart, the rendering helpers ([`render_bar`], [`BREAKDOWN_BAR_WIDTH`],
+/// [`BREAKDOWN_COST_WIDTH`]) are the single source of truth for widths
+/// and bar scaling.
+#[cfg(test)]
+fn format_breakdown_row_text(
+    label: &str,
+    label_width: usize,
+    cost_cents: f64,
+    max_cost: f64,
+    extra: &str,
+) -> String {
+    let bar = render_bar(cost_cents, max_cost);
+    let cost_cell = format_cost_cents(cost_cents);
+    if extra.is_empty() {
+        format!(
+            "  {:<label_w$} {} {:>cost_w$}",
+            label,
+            bar,
+            cost_cell,
+            label_w = label_width,
+            cost_w = BREAKDOWN_COST_WIDTH,
+        )
+    } else {
+        format!(
+            "  {:<label_w$} {} {:>cost_w$}  {}",
+            label,
+            bar,
+            cost_cell,
+            extra,
+            label_w = label_width,
+            cost_w = BREAKDOWN_COST_WIDTH,
+        )
+    }
+}
 
 pub fn period_label(period: StatsPeriod) -> String {
     match period {
@@ -408,7 +573,8 @@ fn cmd_stats_projects(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    let rule_width = 50usize;
+    const LABEL_WIDTH: usize = 28;
+    let rule_width = LABEL_WIDTH + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Repositories{reset} — {bold}{}{reset}",
@@ -422,24 +588,21 @@ fn cmd_stats_projects(
         return Ok(());
     }
 
-    let max_cost = page
-        .rows
-        .iter()
-        .map(|r| r.cost_cents)
-        .fold(0.0_f64, f64::max)
-        .max(0.01);
+    print_breakdown_header("REPOSITORY", LABEL_WIDTH, "");
+
+    let max_cost = max_cost_for_rows(&page.rows);
     for r in &page.rows {
-        let bar_len = ((r.cost_cents / max_cost) * 16.0) as usize;
-        let bar: String = "\u{2588}".repeat(bar_len);
+        let bar = render_bar(r.cost_cents, max_cost);
         println!(
-            "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {cyan}{}{reset}",
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
             r.repo_id,
+            bar,
             format_cost_cents(r.cost_cents),
-            bar
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, 28, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -466,7 +629,10 @@ fn cmd_stats_branches(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    let rule_width = 50usize;
+    const LABEL_WIDTH: usize = 28;
+    const REPO_WIDTH: usize = 16;
+    let rule_width =
+        LABEL_WIDTH + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH + 2 + REPO_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Branches{reset} — {bold}{}{reset}",
@@ -480,12 +646,9 @@ fn cmd_stats_branches(
         return Ok(());
     }
 
-    let max_cost = page
-        .rows
-        .iter()
-        .map(|b| b.cost_cents)
-        .fold(0.0_f64, f64::max)
-        .max(0.01);
+    print_breakdown_header("BRANCH", LABEL_WIDTH, &format!("{:<REPO_WIDTH$}", "REPO"));
+
+    let max_cost = max_cost_for_rows(&page.rows);
     for b in &page.rows {
         let branch_name = b
             .git_branch
@@ -500,18 +663,18 @@ fn cmd_stats_branches(
                 .unwrap_or(&b.repo_id)
                 .to_string()
         };
-        let bar_len = ((b.cost_cents / max_cost) * 16.0) as usize;
-        let bar: String = "\u{2588}".repeat(bar_len);
+        let bar = render_bar(b.cost_cents, max_cost);
         println!(
-            "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}  {cyan}{}{reset}",
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<REPO_WIDTH$}{reset}",
             branch_name,
+            bar,
             format_cost_cents(b.cost_cents),
             repo,
-            bar
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, 28, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -607,7 +770,18 @@ fn cmd_stats_tickets(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    let rule_width = 60usize;
+    const LABEL_WIDTH: usize = 24;
+    const SOURCE_WIDTH: usize = 18;
+    const BRANCH_WIDTH: usize = 24;
+    let rule_width = LABEL_WIDTH
+        + 1
+        + BREAKDOWN_BAR_WIDTH
+        + 1
+        + BREAKDOWN_COST_WIDTH
+        + 2
+        + SOURCE_WIDTH
+        + 2
+        + BRANCH_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Tickets{reset} — {bold}{}{reset}",
@@ -622,15 +796,18 @@ fn cmd_stats_tickets(
         return Ok(());
     }
 
-    let max_cost = page
-        .rows
-        .iter()
-        .map(|t| t.cost_cents)
-        .fold(0.0_f64, f64::max)
-        .max(0.01);
+    print_breakdown_header(
+        "TICKET",
+        LABEL_WIDTH,
+        &format!(
+            "{:<SOURCE_WIDTH$}  {:<BRANCH_WIDTH$}",
+            "SOURCE", "TOP_BRANCH"
+        ),
+    );
+
+    let max_cost = max_cost_for_rows(&page.rows);
     for t in &page.rows {
-        let bar_len = ((t.cost_cents / max_cost) * 16.0) as usize;
-        let bar: String = "\u{2588}".repeat(bar_len);
+        let bar = render_bar(t.cost_cents, max_cost);
         let branch_label = if t.top_branch.is_empty() {
             "--".to_string()
         } else {
@@ -639,19 +816,20 @@ fn cmd_stats_tickets(
         let source_label = if t.source.is_empty() {
             "--".to_string()
         } else {
-            t.source.clone()
+            format!("src={}", t.source)
         };
         println!(
-            "    {bold}{:<24}{reset} {yellow}{:>8}{reset}  {dim}src={:<15}{reset}  {dim}{:<24}{reset}  {cyan}{}{reset}",
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<BRANCH_WIDTH$}{reset}",
             t.ticket_id,
+            bar,
             format_cost_cents(t.cost_cents),
             source_label,
             branch_label,
-            bar
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, 24, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -779,7 +957,18 @@ fn cmd_stats_activities(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    let rule_width = 66usize;
+    const LABEL_WIDTH: usize = 18;
+    const CONF_WIDTH: usize = 11;
+    const BRANCH_WIDTH: usize = 22;
+    let rule_width = LABEL_WIDTH
+        + 1
+        + BREAKDOWN_BAR_WIDTH
+        + 1
+        + BREAKDOWN_COST_WIDTH
+        + 2
+        + CONF_WIDTH
+        + 2
+        + BRANCH_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Activities{reset} — {bold}{}{reset}",
@@ -796,15 +985,18 @@ fn cmd_stats_activities(
         return Ok(());
     }
 
-    let max_cost = page
-        .rows
-        .iter()
-        .map(|a| a.cost_cents)
-        .fold(0.0_f64, f64::max)
-        .max(0.01);
+    print_breakdown_header(
+        "ACTIVITY",
+        LABEL_WIDTH,
+        &format!(
+            "{:<CONF_WIDTH$}  {:<BRANCH_WIDTH$}",
+            "CONFIDENCE", "TOP_BRANCH"
+        ),
+    );
+
+    let max_cost = max_cost_for_rows(&page.rows);
     for a in &page.rows {
-        let bar_len = ((a.cost_cents / max_cost) * 16.0) as usize;
-        let bar: String = "\u{2588}".repeat(bar_len);
+        let bar = render_bar(a.cost_cents, max_cost);
         let branch_label = if a.top_branch.is_empty() {
             "--".to_string()
         } else {
@@ -813,19 +1005,20 @@ fn cmd_stats_activities(
         let confidence_label = if a.confidence.is_empty() {
             "--".to_string()
         } else {
-            a.confidence.clone()
+            format!("conf={}", a.confidence)
         };
         println!(
-            "    {bold}{:<18}{reset} {yellow}{:>8}{reset}  {dim}conf={:<6}{reset}  {dim}{:<22}{reset}  {cyan}{}{reset}",
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<CONF_WIDTH$}{reset}  {dim}{:<BRANCH_WIDTH$}{reset}",
             a.activity,
+            bar,
             format_cost_cents(a.cost_cents),
             confidence_label,
             branch_label,
-            bar
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, 18, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -986,7 +1179,18 @@ fn cmd_stats_files(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    let rule_width = 72usize;
+    const LABEL_WIDTH: usize = 40;
+    const SOURCE_WIDTH: usize = 16;
+    const TICKET_WIDTH: usize = 14;
+    let rule_width = LABEL_WIDTH
+        + 1
+        + BREAKDOWN_BAR_WIDTH
+        + 1
+        + BREAKDOWN_COST_WIDTH
+        + 2
+        + SOURCE_WIDTH
+        + 2
+        + TICKET_WIDTH;
     println!();
     println!("  {bold_cyan} Files{reset} — {bold}{}{reset}", period_label);
     println!("  {dim}{}{reset}", "─".repeat(rule_width));
@@ -1000,15 +1204,18 @@ fn cmd_stats_files(
         return Ok(());
     }
 
-    let max_cost = page
-        .rows
-        .iter()
-        .map(|f| f.cost_cents)
-        .fold(0.0_f64, f64::max)
-        .max(0.01);
+    print_breakdown_header(
+        "FILE",
+        LABEL_WIDTH,
+        &format!(
+            "{:<SOURCE_WIDTH$}  {:<TICKET_WIDTH$}",
+            "SOURCE", "TOP_TICKET"
+        ),
+    );
+
+    let max_cost = max_cost_for_rows(&page.rows);
     for f in &page.rows {
-        let bar_len = ((f.cost_cents / max_cost) * 16.0) as usize;
-        let bar: String = "\u{2588}".repeat(bar_len);
+        let bar = render_bar(f.cost_cents, max_cost);
         let ticket_label = if f.top_ticket_id.is_empty() {
             "--".to_string()
         } else {
@@ -1017,29 +1224,24 @@ fn cmd_stats_files(
         let source_label = if f.source.is_empty() {
             "--".to_string()
         } else {
-            f.source.clone()
+            format!("src={}", f.source)
         };
         // Truncate very long paths so the row stays readable in narrow
         // terminals. Full paths remain visible via `--file <PATH>` and
         // `--format json`.
-        let path_label = if f.file_path.chars().count() > 40 {
-            let tail: String = f.file_path.chars().rev().take(37).collect();
-            let tail: String = tail.chars().rev().collect();
-            format!("…{tail}")
-        } else {
-            f.file_path.clone()
-        };
+        let path_label = truncate_label(&f.file_path, LABEL_WIDTH);
         println!(
-            "    {bold}{:<40}{reset} {yellow}{:>8}{reset}  {dim}src={:<12}{reset}  {dim}{:<14}{reset}  {cyan}{}{reset}",
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<TICKET_WIDTH$}{reset}",
             path_label,
+            bar,
             format_cost_cents(f.cost_cents),
             source_label,
             ticket_label,
-            bar
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, 40, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -1176,9 +1378,21 @@ fn cmd_stats_models(
     let bold = ansi("\x1b[1m");
     let dim = ansi("\x1b[90m");
     let cyan = ansi("\x1b[36m");
+    let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    let rule_width = 50usize;
+    const LABEL_WIDTH: usize = 40;
+    const MSGS_WIDTH: usize = 10;
+    const TOK_WIDTH: usize = 10;
+    let rule_width = LABEL_WIDTH
+        + 1
+        + BREAKDOWN_BAR_WIDTH
+        + 1
+        + BREAKDOWN_COST_WIDTH
+        + 2
+        + MSGS_WIDTH
+        + 2
+        + TOK_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Model usage{reset} — {bold}{}{reset}",
@@ -1192,41 +1406,46 @@ fn cmd_stats_models(
         return Ok(());
     }
 
-    let yellow = ansi("\x1b[33m");
+    print_breakdown_header(
+        "MODEL",
+        LABEL_WIDTH,
+        &format!("{:>MSGS_WIDTH$}  {:>TOK_WIDTH$}", "MSGS", "TOKENS"),
+    );
 
     let has_duplicate_models = {
         let mut seen = std::collections::HashSet::new();
         page.rows.iter().any(|m| !seen.insert(&m.model))
     };
 
-    let max_msgs = page
-        .rows
-        .iter()
-        .map(|m| m.message_count)
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    // #449 fix: bars scale by cost (the column they sit next to), not by
+    // message count. A $66 row no longer renders with more blocks than a
+    // $548 row just because it crossed a provider-specific high-volume
+    // threshold.
+    let max_cost = max_cost_for_rows(&page.rows);
     for m in &page.rows {
-        let bar_len = ((m.message_count as f64 / max_msgs as f64) * 16.0) as usize;
-        let bar: String = "█".repeat(bar_len);
+        let bar = render_bar(m.cost_cents, max_cost);
         let total_tok =
             m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
-        let label = if has_duplicate_models {
+        let raw_label = if has_duplicate_models {
             format!("{} ({})", m.model, m.provider)
         } else {
             m.model.clone()
         };
+        let label = truncate_label(&raw_label, LABEL_WIDTH);
+        let msgs_cell = format!("{} msgs", m.message_count);
+        let tok_cell = format!("{} tok", format_tokens(total_tok));
         println!(
-            "    {bold}{:<40}{reset} {:>5} msgs  {:>8} tok  {yellow}{:>8}{reset}  {cyan}{}{reset}",
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:>MSGS_WIDTH$}{reset}  {dim}{:>TOK_WIDTH$}{reset}",
             label,
-            m.message_count,
-            format_tokens(total_tok),
+            bar,
             format_cost_cents(m.cost_cents),
-            bar
+            msgs_cell,
+            tok_cell,
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, 40, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -1380,46 +1599,38 @@ fn cmd_stats_tags(
     }
 
     let bold = ansi("\x1b[1m");
+    let bold_cyan = ansi("\x1b[1;36m");
+    let cyan = ansi("\x1b[36m");
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
     let dim = ansi("\x1b[90m");
 
-    let rule_width = 78usize;
+    const LABEL_WIDTH: usize = 40;
+    let rule_width = LABEL_WIDTH + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
+    println!();
     println!(
-        "\n{bold}  Tag: {} — {}{reset}\n",
+        "  {bold_cyan} Tag: {}{reset} — {bold}{}{reset}",
         tag_filter,
         period_label(period)
     );
-
-    println!("  {dim}{:<40} {:>38}{reset}", "VALUE", "COST");
     println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    // Find max cost for bar scaling
-    let max_cost = page
-        .rows
-        .iter()
-        .map(|t| t.cost_cents)
-        .fold(0.0f64, f64::max);
-    let bar_width: usize = 30;
+    print_breakdown_header("VALUE", LABEL_WIDTH, "");
 
+    let max_cost = max_cost_for_rows(&page.rows);
     for tag in &page.rows {
-        let bar_len = if max_cost > 0.0 {
-            ((tag.cost_cents / max_cost) * bar_width as f64) as usize
-        } else {
-            0
-        };
-        let bar = "█".repeat(bar_len);
-        let pad_bar = " ".repeat(bar_width.saturating_sub(bar_len));
+        let bar = render_bar(tag.cost_cents, max_cost);
+        let label = truncate_label(&tag.value, LABEL_WIDTH);
         println!(
-            "  {:<40} {yellow}{}{reset}{} {:>8}",
-            tag.value,
+            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
+            label,
             bar,
-            pad_bar,
             format_cost_cents(tag.cost_cents),
+            cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
-    render_breakdown_footer(&page, 40, rule_width);
+    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
     Ok(())
 }
 
@@ -1581,5 +1792,408 @@ mod tests {
             delta_days >= 360,
             "Months(12) should span at least 360 days (got {delta_days})"
         );
+    }
+
+    // ─── #449 breakdown bar / layout tests ────────────────────────────
+
+    #[test]
+    fn render_bar_is_blank_for_zero_cost_rows() {
+        // The #449 "bar on $0 row" regression: a `$0.00` row would
+        // render with visible blocks because the old code ran the ratio
+        // multiplier without a zero guard and relied on a 0.01 floor
+        // on `max_cost`.
+        let blank = render_bar(0.0, 1_000.0);
+        assert_eq!(blank.chars().count(), BREAKDOWN_BAR_WIDTH);
+        assert!(
+            blank.chars().all(|c| c == ' '),
+            "zero-cost row must render an all-spaces bar cell, got {:?}",
+            blank
+        );
+
+        // Negative cost (should not happen in practice but is the same
+        // "no bar" case; guards against sign bugs).
+        let neg = render_bar(-1.0, 100.0);
+        assert!(neg.chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn render_bar_is_blank_when_every_row_is_zero() {
+        // All-$0 window: `max_cost_for_rows` returns 0.0 and the bar
+        // renderer must not divide-by-zero or paint phantom blocks.
+        let blank = render_bar(0.0, 0.0);
+        assert_eq!(blank.chars().count(), BREAKDOWN_BAR_WIDTH);
+        assert!(blank.chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn render_bar_is_proportional_to_cost_not_message_count() {
+        // #449 primary complaint: bars in `--models` scaled by
+        // `message_count`, so a $66 / 5814-msg row out-drew a $548 / 381-msg
+        // row. The shared renderer scales by the caller's `max_cost`
+        // value — message count is no longer in the input.
+        let max = 1_000.0_f64;
+
+        // A row at 100% of max fills the bar.
+        let full = render_bar(1_000.0, max);
+        let full_blocks = full.chars().filter(|c| *c == '\u{2588}').count();
+        assert_eq!(full_blocks, BREAKDOWN_BAR_WIDTH);
+
+        // A row at 50% fills half.
+        let half = render_bar(500.0, max);
+        let half_blocks = half.chars().filter(|c| *c == '\u{2588}').count();
+        assert_eq!(half_blocks, BREAKDOWN_BAR_WIDTH / 2);
+
+        // A row at 0.4% still renders at least one block so the reader
+        // can distinguish it from a $0 row.
+        let tiny = render_bar(4.0, max);
+        let tiny_blocks = tiny.chars().filter(|c| *c == '\u{2588}').count();
+        assert!((1..BREAKDOWN_BAR_WIDTH).contains(&tiny_blocks));
+    }
+
+    #[test]
+    fn render_bar_always_pads_to_fixed_width() {
+        // Width invariant: every bar string is exactly
+        // `BREAKDOWN_BAR_WIDTH` cells (blocks + spaces) so adjacent
+        // columns line up regardless of the row's cost.
+        for pct in [0, 1, 25, 50, 75, 100, 150] {
+            let cost = pct as f64 * 10.0;
+            let bar = render_bar(cost, 1_000.0);
+            assert_eq!(
+                bar.chars().count(),
+                BREAKDOWN_BAR_WIDTH,
+                "bar at {pct}% of max must be exactly {BREAKDOWN_BAR_WIDTH} cells"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_label_is_utf8_boundary_safe() {
+        // #389 / #383 / #404 / #445 precedent: byte-indexed truncation
+        // on user strings panics on multi-byte codepoints. The label
+        // truncator operates on Unicode scalars so tickets / file paths
+        // carrying non-ASCII characters never crash.
+        assert_eq!(truncate_label("short", 40), "short");
+        assert_eq!(truncate_label("", 40), "");
+
+        let long_ascii = "a".repeat(60);
+        let truncated = truncate_label(&long_ascii, 20);
+        assert_eq!(truncated.chars().count(), 20);
+        assert!(truncated.starts_with('…'));
+
+        // Multi-byte: an emoji is 4 bytes but 1 char. The truncator
+        // must count chars, not bytes, so we never split mid-codepoint.
+        let emoji_path = "src/🚀/main.rs".repeat(5);
+        let truncated = truncate_label(&emoji_path, 12);
+        assert_eq!(truncated.chars().count(), 12);
+        assert!(truncated.starts_with('…'));
+    }
+
+    #[test]
+    fn max_cost_for_rows_handles_empty_and_all_zero() {
+        // Empty page: no division-by-zero hazard.
+        let empty: Vec<budi_core::analytics::RepoUsage> = vec![];
+        assert_eq!(max_cost_for_rows(&empty), 0.0);
+
+        // All-$0 page (a real case in `--files today` when no tool-arg
+        // attribution landed). `render_bar` takes this 0.0 and paints
+        // blank cells, which is what the reader expects.
+        let all_zero = vec![
+            budi_core::analytics::RepoUsage {
+                repo_id: "a".into(),
+                display_path: "a".into(),
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_cents: 0.0,
+            },
+            budi_core::analytics::RepoUsage {
+                repo_id: "b".into(),
+                display_path: "b".into(),
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_cents: 0.0,
+            },
+        ];
+        assert_eq!(max_cost_for_rows(&all_zero), 0.0);
+
+        // Sanity: the max is taken from `cost_cents`, not any other
+        // field. Keeps `--models` from regressing to message-count
+        // scaling (#449).
+        let mixed = vec![
+            budi_core::analytics::RepoUsage {
+                repo_id: "big-msgs-cheap".into(),
+                display_path: "".into(),
+                message_count: 100_000,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_cents: 10.0,
+            },
+            budi_core::analytics::RepoUsage {
+                repo_id: "few-msgs-dear".into(),
+                display_path: "".into(),
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_cents: 500.0,
+            },
+        ];
+        assert_eq!(max_cost_for_rows(&mixed), 500.0);
+    }
+
+    #[test]
+    fn breakdown_header_has_cost_column_in_canonical_position() {
+        // #449 acceptance: every breakdown shows a header row, and the
+        // `COST` label sits at the right edge of the bar+cost combined
+        // width so rendered cost values align under it.
+        let header = format_breakdown_header_text("TICKET", 24, "");
+        assert!(
+            header.starts_with("  TICKET"),
+            "header must start with indented label title, got {:?}",
+            header
+        );
+        assert!(
+            header.trim_end().ends_with("COST"),
+            "header must end with the COST title, got {:?}",
+            header
+        );
+
+        // With extras, the extra headers follow COST separated by two
+        // spaces (same gap the row formatter uses).
+        let with_extras =
+            format_breakdown_header_text("ACTIVITY", 18, "CONFIDENCE   TOP_BRANCH             ");
+        assert!(with_extras.contains("COST  CONFIDENCE"));
+    }
+
+    #[test]
+    fn breakdown_row_layout_matches_tag_view_template() {
+        // #449 acceptance: all views line up as `LABEL  BAR  COST  EXTRAS`.
+        // Baseline: the `--tag` shape (the layout the ticket picks as
+        // canonical) produces exactly this string for a half-cost row.
+        let line = format_breakdown_row_text("activity/coding", 40, 500.0, 1_000.0, "");
+        let expected = format!(
+            "  {:<40} {} {:>10}",
+            "activity/coding",
+            render_bar(500.0, 1_000.0),
+            format_cost_cents(500.0),
+        );
+        assert_eq!(line, expected);
+    }
+
+    /// Helper: canonical right-edge column that every view's `COST`
+    /// title must line up against, given the shared bar + cost widths.
+    fn cost_right_edge(label_width: usize) -> usize {
+        // Matches `format_breakdown_header_text` / `format_breakdown_row_text`:
+        // "  " + label + " " + (bar + " " + cost right-aligned).
+        2 + label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH
+    }
+
+    /// Helper: char-based position of `needle` inside `haystack`. Plain
+    /// `str::find` returns byte offsets, which over-counts every bar
+    /// block (3 bytes per `█`) — we want character columns here so the
+    /// layout assertions line up with visual widths.
+    fn char_pos_of(haystack: &str, needle: &str) -> Option<usize> {
+        let byte_pos = haystack.find(needle)?;
+        Some(haystack[..byte_pos].chars().count())
+    }
+
+    #[test]
+    fn breakdown_row_snapshot_models_view() {
+        // Snapshot baseline for `budi stats --models` row layout
+        // (#449 acceptance). One row at the top of the scale, one
+        // tiny but non-zero row, one $0 row — the three cases the
+        // ticket's Reproduction section calls out as bug triggers.
+        let label_w = 40usize;
+        let extras_header = format!("{:>10}  {:>10}", "MSGS", "TOKENS");
+        let header = format_breakdown_header_text("MODEL", label_w, &extras_header);
+
+        let heavy_extras = format!("{:>10}  {:>10}", "24114 msgs", "120M tok");
+        let heavy = format_breakdown_row_text(
+            "claude-opus-4-6 (claude_code)",
+            label_w,
+            210_000.0,
+            210_000.0,
+            &heavy_extras,
+        );
+        let tiny = format_breakdown_row_text(
+            "claude-haiku-4-5 (claude_code)",
+            label_w,
+            65.74,
+            210_000.0,
+            &format!("{:>10}  {:>10}", "5814 msgs", "30M tok"),
+        );
+        let pending = format_breakdown_row_text(
+            "(untagged)",
+            label_w,
+            0.0,
+            210_000.0,
+            &format!("{:>10}  {:>10}", "162 msgs", "0 tok"),
+        );
+
+        // Header `COST` title right-aligns to the canonical edge so it
+        // sits above every row's cost cell.
+        let cost_title_right = header.find("COST").unwrap() + "COST".len();
+        assert_eq!(
+            cost_title_right,
+            cost_right_edge(label_w),
+            "MODEL view: COST title must align to the shared cost-cell right edge\nheader: {header:?}"
+        );
+
+        // Extras header and row extras share the same right edge.
+        assert!(header.trim_end().ends_with("TOKENS"));
+        assert!(heavy.trim_end().ends_with("tok"));
+
+        // The heavy row renders a full bar; the tiny row renders a
+        // visible but non-full bar; the `(untagged)` $0 row renders
+        // a blank bar. This is the #449 bug's 1:1 repro checked.
+        let heavy_blocks = heavy.chars().filter(|c| *c == '\u{2588}').count();
+        let tiny_blocks = tiny.chars().filter(|c| *c == '\u{2588}').count();
+        let pending_blocks = pending.chars().filter(|c| *c == '\u{2588}').count();
+        assert_eq!(heavy_blocks, BREAKDOWN_BAR_WIDTH);
+        assert!((1..BREAKDOWN_BAR_WIDTH).contains(&tiny_blocks));
+        assert_eq!(pending_blocks, 0);
+    }
+
+    #[test]
+    fn breakdown_row_snapshot_tickets_view() {
+        // Golden snapshot for `budi stats --tickets` — pinned so the
+        // bar/cost order cannot silently flip back to the pre-#449
+        // layout (cost-before-bar).
+        let label_w = 24usize;
+        let extras = format!("{:<18}  {:<24}", "SOURCE", "TOP_BRANCH");
+        let header = format_breakdown_header_text("TICKET", label_w, &extras);
+
+        assert!(header.starts_with("  TICKET"));
+        let cost_title_right = header.find("COST").unwrap() + "COST".len();
+        assert_eq!(
+            cost_title_right,
+            cost_right_edge(label_w),
+            "TICKET view: COST title must align to the shared cost-cell right edge"
+        );
+        assert!(header.contains("SOURCE"));
+        assert!(header.contains("TOP_BRANCH"));
+
+        // Canonical row: label, full bar (row cost == max), cost cell,
+        // then extras. The dollar character marks the right edge of the
+        // cost cell.
+        let row_extras = format!("{:<18}  {:<24}", "src=branch", "04-20-pava-1669");
+        let row = format_breakdown_row_text("PAVA-1669", label_w, 2_265.0, 2_265.0, &row_extras);
+        assert!(row.starts_with("  PAVA-1669"));
+        assert!(
+            row.chars().filter(|c| *c == '\u{2588}').count() == BREAKDOWN_BAR_WIDTH,
+            "max-cost row must render a full bar"
+        );
+        // Cost cell sits at the canonical right edge (the first block
+        // in the extras section starts exactly 2 chars past that).
+        let cost_cell = format_cost_cents(2_265.0);
+        let cost_cell_right = char_pos_of(&row, &cost_cell).unwrap() + cost_cell.chars().count();
+        assert_eq!(
+            cost_cell_right,
+            cost_right_edge(label_w),
+            "row cost cell must end at the same column as the header COST title"
+        );
+        // Extras follow with the 2-space gap baked into the shared row
+        // formatter.
+        assert!(row.contains("src=branch"));
+        assert!(row.contains("04-20-pava-1669"));
+
+        // `(untagged)` row with a real dollar cost equal to max:
+        // bar present, full width. Prior to #449 this row rendered
+        // with no bar at all because message_count didn't correlate
+        // with cost.
+        let untagged = format_breakdown_row_text(
+            "(untagged)",
+            label_w,
+            9_122.0,
+            9_122.0,
+            &format!("{:<18}  {:<24}", "src=--", "--"),
+        );
+        assert!(untagged.contains("(untagged)"));
+        assert_eq!(
+            untagged.chars().filter(|c| *c == '\u{2588}').count(),
+            BREAKDOWN_BAR_WIDTH,
+            "the dominant row (same as max_cost) must render a full bar"
+        );
+    }
+
+    #[test]
+    fn breakdown_row_snapshot_activities_view() {
+        // Golden snapshot for `budi stats --activities`. Preserves the
+        // `conf=…` in-row legend (addressed more fully by #450) while
+        // pinning the #449 layout contract.
+        let label_w = 18usize;
+        let extras = format!("{:<11}  {:<22}", "CONFIDENCE", "TOP_BRANCH");
+        let header = format_breakdown_header_text("ACTIVITY", label_w, &extras);
+
+        let cost_title_right = header.find("COST").unwrap() + "COST".len();
+        assert_eq!(
+            cost_title_right,
+            cost_right_edge(label_w),
+            "ACTIVITY view: COST title must align to the shared cost-cell right edge"
+        );
+        assert!(header.contains("CONFIDENCE"));
+        assert!(header.contains("TOP_BRANCH"));
+
+        let row = format_breakdown_row_text(
+            "coding",
+            label_w,
+            1_234.56,
+            1_234.56,
+            &format!("{:<11}  {:<22}", "conf=medium", "main"),
+        );
+        assert!(row.starts_with("  coding"));
+        assert!(row.contains("conf=medium"));
+        // Row is the max-cost row → full bar.
+        assert_eq!(
+            row.chars().filter(|c| *c == '\u{2588}').count(),
+            BREAKDOWN_BAR_WIDTH,
+        );
+
+        // $0 activity row renders a blank bar.
+        let zero = format_breakdown_row_text(
+            "classifier_pending",
+            label_w,
+            0.0,
+            1_234.56,
+            &format!("{:<11}  {:<22}", "conf=--", "--"),
+        );
+        assert_eq!(zero.chars().filter(|c| *c == '\u{2588}').count(), 0);
+    }
+
+    #[test]
+    fn breakdown_row_snapshot_tag_view() {
+        // Golden snapshot for `budi stats --tag <key>` — the layout
+        // every other breakdown now mirrors. Kept as the canonical
+        // shape so a future refactor that regresses one view will
+        // fail a targeted test.
+        let label_w = 40usize;
+        let header = format_breakdown_header_text("VALUE", label_w, "");
+        assert!(header.starts_with("  VALUE"));
+        let cost_title_right = header.find("COST").unwrap() + "COST".len();
+        assert_eq!(
+            cost_title_right,
+            cost_right_edge(label_w),
+            "TAG view: COST title must align to the shared cost-cell right edge"
+        );
+
+        // Half-cost row: bar fills exactly half, cost cell lines up
+        // under the COST header.
+        let row = format_breakdown_row_text("feature-work", label_w, 500.0, 1_000.0, "");
+        assert!(row.starts_with("  feature-work"));
+        let half_blocks = row.chars().filter(|c| *c == '\u{2588}').count();
+        assert_eq!(
+            half_blocks,
+            BREAKDOWN_BAR_WIDTH / 2,
+            "50% cost row must render half a bar"
+        );
+        let cost_cell = format_cost_cents(500.0);
+        let cost_cell_right = char_pos_of(&row, &cost_cell).unwrap() + cost_cell.chars().count();
+        assert_eq!(cost_cell_right, cost_right_edge(label_w));
+
+        // Long tag values truncate with `…` prefix, not byte-index
+        // panic (#389 / #383 / #404 / #445 UTF-8 class).
+        let long = truncate_label("verylongtagvaluethatwillwraparound_123456789_abcdef", 40);
+        assert_eq!(long.chars().count(), 40);
+        assert!(long.starts_with('…'));
     }
 }
