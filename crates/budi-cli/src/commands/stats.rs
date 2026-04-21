@@ -371,182 +371,240 @@ pub fn cmd_stats(
         return Ok(());
     }
 
-    // When no provider filter and multiple agents detected, show breakdown
-    if provider.is_none() {
-        let (since, until) = period_date_range(period);
-        let providers = client.providers(since.as_deref(), until.as_deref())?;
-        if providers.len() > 1 {
-            cmd_stats_multi_agent(&client, period, &providers)?;
-            return Ok(());
+    // #451: every period renders the same set of summary blocks
+    // (header, Agents, Total, Tokens, Est. cost, cost-component
+    // sub-line, cache savings, optional Cursor-lag footnote). The
+    // pre-#451 dispatcher branched on `providers.len() > 1`, which
+    // dropped the Agents block whenever a window happened to surface
+    // a single provider — making `today` look thinner than `1d` /
+    // `7d` / `month` for the same data.
+    cmd_stats_summary(&client, period, provider.as_deref())
+}
+
+/// Color palette for the summary view. Production builds use `ansi()`
+/// codes; tests use the `plain()` palette so snapshot strings don't
+/// depend on terminal state.
+struct SummaryPalette {
+    bold_cyan: &'static str,
+    bold: &'static str,
+    dim: &'static str,
+    cyan: &'static str,
+    yellow: &'static str,
+    green: &'static str,
+    reset: &'static str,
+}
+
+impl SummaryPalette {
+    /// Honour `NO_COLOR` and TTY detection (via `ansi()`).
+    fn from_env() -> Self {
+        Self {
+            bold_cyan: ansi("\x1b[1;36m"),
+            bold: ansi("\x1b[1m"),
+            dim: ansi("\x1b[90m"),
+            cyan: ansi("\x1b[36m"),
+            yellow: ansi("\x1b[33m"),
+            green: ansi("\x1b[32m"),
+            reset: ansi("\x1b[0m"),
         }
     }
 
-    cmd_stats_summary_filtered(&client, period, provider.as_deref())
+    /// All-empty palette so test snapshots are pure ASCII.
+    #[cfg(test)]
+    const fn plain() -> Self {
+        Self {
+            bold_cyan: "",
+            bold: "",
+            dim: "",
+            cyan: "",
+            yellow: "",
+            green: "",
+            reset: "",
+        }
+    }
 }
 
-fn cmd_stats_summary_filtered(
+/// Render the summary view to a String. Pure function — fetched data
+/// goes in, formatted text comes out. The shape is fixed regardless of
+/// period (#451): header → Agents → Total → Tokens → Est. cost →
+/// cost-component sub-line → cache savings → optional Cursor-lag
+/// footnote.
+fn format_summary(
+    period: StatsPeriod,
+    provider: Option<&str>,
+    summary: &budi_core::analytics::UsageSummary,
+    est: &budi_core::cost::CostEstimate,
+    providers: &[analytics::ProviderStats],
+    palette: &SummaryPalette,
+) -> String {
+    use std::fmt::Write as _;
+
+    let SummaryPalette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        green,
+        reset,
+    } = *palette;
+
+    let mut out = String::new();
+    let period_label = period_label(period);
+    let provider_label = provider.unwrap_or("all");
+
+    let displayed_providers: Vec<&analytics::ProviderStats> = providers
+        .iter()
+        .filter(|p| provider.is_none_or(|sel| p.provider == sel))
+        .collect();
+
+    writeln!(out).unwrap();
+    if provider.is_some() {
+        writeln!(
+            out,
+            "  {bold_cyan} budi stats{reset} — {bold}{period_label}{reset} {dim}({provider_label}){reset}",
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "  {bold_cyan} budi stats{reset} — {bold}{period_label}{reset}",
+        )
+        .unwrap();
+    }
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(40)).unwrap();
+
+    if summary.total_messages == 0 {
+        writeln!(out, "  No data for this period.").unwrap();
+        writeln!(out).unwrap();
+        return out;
+    }
+
+    // Agents block — unconditional shape (#451). Even with one
+    // provider in the window we render the row so the summary doesn't
+    // change shape between Today (often 1 provider) and 1d / 7d / 30d
+    // (often multi-provider).
+    writeln!(out, "  {bold}Agents{reset}").unwrap();
+    if displayed_providers.is_empty() {
+        // Reachable when `--provider P` filters out every provider in
+        // the window, or when the daemon hasn't recorded a per-agent
+        // breakdown yet. We still print the block so the shape is
+        // identical to the populated case.
+        writeln!(
+            out,
+            "    {dim}(no provider data — run `budi vitals` to inspect tail offsets){reset}",
+        )
+        .unwrap();
+    } else {
+        for ps in &displayed_providers {
+            let total_tokens = ps.input_tokens
+                + ps.output_tokens
+                + ps.cache_creation_tokens
+                + ps.cache_read_tokens;
+            let cost = if ps.total_cost_cents > 0.0 {
+                ps.total_cost_cents / 100.0
+            } else {
+                ps.estimated_cost
+            };
+            writeln!(
+                out,
+                "    {cyan}{:<14}{reset} {:>5} msgs  {}  {yellow}{}{reset}",
+                ps.display_name,
+                ps.message_count,
+                format_tokens(total_tokens),
+                format_cost(cost),
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "  {bold}Total{reset}        {} messages {dim}({} user, {} assistant){reset}",
+        summary.total_messages, summary.total_user_messages, summary.total_assistant_messages,
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  {bold}Tokens{reset}       {} in, {} out",
+        format_tokens(summary.total_input_tokens),
+        format_tokens(summary.total_output_tokens),
+    )
+    .unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "  {bold}Est. cost{reset}    {yellow}{}{reset}",
+        format_cost(est.total_cost)
+    )
+    .unwrap();
+    // Cost-component sub-line — unconditional (#451). Reads $0.00 in
+    // each cell when the window has no spend, so the shape stays
+    // identical to a populated summary.
+    writeln!(
+        out,
+        "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
+        format_cost(est.input_cost),
+        format_cost(est.output_cost),
+        format_cost(est.cache_write_cost),
+        format_cost(est.cache_read_cost),
+    )
+    .unwrap();
+    // Cache-savings line — unconditional (#451). $0.00 when no cache
+    // hits accumulated; skipping it in 8.2 made `today` look
+    // structurally different from `1d` whenever cache savings happened
+    // to be zero.
+    writeln!(
+        out,
+        "  {green}  cache savings {}{reset}",
+        format_cost(est.cache_savings)
+    )
+    .unwrap();
+
+    // Cursor-lag footnote — printed whenever Cursor is one of the
+    // displayed agents in the window. The pre-#451 summary-filtered
+    // path only printed it when the user explicitly passed
+    // `--provider cursor`, so the multi-agent view (which already
+    // showed a Cursor row) silently dropped the caveat that row
+    // needs.
+    if displayed_providers.iter().any(|p| p.provider == "cursor") {
+        writeln!(
+            out,
+            "  {dim}* {}{reset}",
+            budi_core::analytics::CURSOR_LAG_HINT
+        )
+        .unwrap();
+    }
+
+    writeln!(out).unwrap();
+    out
+}
+
+/// Unified `budi stats` summary renderer (#451).
+///
+/// Every period — `today`, `week`, `month`, `1d`, `7d`, `30d` — emits the
+/// same shape via [`format_summary`]. The pre-#451 renderer split into
+/// `cmd_stats_summary_filtered` (no Agents block) and `cmd_stats_multi_agent`
+/// (Agents block, gated on `providers.len() > 1`), which made the most-used
+/// view (`today`) the thinnest one whenever the window happened to surface
+/// a single provider.
+fn cmd_stats_summary(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
     let summary = client.summary(since.as_deref(), until.as_deref(), provider)?;
-
-    let period_label = period_label(period);
-    let provider_label = provider.unwrap_or("all");
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let yellow = ansi("\x1b[33m");
-    let green = ansi("\x1b[32m");
-    let reset = ansi("\x1b[0m");
-
-    println!();
-    if provider.is_some() {
-        println!(
-            "  {bold_cyan} budi stats{reset} — {bold}{}{reset} {dim}({}){reset}",
-            period_label, provider_label
-        );
-    } else {
-        println!(
-            "  {bold_cyan} budi stats{reset} — {bold}{}{reset}",
-            period_label
-        );
-    }
-    println!("  {dim}{}{reset}", "─".repeat(40));
-
-    if summary.total_messages == 0 {
-        println!("  No data for this period.");
-        println!();
-        return Ok(());
-    }
-
-    println!(
-        "  {bold}Messages{reset}     {} {dim}({} user, {} assistant){reset}",
-        summary.total_messages, summary.total_user_messages, summary.total_assistant_messages
-    );
-    println!();
-
-    println!(
-        "  {bold}Input tokens{reset}  {}",
-        format_tokens(summary.total_input_tokens)
-    );
-    println!(
-        "  {bold}Output tokens{reset} {}",
-        format_tokens(summary.total_output_tokens)
-    );
-
-    // Cost breakdown
     let est = client.cost(since.as_deref(), until.as_deref(), provider)?;
-    println!();
-    println!(
-        "  {bold}Est. cost{reset}     {yellow}{}{reset}",
-        format_cost(est.total_cost)
-    );
-    println!(
-        "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
-        format_cost(est.input_cost),
-        format_cost(est.output_cost),
-        format_cost(est.cache_write_cost),
-        format_cost(est.cache_read_cost)
-    );
-    if est.cache_savings > 0.0 {
-        println!(
-            "  {green}  cache savings {}{reset}",
-            format_cost(est.cache_savings)
-        );
-    }
+    // The Agents block, the Cursor-lag footnote, and the per-provider
+    // tokens/cost breakdown all need this list. Fetched once per
+    // invocation so the text and JSON paths agree on the snapshot.
+    let providers = client.providers(since.as_deref(), until.as_deref())?;
 
-    if provider == Some("cursor") {
-        println!("  {dim}* {}{reset}", budi_core::analytics::CURSOR_LAG_HINT);
-    }
-
-    println!();
-    Ok(())
-}
-
-fn cmd_stats_multi_agent(
-    client: &DaemonClient,
-    period: StatsPeriod,
-    providers: &[analytics::ProviderStats],
-) -> Result<()> {
-    let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let green = ansi("\x1b[32m");
-    let reset = ansi("\x1b[0m");
-
-    println!();
-    println!(
-        "  {bold_cyan} budi stats{reset} — {bold}{}{reset}",
-        period_label
-    );
-    println!("  {dim}{}{reset}", "─".repeat(40));
-
-    // Per-agent breakdown
-    println!("  {bold}Agents{reset}");
-    for ps in providers {
-        let total_tokens =
-            ps.input_tokens + ps.output_tokens + ps.cache_creation_tokens + ps.cache_read_tokens;
-        let cost = if ps.total_cost_cents > 0.0 {
-            ps.total_cost_cents / 100.0
-        } else {
-            ps.estimated_cost
-        };
-        println!(
-            "    {cyan}{:<14}{reset} {:>5} msgs  {}  {yellow}{}{reset}",
-            ps.display_name,
-            ps.message_count,
-            format_tokens(total_tokens),
-            format_cost(cost),
-        );
-    }
-    println!();
-
-    let (since, until) = period_date_range(period);
-    let summary = client.summary(since.as_deref(), until.as_deref(), None)?;
-
-    println!(
-        "  {bold}Total{reset}        {} messages",
-        summary.total_messages
-    );
-
-    println!(
-        "  {bold}Tokens{reset}       {} in, {} out",
-        format_tokens(summary.total_input_tokens),
-        format_tokens(summary.total_output_tokens),
-    );
-
-    let est = client.cost(since.as_deref(), until.as_deref(), None)?;
-    println!();
-    println!(
-        "  {bold}Est. cost{reset}    {yellow}{}{reset}",
-        format_cost(est.total_cost)
-    );
-    println!(
-        "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
-        format_cost(est.input_cost),
-        format_cost(est.output_cost),
-        format_cost(est.cache_write_cost),
-        format_cost(est.cache_read_cost)
-    );
-    if est.cache_savings > 0.0 {
-        println!(
-            "  {green}  cache savings {}{reset}",
-            format_cost(est.cache_savings)
-        );
-    }
-
-    if providers.iter().any(|p| p.provider == "cursor") {
-        println!("  {dim}* {}{reset}", budi_core::analytics::CURSOR_LAG_HINT);
-    }
-
-    println!();
+    let palette = SummaryPalette::from_env();
+    let rendered = format_summary(period, provider, &summary, &est, &providers, &palette);
+    print!("{rendered}");
     Ok(())
 }
 
@@ -2195,5 +2253,328 @@ mod tests {
         let long = truncate_label("verylongtagvaluethatwillwraparound_123456789_abcdef", 40);
         assert_eq!(long.chars().count(), 40);
         assert!(long.starts_with('…'));
+    }
+
+    // ─── #451 summary-shape tests ────────────────────────────────────
+
+    /// Build a representative `UsageSummary` for the summary-shape
+    /// tests. Numbers are arbitrary but non-zero so the formatter
+    /// exercises every code path.
+    fn fixture_summary() -> budi_core::analytics::UsageSummary {
+        budi_core::analytics::UsageSummary {
+            total_messages: 262,
+            total_user_messages: 16,
+            total_assistant_messages: 246,
+            total_input_tokens: 1_300_000,
+            total_output_tokens: 874_100,
+            total_cache_creation_tokens: 50_000,
+            total_cache_read_tokens: 200_000,
+            total_cost_cents: 11_400.0,
+        }
+    }
+
+    fn fixture_cost(cache_savings: f64) -> budi_core::cost::CostEstimate {
+        budi_core::cost::CostEstimate {
+            total_cost: 114.0,
+            input_cost: 4.49,
+            output_cost: 20.82,
+            cache_write_cost: 27.48,
+            cache_read_cost: 65.94,
+            cache_savings,
+        }
+    }
+
+    fn fixture_provider(
+        provider: &str,
+        display: &str,
+        msgs: u64,
+        cents: f64,
+    ) -> analytics::ProviderStats {
+        analytics::ProviderStats {
+            provider: provider.into(),
+            display_name: display.into(),
+            message_count: msgs,
+            input_tokens: 100_000,
+            output_tokens: 50_000,
+            cache_creation_tokens: 10_000,
+            cache_read_tokens: 20_000,
+            estimated_cost: cents / 100.0,
+            total_cost_cents: cents,
+        }
+    }
+
+    /// All blocks that #451 requires to be present in every summary,
+    /// regardless of period or provider count.
+    fn assert_summary_has_required_blocks(rendered: &str, expect_cursor_footnote: bool) {
+        assert!(
+            rendered.contains("budi stats"),
+            "missing header line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Agents"),
+            "missing Agents block (#451):\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Total"),
+            "missing Total line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Tokens"),
+            "missing Tokens line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Est. cost"),
+            "missing Est. cost line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("input ") && rendered.contains("output "),
+            "missing cost-component sub-line (#451):\n{rendered}"
+        );
+        assert!(
+            rendered.contains("cache write") && rendered.contains("cache read"),
+            "missing cost-component sub-line cache cells (#451):\n{rendered}"
+        );
+        assert!(
+            rendered.contains("cache savings"),
+            "missing cache-savings line (#451 — must be unconditional):\n{rendered}"
+        );
+        if expect_cursor_footnote {
+            assert!(
+                rendered.contains("Cursor cost data may lag"),
+                "missing Cursor-lag footnote when Cursor is in providers (#451):\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_shape_is_identical_across_all_six_periods() {
+        // #451 acceptance: `today / week / month / 1d / 7d / 30d` all
+        // produce the same set of blocks (header, Agents, Total,
+        // Tokens, Est. cost, cost-component sub-line, cache savings,
+        // optional Cursor-lag footnote). Pre-#451, today and week
+        // dropped the Agents block whenever the window happened to
+        // surface a single provider.
+        let summary = fixture_summary();
+        let est = fixture_cost(593.0);
+        let providers = vec![
+            fixture_provider("codex", "Codex", 566, 13_700.0),
+            fixture_provider("cursor", "Cursor", 280, 16_300.0),
+            fixture_provider("claude_code", "Claude Code", 3, 72.0),
+        ];
+        let palette = SummaryPalette::plain();
+
+        for period in [
+            StatsPeriod::Today,
+            StatsPeriod::Week,
+            StatsPeriod::Month,
+            StatsPeriod::Days(1),
+            StatsPeriod::Days(7),
+            StatsPeriod::Days(30),
+        ] {
+            let rendered = format_summary(period, None, &summary, &est, &providers, &palette);
+            assert_summary_has_required_blocks(&rendered, true);
+            // Each provider row must show up.
+            for ps in &providers {
+                assert!(
+                    rendered.contains(&ps.display_name),
+                    "{period:?}: missing provider {} row in Agents block:\n{rendered}",
+                    ps.display_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn summary_keeps_agents_block_with_one_provider() {
+        // #451 primary fix: even with a single provider in the window,
+        // the Agents block renders. Pre-#451 the dispatcher dropped
+        // it entirely when `providers.len() == 1`, making `today` look
+        // structurally different from `7d` on the same machine.
+        let summary = fixture_summary();
+        let est = fixture_cost(0.0);
+        let providers = vec![fixture_provider(
+            "claude_code",
+            "Claude Code",
+            262,
+            11_400.0,
+        )];
+        let palette = SummaryPalette::plain();
+
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        assert!(
+            rendered.contains("Agents"),
+            "Agents block must render with a single provider (#451):\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Claude Code"),
+            "the single provider's row must render:\n{rendered}"
+        );
+        // Cursor-lag footnote is OFF when Cursor is not in the window.
+        assert!(
+            !rendered.contains("Cursor cost data may lag"),
+            "Cursor-lag footnote must NOT render when Cursor is absent:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn summary_cache_savings_line_is_unconditional() {
+        // #451 acceptance: cache-savings line is part of the
+        // summary's structural shape, even when the value is $0.00.
+        // Otherwise the line's presence becomes a leaked signal of
+        // whether any cache hits accumulated, and the summary's shape
+        // varies between Today and 7d.
+        let summary = fixture_summary();
+        let providers = vec![fixture_provider(
+            "claude_code",
+            "Claude Code",
+            262,
+            11_400.0,
+        )];
+        let palette = SummaryPalette::plain();
+
+        let with_savings = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &fixture_cost(593.0),
+            &providers,
+            &palette,
+        );
+        assert!(with_savings.contains("cache savings $593"));
+
+        let no_savings = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &fixture_cost(0.0),
+            &providers,
+            &palette,
+        );
+        assert!(
+            no_savings.contains("cache savings $0.00"),
+            "cache-savings line must render even when zero:\n{no_savings}"
+        );
+    }
+
+    #[test]
+    fn summary_provider_filter_renders_one_row_in_agents_block() {
+        // `--provider cursor` keeps the Agents block intact but
+        // narrows it to the selected agent. The Cursor-lag footnote
+        // also stays because cursor is one of the displayed
+        // providers.
+        let summary = fixture_summary();
+        let est = fixture_cost(0.0);
+        let providers = vec![
+            fixture_provider("codex", "Codex", 566, 13_700.0),
+            fixture_provider("cursor", "Cursor", 280, 16_300.0),
+        ];
+        let palette = SummaryPalette::plain();
+
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            Some("cursor"),
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        assert_summary_has_required_blocks(&rendered, true);
+        assert!(rendered.contains("Cursor"));
+        assert!(
+            !rendered.contains("Codex"),
+            "filtered Agents block must hide non-matching providers:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn summary_empty_window_renders_no_data_message_and_skips_blocks() {
+        // The "no data" early return is preserved: empty windows
+        // print a friendly message instead of an Agents block with
+        // a "(no provider data)" placeholder. This keeps the shape
+        // contract scoped to non-empty windows.
+        let mut summary = fixture_summary();
+        summary.total_messages = 0;
+        summary.total_user_messages = 0;
+        summary.total_assistant_messages = 0;
+        let est = fixture_cost(0.0);
+        let providers: Vec<analytics::ProviderStats> = vec![];
+        let palette = SummaryPalette::plain();
+
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        assert!(rendered.contains("No data for this period"));
+        assert!(
+            !rendered.contains("Agents"),
+            "empty window must not print the Agents block"
+        );
+        assert!(
+            !rendered.contains("Est. cost"),
+            "empty window must not print the cost block"
+        );
+    }
+
+    #[test]
+    fn summary_cursor_lag_footnote_rides_on_displayed_providers() {
+        // #451: the Cursor-lag footnote prints whenever the displayed
+        // providers list includes Cursor, regardless of whether the
+        // user passed `--provider cursor`. Pre-#451 the
+        // summary-filtered path only printed it on explicit filter
+        // and the multi-agent path silently included a Cursor row
+        // without the caveat — both regressions are fixed by sharing
+        // one renderer.
+        let summary = fixture_summary();
+        let est = fixture_cost(0.0);
+        let palette = SummaryPalette::plain();
+
+        // Cursor present in window, no filter → footnote on.
+        let providers = vec![
+            fixture_provider("codex", "Codex", 1, 100.0),
+            fixture_provider("cursor", "Cursor", 1, 100.0),
+        ];
+        let r = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        assert!(r.contains("Cursor cost data may lag"));
+
+        // Filtered to codex → footnote off (Cursor row not displayed).
+        let r = format_summary(
+            StatsPeriod::Today,
+            Some("codex"),
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        assert!(!r.contains("Cursor cost data may lag"));
+
+        // No Cursor in window at all → footnote off.
+        let providers_no_cursor = vec![fixture_provider("codex", "Codex", 1, 100.0)];
+        let r = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers_no_cursor,
+            &palette,
+        );
+        assert!(!r.contains("Cursor cost data may lag"));
     }
 }
