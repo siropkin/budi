@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::jsonl::ParsedMessage;
-use crate::provider::{DiscoveredFile, ModelPricing, Provider};
+use crate::provider::{DiscoveredFile, Provider};
 
 /// The Codex provider (covers both Codex Desktop and Codex CLI).
 pub struct CodexProvider;
@@ -313,125 +313,6 @@ fn parse_token_count(
     })
 }
 
-/// OpenAI model pricing lookup (per million tokens, USD).
-/// Source: https://platform.openai.com/docs/pricing
-///
-/// Codex uses OpenAI models (GPT-5.x, o3, etc.) — share pricing with Cursor's
-/// OpenAI entries but in a dedicated function for maintainability.
-pub fn codex_pricing_for_model(model: &str) -> ModelPricing {
-    let m = model.to_lowercase();
-
-    // --- GPT-5.x models ---
-    if m.contains("gpt-5.4") && m.contains("nano") {
-        ModelPricing {
-            input: 0.20,
-            output: 1.25,
-            cache_write: 0.20,
-            cache_read: 0.02,
-        }
-    } else if m.contains("gpt-5.4") && m.contains("mini") {
-        ModelPricing {
-            input: 0.75,
-            output: 4.50,
-            cache_write: 0.75,
-            cache_read: 0.075,
-        }
-    } else if m.contains("gpt-5.4") {
-        ModelPricing {
-            input: 2.50,
-            output: 15.0,
-            cache_write: 2.50,
-            cache_read: 0.25,
-        }
-    } else if m.contains("gpt-5.2") || m.contains("gpt-5.3") {
-        ModelPricing {
-            input: 1.75,
-            output: 14.0,
-            cache_write: 1.75,
-            cache_read: 0.175,
-        }
-    } else if m.contains("gpt-5") && m.contains("mini") {
-        ModelPricing {
-            input: 0.25,
-            output: 2.0,
-            cache_write: 0.25,
-            cache_read: 0.025,
-        }
-    } else if m.contains("gpt-5") && m.contains("fast") {
-        ModelPricing {
-            input: 2.50,
-            output: 20.0,
-            cache_write: 2.50,
-            cache_read: 0.25,
-        }
-    } else if m.contains("gpt-5") {
-        ModelPricing {
-            input: 1.25,
-            output: 10.0,
-            cache_write: 1.25,
-            cache_read: 0.125,
-        }
-
-    // --- GPT-4.x models ---
-    } else if m.contains("gpt-4o-mini") {
-        ModelPricing {
-            input: 0.15,
-            output: 0.60,
-            cache_write: 0.15,
-            cache_read: 0.075,
-        }
-    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
-        ModelPricing {
-            input: 2.50,
-            output: 10.0,
-            cache_write: 2.50,
-            cache_read: 1.25,
-        }
-    } else if m.contains("gpt-4") {
-        ModelPricing {
-            input: 30.0,
-            output: 60.0,
-            cache_write: 30.0,
-            cache_read: 15.0,
-        }
-
-    // --- OpenAI reasoning models ---
-    } else if m.contains("o3-mini") || m.contains("o1-mini") {
-        ModelPricing {
-            input: 1.10,
-            output: 4.40,
-            cache_write: 1.10,
-            cache_read: 0.55,
-        }
-    } else if m.contains("o3") {
-        ModelPricing {
-            input: 2.0,
-            output: 8.0,
-            cache_write: 2.0,
-            cache_read: 0.20,
-        }
-    } else if m.contains("o1") {
-        ModelPricing {
-            input: 15.0,
-            output: 60.0,
-            cache_write: 15.0,
-            cache_read: 7.50,
-        }
-    } else {
-        // Unknown model — use GPT-5.2/5.3 as default (most common Codex model)
-        tracing::warn!(
-            "Unknown Codex model '{}', using GPT-5.2/5.3 default pricing",
-            model
-        );
-        ModelPricing {
-            input: 1.75,
-            output: 14.0,
-            cache_write: 1.75,
-            cache_read: 0.175,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,48 +479,6 @@ mod tests {
         // No new data from offset
         let (msgs2, _) = parse_codex_transcript(content, offset);
         assert!(msgs2.is_empty());
-    }
-
-    #[test]
-    fn pricing_gpt_5_3_codex() {
-        let p = codex_pricing_for_model("gpt-5.3-codex");
-        assert_eq!(p.input, 1.75);
-        assert_eq!(p.output, 14.0);
-    }
-
-    #[test]
-    fn pricing_gpt_5_2_codex() {
-        let p = codex_pricing_for_model("gpt-5.2-codex");
-        assert_eq!(p.input, 1.75);
-        assert_eq!(p.output, 14.0);
-    }
-
-    #[test]
-    fn pricing_gpt_5_4() {
-        let p = codex_pricing_for_model("gpt-5.4");
-        assert_eq!(p.input, 2.50);
-        assert_eq!(p.output, 15.0);
-    }
-
-    #[test]
-    fn pricing_gpt_4o() {
-        let p = codex_pricing_for_model("gpt-4o-2024-08-06");
-        assert_eq!(p.input, 2.50);
-        assert_eq!(p.output, 10.0);
-    }
-
-    #[test]
-    fn pricing_o3() {
-        let p = codex_pricing_for_model("o3-2025-04-16");
-        assert_eq!(p.input, 2.0);
-        assert_eq!(p.output, 8.0);
-    }
-
-    #[test]
-    fn pricing_unknown_defaults_to_gpt_5_2() {
-        let p = codex_pricing_for_model("some-future-model");
-        assert_eq!(p.input, 1.75);
-        assert_eq!(p.output, 14.0);
     }
 
     #[test]
