@@ -10,6 +10,24 @@
 //! like `Desktop`, `~`, `.cursor`, and brew-tap checkouts. Non-repo work
 //! is now rolled up into a single `(no repository)` bucket on the render
 //! side.
+//!
+//! # Design history
+//!
+//! The original design (2026-03-22, pre-8.0) stored `repo_id` as a
+//! SHA-256 hash of the canonical repo root path. The hash successfully
+//! dedup'd worktree checkouts against the main checkout, but it was
+//! opaque in the dashboard — users saw a hex blob instead of a
+//! recognizable project name. 8.3.0 pivots to the normalized
+//! `host/owner/repo` URL (this module's current implementation) so
+//! stats output and cloud rollups render human-readable project names
+//! directly, while worktrees continue to collapse to the main checkout
+//! via [`crate::config::resolve_storage_root`]. Commits on a repo with
+//! no remote stay in the `(no repository)` bucket until the repo gets
+//! pushed somewhere — there is no longer a fallback to a bare folder
+//! name. Cloud sync still hashes the normalized URL before leaving the
+//! machine per [ADR-0083 §6].
+//!
+//! [ADR-0083 §6]: ../../../../docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

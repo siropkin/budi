@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# [budi-install] developer installer for budi — builds from source via cargo
+# or downloads a prebuilt release tarball, then runs `budi init`.
+#
+# This is the in-repo developer-path installer; end users install via the
+# one-line `curl | bash` flow that drives `scripts/install-standalone.sh`
+# instead. Invoke `./scripts/install.sh --help` for flag reference.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

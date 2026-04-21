@@ -5,6 +5,11 @@
 //!
 //! Legacy fallback: composerData from state.vscdb (will be removed).
 //! Secondary fallback: JSONL agent transcripts under `~/.cursor/projects/*/agent-transcripts/`.
+//!
+//! Contract: [ADR-0090 — Cursor Usage API Contract](../../../../docs/adr/0090-cursor-usage-api-contract.md).
+//! Any breaking change to the undocumented upstream must land as a paired
+//! edit to ADR-0090 and this module so the two never disagree. Lag
+//! characterization is pinned in ADR-0089 §7 (verdict comment on #321).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
