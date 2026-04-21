@@ -118,6 +118,20 @@ pub fn service_file_path() -> Option<PathBuf> {
     None
 }
 
+/// Return the path the autostart service writes its stdout/stderr to, if any.
+///
+/// On macOS this is `~/Library/Logs/budi-daemon.log`, which launchd writes
+/// independently of Budi's own data directory. On Linux the systemd unit
+/// logs to journald, and on Windows Task Scheduler has no standalone log
+/// file, so both return `None`.
+pub fn service_log_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return launchd_log_path().ok();
+
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// Return a human-readable description of the service mechanism for this platform.
 pub fn service_mechanism() -> &'static str {
     #[cfg(target_os = "macos")]
