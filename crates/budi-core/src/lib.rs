@@ -6,6 +6,7 @@ pub mod cost;
 pub mod file_attribution;
 pub mod hooks;
 pub mod identity;
+pub mod installer_residue;
 pub mod integrations;
 pub mod jsonl;
 pub mod legacy_proxy;

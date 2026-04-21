@@ -1,9 +1,10 @@
 use std::fs;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use budi_core::installer_residue;
 use budi_core::legacy_proxy;
 use serde_json::Value;
 
@@ -90,11 +91,9 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
                     return Ok(());
                 }
             }
-            print!("Removing data... ");
             match remove_data() {
-                Ok(true) => println!("{green}✓{reset} removed"),
-                Ok(false) => println!("none found"),
-                Err(e) => println!("{yellow}warning: {e}{reset}"),
+                Ok(report) => print_data_removal(&report, green, yellow, reset),
+                Err(e) => println!("Removing data... {yellow}warning: {e}{reset}"),
             }
             print!("Removing config... ");
             match remove_config() {
@@ -107,7 +106,7 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
         }
     }
 
-    // Remove autostart service (launchd / systemd / Task Scheduler)
+    // 8. Remove autostart service (launchd / systemd / Task Scheduler)
     {
         let mechanism = budi_core::autostart::service_mechanism();
         print!("Removing autostart service ({mechanism})... ");
@@ -117,6 +116,22 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
             Err(e) => println!("{yellow}warning: {e}{reset}"),
         }
     }
+
+    // 9. Remove the autostart service log (macOS only — launchd writes
+    // StandardOutPath/StandardErrorPath outside the data dir).
+    if let Some(log_path) = budi_core::autostart::service_log_path() {
+        print!("Removing daemon log ({})... ", log_path.display());
+        match remove_file_if_exists(&log_path) {
+            Ok(true) => println!("{green}✓{reset} removed"),
+            Ok(false) => println!("none found"),
+            Err(e) => println!("{yellow}warning: {e}{reset}"),
+        }
+    }
+
+    // 10. Remove the `# Added by budi installer` block the standalone shell
+    // installer writes to the user's shell profile. Consent-first: on an
+    // interactive run we show the diff and ask per file unless --yes.
+    remove_installer_shell_residue(yes, green, yellow, reset)?;
 
     println!();
     println!("{green}✓{reset} budi uninstalled.");
@@ -351,13 +366,232 @@ fn remove_cursor_hooks(home: &str) -> Result<bool> {
     Ok(changed)
 }
 
-fn remove_data() -> Result<bool> {
+/// Per-entry summary of what was removed from the data dir.
+#[derive(Debug, Default)]
+struct DataRemovalReport {
+    data_dir: Option<PathBuf>,
+    /// Known contract files that existed and were removed (pretty names).
+    named_items: Vec<String>,
+    /// Count of extra entries beyond the named contract set.
+    extra_entry_count: usize,
+}
+
+impl DataRemovalReport {
+    fn missing(&self) -> bool {
+        self.data_dir.is_none()
+    }
+
+    fn total_entries(&self) -> usize {
+        self.named_items.len() + self.extra_entry_count
+    }
+}
+
+fn remove_data() -> Result<DataRemovalReport> {
     let data_dir = budi_core::config::budi_home_dir()?;
     if !data_dir.exists() {
+        return Ok(DataRemovalReport::default());
+    }
+
+    let inventory = inventory_data_dir(&data_dir);
+
+    fs::remove_dir_all(&data_dir)
+        .with_context(|| format!("Failed to remove {}", data_dir.display()))?;
+
+    Ok(DataRemovalReport {
+        data_dir: Some(data_dir),
+        named_items: inventory.named_items,
+        extra_entry_count: inventory.extra_entry_count,
+    })
+}
+
+struct DataInventory {
+    named_items: Vec<String>,
+    extra_entry_count: usize,
+}
+
+/// Walk the data dir once and classify its top-level entries against the
+/// documented ADR-0083 / ADR-0086 contract. The caller deletes the dir
+/// afterwards — this inventory is purely so the CLI can print a
+/// human-readable enumeration of what was removed.
+fn inventory_data_dir(data_dir: &Path) -> DataInventory {
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return DataInventory {
+                named_items: Vec::new(),
+                extra_entry_count: 0,
+            };
+        }
+    };
+
+    let mut db_file = false;
+    let mut db_sidecar_count = 0usize;
+    let mut repos_subdir_count: Option<usize> = None;
+    let mut has_cursor_sessions = false;
+    let mut has_pricing_json = false;
+    let mut has_upgrade_flags = false;
+    let mut extra = 0usize;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        match name_str.as_str() {
+            "analytics.db" => db_file = true,
+            "analytics.db-shm" | "analytics.db-wal" => db_sidecar_count += 1,
+            "cursor-sessions.json" => has_cursor_sessions = true,
+            "pricing.json" => has_pricing_json = true,
+            "repos" => {
+                let count = fs::read_dir(entry.path())
+                    .map(|iter| iter.flatten().count())
+                    .unwrap_or(0);
+                repos_subdir_count = Some(count);
+            }
+            "upgrade-flags" => has_upgrade_flags = true,
+            _ => extra += 1,
+        }
+    }
+
+    let mut named_items = Vec::new();
+    if db_file {
+        let label = if db_sidecar_count > 0 {
+            format!("analytics.db (+{} sidecar)", db_sidecar_count)
+        } else {
+            "analytics.db".to_string()
+        };
+        named_items.push(label);
+    } else if db_sidecar_count > 0 {
+        named_items.push(format!("analytics.db sidecar ({db_sidecar_count})"));
+    }
+    if let Some(count) = repos_subdir_count {
+        let word = if count == 1 { "repo" } else { "repos" };
+        named_items.push(format!("repos/ ({count} {word})"));
+    }
+    if has_cursor_sessions {
+        named_items.push("cursor-sessions.json".to_string());
+    }
+    if has_pricing_json {
+        named_items.push("pricing.json".to_string());
+    }
+    if has_upgrade_flags {
+        named_items.push("upgrade-flags/".to_string());
+    }
+
+    DataInventory {
+        named_items,
+        extra_entry_count: extra,
+    }
+}
+
+fn print_data_removal(report: &DataRemovalReport, green: &str, yellow: &str, reset: &str) {
+    if report.missing() {
+        println!("Removing data... none found");
+        return;
+    }
+    let Some(dir) = &report.data_dir else {
+        return;
+    };
+
+    let total = report.total_entries();
+    if total == 0 {
+        println!(
+            "Removing data... {green}✓{reset} removed empty {}",
+            dir.display()
+        );
+        return;
+    }
+
+    println!(
+        "Removing data... {green}✓{reset} removed {} from {}",
+        pluralize_items(total),
+        dir.display()
+    );
+    for item in &report.named_items {
+        println!("    - {item}");
+    }
+    if report.extra_entry_count > 0 {
+        println!(
+            "    - {yellow}+{}{reset} other entr{}",
+            report.extra_entry_count,
+            if report.extra_entry_count == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    }
+}
+
+fn pluralize_items(count: usize) -> String {
+    if count == 1 {
+        "1 item".to_string()
+    } else {
+        format!("{count} items")
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<bool> {
+    if !path.exists() {
         return Ok(false);
     }
-    fs::remove_dir_all(&data_dir)?;
+    fs::remove_file(path).with_context(|| format!("Failed to remove {}", path.display()))?;
     Ok(true)
+}
+
+fn remove_installer_shell_residue(yes: bool, green: &str, yellow: &str, reset: &str) -> Result<()> {
+    let scan = match installer_residue::scan() {
+        Ok(scan) => scan,
+        Err(e) => {
+            println!("Removing installer PATH block... {yellow}warning: {e}{reset}");
+            return Ok(());
+        }
+    };
+
+    if !scan.has_residue() {
+        println!("Removing installer PATH block... none found");
+        return Ok(());
+    }
+
+    println!("Removing installer PATH block:");
+
+    let interactive = std::io::stdin().is_terminal();
+    for residue in &scan.files {
+        println!("  {}:", residue.path.display());
+        for line in &residue.removed_lines {
+            println!("    - L{}: {}", line.line_number, line.content);
+        }
+
+        let apply = if yes {
+            true
+        } else if !interactive {
+            println!("    {yellow}skipped{reset} (non-interactive; rerun with --yes to remove)");
+            false
+        } else {
+            prompt_confirm(&format!(
+                "  Remove these lines from {}? [y/N] ",
+                residue.path.display()
+            ))?
+        };
+
+        if !apply {
+            continue;
+        }
+
+        match residue.apply_cleanup() {
+            Ok(true) => println!("    {green}✓{reset} removed"),
+            Ok(false) => println!("    (no change)"),
+            Err(e) => println!("    {yellow}warning: {e}{reset}"),
+        }
+    }
+    Ok(())
+}
+
+fn prompt_confirm(prompt: &str) -> Result<bool> {
+    eprint!("{prompt}");
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("Failed to read stdin")?;
+    Ok(matches!(answer.trim(), "y" | "Y"))
 }
 
 fn remove_config() -> Result<bool> {
@@ -401,4 +635,89 @@ fn verify_no_budi_hooks_cursor(path: &PathBuf) -> bool {
             .map(|a| a.iter().any(super::is_budi_cursor_hook_entry))
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "budi-uninstall-test-{name}-{}-{stamp}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn inventory_enumerates_known_contract_files() {
+        let dir = unique_temp_dir("inventory-known");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("analytics.db"), b"db").unwrap();
+        fs::write(dir.join("analytics.db-shm"), b"shm").unwrap();
+        fs::write(dir.join("analytics.db-wal"), b"wal").unwrap();
+        fs::write(dir.join("cursor-sessions.json"), b"{}").unwrap();
+        fs::write(dir.join("pricing.json"), b"{}").unwrap();
+        fs::create_dir_all(dir.join("repos/repo-a")).unwrap();
+        fs::create_dir_all(dir.join("repos/repo-b")).unwrap();
+        fs::create_dir_all(dir.join("upgrade-flags")).unwrap();
+
+        let inv = inventory_data_dir(&dir);
+        assert_eq!(inv.extra_entry_count, 0);
+        assert!(
+            inv.named_items
+                .iter()
+                .any(|s| s.starts_with("analytics.db"))
+        );
+        assert!(inv.named_items.iter().any(|s| s.starts_with("repos/ (2")));
+        assert!(inv.named_items.iter().any(|s| s == "cursor-sessions.json"));
+        assert!(inv.named_items.iter().any(|s| s == "pricing.json"));
+        assert!(inv.named_items.iter().any(|s| s == "upgrade-flags/"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inventory_counts_unknown_entries_separately() {
+        let dir = unique_temp_dir("inventory-unknown");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("analytics.db"), b"db").unwrap();
+        fs::write(dir.join("stray.tmp"), b"x").unwrap();
+        fs::write(dir.join("other-leftover"), b"y").unwrap();
+
+        let inv = inventory_data_dir(&dir);
+        assert_eq!(inv.extra_entry_count, 2);
+        assert!(
+            inv.named_items
+                .iter()
+                .any(|s| s.starts_with("analytics.db"))
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_file_if_exists_is_idempotent() {
+        let dir = unique_temp_dir("remove-file");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon.log");
+        fs::write(&path, b"hi").unwrap();
+
+        assert!(remove_file_if_exists(&path).unwrap());
+        assert!(!remove_file_if_exists(&path).unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pluralize_items_matches_english() {
+        assert_eq!(pluralize_items(1), "1 item");
+        assert_eq!(pluralize_items(2), "2 items");
+        assert_eq!(pluralize_items(0), "0 items");
+    }
 }
