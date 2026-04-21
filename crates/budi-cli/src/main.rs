@@ -137,6 +137,20 @@ Examples:
         /// the Total footer always reconciles to the cent (#448).
         #[arg(long, default_value_t = 30)]
         limit: usize,
+        /// Maximum characters for labels and label-like extra columns
+        /// (branch / file path / ticket id) in breakdown views. Values
+        /// longer than this truncate with a middle ellipsis (`…`). The
+        /// default balances readability on an 80-col terminal with the
+        /// natural length of file paths. (#450)
+        #[arg(long, default_value_t = 40)]
+        label_width: usize,
+        /// Include `(model pending)` rows in `--models` output. By
+        /// default, rows whose model name is still pending (a known
+        /// Cursor cost-lag transient) are suppressed and a footnote
+        /// reports how many rows were hidden. Pass `--include-pending`
+        /// to see the raw bucket. (#450)
+        #[arg(long, default_value_t = false)]
+        include_pending: bool,
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
@@ -547,6 +561,8 @@ fn main() -> Result<()> {
             provider,
             tag,
             limit,
+            label_width,
+            include_pending,
             format,
         } => {
             let json_output = matches!(format, StatsFormat::Json);
@@ -566,6 +582,8 @@ fn main() -> Result<()> {
                 provider,
                 tag,
                 limit,
+                label_width,
+                include_pending,
                 json_output,
             )
         }

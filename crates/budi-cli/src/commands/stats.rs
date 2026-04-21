@@ -63,10 +63,60 @@ fn max_cost_for_rows<T: BreakdownRowCost>(rows: &[T]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
+/// Returns `true` when the only row on the page is the DB's generic
+/// `(untagged)` sentinel. Used to swap the default per-row rendering
+/// for a one-line empty-state message — a one-row breakdown made of
+/// just `(untagged)` looks like a filesystem fault rather than "no
+/// attribution emitted in this window" (#450 acceptance D).
+fn is_only_untagged<T, F>(rows: &[T], name: F) -> bool
+where
+    F: Fn(&T) -> &str,
+{
+    rows.len() == 1 && is_untagged(name(&rows[0]))
+}
+
+/// Period-aware tip rendered when a breakdown's only row is the
+/// `(untagged)` bucket. Encourages widening the window so attribution
+/// signal (which accumulates over time) actually has a chance to show
+/// up — the `Today` and `1d` cases are the most common offenders.
+fn untagged_only_tip(period: StatsPeriod) -> Option<&'static str> {
+    match period {
+        StatsPeriod::Today | StatsPeriod::Days(1) => Some("Try --period 7d."),
+        _ => None,
+    }
+}
+
+/// Print the "no labelled signal in this window" empty-state. Called
+/// when the only row on a page is the `(untagged)` bucket, to avoid
+/// a one-row table that looks like a filesystem fault. (#450
+/// acceptance D)
+fn render_untagged_only_empty_state(view: BreakdownView, period: StatsPeriod) {
+    let dim = ansi("\x1b[90m");
+    let reset = ansi("\x1b[0m");
+    let label = match view {
+        BreakdownView::Projects => "repository attribution",
+        BreakdownView::Branches => "branch attribution",
+        BreakdownView::Tickets => "ticket attribution",
+        BreakdownView::Activities => "activity attribution",
+        BreakdownView::Files => "file attribution",
+        BreakdownView::Models => "labelled model usage",
+        BreakdownView::Tag => "tag attribution",
+    };
+    println!("  No {label} emitted in this window.");
+    if let Some(tip) = untagged_only_tip(period) {
+        println!("  {dim}{tip}{reset}");
+    }
+    println!();
+}
+
 /// Truncate a display label to at most `max_chars` characters, prefixing
 /// the kept suffix with `…` when truncation happens. Operates on Unicode
 /// scalars (not bytes) to stay safe on multi-byte file paths / ticket
 /// ids — see #389 / #383 / #404 / #445 for the precedent bug class.
+///
+/// Retained for legacy call sites and snapshot tests; production rows
+/// render through [`truncate_label_middle`] so head + tail remain
+/// visible for long identifiers (branch prefixes, path suffixes).
 fn truncate_label(label: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -80,6 +130,38 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(max_chars * 4);
     out.push('…');
     out.extend(label.chars().skip(skip));
+    out
+}
+
+/// Middle-ellipsis truncation: keep the leading and trailing chars,
+/// drop the middle with `…`. Unicode-scalar math (not byte math) so
+/// multi-byte codepoints never split — see #389 / #383 / #404 / #445.
+///
+/// The split biases slightly toward the tail so file paths retain
+/// their most identifying segment (the filename), while still
+/// surfacing the repo-root prefix. Returns the input unchanged when
+/// already short enough.
+fn truncate_label_middle(label: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = label.chars().count();
+    if char_count <= max_chars {
+        return label.to_string();
+    }
+    if max_chars <= 2 {
+        // Too narrow to keep head + tail + ellipsis; fall back to the
+        // tail-preserving form so the output still fits.
+        return truncate_label(label, max_chars);
+    }
+    let keep = max_chars - 1; // reserve one slot for `…`
+    let head_len = keep / 2;
+    let tail_len = keep - head_len;
+    let chars: Vec<char> = label.chars().collect();
+    let mut out = String::with_capacity(max_chars * 4);
+    out.extend(chars.iter().take(head_len));
+    out.push('…');
+    out.extend(chars.iter().skip(char_count - tail_len));
     out
 }
 
@@ -149,7 +231,7 @@ fn format_breakdown_row_text(
     extra: &str,
 ) -> String {
     let bar = render_bar(cost_cents, max_cost);
-    let cost_cell = format_cost_cents(cost_cents);
+    let cost_cell = format_cost_cents_fixed(cost_cents);
     if extra.is_empty() {
         format!(
             "  {:<label_w$} {} {:>cost_w$}",
@@ -257,6 +339,8 @@ pub fn cmd_stats(
     provider: Option<String>,
     tag: Option<String>,
     limit: usize,
+    label_width: usize,
+    include_pending: bool,
     json_output: bool,
 ) -> Result<()> {
     // Normalize and validate --provider early with a helpful error message.
@@ -291,8 +375,12 @@ pub fn cmd_stats(
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
     )?;
 
+    // Clamp label-width to a sensible floor so the middle-ellipsis
+    // renderer always has room for head + tail + `…`.
+    let label_width = label_width.max(8);
+
     if let Some(ref tag_filter) = tag {
-        return cmd_stats_tags(&client, period, tag_filter, limit, json_output);
+        return cmd_stats_tags(&client, period, tag_filter, limit, label_width, json_output);
     }
 
     if let Some(ref f) = file {
@@ -300,7 +388,7 @@ pub fn cmd_stats(
     }
 
     if files {
-        return cmd_stats_files(&client, period, limit, json_output);
+        return cmd_stats_files(&client, period, limit, label_width, json_output);
     }
 
     if let Some(ref ac) = activity {
@@ -308,7 +396,7 @@ pub fn cmd_stats(
     }
 
     if activities {
-        return cmd_stats_activities(&client, period, limit, json_output);
+        return cmd_stats_activities(&client, period, limit, label_width, json_output);
     }
 
     if let Some(ref tk) = ticket {
@@ -316,7 +404,7 @@ pub fn cmd_stats(
     }
 
     if tickets {
-        return cmd_stats_tickets(&client, period, limit, json_output);
+        return cmd_stats_tickets(&client, period, limit, label_width, json_output);
     }
 
     if let Some(ref br) = branch {
@@ -324,15 +412,22 @@ pub fn cmd_stats(
     }
 
     if branches {
-        return cmd_stats_branches(&client, period, limit, json_output);
+        return cmd_stats_branches(&client, period, limit, label_width, json_output);
     }
 
     if models {
-        return cmd_stats_models(&client, period, limit, json_output);
+        return cmd_stats_models(
+            &client,
+            period,
+            limit,
+            label_width,
+            include_pending,
+            json_output,
+        );
     }
 
     if projects {
-        return cmd_stats_projects(&client, period, limit, json_output);
+        return cmd_stats_projects(&client, period, limit, label_width, json_output);
     }
 
     if json_output {
@@ -612,6 +707,7 @@ fn cmd_stats_projects(
     client: &DaemonClient,
     period: StatsPeriod,
     limit: usize,
+    label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -631,8 +727,7 @@ fn cmd_stats_projects(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    const LABEL_WIDTH: usize = 28;
-    let rule_width = LABEL_WIDTH + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
+    let rule_width = label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Repositories{reset} — {bold}{}{reset}",
@@ -646,21 +741,31 @@ fn cmd_stats_projects(
         return Ok(());
     }
 
-    print_breakdown_header("REPOSITORY", LABEL_WIDTH, "");
+    if is_only_untagged(&page.rows, |r| &r.repo_id) && page.other.is_none() {
+        render_untagged_only_empty_state(BreakdownView::Projects, period);
+        return Ok(());
+    }
+
+    print_breakdown_header("REPOSITORY", label_width, "");
 
     let max_cost = max_cost_for_rows(&page.rows);
     for r in &page.rows {
         let bar = render_bar(r.cost_cents, max_cost);
+        let label = truncate_label_middle(
+            &display_dimension(BreakdownView::Projects, &r.repo_id),
+            label_width,
+        );
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
-            r.repo_id,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
+            label,
             bar,
-            format_cost_cents(r.cost_cents),
+            format_cost_cents_fixed(r.cost_cents),
+            label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 
@@ -668,6 +773,7 @@ fn cmd_stats_branches(
     client: &DaemonClient,
     period: StatsPeriod,
     limit: usize,
+    label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -687,10 +793,9 @@ fn cmd_stats_branches(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    const LABEL_WIDTH: usize = 28;
     const REPO_WIDTH: usize = 16;
     let rule_width =
-        LABEL_WIDTH + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH + 2 + REPO_WIDTH;
+        label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH + 2 + REPO_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Branches{reset} — {bold}{}{reset}",
@@ -704,14 +809,21 @@ fn cmd_stats_branches(
         return Ok(());
     }
 
-    print_breakdown_header("BRANCH", LABEL_WIDTH, &format!("{:<REPO_WIDTH$}", "REPO"));
+    if is_only_untagged(&page.rows, |b| &b.git_branch) && page.other.is_none() {
+        render_untagged_only_empty_state(BreakdownView::Branches, period);
+        return Ok(());
+    }
+
+    print_breakdown_header("BRANCH", label_width, &format!("{:<REPO_WIDTH$}", "REPO"));
 
     let max_cost = max_cost_for_rows(&page.rows);
     for b in &page.rows {
-        let branch_name = b
+        let raw = b
             .git_branch
             .strip_prefix("refs/heads/")
             .unwrap_or(&b.git_branch);
+        let display = display_dimension(BreakdownView::Branches, raw);
+        let label = truncate_label_middle(&display, label_width);
         let repo = if b.repo_id.is_empty() {
             "--".to_string()
         } else {
@@ -723,16 +835,17 @@ fn cmd_stats_branches(
         };
         let bar = render_bar(b.cost_cents, max_cost);
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<REPO_WIDTH$}{reset}",
-            branch_name,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<REPO_WIDTH$}{reset}",
+            label,
             bar,
-            format_cost_cents(b.cost_cents),
+            format_cost_cents_fixed(b.cost_cents),
             repo,
+            label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 
@@ -809,6 +922,7 @@ fn cmd_stats_tickets(
     client: &DaemonClient,
     period: StatsPeriod,
     limit: usize,
+    label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -828,10 +942,12 @@ fn cmd_stats_tickets(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    const LABEL_WIDTH: usize = 24;
     const SOURCE_WIDTH: usize = 18;
-    const BRANCH_WIDTH: usize = 24;
-    let rule_width = LABEL_WIDTH
+    // TOP_BRANCH uses the same middle-ellipsis truncation as the main
+    // label column; keep its column width pinned to `label_width` so
+    // long branch names don't spill into adjacent columns (#450 B).
+    let branch_width = label_width;
+    let rule_width = label_width
         + 1
         + BREAKDOWN_BAR_WIDTH
         + 1
@@ -839,7 +955,7 @@ fn cmd_stats_tickets(
         + 2
         + SOURCE_WIDTH
         + 2
-        + BRANCH_WIDTH;
+        + branch_width;
     println!();
     println!(
         "  {bold_cyan} Tickets{reset} — {bold}{}{reset}",
@@ -854,22 +970,33 @@ fn cmd_stats_tickets(
         return Ok(());
     }
 
+    if is_only_untagged(&page.rows, |t| &t.ticket_id) && page.other.is_none() {
+        render_untagged_only_empty_state(BreakdownView::Tickets, period);
+        return Ok(());
+    }
+
     print_breakdown_header(
         "TICKET",
-        LABEL_WIDTH,
+        label_width,
         &format!(
-            "{:<SOURCE_WIDTH$}  {:<BRANCH_WIDTH$}",
-            "SOURCE", "TOP_BRANCH"
+            "{:<SOURCE_WIDTH$}  {:<branch_w$}",
+            "SOURCE",
+            "TOP_BRANCH",
+            branch_w = branch_width,
         ),
     );
 
     let max_cost = max_cost_for_rows(&page.rows);
     for t in &page.rows {
         let bar = render_bar(t.cost_cents, max_cost);
+        let label = truncate_label_middle(
+            &display_dimension(BreakdownView::Tickets, &t.ticket_id),
+            label_width,
+        );
         let branch_label = if t.top_branch.is_empty() {
             "--".to_string()
         } else {
-            t.top_branch.clone()
+            truncate_label_middle(&t.top_branch, branch_width)
         };
         let source_label = if t.source.is_empty() {
             "--".to_string()
@@ -877,17 +1004,19 @@ fn cmd_stats_tickets(
             format!("src={}", t.source)
         };
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<BRANCH_WIDTH$}{reset}",
-            t.ticket_id,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<branch_w$}{reset}",
+            label,
             bar,
-            format_cost_cents(t.cost_cents),
+            format_cost_cents_fixed(t.cost_cents),
             source_label,
             branch_label,
+            label_w = label_width,
+            branch_w = branch_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 
@@ -996,6 +1125,7 @@ fn cmd_stats_activities(
     client: &DaemonClient,
     period: StatsPeriod,
     limit: usize,
+    label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -1015,10 +1145,9 @@ fn cmd_stats_activities(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    const LABEL_WIDTH: usize = 18;
     const CONF_WIDTH: usize = 11;
-    const BRANCH_WIDTH: usize = 22;
-    let rule_width = LABEL_WIDTH
+    let branch_width = label_width;
+    let rule_width = label_width
         + 1
         + BREAKDOWN_BAR_WIDTH
         + 1
@@ -1026,7 +1155,7 @@ fn cmd_stats_activities(
         + 2
         + CONF_WIDTH
         + 2
-        + BRANCH_WIDTH;
+        + branch_width;
     println!();
     println!(
         "  {bold_cyan} Activities{reset} — {bold}{}{reset}",
@@ -1043,22 +1172,33 @@ fn cmd_stats_activities(
         return Ok(());
     }
 
+    if is_only_untagged(&page.rows, |a| &a.activity) && page.other.is_none() {
+        render_untagged_only_empty_state(BreakdownView::Activities, period);
+        return Ok(());
+    }
+
     print_breakdown_header(
         "ACTIVITY",
-        LABEL_WIDTH,
+        label_width,
         &format!(
-            "{:<CONF_WIDTH$}  {:<BRANCH_WIDTH$}",
-            "CONFIDENCE", "TOP_BRANCH"
+            "{:<CONF_WIDTH$}  {:<branch_w$}",
+            "CONFIDENCE",
+            "TOP_BRANCH",
+            branch_w = branch_width,
         ),
     );
 
     let max_cost = max_cost_for_rows(&page.rows);
     for a in &page.rows {
         let bar = render_bar(a.cost_cents, max_cost);
+        let label = truncate_label_middle(
+            &display_dimension(BreakdownView::Activities, &a.activity),
+            label_width,
+        );
         let branch_label = if a.top_branch.is_empty() {
             "--".to_string()
         } else {
-            a.top_branch.clone()
+            truncate_label_middle(&a.top_branch, branch_width)
         };
         let confidence_label = if a.confidence.is_empty() {
             "--".to_string()
@@ -1066,17 +1206,19 @@ fn cmd_stats_activities(
             format!("conf={}", a.confidence)
         };
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<CONF_WIDTH$}{reset}  {dim}{:<BRANCH_WIDTH$}{reset}",
-            a.activity,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<CONF_WIDTH$}{reset}  {dim}{:<branch_w$}{reset}",
+            label,
             bar,
-            format_cost_cents(a.cost_cents),
+            format_cost_cents_fixed(a.cost_cents),
             confidence_label,
             branch_label,
+            label_w = label_width,
+            branch_w = branch_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 
@@ -1218,6 +1360,7 @@ fn cmd_stats_files(
     client: &DaemonClient,
     period: StatsPeriod,
     limit: usize,
+    label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -1237,10 +1380,9 @@ fn cmd_stats_files(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    const LABEL_WIDTH: usize = 40;
     const SOURCE_WIDTH: usize = 16;
     const TICKET_WIDTH: usize = 14;
-    let rule_width = LABEL_WIDTH
+    let rule_width = label_width
         + 1
         + BREAKDOWN_BAR_WIDTH
         + 1
@@ -1262,9 +1404,14 @@ fn cmd_stats_files(
         return Ok(());
     }
 
+    if is_only_untagged(&page.rows, |f| &f.file_path) && page.other.is_none() {
+        render_untagged_only_empty_state(BreakdownView::Files, period);
+        return Ok(());
+    }
+
     print_breakdown_header(
         "FILE",
-        LABEL_WIDTH,
+        label_width,
         &format!(
             "{:<SOURCE_WIDTH$}  {:<TICKET_WIDTH$}",
             "SOURCE", "TOP_TICKET"
@@ -1277,7 +1424,7 @@ fn cmd_stats_files(
         let ticket_label = if f.top_ticket_id.is_empty() {
             "--".to_string()
         } else {
-            f.top_ticket_id.clone()
+            truncate_label_middle(&f.top_ticket_id, TICKET_WIDTH)
         };
         let source_label = if f.source.is_empty() {
             "--".to_string()
@@ -1287,19 +1434,23 @@ fn cmd_stats_files(
         // Truncate very long paths so the row stays readable in narrow
         // terminals. Full paths remain visible via `--file <PATH>` and
         // `--format json`.
-        let path_label = truncate_label(&f.file_path, LABEL_WIDTH);
+        let path_label = truncate_label_middle(
+            &display_dimension(BreakdownView::Files, &f.file_path),
+            label_width,
+        );
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<TICKET_WIDTH$}{reset}",
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<TICKET_WIDTH$}{reset}",
             path_label,
             bar,
-            format_cost_cents(f.cost_cents),
+            format_cost_cents_fixed(f.cost_cents),
             source_label,
             ticket_label,
+            label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 
@@ -1420,6 +1571,8 @@ fn cmd_stats_models(
     client: &DaemonClient,
     period: StatsPeriod,
     limit: usize,
+    label_width: usize,
+    include_pending: bool,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -1439,10 +1592,9 @@ fn cmd_stats_models(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
-    const LABEL_WIDTH: usize = 40;
     const MSGS_WIDTH: usize = 10;
     const TOK_WIDTH: usize = 10;
-    let rule_width = LABEL_WIDTH
+    let rule_width = label_width
         + 1
         + BREAKDOWN_BAR_WIDTH
         + 1
@@ -1464,47 +1616,122 @@ fn cmd_stats_models(
         return Ok(());
     }
 
+    // #450 acceptance: suppress `(model pending)` rows by default. These
+    // are Cursor-lag transients where the model name hasn't reconciled
+    // yet; letting them surface in the default text output misleads
+    // users into thinking a phantom "(untagged)" model is active.
+    // Retained in `--format json` and behind `--include-pending`.
+    let (visible_rows, pending_count) = partition_pending_model_rows(&page.rows, include_pending);
+
+    if visible_rows.is_empty() && page.other.is_none() && pending_count > 0 {
+        // Every row was a pending-model transient. Treat the same as
+        // "only untagged" empty-state so the output doesn't render a
+        // one-row table.
+        render_untagged_only_empty_state(BreakdownView::Models, period);
+        if pending_count > 0 {
+            println!(
+                "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
+                pending_count,
+                if pending_count == 1 { "" } else { "s" },
+            );
+            println!();
+        }
+        return Ok(());
+    }
+
     print_breakdown_header(
         "MODEL",
-        LABEL_WIDTH,
+        label_width,
         &format!("{:>MSGS_WIDTH$}  {:>TOK_WIDTH$}", "MSGS", "TOKENS"),
     );
 
     let has_duplicate_models = {
         let mut seen = std::collections::HashSet::new();
-        page.rows.iter().any(|m| !seen.insert(&m.model))
+        visible_rows.iter().any(|m| !seen.insert(&m.model))
     };
 
     // #449 fix: bars scale by cost (the column they sit next to), not by
     // message count. A $66 row no longer renders with more blocks than a
     // $548 row just because it crossed a provider-specific high-volume
     // threshold.
-    let max_cost = max_cost_for_rows(&page.rows);
-    for m in &page.rows {
+    let max_cost = max_cost_for_rows_refs(&visible_rows);
+    for m in &visible_rows {
         let bar = render_bar(m.cost_cents, max_cost);
         let total_tok =
             m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
+        let raw_model_label = display_dimension(BreakdownView::Models, &m.model);
         let raw_label = if has_duplicate_models {
-            format!("{} ({})", m.model, m.provider)
+            format!("{} ({})", raw_model_label, m.provider)
         } else {
-            m.model.clone()
+            raw_model_label
         };
-        let label = truncate_label(&raw_label, LABEL_WIDTH);
+        let label = truncate_label_middle(&raw_label, label_width);
         let msgs_cell = format!("{} msgs", m.message_count);
         let tok_cell = format!("{} tok", format_tokens(total_tok));
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:>MSGS_WIDTH$}{reset}  {dim}{:>TOK_WIDTH$}{reset}",
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:>MSGS_WIDTH$}{reset}  {dim}{:>TOK_WIDTH$}{reset}",
             label,
             bar,
-            format_cost_cents(m.cost_cents),
+            format_cost_cents_fixed(m.cost_cents),
             msgs_cell,
             tok_cell,
+            label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
 
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
+    if pending_count > 0 {
+        println!(
+            "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
+            pending_count,
+            if pending_count == 1 { "" } else { "s" },
+        );
+        println!();
+    }
     Ok(())
+}
+
+/// Split `rows` into visible + pending buckets for the `--models` view.
+/// Pending rows are the `(untagged)` transient caused by Cursor
+/// cost-lag; they are dropped from the default output and reported in
+/// a footnote unless `include_pending` is set.
+fn partition_pending_model_rows<T>(rows: &[T], include_pending: bool) -> (Vec<&T>, usize)
+where
+    T: ModelRow,
+{
+    if include_pending {
+        return (rows.iter().collect(), 0);
+    }
+    let mut visible = Vec::with_capacity(rows.len());
+    let mut pending = 0usize;
+    for r in rows {
+        if is_untagged(r.model_name()) {
+            pending += 1;
+        } else {
+            visible.push(r);
+        }
+    }
+    (visible, pending)
+}
+
+/// Minimal read-only view over the fields `partition_pending_model_rows`
+/// needs. Implemented for the concrete `ModelUsage` row type; kept as a
+/// trait so tests can construct lightweight fixtures.
+trait ModelRow {
+    fn model_name(&self) -> &str;
+}
+
+impl ModelRow for budi_core::analytics::ModelUsage {
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
+fn max_cost_for_rows_refs<T: BreakdownRowCost>(rows: &[&T]) -> f64 {
+    rows.iter()
+        .map(|r| BreakdownRowCost::cost_cents(*r))
+        .fold(0.0_f64, f64::max)
 }
 
 // ─── Breakdown Footer (#448) ─────────────────────────────────────────────────
@@ -1552,7 +1779,7 @@ fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, r
         println!(
             "  {dim}{:<label_pad$}{reset}{yellow}{:>width$}{reset}",
             label,
-            format_cost_cents(other.cost_cents),
+            format_cost_cents_fixed(other.cost_cents),
             width = COST_COL_WIDTH,
         );
     }
@@ -1575,7 +1802,7 @@ fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, r
     println!(
         "  {bold}Total{reset}{:<total_label_pad$}{yellow}{:>width$}{reset}  {}",
         "",
-        format_cost_cents(page.total_cost_cents),
+        format_cost_cents_fixed(page.total_cost_cents),
         shown_note,
         width = COST_COL_WIDTH,
     );
@@ -1600,6 +1827,93 @@ pub use super::format_cost;
 
 pub fn format_cost_cents(cents: f64) -> String {
     format_cost(cents / 100.0)
+}
+
+/// Fixed-precision dollar formatting for breakdown tables: always
+/// `$X,XXX.XX` with thousands separators and two decimal places, so
+/// every row in a breakdown column shares one visual shape. This is
+/// the #450 acceptance for "Single currency format per column type" —
+/// the summary view keeps the humanized `$1.2K` form via
+/// [`format_cost_cents`]; breakdowns use this one.
+pub fn format_cost_cents_fixed(cents: f64) -> String {
+    let dollars = cents / 100.0;
+    let sign = if dollars < 0.0 { "-" } else { "" };
+    let magnitude = dollars.abs();
+    let whole = magnitude.trunc() as u64;
+    let frac = ((magnitude - whole as f64) * 100.0).round() as u64;
+    // Defensive: rounding can push the fractional part to 100; carry
+    // the one into `whole` so "$0.995" renders as "$1.00" instead of
+    // "$0.100".
+    let (whole, frac) = if frac >= 100 {
+        (whole + 1, frac - 100)
+    } else {
+        (whole, frac)
+    };
+    let whole_str = insert_thousands_separator(whole);
+    format!("{sign}${whole_str}.{frac:02}")
+}
+
+fn insert_thousands_separator(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let bytes = digits.as_bytes();
+    let len = bytes.len();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+/// Identity of the breakdown view a row is being rendered for. Used
+/// to translate the DB's generic `(untagged)` dimension value into a
+/// view-specific label — a branch-less message means "no branch", a
+/// ticket-less message means "no ticket", etc. (#450 acceptance E)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BreakdownView {
+    Projects,
+    Branches,
+    Tickets,
+    Activities,
+    Files,
+    Models,
+    Tag,
+}
+
+impl BreakdownView {
+    /// Render-time replacement for the `(untagged)` sentinel stored in
+    /// the DB. Tag view keeps `(untagged)` verbatim since the key
+    /// meaning is user-defined.
+    fn untagged_label(self) -> &'static str {
+        match self {
+            BreakdownView::Projects => "(no repository)",
+            BreakdownView::Branches => "(no branch)",
+            BreakdownView::Tickets => "(no ticket)",
+            BreakdownView::Activities => "(unclassified)",
+            BreakdownView::Files => "(no file tag)",
+            BreakdownView::Models => "(model pending)",
+            BreakdownView::Tag => "(untagged)",
+        }
+    }
+}
+
+/// Returns `true` when `value` is the DB's generic `(untagged)`
+/// sentinel. Kept in one place so renaming the sentinel (unlikely)
+/// touches a single site.
+fn is_untagged(value: &str) -> bool {
+    value == budi_core::analytics::UNTAGGED_DIMENSION
+}
+
+/// Translate `(untagged)` into the view-specific label when rendering
+/// a row; every other value passes through unchanged.
+fn display_dimension(view: BreakdownView, value: &str) -> String {
+    if is_untagged(value) {
+        view.untagged_label().to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Resolve a user-supplied provider name to its canonical DB value.
@@ -1636,6 +1950,7 @@ fn cmd_stats_tags(
     period: StatsPeriod,
     tag_filter: &str,
     limit: usize,
+    label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
@@ -1664,8 +1979,7 @@ fn cmd_stats_tags(
 
     let dim = ansi("\x1b[90m");
 
-    const LABEL_WIDTH: usize = 40;
-    let rule_width = LABEL_WIDTH + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
+    let rule_width = label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
     println!();
     println!(
         "  {bold_cyan} Tag: {}{reset} — {bold}{}{reset}",
@@ -1674,21 +1988,27 @@ fn cmd_stats_tags(
     );
     println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    print_breakdown_header("VALUE", LABEL_WIDTH, "");
+    if is_only_untagged(&page.rows, |t| &t.value) && page.other.is_none() {
+        render_untagged_only_empty_state(BreakdownView::Tag, period);
+        return Ok(());
+    }
+
+    print_breakdown_header("VALUE", label_width, "");
 
     let max_cost = max_cost_for_rows(&page.rows);
     for tag in &page.rows {
         let bar = render_bar(tag.cost_cents, max_cost);
-        let label = truncate_label(&tag.value, LABEL_WIDTH);
+        let label = truncate_label_middle(&tag.value, label_width);
         println!(
-            "  {bold}{:<LABEL_WIDTH$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
             label,
             bar,
-            format_cost_cents(tag.cost_cents),
+            format_cost_cents_fixed(tag.cost_cents),
+            label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
         );
     }
-    render_breakdown_footer(&page, LABEL_WIDTH, rule_width);
+    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 
@@ -2576,5 +2896,349 @@ mod tests {
             &palette,
         );
         assert!(!r.contains("Cursor cost data may lag"));
+    }
+
+    // ─── #450 breakdown polish tests ──────────────────────────────────
+
+    #[test]
+    fn format_cost_cents_fixed_is_always_two_decimals_with_thousands_sep() {
+        // #450 acceptance C: breakdown columns render one currency
+        // shape — fixed `$X,XXX.XX`, never the humanized `$1.2K`. A
+        // breakdown column with `$1.5K / $288 / $90.39 / $0.42` all
+        // resolves to the same visual shape.
+        assert_eq!(format_cost_cents_fixed(0.0), "$0.00");
+        assert_eq!(format_cost_cents_fixed(42.0), "$0.42");
+        assert_eq!(format_cost_cents_fixed(9_039.0), "$90.39");
+        assert_eq!(format_cost_cents_fixed(28_800.0), "$288.00");
+        assert_eq!(format_cost_cents_fixed(150_000.0), "$1,500.00");
+        assert_eq!(format_cost_cents_fixed(1_234_567.0), "$12,345.67");
+        assert_eq!(format_cost_cents_fixed(10_000_000.0), "$100,000.00");
+        // Rounding carry: $0.995 → $1.00, not $0.100.
+        assert_eq!(format_cost_cents_fixed(99.5), "$1.00");
+    }
+
+    #[test]
+    fn truncate_label_middle_keeps_head_and_tail() {
+        // #450 acceptance B: every label-like column uses one
+        // truncation strategy — middle ellipsis so the head (branch
+        // prefix) and tail (file name) both survive.
+        assert_eq!(truncate_label_middle("short", 40), "short");
+        assert_eq!(truncate_label_middle("", 40), "");
+
+        let branch = "04-20-pava-1669_adds_an_optional_inputmode_prop_to_chararrayinput";
+        let truncated = truncate_label_middle(branch, 20);
+        assert_eq!(truncated.chars().count(), 20);
+        assert!(truncated.contains('…'));
+        assert!(truncated.starts_with("04-20-"));
+        assert!(
+            truncated.ends_with("arrayinput"),
+            "middle ellipsis must preserve the tail, got {:?}",
+            truncated
+        );
+
+        // Multi-byte content: emoji still splits on char boundaries,
+        // not bytes, so we never panic (#389 / #383 / #404 / #445).
+        let emoji = "src/🚀/main.rs".repeat(5);
+        let t = truncate_label_middle(&emoji, 12);
+        assert_eq!(t.chars().count(), 12);
+    }
+
+    #[test]
+    fn truncate_label_middle_falls_back_for_very_narrow_widths() {
+        // If the caller asks for less than 3 chars we can't fit both a
+        // head and tail plus ellipsis. Fall back to the legacy tail
+        // renderer so the output still fits the width budget.
+        let t = truncate_label_middle("abcdefghij", 2);
+        assert_eq!(t.chars().count(), 2);
+    }
+
+    #[test]
+    fn breakdown_view_untagged_label_is_view_specific() {
+        // #450 acceptance E: one `(untagged)` DB sentinel, six
+        // different display labels.
+        assert_eq!(BreakdownView::Projects.untagged_label(), "(no repository)");
+        assert_eq!(BreakdownView::Branches.untagged_label(), "(no branch)");
+        assert_eq!(BreakdownView::Tickets.untagged_label(), "(no ticket)");
+        assert_eq!(BreakdownView::Activities.untagged_label(), "(unclassified)");
+        assert_eq!(BreakdownView::Files.untagged_label(), "(no file tag)");
+        assert_eq!(BreakdownView::Models.untagged_label(), "(model pending)");
+        // Tag view keeps the generic sentinel because a tag key can
+        // mean anything — "(no X)" would be misleading.
+        assert_eq!(BreakdownView::Tag.untagged_label(), "(untagged)");
+    }
+
+    #[test]
+    fn display_dimension_translates_untagged_but_leaves_other_values_alone() {
+        assert_eq!(
+            display_dimension(BreakdownView::Tickets, "(untagged)"),
+            "(no ticket)"
+        );
+        assert_eq!(
+            display_dimension(BreakdownView::Files, "(untagged)"),
+            "(no file tag)"
+        );
+        assert_eq!(display_dimension(BreakdownView::Branches, "main"), "main");
+        assert_eq!(
+            display_dimension(BreakdownView::Tickets, "PAVA-1669"),
+            "PAVA-1669"
+        );
+    }
+
+    #[test]
+    fn partition_pending_model_rows_suppresses_untagged_by_default() {
+        // #450 acceptance: `--models` suppresses pending rows by
+        // default; `--include-pending` restores them.
+        #[derive(Clone)]
+        struct Row {
+            name: String,
+        }
+        impl ModelRow for Row {
+            fn model_name(&self) -> &str {
+                &self.name
+            }
+        }
+
+        let rows = vec![
+            Row {
+                name: "claude-opus-4-7".into(),
+            },
+            Row {
+                name: "(untagged)".into(),
+            },
+            Row {
+                name: "claude-sonnet-4-6".into(),
+            },
+            Row {
+                name: "(untagged)".into(),
+            },
+        ];
+
+        let (visible, pending) = partition_pending_model_rows(&rows, false);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(pending, 2);
+        assert!(visible.iter().all(|r| !is_untagged(r.model_name())));
+
+        let (visible_all, pending_all) = partition_pending_model_rows(&rows, true);
+        assert_eq!(visible_all.len(), 4);
+        assert_eq!(pending_all, 0);
+    }
+
+    #[test]
+    fn is_only_untagged_detects_lone_fallback_row() {
+        // #450 acceptance D: a single-row page made of just the
+        // `(untagged)` bucket is the "no labelled signal" case —
+        // render an empty-state tip instead of a 1-row table that
+        // looks like a filesystem fault.
+        use budi_core::analytics::{FileCost, TicketCost};
+
+        let lonely_files = vec![FileCost {
+            file_path: "(untagged)".into(),
+            session_count: 1,
+            message_count: 5,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            cost_cents: 114.0,
+            top_repo_id: String::new(),
+            top_branch: String::new(),
+            top_ticket_id: String::new(),
+            source: String::new(),
+        }];
+        assert!(is_only_untagged(&lonely_files, |f| &f.file_path));
+
+        let mixed_tickets = vec![
+            TicketCost {
+                ticket_id: "PAVA-1".into(),
+                ticket_prefix: "PAVA".into(),
+                session_count: 1,
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                cost_cents: 100.0,
+                top_branch: "main".into(),
+                top_repo_id: String::new(),
+                source: "branch".into(),
+            },
+            TicketCost {
+                ticket_id: "(untagged)".into(),
+                ticket_prefix: String::new(),
+                session_count: 1,
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                cost_cents: 50.0,
+                top_branch: String::new(),
+                top_repo_id: String::new(),
+                source: String::new(),
+            },
+        ];
+        assert!(!is_only_untagged(&mixed_tickets, |t| &t.ticket_id));
+
+        let empty: Vec<TicketCost> = vec![];
+        assert!(!is_only_untagged(&empty, |t| &t.ticket_id));
+    }
+
+    #[test]
+    fn untagged_only_tip_nudges_short_windows_to_widen() {
+        // The "try a longer window" hint is only helpful on `today`
+        // and `1d` — wider windows already saw enough data to know
+        // nothing landed, so the extra line becomes noise.
+        assert!(untagged_only_tip(StatsPeriod::Today).is_some());
+        assert!(untagged_only_tip(StatsPeriod::Days(1)).is_some());
+        assert!(untagged_only_tip(StatsPeriod::Days(7)).is_none());
+        assert!(untagged_only_tip(StatsPeriod::Week).is_none());
+        assert!(untagged_only_tip(StatsPeriod::Month).is_none());
+    }
+
+    // ─── #450 view-layout snapshot tests ──────────────────────────────
+    //
+    // Every breakdown view (`--tickets / --files / --branches /
+    // --activities / --models`) is rendered through the same shared
+    // helpers (`format_breakdown_header_text`, `format_breakdown_row_text`,
+    // `format_cost_cents_fixed`). Pin the rendered shape under the
+    // `today` and `30d` headings so the next regression shows up in
+    // the diff instead of in a user's terminal.
+
+    /// Build a baseline row for a view with the current label width,
+    /// untagged translation, and fixed currency format — the surface
+    /// the ticket asks us to keep stable.
+    fn snapshot_row(view: BreakdownView, raw_label: &str, cents: f64, extras: &str) -> String {
+        let label_width = 40usize;
+        let translated = display_dimension(view, raw_label);
+        let label = truncate_label_middle(&translated, label_width);
+        format_breakdown_row_text(&label, label_width, cents, cents.max(1.0), extras)
+    }
+
+    #[test]
+    fn snapshot_tickets_today_and_30d_layout_is_stable() {
+        let today_label = period_label(StatsPeriod::Today);
+        let thirty_label = period_label(StatsPeriod::Days(30));
+        assert_eq!(today_label, "Today");
+        assert_eq!(thirty_label, "Last 30 days");
+
+        let header = format_breakdown_header_text("TICKET", 40, "SOURCE     TOP_BRANCH");
+        assert!(header.contains("TICKET"));
+        assert!(header.contains("COST"));
+        assert!(header.contains("SOURCE"));
+
+        let real = snapshot_row(
+            BreakdownView::Tickets,
+            "PAVA-1669",
+            2_265.0,
+            "src=branch  04-20-pava-1669",
+        );
+        assert!(real.contains("PAVA-1669"));
+        assert!(real.contains("$22.65"));
+
+        let untagged = snapshot_row(
+            BreakdownView::Tickets,
+            "(untagged)",
+            9_122.0,
+            "src=--      --",
+        );
+        assert!(untagged.contains("(no ticket)"));
+        assert!(untagged.contains("$91.22"));
+        assert!(!untagged.contains("(untagged)"));
+    }
+
+    #[test]
+    fn snapshot_files_today_and_30d_layout_is_stable() {
+        let row = snapshot_row(
+            BreakdownView::Files,
+            "crates/budi-cli/src/commands/stats.rs",
+            58_732.0,
+            "src=cwd     PAVA-1669",
+        );
+        assert!(row.contains("stats.rs"));
+        assert!(row.contains("$587.32"));
+
+        let long_path = snapshot_row(
+            BreakdownView::Files,
+            "very/deeply/nested/path/that/wraps/into/the/next/column/file.proto",
+            12_000.0,
+            "",
+        );
+        // Middle ellipsis keeps the start AND the filename visible.
+        assert!(long_path.contains('…'));
+        assert!(long_path.contains("file.proto") || long_path.contains(".proto"));
+
+        let untagged = snapshot_row(BreakdownView::Files, "(untagged)", 11_400.0, "");
+        assert!(untagged.contains("(no file tag)"));
+    }
+
+    #[test]
+    fn snapshot_branches_today_and_30d_layout_is_stable() {
+        let main = snapshot_row(BreakdownView::Branches, "main", 150_000.0, "budi");
+        assert!(main.contains("main"));
+        assert!(main.contains("$1,500.00"));
+
+        let feature = snapshot_row(
+            BreakdownView::Branches,
+            "04-20-pava-1669_adds_an_optional_inputmode_prop_to_chararrayinput",
+            2_265.0,
+            "Verkada-Web",
+        );
+        // Middle-ellipsis retains the date + ticket prefix and the
+        // distinctive suffix — the two ends readers actually need.
+        assert!(feature.starts_with("  04-20-"));
+        assert!(feature.contains('…'));
+
+        let untagged = snapshot_row(BreakdownView::Branches, "(untagged)", 100.0, "--");
+        assert!(untagged.contains("(no branch)"));
+    }
+
+    #[test]
+    fn snapshot_activities_today_and_30d_layout_is_stable() {
+        let coding = snapshot_row(
+            BreakdownView::Activities,
+            "coding",
+            123_456.0,
+            "conf=high  main",
+        );
+        assert!(coding.contains("coding"));
+        assert!(coding.contains("$1,234.56"));
+
+        let untagged = snapshot_row(
+            BreakdownView::Activities,
+            "(untagged)",
+            420.0,
+            "conf=--    --",
+        );
+        assert!(untagged.contains("(unclassified)"));
+    }
+
+    #[test]
+    fn snapshot_models_today_and_30d_layout_is_stable() {
+        // `--models` snapshot: untagged translation renders as
+        // `(model pending)` when forced visible (e.g. via
+        // `--include-pending`), the breakdown currency is fixed with
+        // thousands separators.
+        let opus = snapshot_row(
+            BreakdownView::Models,
+            "claude-opus-4-7",
+            210_000.0,
+            "24114 msgs  120M tok",
+        );
+        assert!(opus.contains("claude-opus-4-7"));
+        assert!(opus.contains("$2,100.00"));
+
+        let pending_visible =
+            snapshot_row(BreakdownView::Models, "(untagged)", 0.0, "162 msgs   0 tok");
+        assert!(pending_visible.contains("(model pending)"));
+    }
+
+    #[test]
+    fn format_breakdown_footer_uses_fixed_currency() {
+        // The Total row renders with `format_cost_cents_fixed`, so a
+        // value like `$2100.00` never humanizes to `$2.1K` at the
+        // footer — reconciliation to the cent requires the fixed
+        // shape. We assert the helper directly; the footer path uses
+        // the same call.
+        assert_eq!(format_cost_cents_fixed(210_000.0), "$2,100.00");
     }
 }

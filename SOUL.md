@@ -209,7 +209,8 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
      earlier NULL-branch rows in the same session. This is the same routine
      `budi db import` already runs.
   3. **`Unassigned` repo + empty branch** — last-resort fallback. Rows in
-     this state surface as `(untagged)` in `budi stats --branches`.
+     this state fold into the `(untagged)` DB bucket and render as
+     `(no branch)` in `budi stats --branches` (#450).
 
   A detached HEAD (`gitBranch == "HEAD"` or `git rev-parse --abbrev-ref
   HEAD` == `"HEAD"` for legacy proxy rows) is explicitly normalized to empty
@@ -247,12 +248,15 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
       attribution dimension carries its own provenance.
 
   Messages without a recognised ticket emit no `ticket_id` tag (no legacy
-  `Unassigned` sentinel); they surface as `(untagged)` in the tickets
-  list, keeping bucket semantics consistent across branch / ticket /
-  activity views.
+  `Unassigned` sentinel); they fold into the `(untagged)` DB bucket,
+  keeping bucket semantics consistent across branch / ticket /
+  activity views. The CLI renders the bucket with per-view copy (#450):
+  `(no ticket)` for tickets, `(no branch)` for branches, `(unclassified)`
+  for activities, `(no file tag)` for files, `(model pending)` for
+  models (suppressed from default output behind `--include-pending`).
 
   Surfaces:
-  - `budi stats --tickets` — list ranked by cost, with `(untagged)`
+  - `budi stats --tickets` — list ranked by cost, with a `(no ticket)`
     bucket and a `src=…` column showing the dominant `ticket_source`.
   - `budi stats --ticket <ID>` — detail view with per-branch breakdown
     and a `Source` row. Legacy rows without a `ticket_source` sibling
@@ -299,9 +303,10 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   value wins, ties broken alphabetically), falling back to R1.0 defaults
   (`rule` / `medium`) only when an activity has no companion tags yet
   (pre-R1.2 data). Surfaces:
-  - `budi stats --activities` — list ranked by cost, with `(untagged)`
-    bucket for messages that never matched a classification rule (short
-    prompts, slash commands, metadata-only messages).
+  - `budi stats --activities` — list ranked by cost, with an
+    `(unclassified)` bucket (#450) for messages that never matched a
+    classification rule (short prompts, slash commands, metadata-only
+    messages).
   - `budi stats --activity <NAME>` — detail view with per-branch
     breakdown, plus `source` and `confidence` labels.
   - `budi sessions --activity <NAME>` — sessions tagged with the
@@ -338,10 +343,11 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
   queryable the same way as `ticket_source` / `activity_source`.
 
   Surfaces:
-  - `budi stats --files` — files ranked by cost, with `(untagged)`
-    bucket and a `src=…` column showing the dominant source. Long
-    paths are truncated in the CLI output; full paths stay available
-    via `--file <PATH>` and `--format json`.
+  - `budi stats --files` — files ranked by cost, with a `(no file tag)`
+    bucket (#450) and a `src=…` column showing the dominant source.
+    Long paths are middle-ellipsis truncated (configurable via
+    `--label-width N`); full paths stay available via `--file <PATH>`
+    and `--format json`.
   - `budi stats --file <PATH>` — detail view with per-branch **and**
     per-ticket breakdowns, so you can see which tickets charged cost
     to a particular file.
