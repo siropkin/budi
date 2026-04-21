@@ -188,6 +188,6 @@ Expected release artifacts:
 
 Homebrew auto-update notes:
 
-- The release workflow updates `siropkin/homebrew-budi` after publishing assets.
+- The release workflow updates `siropkin/homebrew-budi` after publishing assets. The `update-homebrew` job in `.github/workflows/release.yml` renders `homebrew/budi.rb` against the release `SHA256SUMS` and pushes `Formula/budi.rb` to the tap; no additional scripts are involved.
 - `HOMEBREW_TAP_TOKEN` must be configured in `siropkin/budi` repo secrets.
-- If the workflow cannot push the formula update, run `homebrew/setup-tap.sh <tag>` manually and open a follow-up PR/issue with the failure details.
+- If the workflow ever fails to push, diagnose via the workflow logs and rerun the `update-homebrew` job. The one-shot tap-bootstrap runbook (used once on 2026-03-26 to create `siropkin/homebrew-budi`) is archived as a comment on [#365](https://github.com/siropkin/budi/issues/365#issuecomment-4292484508) for recovery scenarios where the tap repo itself has to be rebuilt from scratch.
