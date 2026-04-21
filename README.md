@@ -262,15 +262,23 @@ budi integrations install --with cursor-extension
 
 ## Cloud sync (optional)
 
-Cloud sync is disabled by default. To enable it, sign up at [app.getbudi.dev](https://app.getbudi.dev), copy your API key from Settings, and create `~/.config/budi/cloud.toml`:
+Cloud sync is disabled by default. Two commands get you from zero to syncing:
 
-```toml
-[cloud]
-enabled = true
-api_key = "budi_your_key_here"
+```bash
+budi cloud init                     # write a commented ~/.config/budi/cloud.toml template
+# paste your key from app.getbudi.dev → Settings → API keys
+budi init                           # restart the daemon so it picks up the new config
 ```
 
-The daemon picks up the config on next restart (`budi init`). Only pre-aggregated daily rollups are synced — prompts, code, and responses never leave your machine. See the [Privacy](#privacy) section for full details.
+Prefer a one-shot if you already have the key on your clipboard:
+
+```bash
+budi cloud init --api-key budi_your_key_here   # writes the key + enables sync
+budi init                                      # restart the daemon
+budi cloud status                              # expect 'state: ready'
+```
+
+The generated `cloud.toml` has every field commented so you know what you are setting. Only pre-aggregated daily rollups are synced — prompts, code, and responses never leave your machine. See the [Privacy](#privacy) section for full details.
 
 Environment variable overrides: `BUDI_CLOUD_ENABLED=true`, `BUDI_CLOUD_API_KEY=budi_...`, `BUDI_CLOUD_ENDPOINT=https://...`.
 
@@ -318,6 +326,8 @@ budi vitals --session <id>         # health vitals for a specific session
 ```bash
 budi doctor                        # check health: daemon, tailer, schema, transcript visibility
 budi doctor --deep                 # run full SQLite integrity_check (slower)
+budi cloud init                    # generate ~/.config/budi/cloud.toml from a commented template
+budi cloud init --api-key KEY      # write the key + enable sync in one step
 budi cloud status                  # cloud sync readiness + last-synced-at + queued records
 budi cloud sync                    # push queued local rollups/sessions to the cloud now
 budi autostart status              # check daemon autostart service
