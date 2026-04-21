@@ -406,8 +406,13 @@ Key points:
 
 - **Rolling `1d` / `7d` / `30d` windows** (`cost_1d`, `cost_7d`,
   `cost_30d`) — not calendar today/week/month. The statusline surface
-  is the only place Budi uses rolling windows; `budi stats` keeps
-  calendar semantics.
+  is the canonical rolling view. `budi stats --period today` still
+  uses the local-calendar today (today-so-far), but `--period week`
+  and `--period month` resolve to rolling 7 / 30 days ending now —
+  identical to `-p 7d` / `-p 30d`. The old calendar-week-starting-Monday
+  and first-of-calendar-month semantics were removed in 8.3 (#447) so
+  the README's "week / month = last 7 / 30 calendar days including
+  today" contract is what the code actually does on every weekday.
 - **Provider-scoping is strict.** When the request carries
   `provider=claude_code`, every numeric field (`cost_*`, `session_cost`,
   `branch_cost`, `project_cost`) and `active_provider` are filtered to

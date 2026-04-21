@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use budi_core::analytics;
-use chrono::{Datelike, Local, Months, NaiveDate, TimeZone};
+use chrono::{Local, Months, NaiveDate, TimeZone};
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
@@ -10,8 +10,8 @@ use super::ansi;
 pub fn period_label(period: StatsPeriod) -> String {
     match period {
         StatsPeriod::Today => "Today".to_string(),
-        StatsPeriod::Week => "This week".to_string(),
-        StatsPeriod::Month => "This month".to_string(),
+        StatsPeriod::Week => "Last 7 days".to_string(),
+        StatsPeriod::Month => "Last 30 days".to_string(),
         StatsPeriod::All => "All time".to_string(),
         StatsPeriod::Days(1) => "Last 1 day".to_string(),
         StatsPeriod::Days(n) => format!("Last {} days", n),
@@ -33,36 +33,27 @@ fn local_midnight_to_utc(date: NaiveDate) -> String {
     local_dt.with_timezone(&chrono::Utc).to_rfc3339()
 }
 
-pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
-    let today = Local::now().date_naive();
+/// Resolve the `since` anchor (as a local calendar date at midnight) for a
+/// given period, relative to `today`. Extracted from `period_date_range` so
+/// tests can parameterize `today` without mocking `Local::now()`.
+///
+/// Returns `None` when the period has no lower bound (e.g. `All`).
+///
+/// `Week` resolves to `today − 7 days` (same as `Days(7)` / `Weeks(1)`), and
+/// `Month` resolves to `today − 30 days` (same as `Days(30)`). This is the
+/// rolling semantic documented in README §"Windows: rolling vs calendar":
+/// "week / month = the last 7 / 30 calendar days including today." The
+/// previous implementation resolved `Week` to the Monday-of-this-week and
+/// `Month` to the first-of-this-month, which collapsed to one day of data on
+/// Mondays and on the first of the month (#447).
+pub(crate) fn period_since_date(today: NaiveDate, period: StatsPeriod) -> Option<NaiveDate> {
     match period {
-        StatsPeriod::Today => {
-            let since = local_midnight_to_utc(today);
-            (Some(since), None)
-        }
-        StatsPeriod::Week => {
-            let weekday = today.weekday().num_days_from_monday();
-            let monday = today - chrono::Duration::days(weekday as i64);
-            let since = local_midnight_to_utc(monday);
-            (Some(since), None)
-        }
-        StatsPeriod::Month => {
-            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-                .expect("valid first-of-month date");
-            let since = local_midnight_to_utc(first);
-            (Some(since), None)
-        }
-        StatsPeriod::All => (None, None),
-        StatsPeriod::Days(n) => {
-            let past = today - chrono::Duration::days(n as i64);
-            let since = local_midnight_to_utc(past);
-            (Some(since), None)
-        }
-        StatsPeriod::Weeks(n) => {
-            let past = today - chrono::Duration::weeks(n as i64);
-            let since = local_midnight_to_utc(past);
-            (Some(since), None)
-        }
+        StatsPeriod::Today => Some(today),
+        StatsPeriod::Week => Some(today - chrono::Duration::days(7)),
+        StatsPeriod::Month => Some(today - chrono::Duration::days(30)),
+        StatsPeriod::All => None,
+        StatsPeriod::Days(n) => Some(today - chrono::Duration::days(n as i64)),
+        StatsPeriod::Weeks(n) => Some(today - chrono::Duration::weeks(n as i64)),
         StatsPeriod::Months(n) => {
             // Use calendar months (chrono clamps to the end of the
             // target month if the current day-of-month doesn't exist
@@ -73,10 +64,15 @@ pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>
             let past = today
                 .checked_sub_months(Months::new(n))
                 .unwrap_or_else(|| today - chrono::Duration::days((n as i64) * 30));
-            let since = local_midnight_to_utc(past);
-            (Some(since), None)
+            Some(past)
         }
     }
+}
+
+pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
+    let today = Local::now().date_naive();
+    let since = period_since_date(today, period).map(local_midnight_to_utc);
+    (since, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +199,13 @@ pub fn cmd_stats(
                 "cache_savings".to_string(),
                 serde_json::json!(cost.cache_savings),
             );
+            // Expose the resolved window so scripting users can verify
+            // which period `--period today|week|month|Nd|Nw|Nm|all`
+            // actually mapped to (#447 acceptance: `budi stats -p week`
+            // and `-p 7d` must resolve to the same window on every
+            // weekday).
+            map.insert("window_start".to_string(), serde_json::json!(since));
+            map.insert("window_end".to_string(), serde_json::json!(until));
         }
         println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
@@ -1310,8 +1313,11 @@ mod tests {
     #[test]
     fn period_label_covers_relative_windows() {
         assert_eq!(period_label(StatsPeriod::Today), "Today");
-        assert_eq!(period_label(StatsPeriod::Week), "This week");
-        assert_eq!(period_label(StatsPeriod::Month), "This month");
+        // `Week` and `Month` now describe the rolling window they
+        // resolve to so the label cannot drift from the numeric total
+        // again (#447).
+        assert_eq!(period_label(StatsPeriod::Week), "Last 7 days");
+        assert_eq!(period_label(StatsPeriod::Month), "Last 30 days");
         assert_eq!(period_label(StatsPeriod::All), "All time");
 
         // Singular forms avoid the "Last 1 days" infelicity.
@@ -1364,6 +1370,76 @@ mod tests {
                 period,
                 since,
                 today_since
+            );
+        }
+    }
+
+    #[test]
+    fn week_resolves_to_rolling_seven_days_on_every_weekday() {
+        // #447 regression: `-p week` previously used
+        // calendar-week-starting-Monday, which collapsed to today on
+        // Mondays and to two days on Tuesdays, contradicting the
+        // README contract that week == rolling 7 days including today.
+        //
+        // Parameterize over a full calendar week so every weekday is
+        // covered, including the Monday that triggered the original
+        // report.
+        let base = NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(); // Monday
+        for offset in 0..7 {
+            let today = base + chrono::Duration::days(offset);
+            let week = period_since_date(today, StatsPeriod::Week).expect("week has since");
+            let seven_d = period_since_date(today, StatsPeriod::Days(7)).expect("7d has since");
+            let today_since =
+                period_since_date(today, StatsPeriod::Today).expect("today has since");
+
+            assert_eq!(
+                week,
+                seven_d,
+                "on {today} (weekday={:?}) `-p week` must resolve to the same date as `-p 7d`",
+                today.format("%A").to_string()
+            );
+            assert_ne!(
+                week,
+                today_since,
+                "on {today} (weekday={:?}) `-p week` must NOT collapse to today's since",
+                today.format("%A").to_string()
+            );
+            assert_eq!(
+                today - week,
+                chrono::Duration::days(7),
+                "on {today} `-p week` must anchor exactly 7 days before today"
+            );
+        }
+    }
+
+    #[test]
+    fn month_resolves_to_rolling_thirty_days_on_every_day_of_month() {
+        // #447 regression: `-p month` previously used
+        // first-of-calendar-month, which collapsed to one day on the
+        // 1st of the month, contradicting the README contract that
+        // month == rolling 30 days including today.
+        //
+        // Parameterize over a full month so the 1st is covered.
+        let base = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        for offset in 0..31 {
+            let today = base + chrono::Duration::days(offset);
+            let month = period_since_date(today, StatsPeriod::Month).expect("month has since");
+            let thirty_d = period_since_date(today, StatsPeriod::Days(30)).expect("30d has since");
+            let today_since =
+                period_since_date(today, StatsPeriod::Today).expect("today has since");
+
+            assert_eq!(
+                month, thirty_d,
+                "on {today} `-p month` must resolve to the same date as `-p 30d`"
+            );
+            assert_ne!(
+                month, today_since,
+                "on {today} `-p month` must NOT collapse to today's since"
+            );
+            assert_eq!(
+                today - month,
+                chrono::Duration::days(30),
+                "on {today} `-p month` must anchor exactly 30 days before today"
             );
         }
     }
