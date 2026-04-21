@@ -245,6 +245,11 @@ Examples:
         /// Max sessions to show (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Render the full 36-character session UUID instead of the
+        /// 8-character short form (useful for scripting and for
+        /// `budi sessions <id>` lookup). #445.
+        #[arg(long, default_value_t = false)]
+        full_uuid: bool,
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
@@ -631,6 +636,7 @@ fn main() -> Result<()> {
             ticket,
             activity,
             limit,
+            full_uuid,
             format,
         } => {
             let json_output = matches!(format, StatsFormat::Json);
@@ -643,6 +649,7 @@ fn main() -> Result<()> {
                     ticket.as_deref(),
                     activity.as_deref(),
                     limit,
+                    full_uuid,
                     json_output,
                 )
             }

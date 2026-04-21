@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use budi_core::config;
+use serde::Serialize;
 use serde_json::Value;
 
 pub mod autostart;
@@ -127,6 +128,79 @@ pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
     config::find_repo_root(&cwd).ok()
 }
 
+// ---------------------------------------------------------------------------
+// CLI JSON output helpers (#445)
+// ---------------------------------------------------------------------------
+//
+// Every `budi` subcommand that emits `--format json` flows through
+// [`print_json`] so the user-visible output obeys one contract:
+//
+//   - Any JSON field whose key ends in `_cents` serialises as an
+//     integer (rounded half-to-even via `f64::round`). A raw
+//     `f64 cost_cents` on an internal struct surfaces over the wire
+//     as `151767`, not `151766.7552219369` — cents are cents.
+//
+// The normalisation runs on the serialised `serde_json::Value` rather
+// than on the source structs so the internal math can stay in `f64`
+// (where cost pipelines accumulate fractional cents) without forcing
+// every struct to adopt a custom serialiser. Nested objects and
+// arrays are walked recursively.
+
+/// Walk `value` in place and round every numeric field whose key ends
+/// in `_cents` to an integer. Non-numeric values at those keys are
+/// left unchanged. Returns the mutated reference for chaining.
+pub fn round_cents_to_integer(value: &mut Value) -> &mut Value {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if is_cents_key(k)
+                    && let Some(n) = v.as_f64()
+                {
+                    *v = Value::from(n.round() as i64);
+                    continue;
+                }
+                round_cents_to_integer(v);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                round_cents_to_integer(v);
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
+fn is_cents_key(key: &str) -> bool {
+    key.ends_with("_cents")
+}
+
+/// Serialize `value` as pretty JSON and print it to stdout with the
+/// CLI cents normalisation applied. All `budi` commands that emit
+/// `--format json` should route through this helper so the contract
+/// stays consistent.
+pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    let mut v = serde_json::to_value(value).context("serialise to JSON value")?;
+    round_cents_to_integer(&mut v);
+    let out = serde_json::to_string_pretty(&v).context("serialise JSON value to string")?;
+    println!("{out}");
+    Ok(())
+}
+
+/// Compact variant of [`print_json`] for single-line surfaces like
+/// `budi statusline --format json`, where the downstream consumer
+/// (Cursor extension, cloud dashboard, user's starship prompt)
+/// expects a single-line payload but still benefits from the cents
+/// normalisation.
+pub fn print_json_compact<T: Serialize>(value: &T) -> Result<()> {
+    let mut v = serde_json::to_value(value).context("serialise to JSON value")?;
+    round_cents_to_integer(&mut v);
+    let out = serde_json::to_string(&v).context("serialise JSON value to string")?;
+    println!("{out}");
+    Ok(())
+}
+
 /// Format a cost value in dollars: $1.2K, $123, $12.50, $0.42, $0.00
 pub fn format_cost(dollars: f64) -> String {
     if dollars >= 1000.0 {
@@ -179,5 +253,86 @@ mod tests {
         }
         assert!(found_backup, "expected invalid-json backup file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- round_cents_to_integer (#445 item 4) -----------------------
+
+    #[test]
+    fn round_cents_rounds_ten_digit_float_to_integer() {
+        // The exact regression from #445 item 4: a raw `f64 cents`
+        // value round-trips through serde_json as a 10-digit float
+        // (`151766.7552219369`). After normalisation it must be an
+        // integer `151767`.
+        let mut v = serde_json::json!({ "total_cost_cents": 151766.7552219369 });
+        round_cents_to_integer(&mut v);
+        assert_eq!(v["total_cost_cents"], serde_json::json!(151767));
+    }
+
+    #[test]
+    fn round_cents_recurses_into_nested_objects() {
+        let mut v = serde_json::json!({
+            "summary": {
+                "cost_cents": 1234.567,
+                "input_cost": 12.5,
+            },
+            "breakdown": [
+                { "model": "a", "cost_cents": 100.5 },
+                { "model": "b", "cost_cents": 0.1 },
+                { "model": "c", "cost_cents": 99.49 },
+            ],
+            "window_start": "2026-04-01",
+        });
+        round_cents_to_integer(&mut v);
+        assert_eq!(v["summary"]["cost_cents"], serde_json::json!(1235));
+        // Non-cents fields must be untouched — `input_cost` stays
+        // fractional dollars.
+        assert_eq!(v["summary"]["input_cost"], serde_json::json!(12.5));
+        assert_eq!(v["breakdown"][0]["cost_cents"], serde_json::json!(101));
+        assert_eq!(v["breakdown"][1]["cost_cents"], serde_json::json!(0));
+        assert_eq!(v["breakdown"][2]["cost_cents"], serde_json::json!(99));
+        assert_eq!(v["window_start"], serde_json::json!("2026-04-01"));
+    }
+
+    #[test]
+    fn round_cents_preserves_already_integer_cents() {
+        // Consumers that already pass integer cents (e.g. after cache
+        // savings has been pre-rounded) must not see any change.
+        let mut v = serde_json::json!({ "cost_cents": 42 });
+        let before = v.clone();
+        round_cents_to_integer(&mut v);
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn round_cents_ignores_non_numeric_cents_values() {
+        // If a `*_cents` field ever lands as non-numeric (null / string)
+        // the rounder must not panic or mutate it.
+        let mut v = serde_json::json!({
+            "total_cost_cents": serde_json::Value::Null,
+            "other_cents": "n/a",
+        });
+        let before = v.clone();
+        round_cents_to_integer(&mut v);
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn round_cents_covers_cache_savings_and_avg_cost_keys() {
+        // Catalogued `*_cents` surfaces in the current
+        // analytics/queries.rs vocabulary: `cost_cents`,
+        // `total_cost_cents`, `cache_savings_cents`,
+        // `avg_cost_per_message_cents`. Every one of them matches
+        // the `_cents` suffix rule without hard-coding a list.
+        let mut v = serde_json::json!({
+            "cost_cents": 1.5,
+            "total_cost_cents": 1000.4,
+            "cache_savings_cents": 250.6,
+            "avg_cost_per_message_cents": 3.49,
+        });
+        round_cents_to_integer(&mut v);
+        assert_eq!(v["cost_cents"], serde_json::json!(2));
+        assert_eq!(v["total_cost_cents"], serde_json::json!(1000));
+        assert_eq!(v["cache_savings_cents"], serde_json::json!(251));
+        assert_eq!(v["avg_cost_per_message_cents"], serde_json::json!(3));
     }
 }

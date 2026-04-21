@@ -116,7 +116,7 @@ pub fn cmd_import(force: bool, json: bool) -> Result<()> {
                 }))
                 .collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        super::print_json(&body)?;
         return Ok(());
     }
 

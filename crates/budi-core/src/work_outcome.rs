@@ -129,7 +129,16 @@ pub struct WorkOutcomeInputs<'a> {
 pub fn derive_work_outcome(inputs: &WorkOutcomeInputs<'_>) -> WorkOutcome {
     let branch = inputs.branch.trim();
     if branch.is_empty() || crate::pipeline::is_integration_branch(branch) {
-        return WorkOutcome::unknown("no non-integration branch on session — nothing to correlate");
+        // #445 rewrite: the previous message ("no non-integration
+        // branch on session — nothing to correlate") was internal
+        // jargon — a fresh user has no mental model of what
+        // "integration branch" means, and the rationale suggested an
+        // action they could take even though the outcome is inherently
+        // un-derivable. Plain-language phrasing tells the reader why
+        // we showed "unknown" without implying they can change it.
+        return WorkOutcome::unknown(
+            "session wasn't tied to a feature branch, so no merge outcome can be inferred",
+        );
     }
     if !inputs.repo_root.exists() || !inputs.repo_root.join(".git").exists() {
         return WorkOutcome::unknown("repo_root is not a git working tree");
@@ -344,6 +353,37 @@ mod tests {
         assert_eq!(
             derive_work_outcome(&inputs).label,
             WorkOutcomeLabel::Unknown
+        );
+    }
+
+    #[test]
+    fn unknown_rationale_avoids_integration_branch_jargon() {
+        // #445 acceptance: the fresh-user smoke pass found the original
+        // rationale ("no non-integration branch on session — nothing
+        // to correlate") was unreadable — a new user has no mental
+        // model for what "integration branch" is and the wording
+        // implied they should take an action when the outcome is
+        // inherently un-derivable. Lock the jargon out.
+        let inputs = WorkOutcomeInputs {
+            repo_root: Path::new("/"),
+            branch: "main",
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            grace: None,
+        };
+        let r = derive_work_outcome(&inputs).rationale;
+        assert!(
+            !r.contains("non-integration"),
+            "rationale still contains `non-integration` jargon: {r}"
+        );
+        assert!(
+            !r.contains("nothing to correlate"),
+            "rationale still contains the `nothing to correlate` phrasing: {r}"
+        );
+        // Must still name the underlying reason.
+        assert!(
+            r.contains("feature branch") || r.contains("merge outcome"),
+            "rationale no longer explains the reason: {r}"
         );
     }
 
