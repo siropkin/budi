@@ -45,7 +45,8 @@ pub struct AppState {
 
 fn build_router(app_state: AppState) -> Router {
     use routes::{
-        analytics as a, cloud as c, hooks as h, require_current_schema, require_loopback,
+        analytics as a, cloud as c, hooks as h, pricing as p, require_current_schema,
+        require_loopback,
     };
 
     // Loopback-only admin / sync / cloud mutation routes.
@@ -62,6 +63,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/sync/all", post(h::analytics_history))
         .route("/sync/reset", post(h::analytics_sync_reset))
         .route("/cloud/sync", post(c::cloud_sync))
+        .route("/pricing/refresh", post(p::pricing_refresh))
         .route("/admin/providers", get(a::analytics_registered_providers))
         .route("/admin/schema", get(a::analytics_schema_version))
         .route("/admin/migrate", post(a::analytics_migrate))
@@ -161,6 +163,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/health/check-update", get(h::health_check_update))
         .route("/sync/status", get(h::sync_status))
         .route("/cloud/status", get(routes::cloud::cloud_status))
+        .route("/pricing/status", get(p::pricing_status))
         .merge(analytics_routes)
         .merge(protected_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
@@ -276,6 +279,26 @@ async fn main() -> Result<()> {
     };
 
     install_shutdown_listener(tailer_shutdown, tailer_handle);
+
+    // --- Start pricing refresh worker (ADR-0091 §3) ---
+    //
+    // Runs independently of cloud sync: warm-loads the on-disk cache,
+    // fires an initial fetch if absent or >24h old, then cycles every
+    // 24h. Network calls are disabled when `BUDI_PRICING_REFRESH=0` is
+    // set — the embedded baseline becomes authoritative in that mode.
+    // Failures never block ingestion; the previous cache keeps serving
+    // `pricing::lookup` until the next tick succeeds.
+    let pricing_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(db_path) = analytics::db_path() {
+        tracing::info!(
+            target: "budi_daemon::pricing_refresh",
+            "starting pricing manifest refresh worker (ADR-0091 §3)"
+        );
+        tokio::spawn(workers::pricing_refresh::run(
+            db_path,
+            pricing_shutdown.clone(),
+        ));
+    }
 
     // --- Start cloud sync worker if configured ---
     {

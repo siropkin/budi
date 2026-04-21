@@ -298,6 +298,7 @@ fn parse_token_count(
         user_name: None,
         machine_name: None,
         cost_confidence: "estimated".to_string(),
+        pricing_source: None,
         request_id: None,
         speed: None,
         cache_creation_1h_tokens: 0,

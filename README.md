@@ -599,6 +599,8 @@ Privileged routes are loopback-only (`127.0.0.1` / `::1`): all `/admin/*` endpoi
 | POST | `/admin/migrate` | Run database migration (loopback-only) |
 | POST | `/admin/repair` | Repair schema drift + run migration (loopback-only) |
 | POST | `/admin/integrations/install` | Install/update integrations from daemon (loopback-only) |
+| GET | `/pricing/status` | Pricing manifest snapshot ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md)) |
+| POST | `/pricing/refresh` | Trigger an immediate LiteLLM manifest refresh (loopback-only) |
 
 Most endpoints accept `?since=<ISO>&until=<ISO>` for date filtering.
 

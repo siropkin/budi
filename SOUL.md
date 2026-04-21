@@ -490,12 +490,14 @@ Key points:
 - `crates/budi-core/src/file_attribution.rs` - R1.4 (#292) repo-relative file-path extractor, enforces ADR-0083 privacy limits (no absolute paths, no outside-of-repo paths, no file contents)
 - `crates/budi-core/src/work_outcome.rs` - R1.5 (#293) session-scoped `work_outcome` derivation (`committed`, `branch_merged`, `no_commit`, `unknown`) from local git state only — no remote API calls, no content capture
 - `crates/budi-core/src/cost.rs` - Cost estimation glue (aggregates `cost_cents` from `messages`). Pricing itself lives in `provider.rs::ModelPricing` + the per-provider `*_pricing_for_model()` functions in `providers/*.rs`; those tables are replaced in 8.3 by a manifest-driven `pricing::lookup` ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md), implementation #376, cleanup #377)
+- `crates/budi-core/src/pricing/mod.rs` - 8.3+ pricing loader + `lookup` API. Three-layer resolution (on-disk cache → embedded LiteLLM baseline → `unknown`), `PricingSource` tagging for immutable history, `backfill_unknown_rows` for Rule A (ADR-0091 §5), validation guards (>95% retention floor, $1,000/M sanity ceiling, 10 MB size cap). See [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md)
+- `crates/budi-core/src/pricing/manifest.embedded.json` - Vendored snapshot of LiteLLM's `model_prices_and_context_window.json`, refreshed per release by `scripts/pricing/sync_baseline.sh` (ADR-0091 §10)
 - `crates/budi-core/src/hooks.rs` - Prompt classification and migration helpers (hook ingestion removed in 8.0; `hook_events` table no longer exists in schema v1)
 - `crates/budi-core/src/jsonl.rs` - JSONL transcript parser, ParsedMessage struct
-- `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery, pricing)
-- `crates/budi-core/src/providers/codex.rs` - Codex provider (Codex Desktop/CLI transcript import from `~/.codex/sessions/`, OpenAI model pricing)
-- `crates/budi-core/src/providers/copilot.rs` - Copilot CLI provider (transcript import from `~/.copilot/session-state/`, delegates pricing to Claude/OpenAI based on model)
-- `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts)
+- `crates/budi-core/src/providers/claude_code.rs` - Claude Code provider (JSONL discovery; 8.2-era `claude_pricing_for_model` retained pending cleanup in #377 — 8.3+ pricing flows through `pricing::lookup` per [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md))
+- `crates/budi-core/src/providers/codex.rs` - Codex provider (Codex Desktop/CLI transcript import from `~/.codex/sessions/`; 8.2-era `codex_pricing_for_model` retained pending cleanup in #377 — 8.3+ pricing flows through `pricing::lookup` per [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md))
+- `crates/budi-core/src/providers/copilot.rs` - Copilot CLI provider (transcript import from `~/.copilot/session-state/`; 8.2-era `copilot_pricing_for_model` delegator retained pending cleanup in #377 — 8.3+ pricing flows through `pricing::lookup` per [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md))
+- `crates/budi-core/src/providers/cursor.rs` - Cursor provider (Usage API primary, transcript fallback; auth/session context from state.vscdb across macOS/Linux/Windows layouts). Usage-API rows write `pricing_source = 'upstream:api'` (ADR-0091 §4 sixth column value); transcript-fallback rows flow through `pricing::lookup`
 - `crates/budi-core/src/migration.rs` - Schema v1, all migration paths
 - `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
 - `crates/budi-core/src/autostart.rs` - Platform-native daemon autostart: launchd (macOS), systemd (Linux), Task Scheduler (Windows). Install/uninstall/status.
@@ -503,6 +505,9 @@ Key points:
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + cloud sync worker + startup hooks for tailer / migration / legacy-residue notices.
 - `crates/budi-daemon/src/workers/cloud_sync.rs` - Background cloud sync loop: configurable interval, backoff, auth/schema error handling
+- `crates/budi-daemon/src/workers/pricing_refresh.rs` - 24 h LiteLLM manifest refresh loop ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) §3). Warm-loads the on-disk cache, validates fetched payloads, atomic-writes, hot-swaps `pricing` state, runs `backfill_unknown_rows`. Disabled via `BUDI_PRICING_REFRESH=0`
+- `crates/budi-daemon/src/routes/pricing.rs` - `GET /pricing/status` + `POST /pricing/refresh` (loopback-only) ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) §8)
+- `crates/budi-cli/src/commands/pricing.rs` - `budi pricing status [--json] [--refresh]` CLI surface ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) §8)
 - `crates/budi-daemon/src/routes/hooks.rs` - /sync, /sync/all, /sync/reset, /sync/status, /health, /health/integrations, /health/check-update, /admin/integrations/install endpoints (hook ingestion removed)
 - `crates/budi-daemon/src/routes/cloud.rs` - /cloud/sync (loopback-only manual cloud flush) and /cloud/status (cloud readiness + watermarks); added in R2.1 (#225)
 - `crates/budi-cli/src/commands/cloud.rs` - `budi cloud sync` / `budi cloud status` (R2.1 #225): text + JSON output, exit code 2 on non-ok sync

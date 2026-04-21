@@ -852,6 +852,16 @@ fn usage_events_to_messages(
                 } else {
                     "estimated".to_string()
                 },
+                // ADR-0091 §1 / #376: Cursor exact-cost rows come from
+                // Cursor's Usage API, not from the LiteLLM manifest. Tag
+                // them with `upstream:api` so `pricing_source` stays
+                // honest; the CostEnricher will tag manifest-estimated
+                // rows (those without `total_cents`) on its pass.
+                pricing_source: if ev.total_cents.is_some() {
+                    Some(crate::pricing::COLUMN_VALUE_UPSTREAM_API.to_string())
+                } else {
+                    None
+                },
                 request_id: None,
                 speed: None,
                 cache_creation_1h_tokens: 0,
@@ -1451,6 +1461,7 @@ fn parse_cursor_line(
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "n/a".to_string(),
+                pricing_source: None,
                 request_id: request_id.clone(),
                 speed: None,
                 cache_creation_1h_tokens: 0,
@@ -1486,6 +1497,7 @@ fn parse_cursor_line(
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
+                pricing_source: None,
                 request_id,
                 speed: None,
                 cache_creation_1h_tokens: 0,

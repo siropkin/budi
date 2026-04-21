@@ -157,6 +157,20 @@ pub struct ParsedMessage {
     /// Confidence level: "exact" (tokens from source), "exact_cost" (cost from API, tokens estimated),
     /// "estimated" (both calculated from heuristics).
     pub cost_confidence: String,
+    /// Provenance tag for `cost_cents`, persisted to `messages.pricing_source`.
+    /// Populated by `CostEnricher` from `pricing::PricingSource::as_column_value()`
+    /// for manifest-priced rows, by `pricing::COLUMN_VALUE_UNKNOWN` when the
+    /// model isn't in the manifest, and by the Cursor ingest path with
+    /// `pricing::COLUMN_VALUE_UPSTREAM_API` when `cost_cents` comes from
+    /// Cursor's Usage API. See [ADR-0091] §4.
+    ///
+    /// `None` at the pipeline seam means the enricher hasn't run yet; the
+    /// analytics insert path falls back to the column DEFAULT
+    /// (`"legacy:pre-manifest"`) — so rows that somehow bypass the pipeline
+    /// still have a valid tag.
+    ///
+    /// [ADR-0091]: https://github.com/siropkin/budi/blob/main/docs/adr/0091-model-pricing-manifest-source-of-truth.md
+    pub pricing_source: Option<String>,
     /// API request ID (message.id from JSONL). Used for deduplication of
     /// multi-content-block responses.
     pub request_id: Option<String>,
@@ -228,6 +242,7 @@ impl Default for ParsedMessage {
             user_name: None,
             machine_name: None,
             cost_confidence: String::new(),
+            pricing_source: None,
             request_id: None,
             speed: None,
             cache_creation_1h_tokens: 0,
@@ -516,6 +531,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "n/a".to_string(),
+                pricing_source: None,
                 request_id: None,
                 speed: None,
                 cache_creation_1h_tokens: 0,
@@ -567,6 +583,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
+                pricing_source: None,
                 request_id: a.message.id,
                 speed: usage.and_then(|u| u.speed.clone()),
                 cache_creation_1h_tokens: cache_1h,
@@ -631,6 +648,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 user_name: None,
                 machine_name: None,
                 cost_confidence: "estimated".to_string(),
+                pricing_source: None,
                 request_id: flat.id,
                 speed: usage.and_then(|u| u.speed.clone()),
                 cache_creation_1h_tokens: cache_1h,
@@ -655,6 +673,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
             parent_uuid: flat.parent_uuid,
             provider: "claude_code".to_string(),
             cost_confidence: "n/a".to_string(),
+            pricing_source: None,
             ..Default::default()
         }),
         _ => None,

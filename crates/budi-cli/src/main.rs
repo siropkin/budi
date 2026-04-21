@@ -300,6 +300,29 @@ Examples:
         #[command(subcommand)]
         action: CloudAction,
     },
+    /// Pricing manifest: view status, trigger a manual refresh (ADR-0091)
+    #[command(after_help = "\
+Examples:
+  budi pricing status              Show current manifest layer, version, and unknown models
+  budi pricing status --refresh    Fetch the latest LiteLLM manifest before showing status
+  budi pricing status --format json  JSON output for scripting")]
+    Pricing {
+        #[command(subcommand)]
+        action: PricingAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PricingAction {
+    /// Show manifest layer, version, known model count, and unknown models
+    Status {
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
+        /// Trigger an immediate manifest refresh before showing status
+        #[arg(long, default_value_t = false)]
+        refresh: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -597,6 +620,11 @@ fn main() -> Result<()> {
         Commands::Cloud { action } => match action {
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
             CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
+        },
+        Commands::Pricing { action } => match action {
+            PricingAction::Status { format, refresh } => {
+                commands::pricing::cmd_pricing_status(format, refresh)
+            }
         },
     }
 }

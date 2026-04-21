@@ -344,43 +344,39 @@ impl Enricher for CostEnricher {
             }
         }
 
-        // Calculate cost if not already set (skip if API provided exact cost)
+        // Calculate cost if not already set (skip if API provided exact cost).
+        // 8.3 / #376: sources pricing from `pricing::lookup` (ADR-0091). An
+        // unknown model short-circuits the whole calc — we must not pipe
+        // zero rates through `calculate_cost_cents`, because the web-search
+        // surcharge ($0.01/search) would leak onto a supposedly-zero row.
         if msg.cost_cents.is_none() && msg.role == "assistant" {
             if msg.model.is_none() {
                 tracing::trace!(
-                    "CostEnricher: model is None for message {}, using default pricing",
+                    "CostEnricher: model is None for message {}, pricing as unknown",
                     msg.uuid
                 );
             }
             let model = msg.model.as_deref().unwrap_or("unknown");
-            if model == "unknown" {
-                tracing::trace!(
-                    "CostEnricher: model is 'unknown' for message {}, cost estimate may be inaccurate",
-                    msg.uuid
-                );
-            }
-            if msg.provider != "cursor" && msg.provider != "claude_code" {
-                tracing::warn!(
-                    "CostEnricher: unknown provider '{}', using claude_code pricing",
-                    msg.provider
-                );
-            }
-            let pricing = crate::provider::pricing_for_model(model, &msg.provider);
-
-            msg.cost_cents = Some(pricing.calculate_cost_cents(
-                msg.input_tokens,
-                msg.output_tokens,
-                msg.cache_creation_tokens,
-                msg.cache_read_tokens,
-                msg.cache_creation_1h_tokens,
-                msg.speed.as_deref(),
-                msg.web_search_requests,
-            ));
-            // Distinguish between known and unknown model estimates
-            if model == "unknown" {
-                msg.cost_confidence = "estimated_unknown_model".to_string();
-            } else {
-                msg.cost_confidence = "estimated".to_string();
+            match crate::pricing::lookup(model, &msg.provider) {
+                crate::pricing::PricingOutcome::Known { pricing, source } => {
+                    msg.cost_cents = Some(pricing.calculate_cost_cents(
+                        msg.input_tokens,
+                        msg.output_tokens,
+                        msg.cache_creation_tokens,
+                        msg.cache_read_tokens,
+                        msg.cache_creation_1h_tokens,
+                        msg.speed.as_deref(),
+                        msg.web_search_requests,
+                    ));
+                    msg.cost_confidence = "estimated".to_string();
+                    msg.pricing_source = Some(source.as_column_value());
+                }
+                crate::pricing::PricingOutcome::Unknown { .. } => {
+                    // ADR-0091 §2: $0 + warn, not a silent per-provider default.
+                    msg.cost_cents = Some(0.0);
+                    msg.cost_confidence = "estimated_unknown_model".to_string();
+                    msg.pricing_source = Some(crate::pricing::COLUMN_VALUE_UNKNOWN.to_string());
+                }
             }
         }
 
