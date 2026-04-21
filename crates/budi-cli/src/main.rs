@@ -161,11 +161,10 @@ Examples:
     },
     /// Database admin commands (migrate, repair, import historical transcripts)
     ///
-    /// Groups the previously-bare `budi migrate` / `budi repair` /
-    /// `budi import` verbs under a single namespace (R2.1 CLI audit
-    /// follow-up, #368). The bare verbs still parse in 8.2.x as hidden
-    /// backward-compatibility aliases but print a one-per-day stderr
-    /// deprecation hint and are slated for removal in 8.3.
+    /// Groups migrate / repair / import under a single namespace (R2.1
+    /// CLI audit follow-up, #368). The pre-8.2.1 bare verbs
+    /// (`budi migrate` / `budi repair` / `budi import`) were removed in
+    /// 8.3.0 (#428); use `budi db <verb>` instead.
     #[command(after_help = "\
 Examples:
   budi db migrate            Run database migration explicitly
@@ -175,20 +174,6 @@ Examples:
     Db {
         #[command(subcommand)]
         action: DbAction,
-    },
-    /// Deprecated: moved to `budi db migrate`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
-    #[command(hide = true)]
-    Migrate,
-    /// Deprecated: moved to `budi db repair`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
-    #[command(hide = true)]
-    Repair,
-    /// Deprecated: moved to `budi db import`. Still functional in 8.2 for backward compatibility; will be removed in 8.3.
-    #[command(hide = true)]
-    Import {
-        /// Clear all data and re-ingest from scratch.
-        /// Use after upgrading budi when the cost calculation has changed.
-        #[arg(long, default_value_t = false)]
-        force: bool,
     },
     /// Show session health vitals (context drag, cache efficiency, thrashing, cost acceleration)
     Vitals {
@@ -559,18 +544,6 @@ fn main() -> Result<()> {
             DbAction::Repair => commands::repair::cmd_repair(),
             DbAction::Import { force } => commands::import::cmd_import(force),
         },
-        Commands::Migrate => {
-            commands::db::nudge_db_alias("migrate");
-            commands::db::cmd_db_migrate()
-        }
-        Commands::Repair => {
-            commands::db::nudge_db_alias("repair");
-            commands::repair::cmd_repair()
-        }
-        Commands::Import { force } => {
-            commands::db::nudge_db_alias("import");
-            commands::import::cmd_import(force)
-        }
         Commands::Vitals { session } => commands::vitals::cmd_vitals(session),
         Commands::Health { session } => {
             commands::vitals::nudge_health_alias();
@@ -661,25 +634,13 @@ mod tests {
         assert!(lower.contains("doctor"));
         assert!(lower.contains("stats"));
         assert!(lower.contains("autostart"));
-        // `budi db` is the canonical DB admin namespace in 8.2.1
-        // (#368). The bare `budi migrate` / `budi repair` / `budi import`
-        // verbs are hidden aliases and must not appear in the subcommand
-        // list so new users learn the canonical names.
+        // `budi db` is the canonical DB admin namespace. The pre-8.2.1
+        // bare verbs (`budi migrate` / `budi repair` / `budi import`)
+        // were removed in 8.3.0 (#428) and must not come back as a
+        // top-level command.
         assert!(
             lower.contains("\n  db "),
             "top-level help should advertise the `budi db` namespace"
-        );
-        assert!(
-            !lower.contains("\n  migrate "),
-            "deprecated bare `budi migrate` should be hidden from help"
-        );
-        assert!(
-            !lower.contains("\n  repair "),
-            "deprecated bare `budi repair` should be hidden from help"
-        );
-        assert!(
-            !lower.contains("\n  import "),
-            "deprecated bare `budi import` should be hidden from help"
         );
         assert!(
             !lower.contains("\n  sync"),
@@ -724,23 +685,16 @@ mod tests {
     }
 
     #[test]
-    fn cli_still_parses_deprecated_db_bare_verbs() {
-        // The bare `budi migrate` / `budi repair` / `budi import` verbs
-        // keep parsing in 8.2.x so existing aliases, wiki docs, and
-        // third-party scripts keep working for the full deprecation
-        // window (slated for removal in 8.3, see #368).
-        let cli = Cli::try_parse_from(["budi", "migrate"]).expect("budi migrate (alias) parses");
-        assert!(matches!(cli.command, Commands::Migrate));
-
-        let cli = Cli::try_parse_from(["budi", "repair"]).expect("budi repair (alias) parses");
-        assert!(matches!(cli.command, Commands::Repair));
-
-        let cli = Cli::try_parse_from(["budi", "import"]).expect("budi import (alias) parses");
-        assert!(matches!(cli.command, Commands::Import { force: false }));
-
-        let cli = Cli::try_parse_from(["budi", "import", "--force"])
-            .expect("budi import --force (alias) parses");
-        assert!(matches!(cli.command, Commands::Import { force: true }));
+    fn cli_rejects_removed_db_bare_verbs() {
+        // #428 — the pre-8.2.1 bare verbs `budi migrate` / `budi repair` /
+        // `budi import` were removed in 8.3.0 after shipping in 8.2.x as
+        // hidden deprecation aliases. Users must now reach these via the
+        // `budi db` namespace. Regression guard so they don't quietly come
+        // back.
+        assert!(Cli::try_parse_from(["budi", "migrate"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "repair"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "import"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "import", "--force"]).is_err());
     }
 
     #[test]

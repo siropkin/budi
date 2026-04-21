@@ -1,5 +1,11 @@
 # Changelog
 
+## 8.3.0 — Unreleased
+
+### Removed
+
+- **Bare-verb DB admin aliases `budi migrate` / `budi repair` / `budi import`** (#428) — 8.2.1 (#368) grouped the three DB admin verbs under a single `budi db` namespace (`budi db migrate`, `budi db repair`, `budi db import`) and kept the pre-namespace bare verbs as hidden backward-compatibility aliases that printed a one-per-day stderr deprecation nudge. 8.3.0 removes the aliases, the nudge, and the `$BUDI_HOME/db-alias-nudge` rate-limit marker; `budi db <verb>` is now the only surface for the DB admin commands and `budi migrate` / `budi repair` / `budi import` return a clap "unknown subcommand" error. `budi update` best-effort deletes the stale marker file from 8.2.x installs on upgrade (silent on failure, no user prompt). `README.md` / `SOUL.md` / top-level help / the `budi db` `after_help` examples no longer mention the bare verbs.
+
 ## 8.2.1 — 2026-04-20
 
 8.2.1 is the post-`v8.2.0` hardening train: it tightens tailer runtime
