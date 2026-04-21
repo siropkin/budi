@@ -363,10 +363,14 @@ enum AutostartAction {
 ///
 /// Two flavors are supported (#404):
 ///
-/// * **Calendar windows** (`today`, `week`, `month`, `all`) — anchored to the
-///   start of the current local calendar day / ISO week (Monday) / month.
-///   These are the historical CLI semantics and match what `budi stats`
-///   has always shown.
+/// * **Named windows** (`today`, `week`, `month`, `all`). `today` is
+///   anchored to the start of the current local calendar day.
+///   `week` and `month` resolve to rolling 7 / 30 days ending now —
+///   identical to `-p 7d` / `-p 30d` — matching the README's
+///   "last 7 / 30 calendar days including today" contract. Before 8.3
+///   (#447), `week` was calendar-week-starting-Monday and `month` was
+///   first-of-calendar-month, which collapsed to a single day of data
+///   on Mondays and on the 1st of the month respectively.
 /// * **Rolling windows** (`Nd`, `Nw`, `Nm` where `N` is a positive integer) —
 ///   e.g. `1d`, `7d`, `2w`, `3m`. `Nd` / `Nw` go back exactly that many
 ///   days / weeks from the local calendar day, and `Nm` uses calendar
