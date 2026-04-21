@@ -1,7 +1,7 @@
 # ADR-0091: Model Pricing via Embedded Baseline + LiteLLM Runtime Refresh
 
 - **Date**: 2026-04-21
-- **Status**: Proposed
+- **Status**: Accepted (promoted 2026-04-21 after [#376](https://github.com/siropkin/budi/issues/376) and [#377](https://github.com/siropkin/budi/issues/377) merged with all Promotion Criteria test gates green)
 - **Issue**: [#375](https://github.com/siropkin/budi/issues/375)
 - **Milestone**: 8.3.0 (epic: [#436](https://github.com/siropkin/budi/issues/436))
 - **Amends**: [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md) §Neutral (outbound-network surface; see §6 below)
@@ -249,6 +249,13 @@ This ADR is promoted from `Proposed` to `Accepted` only when all of the followin
 - The embedded baseline refresh step is added to the release checklist ahead of the v8.3.0 tag (§10).
 
 Until every bullet above is demonstrable, the status banner stays `Proposed`.
+
+**Promotion evidence (2026-04-21):**
+
+- [#376](https://github.com/siropkin/budi/issues/376) merged as [PR #461](https://github.com/siropkin/budi/pull/461). All nine Promotion-Criteria test gates green: `manifest:vNNN` never recomputed, `legacy:pre-manifest` never recomputed, `unknown → backfilled:vNNN` rewrites do happen on refresh, UTF-8 boundary safety on multi-byte model ids, <95%-retention guard rejects a wiped payload, $1,000/M sanity ceiling rejects a mispriced payload, `BUDI_PRICING_REFRESH=0` suppresses network calls, schema migration is idempotent, `budi pricing status --json` golden-key shape is stable.
+- [#377](https://github.com/siropkin/budi/issues/377) merged as [PR #462](https://github.com/siropkin/budi/pull/462). Net diff **-750 LOC** across the workspace; the four `*_pricing_for_model` functions and their substring-dispatch tests are gone; every call site now routes through `pricing::lookup`.
+- Propagation rode with the ADR merge in [PR #460](https://github.com/siropkin/budi/pull/460) — `SOUL.md` / `README.md` / `docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md` updated in the same commit.
+- `scripts/pricing/sync_baseline.sh` ships as the §10 refresh instrument. The v8.3.0 release ticket is committed to running it once as part of the pre-tag checklist per the script's own §10 prose.
 
 ## Out of scope
 
