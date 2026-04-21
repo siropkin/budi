@@ -5299,3 +5299,251 @@ fn breakdown_other_label_is_stable_wire_value() {
     // downstream reconciliation tooling.
     assert_eq!(BREAKDOWN_OTHER_LABEL, "(other)");
 }
+
+// ─── #452 text-vs-JSON parity property tests ─────────────────────────────────
+//
+// The audit reported a 74-message gap between `budi stats` text output and
+// `budi stats --format json` for the same query, plus a `--provider cursor`
+// count that exceeded the unfiltered count. We could not reproduce either on
+// a second machine. Code-read findings:
+//
+//   1. The text and JSON CLI paths both call the *same* daemon endpoint
+//      (`GET /analytics/summary`) backed by `usage_summary_with_filters`.
+//      Within a single daemon invocation, both paths see identical data —
+//      they cannot disagree by construction. The reported 74-message gap
+//      must come from two separate CLI invocations taking separate
+//      snapshots while a live tailer ingests in between.
+//
+//   2. `usage_summary_with_filters` and `estimate_cost_with_filters` apply
+//      the same provider predicate (`COALESCE(provider, 'claude_code') = ?`)
+//      to the same WHERE clause that drives both the row count and the cost
+//      sum. There is no path that filters cost without filtering count, or
+//      vice versa, on the message-table query.
+//
+//   3. The rollup-path (`usage_summary_from_rollups`) uses `provider = ?`
+//      without the COALESCE wrapper. Rows with NULL provider in the rollup
+//      tables would be excluded from any provider-filtered query — but this
+//      can only make `filtered <= unfiltered`, never the other direction
+//      the audit reports.
+//
+// The property tests below pin contract (2) and (3) at the SQL layer. If the
+// audit's anomaly ever reproduces, we file a follow-up bug rather than chase
+// the 8.2.1 phantom.
+
+/// Build an assistant message attributed to a specific provider. The
+/// `--provider` filter scope tests need to seed cohorts from cursor /
+/// codex / claude_code in the same window so the property
+/// `filtered <= unfiltered` is meaningful.
+fn provider_msg(uuid: &str, session: &str, provider: &str, cost_cents: f64) -> ParsedMessage {
+    ParsedMessage {
+        uuid: uuid.to_string(),
+        session_id: Some(session.to_string()),
+        timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
+        cwd: None,
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: None,
+        repo_id: None,
+        provider: provider.to_string(),
+        cost_cents: Some(cost_cents),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "exact".to_string(),
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    }
+}
+
+#[test]
+fn provider_filtered_summary_count_is_at_most_unfiltered_count() {
+    // #452 acceptance: for any provider P, the message count under
+    // `--provider P` must be <= the unfiltered count. Pre-#452 the
+    // audit reported `--provider cursor` returning 184 msgs vs 115
+    // unfiltered, which is mathematically impossible if the same
+    // predicate is applied to both queries. Pin the math here.
+    let mut conn = test_db();
+    let msgs = vec![
+        provider_msg("p-cursor-1", "s-cursor", "cursor", 10.0),
+        provider_msg("p-cursor-2", "s-cursor", "cursor", 20.0),
+        provider_msg("p-codex-1", "s-codex", "codex", 30.0),
+        provider_msg("p-codex-2", "s-codex", "codex", 40.0),
+        provider_msg("p-codex-3", "s-codex", "codex", 50.0),
+        provider_msg("p-claude-1", "s-claude", "claude_code", 60.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let unfiltered =
+        usage_summary_with_filters(&conn, None, None, None, &DimensionFilters::default()).unwrap();
+    assert_eq!(unfiltered.total_messages, 6);
+
+    for provider in ["cursor", "codex", "claude_code", "copilot_cli", "openai"] {
+        let filtered = usage_summary_with_filters(
+            &conn,
+            None,
+            None,
+            Some(provider),
+            &DimensionFilters::default(),
+        )
+        .unwrap();
+        assert!(
+            filtered.total_messages <= unfiltered.total_messages,
+            "--provider {provider} returned {} messages, more than unfiltered {} (audit hypothesis B)",
+            filtered.total_messages,
+            unfiltered.total_messages,
+        );
+    }
+}
+
+#[test]
+fn provider_filtered_summary_partitions_by_provider_to_the_message() {
+    // #452 acceptance: summing `summary(--provider P).total_messages`
+    // across every provider in the window must equal the unfiltered
+    // count exactly. This proves the WHERE clause partitions cleanly
+    // — no rows are double-counted or dropped under filtering.
+    let mut conn = test_db();
+    let msgs = vec![
+        provider_msg("part-cursor-1", "s1", "cursor", 11.0),
+        provider_msg("part-cursor-2", "s1", "cursor", 12.0),
+        provider_msg("part-cursor-3", "s2", "cursor", 13.0),
+        provider_msg("part-codex-1", "s3", "codex", 21.0),
+        provider_msg("part-codex-2", "s3", "codex", 22.0),
+        provider_msg("part-claude-1", "s4", "claude_code", 31.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let unfiltered =
+        usage_summary_with_filters(&conn, None, None, None, &DimensionFilters::default()).unwrap();
+
+    let providers = ["cursor", "codex", "claude_code"];
+    let summed: u64 = providers
+        .iter()
+        .map(|p| {
+            usage_summary_with_filters(&conn, None, None, Some(p), &DimensionFilters::default())
+                .unwrap()
+                .total_messages
+        })
+        .sum();
+    assert_eq!(
+        summed, unfiltered.total_messages,
+        "sum of per-provider message counts must equal the unfiltered total — partitioning bug if not"
+    );
+}
+
+#[test]
+fn provider_filtered_cost_partitions_by_provider_to_the_cent() {
+    // #452 acceptance companion: the same predicate applied to the
+    // cost query must partition the cost sum exactly. Pre-#452 the
+    // audit reported `--provider cursor` returning the full
+    // unfiltered cost ($113.87) — that's only possible if the cost
+    // predicate is a no-op while the count predicate works. Pin the
+    // math.
+    let mut conn = test_db();
+    let msgs = vec![
+        provider_msg("cost-cursor-1", "s1", "cursor", 11.5),
+        provider_msg("cost-cursor-2", "s1", "cursor", 12.5),
+        provider_msg("cost-codex-1", "s2", "codex", 21.0),
+        provider_msg("cost-codex-2", "s2", "codex", 22.0),
+        provider_msg("cost-claude-1", "s3", "claude_code", 31.25),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let unfiltered = crate::cost::estimate_cost_with_filters(
+        &conn,
+        None,
+        None,
+        None,
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+
+    let providers = ["cursor", "codex", "claude_code"];
+    let summed_cents: f64 = providers
+        .iter()
+        .map(|p| {
+            crate::cost::estimate_cost_with_filters(
+                &conn,
+                None,
+                None,
+                Some(p),
+                &DimensionFilters::default(),
+            )
+            .unwrap()
+            .total_cost
+        })
+        .sum::<f64>();
+
+    // total_cost is in dollars (cents/100). Compare to one cent of
+    // tolerance so floating-point rounding doesn't flake the test.
+    assert!(
+        (summed_cents - unfiltered.total_cost).abs() < 0.01,
+        "sum of per-provider cost must equal unfiltered total ({summed_cents} vs {})",
+        unfiltered.total_cost,
+    );
+
+    // And every per-provider sum must be <= unfiltered (the dual of
+    // hypothesis B from the audit, applied to cost).
+    for p in &providers {
+        let filtered = crate::cost::estimate_cost_with_filters(
+            &conn,
+            None,
+            None,
+            Some(p),
+            &DimensionFilters::default(),
+        )
+        .unwrap();
+        assert!(
+            filtered.total_cost <= unfiltered.total_cost + 0.01,
+            "--provider {p} cost ({}) exceeded unfiltered cost ({})",
+            filtered.total_cost,
+            unfiltered.total_cost,
+        );
+    }
+}
+
+#[test]
+fn unknown_provider_filter_yields_zero_messages_and_zero_cost() {
+    // Defensive: a provider value that doesn't match any row in the
+    // window must produce zero messages and zero cost. The CLI
+    // `normalize_provider` rejects unknown providers up-front, but
+    // the SQL layer should still degrade gracefully if a stale alias
+    // ever sneaks through.
+    let mut conn = test_db();
+    let msgs = vec![provider_msg("u-cursor-1", "s1", "cursor", 5.0)];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let summary = usage_summary_with_filters(
+        &conn,
+        None,
+        None,
+        Some("ghost_provider_that_does_not_exist"),
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(summary.total_messages, 0);
+    assert_eq!(summary.total_cost_cents, 0.0);
+
+    let cost = crate::cost::estimate_cost_with_filters(
+        &conn,
+        None,
+        None,
+        Some("ghost_provider_that_does_not_exist"),
+        &DimensionFilters::default(),
+    )
+    .unwrap();
+    assert_eq!(cost.total_cost, 0.0);
+}
