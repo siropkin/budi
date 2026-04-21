@@ -36,7 +36,11 @@ impl Enricher for GitEnricher {
     fn enrich(&mut self, msg: &mut ParsedMessage) -> Vec<Tag> {
         let mut tags = Vec::new();
 
-        // Resolve repo_id from cwd
+        // Resolve repo_id from cwd. #442: `resolve_repo_id` now returns
+        // `None` when the cwd is not inside a git repo with a remote
+        // origin, so non-repo work (scratch dirs, `~/Desktop`, brew
+        // checkouts) stays NULL and rolls up into a single `(no
+        // repository)` bucket on render.
         if msg.repo_id.is_none() {
             if msg.cwd.is_none() {
                 tracing::debug!(
@@ -45,8 +49,7 @@ impl Enricher for GitEnricher {
                 );
             }
             if let Some(ref cwd) = msg.cwd {
-                let repo_id = self.repo_cache.resolve(Path::new(cwd));
-                msg.repo_id = Some(repo_id);
+                msg.repo_id = self.repo_cache.resolve(Path::new(cwd));
             }
         }
 

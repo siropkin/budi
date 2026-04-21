@@ -656,7 +656,7 @@ fn load_composer_header_contexts(now_ms: i64) -> Vec<SessionContext> {
         let repo_id = workspace_root
             .as_deref()
             .map(std::path::Path::new)
-            .map(crate::repo_id::resolve_repo_id);
+            .and_then(crate::repo_id::resolve_repo_id);
         let git_branch = workspace_root
             .as_deref()
             .and_then(resolve_git_branch_from_head);

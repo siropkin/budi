@@ -216,6 +216,31 @@ pub async fn analytics_projects(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
+/// #442 `--include-non-repo`: per-cwd-basename breakdown of rows whose
+/// `repo_id` is NULL. Returned as a flat `Vec<RepoUsage>` (no paginated
+/// `(other)` bucket) because the expected cardinality is small — any
+/// single user's non-repo scratch-dir set tops out in the low dozens.
+pub async fn analytics_non_repo(
+    Query(params): Query<ListParams>,
+) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
+    let limit = resolve_breakdown_limit(params.limit);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::non_repo_usage(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            limit,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
 pub async fn analytics_models(
     Query(params): Query<ListParams>,
 ) -> Result<

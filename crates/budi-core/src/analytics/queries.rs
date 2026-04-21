@@ -1065,6 +1065,126 @@ pub fn repo_usage_with_filters(
     Ok(rows)
 }
 
+/// #442: Per-cwd breakdown for `messages` rows whose `repo_id` is NULL
+/// (non-repository work — scratch dirs, `~/Desktop`, brew-tap
+/// checkouts). Rows are grouped by the **basename** of `cwd` so the
+/// output matches the pre-8.3 per-folder-name labels users already
+/// recognize from their history (`Desktop`, `ivan.seredkin`, etc.).
+///
+/// Used by `budi stats --projects --include-non-repo` to surface the
+/// detail that was collapsed into `(no repository)` by default.
+/// Returns an empty vec when there are no non-repo rows in the window.
+pub fn non_repo_usage(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<RepoUsage>> {
+    let mut conditions = vec![
+        "role = 'assistant'".to_string(),
+        "(repo_id IS NULL OR repo_id = '')".to_string(),
+        "cwd IS NOT NULL".to_string(),
+        "cwd != ''".to_string(),
+    ];
+    let mut param_values: Vec<String> = Vec::new();
+    if let Some(s) = since {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
+    }
+
+    let sql = format!(
+        "SELECT cwd,
+                COUNT(*) AS cnt,
+                COALESCE(SUM(input_tokens), 0) AS inp,
+                COALESCE(SUM(output_tokens), 0) AS outp,
+                COALESCE(SUM(cost_cents), 0.0) AS cost
+         FROM messages
+         WHERE {}
+         GROUP BY cwd",
+        conditions.join(" AND ")
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<(String, u64, u64, u64, f64)> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Aggregate same-basename cwds together. `~/Desktop` and
+    // `/tmp/Desktop` both collapse to `Desktop`, matching the label the
+    // user saw in their pre-8.3 stats.
+    let mut agg: std::collections::BTreeMap<String, (String, u64, u64, u64, f64)> =
+        std::collections::BTreeMap::new();
+    for (cwd, cnt, inp, outp, cost) in rows {
+        let label = cwd_basename(&cwd);
+        let entry = agg
+            .entry(label)
+            .or_insert_with(|| (cwd.clone(), 0, 0, 0, 0.0));
+        // Keep the lexicographically-smallest cwd as the display_path
+        // so output is deterministic even when basenames collide.
+        if cwd < entry.0 {
+            entry.0 = cwd;
+        }
+        entry.1 += cnt;
+        entry.2 += inp;
+        entry.3 += outp;
+        entry.4 += cost;
+    }
+
+    let mut out: Vec<RepoUsage> = agg
+        .into_iter()
+        .map(|(label, (sample_cwd, cnt, inp, outp, cost))| RepoUsage {
+            repo_id: label,
+            display_path: sample_cwd,
+            message_count: cnt,
+            input_tokens: inp,
+            output_tokens: outp,
+            cost_cents: cost,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.cost_cents
+            .partial_cmp(&a.cost_cents)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.repo_id.cmp(&b.repo_id))
+    });
+    if limit > 0 && out.len() > limit {
+        out.truncate(limit);
+    }
+    Ok(out)
+}
+
+/// Return the last path component of `cwd`, or `(unknown)` if empty.
+/// Strips a trailing `/` so `/foo/bar/` and `/foo/bar` collapse to `bar`.
+fn cwd_basename(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "(unknown)".to_string();
+    }
+    trimmed
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(unknown)")
+        .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Activity Chart
 // ---------------------------------------------------------------------------

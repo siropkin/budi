@@ -1,38 +1,63 @@
 //! Resolve a working directory to a canonical repository identity.
 //!
-//! Resolution logic:
-//! 1. Git + remote origin → normalized URL (e.g. `github.com/user/repo`)
-//! 2. Git + no remote → git root folder name
-//! 3. No git → current folder name
+//! Resolution logic (#442):
+//! 1. Git + remote origin → `Some("host/owner/repo")` (normalized URL).
+//! 2. Anything else (no git, git but no remote, scratch dirs) → `None`.
+//!
+//! Before 8.3.0 this also returned the git-root folder name or the cwd's
+//! folder name when no remote was available, which meant `budi stats
+//! --projects` silently mixed real GitHub repos with ad-hoc directories
+//! like `Desktop`, `~`, `.cursor`, and brew-tap checkouts. Non-repo work
+//! is now rolled up into a single `(no repository)` bucket on the render
+//! side.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Resolve a cwd path to a canonical repo_id string.
-pub fn resolve_repo_id(cwd: &Path) -> String {
-    // Find git root
-    let Some(git_root) = find_git_root(cwd) else {
-        // No git — use folder name
-        return folder_name(cwd);
-    };
+///
+/// Returns `None` when the cwd is not inside a git repo with a remote
+/// origin. Callers should treat `None` as "non-repository work" and
+/// persist it as `NULL` in the analytics DB so it collapses to a single
+/// `(no repository)` bucket at query time.
+pub fn resolve_repo_id(cwd: &Path) -> Option<String> {
+    // Find git root.
+    let git_root = find_git_root(cwd)?;
 
-    // Resolve worktrees to main repo root
+    // Resolve worktrees to main repo root so a detached worktree checkout
+    // shares identity with its parent.
     let storage_root = crate::config::resolve_storage_root(&git_root);
 
-    // Try to get remote origin URL
-    if let Some(url) = git_remote_origin(&storage_root) {
-        return normalize_git_url(&url);
-    }
+    // Require a remote origin — an init'd-but-unpushed local repo stays
+    // in the `(no repository)` bucket until it has an upstream.
+    let url = git_remote_origin(&storage_root)?;
 
-    // Git but no remote — use root folder name
-    folder_name(&storage_root)
+    Some(normalize_git_url(&url))
+}
+
+/// Returns `true` when the given string looks like a normalized
+/// `resolve_repo_id` output: at least two `/` separators, and the part
+/// before the first `/` contains a `.` (i.e. looks like a host).
+///
+/// Used by the idempotent 8.3 backfill to distinguish real repo URLs
+/// from pre-8.3 bare-folder-name residue.
+pub fn looks_like_repo_url(s: &str) -> bool {
+    let Some(first_slash) = s.find('/') else {
+        return false;
+    };
+    let host = &s[..first_slash];
+    if !host.contains('.') {
+        return false;
+    }
+    // Need at least one more `/` after the host, i.e. `host/owner/repo`.
+    s[first_slash + 1..].contains('/')
 }
 
 /// Cache for repo_id resolution to avoid repeated git calls during sync.
 #[derive(Default)]
 pub struct RepoIdCache {
-    cache: HashMap<PathBuf, String>,
+    cache: HashMap<PathBuf, Option<String>>,
 }
 
 impl RepoIdCache {
@@ -42,7 +67,7 @@ impl RepoIdCache {
         }
     }
 
-    pub fn resolve(&mut self, cwd: &Path) -> String {
+    pub fn resolve(&mut self, cwd: &Path) -> Option<String> {
         if let Some(id) = self.cache.get(cwd) {
             return id.clone();
         }
@@ -136,13 +161,6 @@ fn strip_git_suffix(s: &str) -> String {
     result
 }
 
-fn folder_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,20 +206,44 @@ mod tests {
     }
 
     #[test]
-    fn folder_name_extracts_last_component() {
-        assert_eq!(
-            folder_name(Path::new("/home/user/my-project")),
-            "my-project"
-        );
+    fn looks_like_repo_url_accepts_normalized_outputs() {
+        assert!(looks_like_repo_url("github.com/siropkin/budi"));
+        assert!(looks_like_repo_url("gitlab.com/group/subgroup/project"));
+        assert!(looks_like_repo_url("bitbucket.org/user/repo"));
+        assert!(looks_like_repo_url("git.sr.ht/~user/repo"));
+    }
+
+    #[test]
+    fn looks_like_repo_url_rejects_bare_folder_names() {
+        // Every example from the #442 repro table.
+        assert!(!looks_like_repo_url("Desktop"));
+        assert!(!looks_like_repo_url("ivan.seredkin")); // dot but no slash
+        assert!(!looks_like_repo_url("budi-cursor"));
+        assert!(!looks_like_repo_url(".cursor"));
+        assert!(!looks_like_repo_url("homebrew-budi"));
+        assert!(!looks_like_repo_url("awesome-vibe-coding-1"));
+        // A lone host stays out of the repo set — we require owner/repo.
+        assert!(!looks_like_repo_url("github.com"));
+        assert!(!looks_like_repo_url("github.com/owner")); // missing repo segment
+        // Paths that are URL-shaped but lack a dotted host also stay out.
+        assert!(!looks_like_repo_url("local/owner/repo"));
+    }
+
+    #[test]
+    fn resolve_repo_id_returns_none_for_non_git_paths() {
+        // Non-git dirs never get a repo_id, regardless of their name.
+        let tmp = std::env::temp_dir();
+        assert_eq!(resolve_repo_id(&tmp), None);
     }
 
     #[test]
     fn cache_returns_consistent_results() {
         let mut cache = RepoIdCache::new();
-        // Non-git directory — should use folder name
-        let id1 = cache.resolve(Path::new("/tmp"));
-        let id2 = cache.resolve(Path::new("/tmp"));
+        let tmp = std::env::temp_dir();
+        // Non-git directory — should be None, and stay None on repeat calls.
+        let id1 = cache.resolve(&tmp);
+        let id2 = cache.resolve(&tmp);
         assert_eq!(id1, id2);
-        assert_eq!(id1, "tmp");
+        assert_eq!(id1, None);
     }
 }

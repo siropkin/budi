@@ -341,6 +341,7 @@ pub fn cmd_stats(
     limit: usize,
     label_width: usize,
     include_pending: bool,
+    include_non_repo: bool,
     json_output: bool,
 ) -> Result<()> {
     // Normalize and validate --provider early with a helpful error message.
@@ -427,7 +428,14 @@ pub fn cmd_stats(
     }
 
     if projects {
-        return cmd_stats_projects(&client, period, limit, label_width, json_output);
+        return cmd_stats_projects(
+            &client,
+            period,
+            limit,
+            label_width,
+            include_non_repo,
+            json_output,
+        );
     }
 
     if json_output {
@@ -708,13 +716,30 @@ fn cmd_stats_projects(
     period: StatsPeriod,
     limit: usize,
     label_width: usize,
+    include_non_repo: bool,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
     let page = client.projects(since.as_deref(), until.as_deref(), limit)?;
+    let non_repo_rows = if include_non_repo {
+        // #442: fetch per-cwd-basename detail for the non-repo bucket so
+        // operators who want the pre-8.3 folder-name view can still get
+        // it. Default behavior leaves the main table clean.
+        client.non_repo(since.as_deref(), until.as_deref(), limit)?
+    } else {
+        Vec::new()
+    };
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        if include_non_repo {
+            let payload = serde_json::json!({
+                "repositories": &page,
+                "non_repo": &non_repo_rows,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        }
         return Ok(());
     }
 
@@ -735,37 +760,65 @@ fn cmd_stats_projects(
     );
     println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if page.rows.is_empty() && page.other.is_none() {
+    if page.rows.is_empty() && page.other.is_none() && non_repo_rows.is_empty() {
         println!("  No data for this period.");
         println!();
         return Ok(());
     }
 
-    if is_only_untagged(&page.rows, |r| &r.repo_id) && page.other.is_none() {
-        render_untagged_only_empty_state(BreakdownView::Projects, period);
-        return Ok(());
+    if !page.rows.is_empty() || page.other.is_some() {
+        if is_only_untagged(&page.rows, |r| &r.repo_id) && page.other.is_none() {
+            render_untagged_only_empty_state(BreakdownView::Projects, period);
+        } else {
+            print_breakdown_header("REPOSITORY", label_width, "");
+
+            let max_cost = max_cost_for_rows(&page.rows);
+            for r in &page.rows {
+                let bar = render_bar(r.cost_cents, max_cost);
+                let label = truncate_label_middle(
+                    &display_dimension(BreakdownView::Projects, &r.repo_id),
+                    label_width,
+                );
+                println!(
+                    "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
+                    label,
+                    bar,
+                    format_cost_cents_fixed(r.cost_cents),
+                    label_w = label_width,
+                    cost_w = BREAKDOWN_COST_WIDTH,
+                );
+            }
+
+            render_breakdown_footer(&page, label_width, rule_width);
+        }
     }
 
-    print_breakdown_header("REPOSITORY", label_width, "");
-
-    let max_cost = max_cost_for_rows(&page.rows);
-    for r in &page.rows {
-        let bar = render_bar(r.cost_cents, max_cost);
-        let label = truncate_label_middle(
-            &display_dimension(BreakdownView::Projects, &r.repo_id),
-            label_width,
-        );
+    if include_non_repo && !non_repo_rows.is_empty() {
+        println!();
         println!(
-            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
-            label,
-            bar,
-            format_cost_cents_fixed(r.cost_cents),
-            label_w = label_width,
-            cost_w = BREAKDOWN_COST_WIDTH,
+            "  {bold_cyan} Non-repository folders{reset} — {bold}{}{reset}",
+            period_label
         );
+        println!("  {dim}{}{reset}", "─".repeat(rule_width));
+        print_breakdown_header("FOLDER", label_width, "");
+        let max_cost = non_repo_rows
+            .iter()
+            .map(|r| r.cost_cents)
+            .fold(0.0_f64, f64::max);
+        for r in &non_repo_rows {
+            let bar = render_bar(r.cost_cents, max_cost);
+            let label = truncate_label_middle(&r.repo_id, label_width);
+            println!(
+                "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
+                label,
+                bar,
+                format_cost_cents_fixed(r.cost_cents),
+                label_w = label_width,
+                cost_w = BREAKDOWN_COST_WIDTH,
+            );
+        }
     }
 
-    render_breakdown_footer(&page, label_width, rule_width);
     Ok(())
 }
 

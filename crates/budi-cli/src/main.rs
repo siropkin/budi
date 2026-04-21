@@ -151,6 +151,12 @@ Examples:
         /// to see the raw bucket. (#450)
         #[arg(long, default_value_t = false)]
         include_pending: bool,
+        /// Break out the `(no repository)` bucket in `--projects` into a
+        /// per-folder breakdown keyed on the cwd basename. Off by
+        /// default so the main Repositories table stays clean of
+        /// `Desktop` / `~` / scratch-dir rows. (#442)
+        #[arg(long, default_value_t = false)]
+        include_non_repo: bool,
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
@@ -563,6 +569,7 @@ fn main() -> Result<()> {
             limit,
             label_width,
             include_pending,
+            include_non_repo,
             format,
         } => {
             let json_output = matches!(format, StatsFormat::Json);
@@ -584,6 +591,7 @@ fn main() -> Result<()> {
                 limit,
                 label_width,
                 include_pending,
+                include_non_repo,
                 json_output,
             )
         }
