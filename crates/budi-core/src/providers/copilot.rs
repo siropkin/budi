@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::jsonl::ParsedMessage;
-use crate::provider::{DiscoveredFile, ModelPricing, Provider};
+use crate::provider::{DiscoveredFile, Provider};
 
 /// The Copilot CLI provider.
 pub struct CopilotProvider;
@@ -336,23 +336,6 @@ fn parse_usage_event(
     })
 }
 
-/// Copilot CLI model pricing lookup (per million tokens, USD).
-///
-/// Copilot CLI supports BYOK with various providers. When using OpenAI
-/// models, pricing matches Codex/OpenAI rates. When using Anthropic
-/// models, pricing matches Claude rates.
-pub fn copilot_pricing_for_model(model: &str) -> ModelPricing {
-    let m = model.to_lowercase();
-
-    // Anthropic models (when using COPILOT_PROVIDER_TYPE=anthropic)
-    if m.contains("claude") {
-        return crate::providers::claude_code::claude_pricing_for_model(model);
-    }
-
-    // OpenAI models (default COPILOT_PROVIDER_TYPE=openai)
-    crate::providers::codex::codex_pricing_for_model(model)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,24 +524,6 @@ mod tests {
             parse_copilot_transcript(content, 0, Some("copilot-sess-1".to_string()), None);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].model.as_deref(), Some("claude-sonnet-4-20250514"));
-    }
-
-    #[test]
-    fn pricing_delegates_to_claude_for_claude_models() {
-        let p = copilot_pricing_for_model("claude-sonnet-4-20250514");
-        // Should use Claude pricing, not OpenAI
-        let claude_p =
-            crate::providers::claude_code::claude_pricing_for_model("claude-sonnet-4-20250514");
-        assert_eq!(p.input, claude_p.input);
-        assert_eq!(p.output, claude_p.output);
-    }
-
-    #[test]
-    fn pricing_delegates_to_codex_for_openai_models() {
-        let p = copilot_pricing_for_model("gpt-5.3");
-        let codex_p = crate::providers::codex::codex_pricing_for_model("gpt-5.3");
-        assert_eq!(p.input, codex_p.input);
-        assert_eq!(p.output, codex_p.output);
     }
 
     #[test]

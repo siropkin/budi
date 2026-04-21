@@ -1,9 +1,10 @@
 //! Pricing manifest — single source of truth for model cost calculation.
 //!
 //! See [ADR-0091] "Model Pricing via Embedded Baseline + LiteLLM Runtime
-//! Refresh" for the governing design. This module supersedes the four
-//! hand-maintained `*_pricing_for_model()` functions in `providers/*.rs`;
-//! those are deleted in the sibling cleanup ticket #377.
+//! Refresh" for the governing design. This module replaces the four
+//! hand-maintained `*_pricing_for_model()` functions that lived in
+//! `providers/*.rs` through 8.2 — those were deleted in #377 and every
+//! caller now goes through [`lookup`].
 //!
 //! # Lookup contract (ADR-0091 §2)
 //!

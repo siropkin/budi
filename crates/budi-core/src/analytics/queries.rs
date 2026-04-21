@@ -3684,9 +3684,11 @@ pub fn cache_efficiency_with_filters(
         total_input += input;
         total_cache_read += cache_read;
         total_cache_creation += cache_creation;
-        let pricing = match prov.as_str() {
-            "cursor" => crate::providers::cursor::cursor_pricing_for_model(model),
-            _ => crate::providers::claude_code::claude_pricing_for_model(model),
+        // ADR-0091: pricing flows through `pricing::lookup`. Unknown models
+        // contribute 0 savings rather than borrowing a phantom default rate.
+        let pricing = match crate::pricing::lookup(model, prov) {
+            crate::pricing::PricingOutcome::Known { pricing, .. } => pricing,
+            crate::pricing::PricingOutcome::Unknown { .. } => continue,
         };
         // Savings: what cache reads would have cost at full input price minus what they actually cost
         let savings = *cache_read as f64 * (pricing.input - pricing.cache_read) / 1_000_000.0;

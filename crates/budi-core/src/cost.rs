@@ -182,7 +182,14 @@ pub fn estimate_cost_with_filters(
 
     for row in rows {
         let (prov, model, input, output, cache_write, cache_read) = row?;
-        let p = crate::provider::pricing_for_model(&model, &prov);
+        // ADR-0091: pricing::lookup is the sole path to rates. Unknown
+        // models contributed `cost_cents = 0` to the total at ingest time
+        // (enforced by `CostEnricher`), so they must contribute 0 to the
+        // breakdown too — skip them rather than applying a phantom rate.
+        let p = match crate::pricing::lookup(&model, &prov) {
+            crate::pricing::PricingOutcome::Known { pricing, .. } => pricing,
+            crate::pricing::PricingOutcome::Unknown { .. } => continue,
+        };
         let ic = input as f64 * p.input / 1_000_000.0;
         let oc = output as f64 * p.output / 1_000_000.0;
         let cwc = cache_write as f64 * p.cache_write / 1_000_000.0;
@@ -252,7 +259,7 @@ mod tests {
         // total = 0.30 + 0.75 + 0.75 + 0.15 = $1.95 = 195 cents
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6-20260321', ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', ?2, ?3, ?4, ?5, ?6)",
             params!["msg1", 100_000i64, 50_000i64, 200_000i64, 500_000i64, 195.0],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -368,7 +375,7 @@ mod tests {
             // Tool use (small output)
             ("opus4", "claude-opus-4-6", 1, 36, 879, 51383),
             // Sonnet message
-            ("son1", "claude-sonnet-4-6-20260321", 5, 512, 8234, 42000),
+            ("son1", "claude-sonnet-4-6", 5, 512, 8234, 42000),
             // Haiku
             ("hai1", "claude-haiku-4-5-20251001", 10, 128, 3000, 15000),
             // Opus 4.5 (different model ID, same pricing)
@@ -377,7 +384,12 @@ mod tests {
 
         let mut expected_total_cents = 0.0f64;
         for (prefix, model, inp, out, cw, cr) in scenarios {
-            let pricing = crate::providers::claude_code::claude_pricing_for_model(model);
+            let pricing = match crate::pricing::lookup(model, "claude_code") {
+                crate::pricing::PricingOutcome::Known { pricing, .. } => pricing,
+                crate::pricing::PricingOutcome::Unknown { .. } => {
+                    panic!("test fixture model {model} must be known in the manifest")
+                }
+            };
             let cost = *inp as f64 * pricing.input / 1_000_000.0
                 + *out as f64 * pricing.output / 1_000_000.0
                 + *cw as f64 * pricing.cache_write / 1_000_000.0
@@ -429,7 +441,12 @@ mod tests {
         //
         // Correct cost: 3 × $5/M + 16267 × $6.25/M + 9985 × $0.50/M
         // Wrong cost (if double-counting): (3+16267+9985) × $5/M + 16267 × $6.25/M + 9985 × $0.50/M
-        let p = crate::providers::claude_code::claude_pricing_for_model("claude-opus-4-6");
+        let p = match crate::pricing::lookup("claude-opus-4-6", "claude_code") {
+            crate::pricing::PricingOutcome::Known { pricing, .. } => pricing,
+            crate::pricing::PricingOutcome::Unknown { .. } => {
+                panic!("claude-opus-4-6 must be known in the manifest")
+            }
+        };
         let correct =
             3.0 * p.input / 1e6 + 16267.0 * p.cache_write / 1e6 + 9985.0 * p.cache_read / 1e6;
         let wrong_double_count = (3.0 + 16267.0 + 9985.0) * p.input / 1e6
