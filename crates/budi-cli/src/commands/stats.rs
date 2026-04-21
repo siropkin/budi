@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use budi_core::analytics;
+use budi_core::analytics::{self, BreakdownPage};
 use chrono::{Local, Months, NaiveDate, TimeZone};
 
 use crate::StatsPeriod;
@@ -91,6 +91,7 @@ pub fn cmd_stats(
     models: bool,
     provider: Option<String>,
     tag: Option<String>,
+    limit: usize,
     json_output: bool,
 ) -> Result<()> {
     // Normalize and validate --provider early with a helpful error message.
@@ -126,7 +127,7 @@ pub fn cmd_stats(
     )?;
 
     if let Some(ref tag_filter) = tag {
-        return cmd_stats_tags(&client, period, tag_filter, json_output);
+        return cmd_stats_tags(&client, period, tag_filter, limit, json_output);
     }
 
     if let Some(ref f) = file {
@@ -134,7 +135,7 @@ pub fn cmd_stats(
     }
 
     if files {
-        return cmd_stats_files(&client, period, json_output);
+        return cmd_stats_files(&client, period, limit, json_output);
     }
 
     if let Some(ref ac) = activity {
@@ -142,7 +143,7 @@ pub fn cmd_stats(
     }
 
     if activities {
-        return cmd_stats_activities(&client, period, json_output);
+        return cmd_stats_activities(&client, period, limit, json_output);
     }
 
     if let Some(ref tk) = ticket {
@@ -150,7 +151,7 @@ pub fn cmd_stats(
     }
 
     if tickets {
-        return cmd_stats_tickets(&client, period, json_output);
+        return cmd_stats_tickets(&client, period, limit, json_output);
     }
 
     if let Some(ref br) = branch {
@@ -158,21 +159,15 @@ pub fn cmd_stats(
     }
 
     if branches {
-        return cmd_stats_branches(&client, period, json_output);
+        return cmd_stats_branches(&client, period, limit, json_output);
     }
 
     if models {
-        return cmd_stats_models(&client, period, json_output);
+        return cmd_stats_models(&client, period, limit, json_output);
     }
 
     if projects {
-        if json_output {
-            let (since, until) = period_date_range(period);
-            let data = client.projects(since.as_deref(), until.as_deref(), 50)?;
-            println!("{}", serde_json::to_string_pretty(&data)?);
-            return Ok(());
-        }
-        return cmd_stats_projects(&client, period);
+        return cmd_stats_projects(&client, period, limit, json_output);
     }
 
     if json_output {
@@ -390,9 +385,19 @@ fn cmd_stats_multi_agent(
     Ok(())
 }
 
-fn cmd_stats_projects(client: &DaemonClient, period: StatsPeriod) -> Result<()> {
+fn cmd_stats_projects(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    limit: usize,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let repos = client.projects(since.as_deref(), until.as_deref(), 15)?;
+    let page = client.projects(since.as_deref(), until.as_deref(), limit)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&page)?);
+        return Ok(());
+    }
 
     let period_label = period_label(period);
 
@@ -403,25 +408,27 @@ fn cmd_stats_projects(client: &DaemonClient, period: StatsPeriod) -> Result<()> 
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
+    let rule_width = 50usize;
     println!();
     println!(
         "  {bold_cyan} Repositories{reset} — {bold}{}{reset}",
         period_label
     );
-    println!("  {dim}{}{reset}", "─".repeat(50));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if repos.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!("  No data for this period.");
         println!();
         return Ok(());
     }
 
-    let max_cost = repos
+    let max_cost = page
+        .rows
         .iter()
         .map(|r| r.cost_cents)
         .fold(0.0_f64, f64::max)
         .max(0.01);
-    for r in &repos {
+    for r in &page.rows {
         let bar_len = ((r.cost_cents / max_cost) * 16.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
         println!(
@@ -432,16 +439,21 @@ fn cmd_stats_projects(client: &DaemonClient, period: StatsPeriod) -> Result<()> 
         );
     }
 
-    println!();
+    render_breakdown_footer(&page, 28, rule_width);
     Ok(())
 }
 
-fn cmd_stats_branches(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_branches(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    limit: usize,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let branches = client.branches(since.as_deref(), until.as_deref())?;
+    let page = client.branches(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&branches)?);
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
 
@@ -454,25 +466,27 @@ fn cmd_stats_branches(client: &DaemonClient, period: StatsPeriod, json_output: b
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
+    let rule_width = 50usize;
     println!();
     println!(
         "  {bold_cyan} Branches{reset} — {bold}{}{reset}",
         period_label
     );
-    println!("  {dim}{}{reset}", "─".repeat(50));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if branches.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!("  No branch data for this period.");
         println!();
         return Ok(());
     }
 
-    let max_cost = branches
+    let max_cost = page
+        .rows
         .iter()
         .map(|b| b.cost_cents)
         .fold(0.0_f64, f64::max)
         .max(0.01);
-    for b in &branches {
+    for b in &page.rows {
         let branch_name = b
             .git_branch
             .strip_prefix("refs/heads/")
@@ -497,7 +511,7 @@ fn cmd_stats_branches(client: &DaemonClient, period: StatsPeriod, json_output: b
         );
     }
 
-    println!();
+    render_breakdown_footer(&page, 28, rule_width);
     Ok(())
 }
 
@@ -570,12 +584,17 @@ fn cmd_stats_branch_detail(
 /// The list always carries an `(untagged)` row so users can see how much
 /// activity is *not* attributed to a ticket — that bucket should shrink as
 /// teams adopt ticket-bearing branch names.
-fn cmd_stats_tickets(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_tickets(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    limit: usize,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let tickets = client.tickets(since.as_deref(), until.as_deref(), 30)?;
+    let page = client.tickets(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&tickets)?);
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
 
@@ -588,26 +607,28 @@ fn cmd_stats_tickets(client: &DaemonClient, period: StatsPeriod, json_output: bo
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
+    let rule_width = 60usize;
     println!();
     println!(
         "  {bold_cyan} Tickets{reset} — {bold}{}{reset}",
         period_label
     );
-    println!("  {dim}{}{reset}", "─".repeat(60));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if tickets.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!("  No ticket data for this period.");
         println!("  Tip: branch names need to contain a ticket id (e.g. PAVA-123).");
         println!();
         return Ok(());
     }
 
-    let max_cost = tickets
+    let max_cost = page
+        .rows
         .iter()
         .map(|t| t.cost_cents)
         .fold(0.0_f64, f64::max)
         .max(0.01);
-    for t in &tickets {
+    for t in &page.rows {
         let bar_len = ((t.cost_cents / max_cost) * 16.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
         let branch_label = if t.top_branch.is_empty() {
@@ -630,7 +651,7 @@ fn cmd_stats_tickets(client: &DaemonClient, period: StatsPeriod, json_output: bo
         );
     }
 
-    println!();
+    render_breakdown_footer(&page, 24, rule_width);
     Ok(())
 }
 
@@ -738,13 +759,14 @@ fn cmd_stats_ticket_detail(
 fn cmd_stats_activities(
     client: &DaemonClient,
     period: StatsPeriod,
+    limit: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let activities = client.activities(since.as_deref(), until.as_deref(), 30)?;
+    let page = client.activities(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&activities)?);
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
 
@@ -757,14 +779,15 @@ fn cmd_stats_activities(
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
+    let rule_width = 66usize;
     println!();
     println!(
         "  {bold_cyan} Activities{reset} — {bold}{}{reset}",
         period_label
     );
-    println!("  {dim}{}{reset}", "─".repeat(66));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if activities.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!("  No activity data for this period.");
         println!(
             "  Tip: activity is classified from the user's prompt; run `budi doctor` to check the signal."
@@ -773,12 +796,13 @@ fn cmd_stats_activities(
         return Ok(());
     }
 
-    let max_cost = activities
+    let max_cost = page
+        .rows
         .iter()
         .map(|a| a.cost_cents)
         .fold(0.0_f64, f64::max)
         .max(0.01);
-    for a in &activities {
+    for a in &page.rows {
         let bar_len = ((a.cost_cents / max_cost) * 16.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
         let branch_label = if a.top_branch.is_empty() {
@@ -801,7 +825,7 @@ fn cmd_stats_activities(
         );
     }
 
-    println!();
+    render_breakdown_footer(&page, 18, rule_width);
     Ok(())
 }
 
@@ -939,12 +963,17 @@ fn validate_file_path_arg(path: &str) -> Result<()> {
 /// output always carries an `(untagged)` row so users can see how much
 /// activity isn't attributed to a file — that bucket should shrink as
 /// tool-arg coverage improves. Added in R1.4 (#292).
-fn cmd_stats_files(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_files(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    limit: usize,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let files = client.files(since.as_deref(), until.as_deref(), 30)?;
+    let page = client.files(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&files)?);
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
 
@@ -957,11 +986,12 @@ fn cmd_stats_files(client: &DaemonClient, period: StatsPeriod, json_output: bool
     let yellow = ansi("\x1b[33m");
     let reset = ansi("\x1b[0m");
 
+    let rule_width = 72usize;
     println!();
     println!("  {bold_cyan} Files{reset} — {bold}{}{reset}", period_label);
-    println!("  {dim}{}{reset}", "─".repeat(72));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if files.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!("  No file data for this period.");
         println!(
             "  Tip: file paths are extracted from tool-call arguments (Read/Write/Edit, etc)."
@@ -970,12 +1000,13 @@ fn cmd_stats_files(client: &DaemonClient, period: StatsPeriod, json_output: bool
         return Ok(());
     }
 
-    let max_cost = files
+    let max_cost = page
+        .rows
         .iter()
         .map(|f| f.cost_cents)
         .fold(0.0_f64, f64::max)
         .max(0.01);
-    for f in &files {
+    for f in &page.rows {
         let bar_len = ((f.cost_cents / max_cost) * 16.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
         let ticket_label = if f.top_ticket_id.is_empty() {
@@ -1008,7 +1039,7 @@ fn cmd_stats_files(client: &DaemonClient, period: StatsPeriod, json_output: bool
         );
     }
 
-    println!();
+    render_breakdown_footer(&page, 40, rule_width);
     Ok(())
 }
 
@@ -1125,12 +1156,17 @@ fn cmd_stats_file_detail(
     Ok(())
 }
 
-fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: bool) -> Result<()> {
+fn cmd_stats_models(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    limit: usize,
+    json_output: bool,
+) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let models = client.models(since.as_deref(), until.as_deref())?;
+    let page = client.models(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&models)?);
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
 
@@ -1142,14 +1178,15 @@ fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: boo
     let cyan = ansi("\x1b[36m");
     let reset = ansi("\x1b[0m");
 
+    let rule_width = 50usize;
     println!();
     println!(
         "  {bold_cyan} Model usage{reset} — {bold}{}{reset}",
         period_label
     );
-    println!("  {dim}{}{reset}", "─".repeat(50));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
-    if models.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!("  No data for this period.");
         println!();
         return Ok(());
@@ -1159,16 +1196,17 @@ fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: boo
 
     let has_duplicate_models = {
         let mut seen = std::collections::HashSet::new();
-        models.iter().any(|m| !seen.insert(&m.model))
+        page.rows.iter().any(|m| !seen.insert(&m.model))
     };
 
-    let max_msgs = models
+    let max_msgs = page
+        .rows
         .iter()
         .map(|m| m.message_count)
         .max()
         .unwrap_or(1)
         .max(1);
-    for m in &models {
+    for m in &page.rows {
         let bar_len = ((m.message_count as f64 / max_msgs as f64) * 16.0) as usize;
         let bar: String = "█".repeat(bar_len);
         let total_tok =
@@ -1188,8 +1226,83 @@ fn cmd_stats_models(client: &DaemonClient, period: StatsPeriod, json_output: boo
         );
     }
 
-    println!();
+    render_breakdown_footer(&page, 40, rule_width);
     Ok(())
+}
+
+// ─── Breakdown Footer (#448) ─────────────────────────────────────────────────
+//
+// Every text-mode breakdown view ends in a `Total` footer that reconciles
+// to the cent. When rows are truncated, a sibling `(other N: $X)` row is
+// rendered just above the total so sum(rendered) + other == total. This is
+// the contract the #448 release-blocker nails down.
+
+/// Render the `(other N rows)` line and trailing `Total $X (M of N rows shown)`
+/// footer that wraps every breakdown view. No-ops when the page is empty
+/// (caller prints its own "no data" message).
+///
+/// `_name_col_width` is kept as a signature parameter for views that later
+/// want tighter per-column alignment (see #450); the current footer uses the
+/// `rule_width` anchor so it reconciles visually on every view without
+/// per-layout tuning.
+fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, rule_width: usize) {
+    if page.shown_rows == 0 && page.other.is_none() {
+        return;
+    }
+
+    let dim = ansi("\x1b[90m");
+    let bold = ansi("\x1b[1m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    // The footer sits under a rule `rule_width` wide; we right-align the
+    // cost to the last column of the rule and pad the label with spaces
+    // in front. This reconciles cleanly on every view without needing
+    // per-view column tables (which #450 will introduce in the polish
+    // pass).
+    const COST_COL_WIDTH: usize = 10;
+    let rule_len = rule_width.max(20);
+    let label_pad = rule_len.saturating_sub(COST_COL_WIDTH);
+
+    if let Some(other) = &page.other {
+        let plural = if other.row_count == 1 { "" } else { "s" };
+        let label = format!(
+            "{} — {} more row{}",
+            analytics::BREAKDOWN_OTHER_LABEL,
+            other.row_count,
+            plural,
+        );
+        println!(
+            "  {dim}{:<label_pad$}{reset}{yellow}{:>width$}{reset}",
+            label,
+            format_cost_cents(other.cost_cents),
+            width = COST_COL_WIDTH,
+        );
+    }
+
+    println!("  {dim}{}{reset}", "─".repeat(rule_len));
+
+    let shown_note = if page.other.is_some() {
+        format!(
+            "{dim}({} of {} rows shown — pass --limit 0 for all){reset}",
+            page.shown_rows, page.total_rows
+        )
+    } else if page.total_rows == 0 {
+        String::new()
+    } else {
+        let plural = if page.total_rows == 1 { "" } else { "s" };
+        format!("{dim}({} row{} shown){reset}", page.total_rows, plural)
+    };
+
+    let total_label_pad = label_pad.saturating_sub(5); // "Total" prefix width
+    println!(
+        "  {bold}Total{reset}{:<total_label_pad$}{yellow}{:>width$}{reset}  {}",
+        "",
+        format_cost_cents(page.total_cost_cents),
+        shown_note,
+        width = COST_COL_WIDTH,
+    );
+    println!();
 }
 
 // ─── Formatting Utilities ────────────────────────────────────────────────────
@@ -1245,18 +1358,19 @@ fn cmd_stats_tags(
     client: &DaemonClient,
     period: StatsPeriod,
     tag_filter: &str,
+    limit: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
 
-    let data = client.tags(Some(tag_filter), since.as_deref(), until.as_deref(), 30)?;
+    let page = client.tags(Some(tag_filter), since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&data)?);
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
 
-    if data.is_empty() {
+    if page.rows.is_empty() && page.other.is_none() {
         println!(
             "No tag data for '{}' ({})",
             tag_filter,
@@ -1271,6 +1385,7 @@ fn cmd_stats_tags(
 
     let dim = ansi("\x1b[90m");
 
+    let rule_width = 78usize;
     println!(
         "\n{bold}  Tag: {} — {}{reset}\n",
         tag_filter,
@@ -1278,13 +1393,17 @@ fn cmd_stats_tags(
     );
 
     println!("  {dim}{:<40} {:>38}{reset}", "VALUE", "COST");
-    println!("  {dim}{}{reset}", "─".repeat(78));
+    println!("  {dim}{}{reset}", "─".repeat(rule_width));
 
     // Find max cost for bar scaling
-    let max_cost = data.iter().map(|t| t.cost_cents).fold(0.0f64, f64::max);
+    let max_cost = page
+        .rows
+        .iter()
+        .map(|t| t.cost_cents)
+        .fold(0.0f64, f64::max);
     let bar_width: usize = 30;
 
-    for tag in &data {
+    for tag in &page.rows {
         let bar_len = if max_cost > 0.0 {
             ((tag.cost_cents / max_cost) * bar_width as f64) as usize
         } else {
@@ -1300,7 +1419,7 @@ fn cmd_stats_tags(
             format_cost_cents(tag.cost_cents),
         );
     }
-    println!();
+    render_breakdown_footer(&page, 40, rule_width);
     Ok(())
 }
 

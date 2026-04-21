@@ -4865,3 +4865,437 @@ fn ingest_with_tail_file_writes_offset_atomically_for_empty_message_batch() {
         "empty-batch ingest with tail_file must still upsert the offset",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Breakdown reconciliation (#448)
+//
+// Regression guard for the release-blocker where every breakdown silently
+// capped at 30 rows with no grand total, underreporting by ~9% on a real
+// `--files 30d` sample. The contract these tests pin down:
+//
+//   sum(rows) + other.cost_cents == total_cost_cents, to the cent,
+//
+// for every breakdown view (`--projects/--branches/--tickets/--activities/
+// --files/--models/--tag`) across every period (`today/7d/30d`). Plus:
+//   * `total_cost_cents` equals the grand total of assistant cost in the
+//     window (reconciles with `usage_summary`), because every ranked row
+//     spans the full tagged-or-untagged partition.
+//   * `paginate_breakdown(rows, 0)` never truncates (0 = unlimited).
+// ---------------------------------------------------------------------------
+
+/// Assert that `sum(rows.cost_cents) + other.cost_cents == total_cost_cents`
+/// to within 0.01 cent for rounding slack. Used as the reconciliation
+/// oracle for every breakdown view.
+fn assert_breakdown_reconciles<T: BreakdownRowCost>(
+    page: &BreakdownPage<T>,
+    expected_total_cents: f64,
+    label: &str,
+) {
+    let rows_cost: f64 = page.rows.iter().map(BreakdownRowCost::cost_cents).sum();
+    let other_cost = page.other.as_ref().map(|o| o.cost_cents).unwrap_or(0.0);
+    assert!(
+        (rows_cost + other_cost - page.total_cost_cents).abs() < 0.01,
+        "{label}: rows + other != total_cost_cents ({rows_cost} + {other_cost} vs {})",
+        page.total_cost_cents,
+    );
+    assert!(
+        (page.total_cost_cents - expected_total_cents).abs() < 0.01,
+        "{label}: total_cost_cents {} diverges from expected {expected_total_cents}",
+        page.total_cost_cents,
+    );
+    // total_rows always equals shown_rows + other.row_count, and
+    // paginate_breakdown never produces an `other` row with zero rows in it.
+    if let Some(other) = page.other.as_ref() {
+        assert!(other.row_count > 0, "{label}: other row must be non-empty");
+        assert_eq!(
+            page.shown_rows + other.row_count,
+            page.total_rows,
+            "{label}: shown + other != total_rows",
+        );
+    } else {
+        assert_eq!(
+            page.shown_rows, page.total_rows,
+            "{label}: other=None implies shown_rows == total_rows",
+        );
+    }
+}
+
+/// Seed 42 tickets of varying cost in a single window so the default
+/// limit of 30 necessarily truncates. Each cost is picked to avoid
+/// collisions with the untagged bucket's cost.
+fn seed_tickets_for_reconciliation(conn: &mut Connection) -> f64 {
+    let mut msgs = Vec::new();
+    let mut tags = Vec::new();
+    let mut total = 0.0;
+    for i in 0..42 {
+        let cost = 1.0 + i as f64 * 0.37;
+        total += cost;
+        let uuid = format!("tk-rec-{i}");
+        let sid = format!("s-tk-{i}");
+        let ticket = format!("RECON-{i}");
+        let branch = format!("{ticket}-work");
+        let m = ticket_msg(&uuid, &sid, &branch, "repo-rec", cost);
+        msgs.push(m);
+        tags.push(ticket_tags(&[&ticket]));
+    }
+    // An untagged assistant message so the `(untagged)` bucket is part
+    // of the truncation / reconciliation math.
+    let untagged = assistant_msg("tk-rec-untagged", "s-tk-u", 0.73);
+    total += 0.73;
+    msgs.push(untagged);
+    tags.push(Vec::new());
+
+    ingest_messages(conn, &msgs, Some(&tags)).unwrap();
+    total
+}
+
+#[test]
+fn breakdown_tickets_reconcile_with_other_row_when_truncated() {
+    let mut conn = test_db();
+    let expected_total = seed_tickets_for_reconciliation(&mut conn);
+
+    let all = ticket_cost_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+
+    // Capped at 30 → `(other)` aggregates the remaining 13 rows.
+    let page = paginate_breakdown(all.clone(), 30);
+    assert_eq!(page.shown_rows, 30);
+    assert_eq!(page.rows.len(), 30);
+    assert!(page.other.is_some(), "truncation must surface `(other)`");
+    let other = page.other.as_ref().unwrap();
+    assert_eq!(
+        other.row_count,
+        page.total_rows - 30,
+        "other.row_count must cover every truncated row",
+    );
+    assert_breakdown_reconciles(&page, expected_total, "--tickets cap=30");
+
+    // Unlimited → everything in `rows`, nothing in `other`.
+    let unlimited = paginate_breakdown(all.clone(), 0);
+    assert!(unlimited.other.is_none(), "limit=0 must not truncate");
+    assert_eq!(unlimited.shown_rows, unlimited.total_rows);
+    assert_breakdown_reconciles(&unlimited, expected_total, "--tickets cap=0");
+}
+
+#[test]
+fn breakdown_files_reconcile_with_other_row_when_truncated() {
+    let mut conn = test_db();
+    let mut msgs = Vec::new();
+    let mut tags = Vec::new();
+    let mut expected = 0.0;
+    for i in 0..40 {
+        let cost = 0.75 + i as f64 * 0.31;
+        expected += cost;
+        let uuid = format!("fc-rec-{i}");
+        let sid = format!("s-fc-{i}");
+        let path = format!("src/generated/file_{i:03}.rs");
+        let m = file_msg(&uuid, &sid, "main", "repo-files", cost);
+        msgs.push(m);
+        tags.push(file_tags(&[&path]));
+    }
+    // Untagged bucket.
+    msgs.push(assistant_msg("fc-rec-untagged", "s-fc-u", 0.41));
+    tags.push(Vec::new());
+    expected += 0.41;
+    ingest_messages(&mut conn, &msgs, Some(&tags)).unwrap();
+
+    let all = file_cost_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert_eq!(page.shown_rows, 30);
+    assert!(
+        page.other.is_some(),
+        "--files must emit (other) when truncated"
+    );
+    assert_breakdown_reconciles(&page, expected, "--files cap=30");
+}
+
+#[test]
+fn breakdown_activities_reconcile_with_other_row_when_truncated() {
+    let mut conn = test_db();
+    let mut msgs = Vec::new();
+    let mut tags = Vec::new();
+    let mut expected = 0.0;
+    for i in 0..35 {
+        let cost = 0.5 + i as f64 * 0.19;
+        expected += cost;
+        let uuid = format!("ac-rec-{i}");
+        let sid = format!("s-ac-{i}");
+        let activity = format!("activity_{i:02}");
+        let m = activity_msg(&uuid, &sid, "main", "repo-acts", cost);
+        msgs.push(m);
+        tags.push(activity_tags(&[&activity]));
+    }
+    ingest_messages(&mut conn, &msgs, Some(&tags)).unwrap();
+
+    let all = activity_cost_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert_eq!(page.shown_rows, 30);
+    assert!(
+        page.other.is_some(),
+        "--activities must emit (other) when truncated",
+    );
+    assert_breakdown_reconciles(&page, expected, "--activities cap=30");
+}
+
+#[test]
+fn breakdown_projects_reconcile_with_other_row_when_truncated() {
+    let mut conn = test_db();
+    let mut msgs = Vec::new();
+    let mut expected = 0.0;
+    for i in 0..35 {
+        let cost = 0.9 + i as f64 * 0.22;
+        expected += cost;
+        let mut m = assistant_msg(&format!("pr-rec-{i}"), &format!("s-pr-{i}"), cost);
+        m.repo_id = Some(format!("github.com/acme/repo-{i:03}"));
+        msgs.push(m);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let all = repo_usage_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert_eq!(page.shown_rows, 30);
+    assert!(
+        page.other.is_some(),
+        "--projects must emit (other) when truncated",
+    );
+    assert_breakdown_reconciles(&page, expected, "--projects cap=30");
+}
+
+#[test]
+fn breakdown_branches_reconcile_with_other_row_when_truncated() {
+    let mut conn = test_db();
+    let mut msgs = Vec::new();
+    let mut expected = 0.0;
+    for i in 0..33 {
+        let cost = 1.2 + i as f64 * 0.41;
+        expected += cost;
+        let mut m = assistant_msg(&format!("br-rec-{i}"), &format!("s-br-{i}"), cost);
+        m.git_branch = Some(format!("feature/branch-{i:03}"));
+        m.repo_id = Some("repo-branches".to_string());
+        msgs.push(m);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let all = branch_cost_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert_eq!(page.shown_rows, 30);
+    assert!(
+        page.other.is_some(),
+        "--branches must emit (other) when truncated",
+    );
+    assert_breakdown_reconciles(&page, expected, "--branches cap=30");
+}
+
+#[test]
+fn breakdown_models_reconcile_with_other_row_when_truncated() {
+    let mut conn = test_db();
+    let mut msgs = Vec::new();
+    let mut expected = 0.0;
+    for i in 0..33 {
+        let cost = 0.65 + i as f64 * 0.27;
+        expected += cost;
+        let mut m = assistant_msg(&format!("md-rec-{i}"), &format!("s-md-{i}"), cost);
+        m.model = Some(format!("model-family-{i:03}"));
+        msgs.push(m);
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let all = model_usage_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert_eq!(page.shown_rows, 30);
+    assert!(
+        page.other.is_some(),
+        "--models must emit (other) when truncated",
+    );
+    assert_breakdown_reconciles(&page, expected, "--models cap=30");
+}
+
+#[test]
+fn breakdown_tags_reconcile_with_other_row_when_truncated() {
+    // `--tag ticket_id` mirrors `--tickets` but flows through a different
+    // code path (`tag_stats_with_filters`), so it gets its own guard.
+    let mut conn = test_db();
+    let expected = seed_tickets_for_reconciliation(&mut conn);
+
+    let all = tag_stats_with_filters(
+        &conn,
+        Some("ticket_id"),
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert_eq!(page.shown_rows, 30);
+    assert!(
+        page.other.is_some(),
+        "--tag ticket_id must emit (other) when truncated",
+    );
+    assert_breakdown_reconciles(&page, expected, "--tag ticket_id cap=30");
+}
+
+#[test]
+fn paginate_breakdown_no_truncation_when_rows_fit() {
+    // <= limit → `other` stays `None`, shown == total, cost reconciles.
+    let mut conn = test_db();
+    let mut msgs = Vec::new();
+    let mut expected = 0.0;
+    for i in 0..5 {
+        let cost = 1.0 + i as f64;
+        expected += cost;
+        msgs.push(assistant_msg(
+            &format!("fit-{i}"),
+            &format!("s-fit-{i}"),
+            cost,
+        ));
+    }
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let all = model_usage_with_filters(
+        &conn,
+        None,
+        None,
+        &DimensionFilters::default(),
+        BREAKDOWN_FETCH_ALL_LIMIT,
+    )
+    .unwrap();
+    let page = paginate_breakdown(all, 30);
+    assert!(page.other.is_none());
+    assert_eq!(page.shown_rows, page.total_rows);
+    assert_breakdown_reconciles(&page, expected, "fits-under-limit");
+}
+
+#[test]
+fn breakdown_tickets_reconcile_across_today_7d_and_30d() {
+    // Replicates the #448 acceptance: reconciliation to the cent across
+    // `today/7d/30d`. We plant tickets at three different anchor dates
+    // and query with the corresponding `since` bound so each window's
+    // total is a known strict subset of the universe.
+    use chrono::{Duration, Utc};
+
+    let mut conn = test_db();
+    let now = Utc::now();
+    // Anchor ticket cohorts in each of the three windows. Each cohort
+    // has 40 distinct tickets so the default cap of 30 forces
+    // truncation, and each cost is unique (0.5 cent steps) so every row
+    // sorts deterministically.
+    let mut msgs: Vec<ParsedMessage> = Vec::new();
+    let mut tags: Vec<Vec<Tag>> = Vec::new();
+    let anchors = [
+        (now - Duration::hours(1), "today-"),    // inside today
+        (now - Duration::days(3), "seven-d-"),   // inside 7d
+        (now - Duration::days(20), "thirty-d-"), // inside 30d
+    ];
+
+    // Running totals per window (today ⊂ 7d ⊂ 30d).
+    let mut total_today = 0.0;
+    let mut total_7d = 0.0;
+    let mut total_30d = 0.0;
+
+    for (cohort_idx, (ts, prefix)) in anchors.iter().enumerate() {
+        for i in 0..40 {
+            let cost = 0.5 + cohort_idx as f64 * 5.0 + i as f64 * 0.11;
+            let uuid = format!("recon-{prefix}{i}");
+            let sid = format!("s-{prefix}{i}");
+            let ticket = format!("RECON-{prefix}{i}");
+            let branch = format!("{ticket}-wip");
+            let mut m = ticket_msg(&uuid, &sid, &branch, "repo-recon", cost);
+            m.timestamp = *ts;
+            msgs.push(m);
+            tags.push(ticket_tags(&[&ticket]));
+            total_30d += cost;
+            if cohort_idx <= 1 {
+                total_7d += cost;
+            }
+            if cohort_idx == 0 {
+                total_today += cost;
+            }
+        }
+    }
+    ingest_messages(&mut conn, &msgs, Some(&tags)).unwrap();
+
+    let today_since = (now - Duration::days(0))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .to_rfc3339();
+    let since_7d = (now - Duration::days(7)).to_rfc3339();
+    let since_30d = (now - Duration::days(30)).to_rfc3339();
+
+    for (since, expected_total, label) in [
+        (Some(today_since.as_str()), total_today, "today"),
+        (Some(since_7d.as_str()), total_7d, "7d"),
+        (Some(since_30d.as_str()), total_30d, "30d"),
+    ] {
+        let all = ticket_cost_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all, 30);
+        assert_eq!(
+            page.shown_rows, 30,
+            "{label}: expected 30 rows rendered, got {}",
+            page.shown_rows,
+        );
+        assert!(
+            page.other.is_some(),
+            "{label}: expected `(other)` since cohort has 40 tickets",
+        );
+        assert_breakdown_reconciles(&page, expected_total, label);
+    }
+}
+
+#[test]
+fn breakdown_other_label_is_stable_wire_value() {
+    // Scripts keying off `(other)` must stay stable — guarding the
+    // constant here prevents an accidental rename from breaking
+    // downstream reconciliation tooling.
+    assert_eq!(BREAKDOWN_OTHER_LABEL, "(other)");
+}

@@ -130,6 +130,13 @@ Examples:
         /// Show cost breakdown by tag key (e.g. --tag ticket_id, --tag activity)
         #[arg(long)]
         tag: Option<String>,
+        /// Maximum rows to show in breakdown views (`--projects`,
+        /// `--branches`, `--tickets`, `--activities`, `--files`,
+        /// `--models`, `--tag`). `0` = no cap (show every matching row).
+        /// Truncated rows collapse into an `(other N: $X)` aggregate so
+        /// the Total footer always reconciles to the cent (#448).
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
@@ -497,6 +504,7 @@ fn main() -> Result<()> {
             models,
             provider,
             tag,
+            limit,
             format,
         } => {
             let json_output = matches!(format, StatsFormat::Json);
@@ -515,6 +523,7 @@ fn main() -> Result<()> {
                 models,
                 provider,
                 tag,
+                limit,
                 json_output,
             )
         }
