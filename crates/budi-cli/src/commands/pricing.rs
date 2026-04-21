@@ -49,7 +49,7 @@ pub fn cmd_pricing_status(format: StatsFormat, refresh: bool) -> Result<()> {
         } else {
             serde_json::json!({ "status": status, "aliases": aliases })
         };
-        println!("{}", serde_json::to_string_pretty(&combined)?);
+        super::print_json(&combined)?;
         if let Some(r) = refresh_body.as_ref()
             && r.get("ok").and_then(Value::as_bool) != Some(true)
         {

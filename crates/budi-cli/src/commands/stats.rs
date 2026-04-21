@@ -471,7 +471,7 @@ pub fn cmd_stats(
             map.insert("window_start".to_string(), serde_json::json!(since));
             map.insert("window_end".to_string(), serde_json::json!(until));
         }
-        println!("{}", serde_json::to_string_pretty(&obj)?);
+        super::print_json(&obj)?;
         return Ok(());
     }
 
@@ -628,11 +628,21 @@ fn format_summary(
         summary.total_messages, summary.total_user_messages, summary.total_assistant_messages,
     )
     .unwrap();
+    // #445 item 5: the pre-8.3 summary showed only `{input} in, {output}
+    // out` while the per-agent rows above summed **all four** token
+    // components (input + output + cache-write + cache-read). Cursor
+    // traffic is cache-heavy, so the two lines appeared to disagree —
+    // `591.2M + 137.7M + 805.4M` on per-agent rows vs `89.9M in, 6.8M
+    // out` on the summary. Render every token component the per-agent
+    // total includes so the reader can reconcile them without reading
+    // the renderer source.
     writeln!(
         out,
-        "  {bold}Tokens{reset}       {} in, {} out",
+        "  {bold}Tokens{reset}       {} input · {} output · {} cache-write · {} cache-read",
         format_tokens(summary.total_input_tokens),
         format_tokens(summary.total_output_tokens),
+        format_tokens(summary.total_cache_creation_tokens),
+        format_tokens(summary.total_cache_read_tokens),
     )
     .unwrap();
 
@@ -737,9 +747,9 @@ fn cmd_stats_projects(
                 "repositories": &page,
                 "non_repo": &non_repo_rows,
             });
-            println!("{}", serde_json::to_string_pretty(&payload)?);
+            super::print_json(&payload)?;
         } else {
-            println!("{}", serde_json::to_string_pretty(&page)?);
+            super::print_json(&page)?;
         }
         return Ok(());
     }
@@ -834,7 +844,7 @@ fn cmd_stats_branches(
     let page = client.branches(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        super::print_json(&page)?;
         return Ok(());
     }
 
@@ -914,7 +924,7 @@ fn cmd_stats_branch_detail(
     let result = client.branch_detail(branch, repo, since.as_deref(), until.as_deref())?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        super::print_json(&result)?;
         return Ok(());
     }
 
@@ -983,7 +993,7 @@ fn cmd_stats_tickets(
     let page = client.tickets(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        super::print_json(&page)?;
         return Ok(());
     }
 
@@ -1088,7 +1098,7 @@ fn cmd_stats_ticket_detail(
     let result = client.ticket_detail(ticket, repo, since.as_deref(), until.as_deref())?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        super::print_json(&result)?;
         return Ok(());
     }
 
@@ -1186,7 +1196,7 @@ fn cmd_stats_activities(
     let page = client.activities(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        super::print_json(&page)?;
         return Ok(());
     }
 
@@ -1291,7 +1301,7 @@ fn cmd_stats_activity_detail(
     let result = client.activity_detail(activity, repo, since.as_deref(), until.as_deref())?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        super::print_json(&result)?;
         return Ok(());
     }
 
@@ -1421,7 +1431,7 @@ fn cmd_stats_files(
     let page = client.files(since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        super::print_json(&page)?;
         return Ok(());
     }
 
@@ -1522,7 +1532,7 @@ fn cmd_stats_file_detail(
     let result = client.file_detail(file_path, repo, since.as_deref(), until.as_deref())?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        super::print_json(&result)?;
         return Ok(());
     }
 
@@ -1937,8 +1947,7 @@ fn build_models_json_page<'a>(
 /// fields.
 fn print_models_json(page: &BreakdownPage<budi_core::analytics::ModelUsage>) -> Result<()> {
     let enriched = build_models_json_page(page);
-    println!("{}", serde_json::to_string_pretty(&enriched)?);
-    Ok(())
+    super::print_json(&enriched)
 }
 
 #[cfg(test)]
@@ -2183,7 +2192,7 @@ fn cmd_stats_tags(
     let page = client.tags(Some(tag_filter), since.as_deref(), until.as_deref(), limit)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&page)?);
+        super::print_json(&page)?;
         return Ok(());
     }
 
@@ -2888,6 +2897,64 @@ mod tests {
                 rendered.contains("Cursor cost data may lag"),
                 "missing Cursor-lag footnote when Cursor is in providers (#451):\n{rendered}"
             );
+        }
+    }
+
+    #[test]
+    fn summary_tokens_row_reconciles_with_per_agent_totals() {
+        // #445 item 5: the per-agent rows in the Agents block render a
+        // token total that *includes* cache traffic (input + output +
+        // cache-write + cache-read). Before this fix the summary
+        // Tokens row only showed `{input} in, {output} out`, which
+        // looked like it disagreed with the per-agent row on cache-heavy
+        // workloads. Lock in the four-component shape so a future
+        // renderer change cannot silently regress the reconciliation.
+        let summary = fixture_summary();
+        let est = fixture_cost(0.0);
+        let providers = vec![fixture_provider(
+            "claude_code",
+            "Claude Code",
+            262,
+            summary.total_cost_cents,
+        )];
+        let palette = SummaryPalette::plain();
+        let rendered = format_summary(
+            StatsPeriod::Days(7),
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+
+        // Every token component must appear on the Tokens line (not
+        // just input / output).
+        assert!(
+            rendered.contains("input"),
+            "summary missing input label:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("output"),
+            "summary missing output label:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("cache-write"),
+            "summary missing cache-write component (#445 reconciliation):\n{rendered}"
+        );
+        assert!(
+            rendered.contains("cache-read"),
+            "summary missing cache-read component (#445 reconciliation):\n{rendered}"
+        );
+
+        // The pre-#445 shape `<n> in, <n> out` must be gone so consumers
+        // can't rely on it and readers never see it.
+        for line in rendered.lines() {
+            if line.trim_start().starts_with("Tokens") {
+                assert!(
+                    !line.contains(" in, "),
+                    "legacy two-component Tokens line still renders: {line}"
+                );
+            }
         }
     }
 

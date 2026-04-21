@@ -184,7 +184,7 @@ pub fn cmd_cloud_sync(format: StatsFormat) -> Result<()> {
     let body = client.cloud_sync()?;
 
     if matches!(format, StatsFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        super::print_json(&body)?;
         // Exit non-zero on non-ok result so scripts can branch on status.
         if body.get("ok").and_then(Value::as_bool) != Some(true) {
             std::process::exit(2);
@@ -205,7 +205,7 @@ pub fn cmd_cloud_status(format: StatsFormat) -> Result<()> {
     let body = client.cloud_status()?;
 
     if matches!(format, StatsFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        super::print_json(&body)?;
         return Ok(());
     }
 

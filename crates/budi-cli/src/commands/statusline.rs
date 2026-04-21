@@ -360,10 +360,10 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
 
     match format {
         StatuslineFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string(&statusline_data).unwrap_or_default()
-            );
+            // #445 item 4: surface integer cents so downstream
+            // consumers (Cursor extension, cloud dashboard, starship
+            // templates) never see 10-digit fractional-cent floats.
+            let _ = super::print_json_compact(&statusline_data);
         }
         StatuslineFormat::Custom => {
             if let Some(ref template) = sl_config.format {
