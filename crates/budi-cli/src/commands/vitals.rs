@@ -90,7 +90,7 @@ fn render_vitals(h: &SessionHealth) {
         match s {
             "red" => "🔴",
             "yellow" => "🟡",
-            "gray" => "⚪",
+            "gray" | "insufficient_data" => "⚪",
             _ => "🟢",
         }
     };
@@ -98,8 +98,14 @@ fn render_vitals(h: &SessionHealth) {
         match s {
             "red" => red,
             "yellow" => yellow,
-            "gray" => dim,
+            "gray" | "insufficient_data" => dim,
             _ => green,
+        }
+    };
+    let state_label = |s: &str| -> String {
+        match s {
+            "insufficient_data" => "INSUFFICIENT DATA".to_string(),
+            _ => s.to_uppercase(),
         }
     };
 
@@ -107,7 +113,7 @@ fn render_vitals(h: &SessionHealth) {
     let color = state_color(&h.state);
     println!(
         "{icon} {bold}Session Health: {color}{}{reset}",
-        h.state.to_uppercase()
+        state_label(&h.state)
     );
     let cost_dollars = h.total_cost_cents / 100.0;
     let cost_display = if cost_dollars == 0.0 {
@@ -162,9 +168,10 @@ fn render_vitals(h: &SessionHealth) {
         }
     }
 
-    if h.state == "green" {
+    if h.state == "green" || h.state == "insufficient_data" {
         println!();
-        println!("  {green}{}{reset}", h.tip);
+        let tip_color = state_color(&h.state);
+        println!("  {tip_color}{}{reset}", h.tip);
     }
 }
 
