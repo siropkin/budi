@@ -564,6 +564,7 @@ struct ProviderDoctorData {
     tracked_offsets: Option<usize>,
     latest_tail_offset: Option<u64>,
     latest_tail_seen: Option<DateTime<Utc>>,
+    latest_file_tail_seen: Option<DateTime<Utc>>,
     discover_error: Option<String>,
     db_error: Option<String>,
 }
@@ -583,6 +584,7 @@ fn gather_provider_doctor_data(
         tracked_offsets: None,
         latest_tail_offset: None,
         latest_tail_seen: None,
+        latest_file_tail_seen: None,
         discover_error: None,
         db_error: None,
     };
@@ -618,6 +620,7 @@ fn gather_provider_doctor_data(
             match load_tail_offset_state(conn, provider.name(), latest_file) {
                 Ok(Some(state)) => {
                     data.latest_tail_offset = Some(state.byte_offset);
+                    data.latest_file_tail_seen = state.last_seen;
                     data.latest_tail_seen = data.latest_tail_seen.or(state.last_seen);
                 }
                 Ok(None) => {}
@@ -820,28 +823,146 @@ fn summarize_transcript_visibility(diag: &ProviderDoctorData) -> CheckResult {
     };
 
     let gap = file_len.saturating_sub(offset);
-    if gap > 0 {
+    classify_transcript_visibility(
+        label,
+        latest_file,
+        gap,
+        diag.latest_file_tail_seen,
+        diag.latest_file_mtime,
+        Utc::now(),
+    )
+}
+
+/// Small gap that a live transcript can generate between tailer reads.
+const LIVE_WRITE_GAP_BYTES: u64 = 1024 * 1024; // 1 MB
+/// Gap above which the tailer is treated as genuinely wedged regardless of activity recency.
+const WEDGE_GAP_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+/// Window within which tailer activity counts as "live".
+const RECENT_ACTIVITY_SECS: i64 = 60;
+/// Window beyond which tailer silence counts as "stale" — only a FAIL when paired with a
+/// currently-being-written file (mtime within `RECENT_ACTIVITY_SECS`).
+const STALE_ACTIVITY_SECS: i64 = 300; // 5 minutes
+
+fn classify_transcript_visibility(
+    label: String,
+    latest_file: &Path,
+    gap: u64,
+    latest_file_tail_seen: Option<DateTime<Utc>>,
+    latest_file_mtime: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> CheckResult {
+    if gap == 0 {
+        return CheckResult::pass(
+            label,
+            format!(
+                "latest transcript is {} and the tailer is caught up (0 B behind)",
+                latest_file.display()
+            ),
+        );
+    }
+
+    let tail_age_secs =
+        latest_file_tail_seen.map(|ts| now.signed_duration_since(ts).num_seconds().max(0));
+    let file_age_secs =
+        latest_file_mtime.map(|ts| now.signed_duration_since(ts).num_seconds().max(0));
+
+    let tail_activity_label = match tail_age_secs {
+        Some(secs) => format!("tailer last read {} ago", format_relative_age_secs(secs)),
+        None => "tailer has not recorded activity on this file yet".to_string(),
+    };
+
+    if gap > WEDGE_GAP_BYTES {
         return CheckResult::fail(
             label,
             format!(
-                "latest transcript is {} and the tailer is {} B behind",
+                "latest transcript is {} and the tailer is {} behind (above the {} wedge threshold); {}",
                 latest_file.display(),
-                gap
+                format_bytes(gap),
+                format_bytes(WEDGE_GAP_BYTES),
+                tail_activity_label
             ),
             Some(
-                "Keep `budi-daemon` running and rerun `budi doctor`; if the gap persists, restart with `budi init`."
+                "Check `~/.local/share/budi/logs/daemon.log` for tailer errors and rerun `budi doctor` once the daemon has caught up."
                     .to_string(),
             ),
         );
     }
 
-    CheckResult::pass(
+    if let (Some(tail_age), Some(file_age)) = (tail_age_secs, file_age_secs)
+        && tail_age > STALE_ACTIVITY_SECS
+        && file_age < RECENT_ACTIVITY_SECS
+    {
+        return CheckResult::fail(
+            label,
+            format!(
+                "latest transcript is {} and is actively being written (modified {}s ago), but the tailer has not read it in {}",
+                latest_file.display(),
+                file_age,
+                format_relative_age_secs(tail_age)
+            ),
+            Some(
+                "Check `~/.local/share/budi/logs/daemon.log` for tailer errors and rerun `budi doctor` once the daemon has caught up."
+                    .to_string(),
+            ),
+        );
+    }
+
+    let tailer_recently_active = tail_age_secs
+        .map(|secs| secs <= RECENT_ACTIVITY_SECS)
+        .unwrap_or(false);
+
+    if gap <= LIVE_WRITE_GAP_BYTES && tailer_recently_active {
+        return CheckResult::pass(
+            label,
+            format!(
+                "latest transcript is {} and the tailer is {} behind a live write ({}); gap typically closes within a few seconds",
+                latest_file.display(),
+                format_bytes(gap),
+                tail_activity_label
+            ),
+        );
+    }
+
+    CheckResult::warn(
         label,
         format!(
-            "latest transcript is {} and the tailer is caught up (0 B behind)",
-            latest_file.display()
+            "latest transcript is {} and the tailer is {} behind; {}",
+            latest_file.display(),
+            format_bytes(gap),
+            tail_activity_label
+        ),
+        Some(
+            "This usually closes on its own for a live transcript. If it persists for several minutes, check `~/.local/share/budi/logs/daemon.log`."
+                .to_string(),
         ),
     )
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else if bytes < GB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    }
+}
+
+fn format_relative_age_secs(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 60 * 60 {
+        format!("{}m", secs / 60)
+    } else if secs < 60 * 60 * 48 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }
 
 fn latest_file_is_from_today(ts: Option<DateTime<Utc>>) -> bool {
@@ -895,6 +1016,7 @@ mod tests {
             tracked_offsets: Some(1),
             latest_tail_offset: Some(120),
             latest_tail_seen: Some(Utc::now()),
+            latest_file_tail_seen: Some(Utc::now()),
             discover_error: None,
             db_error: None,
         }
@@ -1002,14 +1124,159 @@ mod tests {
     }
 
     #[test]
-    fn transcript_visibility_reports_gap_bytes() {
+    fn transcript_visibility_passes_on_small_gap_with_recent_tailer_activity() {
         let mut data = diag("Claude Code");
         data.latest_tail_offset = Some(96);
 
         let result = summarize_transcript_visibility(&data);
 
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.detail.contains("24 B behind a live write"));
+        assert!(result.detail.contains("tailer last read"));
+    }
+
+    fn path() -> &'static Path {
+        Path::new("/tmp/watch/session.jsonl")
+    }
+
+    #[test]
+    fn visibility_passes_when_caught_up() {
+        let now = Utc::now();
+        let result = classify_transcript_visibility(
+            "transcript visibility / Cursor".to_string(),
+            path(),
+            0,
+            Some(now),
+            Some(now),
+            now,
+        );
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.detail.contains("caught up"));
+        assert!(result.fix.is_none());
+    }
+
+    #[test]
+    fn visibility_passes_on_live_write_drift() {
+        // Precisely the 2026-04-20 fresh-user repro: 2551 B gap, tailer 1s ago.
+        let now = Utc::now();
+        let result = classify_transcript_visibility(
+            "transcript visibility / Cursor".to_string(),
+            path(),
+            2551,
+            Some(now - chrono::Duration::seconds(1)),
+            Some(now - chrono::Duration::seconds(1)),
+            now,
+        );
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.detail.contains("2.5 KB behind a live write"));
+        assert!(result.fix.is_none());
+    }
+
+    #[test]
+    fn visibility_warns_when_tailer_activity_is_stale_but_gap_is_small() {
+        let now = Utc::now();
+        let result = classify_transcript_visibility(
+            "transcript visibility / Cursor".to_string(),
+            path(),
+            4096,
+            Some(now - chrono::Duration::seconds(120)),
+            Some(now - chrono::Duration::seconds(120)),
+            now,
+        );
+        assert_eq!(result.state, CheckState::Warn);
+        assert!(result.detail.contains("4.0 KB behind"));
+        assert!(
+            result
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("daemon.log")
+        );
+    }
+
+    #[test]
+    fn visibility_warns_when_gap_exceeds_live_write_threshold() {
+        let now = Utc::now();
+        let result = classify_transcript_visibility(
+            "transcript visibility / Cursor".to_string(),
+            path(),
+            2 * 1024 * 1024,
+            Some(now - chrono::Duration::seconds(2)),
+            Some(now - chrono::Duration::seconds(2)),
+            now,
+        );
+        assert_eq!(result.state, CheckState::Warn);
+        assert!(result.detail.contains("2.0 MB behind"));
+    }
+
+    #[test]
+    fn visibility_fails_when_gap_exceeds_wedge_threshold() {
+        let now = Utc::now();
+        let result = classify_transcript_visibility(
+            "transcript visibility / Cursor".to_string(),
+            path(),
+            20 * 1024 * 1024,
+            Some(now - chrono::Duration::seconds(1)),
+            Some(now - chrono::Duration::seconds(1)),
+            now,
+        );
         assert_eq!(result.state, CheckState::Fail);
-        assert!(result.detail.contains("24 B behind"));
+        assert!(result.detail.contains("20.0 MB behind"));
+        assert!(result.detail.contains("wedge threshold"));
+        assert!(
+            result
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("daemon.log")
+        );
+    }
+
+    #[test]
+    fn visibility_fails_when_file_is_actively_written_but_tailer_is_idle() {
+        let now = Utc::now();
+        let result = classify_transcript_visibility(
+            "transcript visibility / Cursor".to_string(),
+            path(),
+            4096,
+            Some(now - chrono::Duration::seconds(600)),
+            Some(now - chrono::Duration::seconds(2)),
+            now,
+        );
+        assert_eq!(result.state, CheckState::Fail);
+        assert!(result.detail.contains("actively being written"));
+        assert!(result.detail.contains("has not read it in"));
+    }
+
+    #[test]
+    fn visibility_does_not_suggest_restart_with_budi_init() {
+        // Regression guard for #438 — the legacy FAIL message told users to
+        // restart with `budi init` on harmless live-write drift. Never do that.
+        let now = Utc::now();
+        for gap in [0u64, 2_551, 4096, 2 * 1024 * 1024, 20 * 1024 * 1024] {
+            let result = classify_transcript_visibility(
+                "transcript visibility / Cursor".to_string(),
+                path(),
+                gap,
+                Some(now - chrono::Duration::seconds(1)),
+                Some(now - chrono::Duration::seconds(1)),
+                now,
+            );
+            let fix = result.fix.as_deref().unwrap_or_default();
+            assert!(
+                !fix.contains("budi init"),
+                "fix copy should not suggest `budi init` (gap={gap}): {fix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_bytes_rounds_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2551), "2.5 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(10 * 1024 * 1024), "10.0 MB");
     }
 
     #[test]
