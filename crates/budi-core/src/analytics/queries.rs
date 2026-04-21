@@ -319,6 +319,161 @@ pub struct UsageSummary {
     pub total_cost_cents: f64,
 }
 
+// ---------------------------------------------------------------------------
+// Breakdown envelope (#448)
+// ---------------------------------------------------------------------------
+//
+// Every `budi stats` breakdown view (`--projects`, `--branches`, `--tickets`,
+// `--activities`, `--files`, `--models`, `--tag`) ships through this envelope
+// so the shape of every endpoint carries a grand total and an explicit
+// `(other)` aggregate when rows are truncated. Before 8.3 these views
+// returned a bare `Vec<T>` capped at 30 rows with no footer, which caused
+// `--files 30d` to silently underreport cost by ~9% on machines with more
+// than 30 distinct file paths (#448 reproduction).
+//
+// Contract: `sum(rows) + other.cost_cents == total_cost_cents`, to the cent,
+// for every period and breakdown — enforced by `paginate_breakdown` and
+// exercised by the reconciliation tests in `analytics/tests.rs`.
+
+/// Display label for the truncation-tail aggregate row in breakdown output.
+///
+/// Distinct from [`UNTAGGED_DIMENSION`]: `(other)` is "the cost we truncated
+/// from the bottom of the ranked list", `(untagged)` is "the cost that
+/// carries no tag value at all". Both can coexist on the same view.
+pub const BREAKDOWN_OTHER_LABEL: &str = "(other)";
+
+/// Aggregate of every row ranked below the requested limit. Emitted as a
+/// sibling of the top-N rows so scripts reconcile to the grand total
+/// without needing to re-query with `--limit 0`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BreakdownOther {
+    /// How many rows were folded into this aggregate.
+    pub row_count: usize,
+    /// Summed cost of the folded rows, in cents.
+    pub cost_cents: f64,
+}
+
+/// Envelope wrapping every breakdown response: top-N rows plus a truncated
+/// `(other)` aggregate plus the grand total and total distinct-row count
+/// for the requested window.
+///
+/// `limit == 0` means "no cap" — `rows` holds every matched row and `other`
+/// is always `None`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BreakdownPage<T> {
+    /// Top rows sorted by cost (highest first), truncated to `shown_rows`.
+    pub rows: Vec<T>,
+    /// Aggregate of rows beyond `limit`. `None` when nothing was truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other: Option<BreakdownOther>,
+    /// Grand total across every row in the window, to the cent. Equals
+    /// `sum(rows.cost_cents) + other.cost_cents` when `other` is `Some`.
+    pub total_cost_cents: f64,
+    /// Number of distinct rows matched by the query, including rows folded
+    /// into `(other)`.
+    pub total_rows: usize,
+    /// How many rows are in `rows` (always `<= limit` when `limit > 0`).
+    pub shown_rows: usize,
+    /// Effective limit applied. `0` = unlimited.
+    pub limit: usize,
+}
+
+/// Contract for breakdown row types so [`paginate_breakdown`] can read
+/// the cost field without type-specific casing. Implementations live
+/// alongside the envelope because the trait is purely load-bearing for
+/// truncation math, not part of the row's public semantics.
+pub trait BreakdownRowCost {
+    fn cost_cents(&self) -> f64;
+}
+
+impl BreakdownRowCost for RepoUsage {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+impl BreakdownRowCost for BranchCost {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+impl BreakdownRowCost for TicketCost {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+impl BreakdownRowCost for ActivityCost {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+impl BreakdownRowCost for FileCost {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+impl BreakdownRowCost for ModelUsage {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+impl BreakdownRowCost for TagCost {
+    fn cost_cents(&self) -> f64 {
+        self.cost_cents
+    }
+}
+
+/// Sentinel limit that disables truncation. Passed to the underlying SQL
+/// LIMIT clause as an i64, so we stay well under i64::MAX.
+pub const BREAKDOWN_FETCH_ALL_LIMIT: usize = 1_000_000;
+
+/// Split `all_rows` (already sorted by cost DESC) into the visible top-N
+/// plus an `(other)` aggregate, and compute the grand total.
+///
+/// Callers fetch the full set first (via `*_cost_with_filters` with a very
+/// large SQL `LIMIT`) and hand the vec to this helper. That keeps the
+/// truncation logic in one place so every breakdown reconciles to the cent
+/// (#448 acceptance).
+pub fn paginate_breakdown<T: BreakdownRowCost>(
+    mut all_rows: Vec<T>,
+    limit: usize,
+) -> BreakdownPage<T> {
+    let total_rows = all_rows.len();
+    let total_cost_cents: f64 = all_rows.iter().map(BreakdownRowCost::cost_cents).sum();
+
+    if limit == 0 || total_rows <= limit {
+        let shown_rows = total_rows;
+        return BreakdownPage {
+            rows: all_rows,
+            other: None,
+            total_cost_cents,
+            total_rows,
+            shown_rows,
+            limit,
+        };
+    }
+
+    let rest: Vec<T> = all_rows.drain(limit..).collect();
+    let other_cost: f64 = rest.iter().map(BreakdownRowCost::cost_cents).sum();
+    let other = BreakdownOther {
+        row_count: rest.len(),
+        cost_cents: other_cost,
+    };
+    BreakdownPage {
+        rows: all_rows,
+        other: Some(other),
+        total_cost_cents,
+        total_rows,
+        shown_rows: limit,
+        limit,
+    }
+}
+
 /// Query a usage summary, optionally filtered by date range.
 /// Consolidated into a single scan of the messages table.
 #[cfg(test)]

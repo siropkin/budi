@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
-    ActivityCost, ActivityCostDetail, BranchCost, FileCost, FileCostDetail, ModelUsage,
-    PaginatedSessions, ProviderStats, RepoUsage, SessionHealth, SessionListEntry, SessionTag,
-    TagCost, TicketCost, TicketCostDetail, UsageSummary,
+    ActivityCost, ActivityCostDetail, BranchCost, BreakdownPage, FileCost, FileCostDetail,
+    ModelUsage, PaginatedSessions, ProviderStats, RepoUsage, SessionHealth, SessionListEntry,
+    SessionTag, TagCost, TicketCost, TicketCostDetail, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -422,7 +422,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<RepoUsage>> {
+    ) -> Result<BreakdownPage<RepoUsage>> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
             params.push(("since", s.to_string()));
@@ -441,14 +441,20 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn branches(&self, since: Option<&str>, until: Option<&str>) -> Result<Vec<BranchCost>> {
-        let mut params = Vec::new();
+    pub fn branches(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<BreakdownPage<BranchCost>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
-            params.push(("since", s));
+            params.push(("since", s.to_string()));
         }
         if let Some(u) = until {
-            params.push(("until", u));
+            params.push(("until", u.to_string()));
         }
+        params.push(("limit", limit.to_string()));
         let resp = self
             .client
             .get(format!("{}/analytics/branches", self.base_url))
@@ -504,7 +510,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<TicketCost>> {
+    ) -> Result<BreakdownPage<TicketCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
             params.push(("since", s.to_string()));
@@ -570,7 +576,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<ActivityCost>> {
+    ) -> Result<BreakdownPage<ActivityCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
             params.push(("since", s.to_string()));
@@ -635,7 +641,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<FileCost>> {
+    ) -> Result<BreakdownPage<FileCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
             params.push(("since", s.to_string()));
@@ -692,14 +698,20 @@ impl DaemonClient {
         Ok(Some(serde_json::from_value(val)?))
     }
 
-    pub fn models(&self, since: Option<&str>, until: Option<&str>) -> Result<Vec<ModelUsage>> {
-        let mut params = Vec::new();
+    pub fn models(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<BreakdownPage<ModelUsage>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
-            params.push(("since", s));
+            params.push(("since", s.to_string()));
         }
         if let Some(u) = until {
-            params.push(("until", u));
+            params.push(("until", u.to_string()));
         }
+        params.push(("limit", limit.to_string()));
         let resp = self
             .client
             .get(format!("{}/analytics/models", self.base_url))
@@ -716,7 +728,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<TagCost>> {
+    ) -> Result<BreakdownPage<TagCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(k) = key {
             params.push(("key", k.to_string()));

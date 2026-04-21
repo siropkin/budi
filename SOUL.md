@@ -340,6 +340,24 @@ in [#302](https://github.com/siropkin/budi/issues/302) / #303 / #304 / #305):
     repo-relative (no leading `/`, no `..`, no Windows separators, no
     URL scheme) before hitting SQLite.
 
+- **Breakdown envelope** (shared, 8.3 / [#448](https://github.com/siropkin/budi/issues/448)).
+  Every list endpoint (`GET /analytics/projects`,
+  `/analytics/branches`, `/analytics/tickets`, `/analytics/activities`,
+  `/analytics/files`, `/analytics/models`, `/analytics/tags`) returns
+  a [`BreakdownPage<T>`](crates/budi-core/src/analytics/queries.rs)
+  envelope rather than a bare JSON array. The envelope exposes
+  `rows`, `other?` (truncation-tail aggregate), `total_cost_cents`
+  (grand total across every matching row, to the cent),
+  `total_rows`, `shown_rows`, and the effective `limit`. The contract
+  `sum(rows.cost_cents) + other.cost_cents == total_cost_cents` is
+  exercised by the reconciliation suite in `analytics/tests.rs`. Before
+  8.3 the same endpoints returned a bare `Vec<T>` capped at 30 rows
+  with no grand total, which silently underreported `--files 30d` by
+  ~9% on machines with more than 30 distinct file paths. The CLI
+  surfaces this as a `Total` footer plus an optional `(other)` row and
+  honours `--limit N` (default 30, `0` = unlimited) across every
+  breakdown view.
+
 - **`tool_outcome`** — per-message tool-call outcome added in R1.5
   ([#293](https://github.com/siropkin/budi/issues/293)). The JSONL
   extractor reads `tool_result` blocks from user messages, keeps only

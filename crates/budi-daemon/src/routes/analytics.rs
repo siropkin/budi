@@ -183,10 +183,20 @@ pub struct ListParams {
     pub filters: DimensionParams,
 }
 
+/// Resolve the CLI-requested `--limit N` (0 = unlimited) to a capped value
+/// for pagination. `None` falls back to the default breakdown cap of 30.
+fn resolve_breakdown_limit(requested: Option<usize>) -> usize {
+    let raw = requested.unwrap_or(30);
+    if raw == 0 { 0 } else { raw.min(100_000) }
+}
+
 pub async fn analytics_projects(
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<
+    Json<analytics::BreakdownPage<analytics::RepoUsage>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -196,20 +206,23 @@ pub async fn analytics_projects(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_models(
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<analytics::ModelUsage>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<
+    Json<analytics::BreakdownPage<analytics::ModelUsage>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -219,20 +232,23 @@ pub async fn analytics_models(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_branches(
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<analytics::BranchCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<
+    Json<analytics::BreakdownPage<analytics::BranchCost>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -242,14 +258,14 @@ pub async fn analytics_branches(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_cost(
@@ -452,8 +468,9 @@ pub struct TagParams {
 
 pub async fn analytics_tags(
     Query(params): Query<TagParams>,
-) -> Result<Json<Vec<analytics::TagCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<Json<analytics::BreakdownPage<analytics::TagCost>>, (StatusCode, Json<serde_json::Value>)>
+{
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -464,13 +481,13 @@ pub async fn analytics_tags(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_branch_detail(
@@ -523,8 +540,11 @@ pub struct TicketDetailParams {
 
 pub async fn analytics_tickets(
     Query(params): Query<TicketListParams>,
-) -> Result<Json<Vec<analytics::TicketCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<
+    Json<analytics::BreakdownPage<analytics::TicketCost>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -534,14 +554,14 @@ pub async fn analytics_tickets(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_ticket_detail(
@@ -597,8 +617,11 @@ pub struct ActivityDetailParams {
 
 pub async fn analytics_activities(
     Query(params): Query<ActivityListParams>,
-) -> Result<Json<Vec<analytics::ActivityCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<
+    Json<analytics::BreakdownPage<analytics::ActivityCost>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -608,14 +631,14 @@ pub async fn analytics_activities(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_activity_detail(
@@ -673,8 +696,11 @@ pub struct FileDetailParams {
 
 pub async fn analytics_files(
     Query(params): Query<FileListParams>,
-) -> Result<Json<Vec<analytics::FileCost>>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(200);
+) -> Result<
+    Json<analytics::BreakdownPage<analytics::FileCost>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let limit = resolve_breakdown_limit(params.limit);
     let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
@@ -684,14 +710,14 @@ pub async fn analytics_files(
             params.since.as_deref(),
             params.until.as_deref(),
             &filters,
-            limit,
+            analytics::BREAKDOWN_FETCH_ALL_LIMIT,
         )
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
     .map_err(internal_error)?;
 
-    Ok(Json(result))
+    Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
 pub async fn analytics_file_detail(
