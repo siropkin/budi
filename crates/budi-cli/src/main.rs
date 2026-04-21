@@ -167,10 +167,11 @@ Examples:
     /// 8.3.0 (#428); use `budi db <verb>` instead.
     #[command(after_help = "\
 Examples:
-  budi db migrate            Run database migration explicitly
-  budi db repair             Repair schema drift and run migration checks
-  budi db import             Import historical transcripts from disk
-  budi db import --force     Re-ingest all data from scratch (use after upgrades)")]
+  budi db migrate                Run database migration explicitly
+  budi db repair                 Repair schema drift and run migration checks
+  budi db import                 Import historical transcripts from disk
+  budi db import --force         Re-ingest all data from scratch (use after upgrades)
+  budi db import --format json   JSON output with per-agent breakdown (for scripting)")]
     Db {
         #[command(subcommand)]
         action: DbAction,
@@ -361,6 +362,12 @@ enum DbAction {
         /// Use after upgrading budi when the cost calculation has changed.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Output format: text (default) or json. `json` prints a structured
+        /// per-agent summary at the end (suitable for scripting) and
+        /// suppresses the live per-agent progress feed so stdout stays
+        /// parseable.
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
     },
 }
 
@@ -542,7 +549,10 @@ fn main() -> Result<()> {
         Commands::Db { action } => match action {
             DbAction::Migrate => commands::db::cmd_db_migrate(),
             DbAction::Repair => commands::repair::cmd_repair(),
-            DbAction::Import { force } => commands::import::cmd_import(force),
+            DbAction::Import { force, format } => {
+                let json = matches!(format, StatsFormat::Json);
+                commands::import::cmd_import(force, json)
+            }
         },
         Commands::Vitals { session } => commands::vitals::cmd_vitals(session),
         Commands::Health { session } => {
@@ -669,8 +679,11 @@ mod tests {
         let cli = Cli::try_parse_from(["budi", "db", "import"]).expect("budi db import parses");
         match cli.command {
             Commands::Db {
-                action: DbAction::Import { force },
-            } => assert!(!force),
+                action: DbAction::Import { force, format },
+            } => {
+                assert!(!force);
+                assert_eq!(format, StatsFormat::Text);
+            }
             _ => panic!("expected db import command"),
         }
 
@@ -678,9 +691,24 @@ mod tests {
             .expect("budi db import --force parses");
         match cli.command {
             Commands::Db {
-                action: DbAction::Import { force },
-            } => assert!(force),
+                action: DbAction::Import { force, format },
+            } => {
+                assert!(force);
+                assert_eq!(format, StatsFormat::Text);
+            }
             _ => panic!("expected db import --force command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "db", "import", "--format", "json"])
+            .expect("budi db import --format json parses");
+        match cli.command {
+            Commands::Db {
+                action: DbAction::Import { force, format },
+            } => {
+                assert!(!force);
+                assert_eq!(format, StatsFormat::Json);
+            }
+            _ => panic!("expected db import --format json command"),
         }
     }
 

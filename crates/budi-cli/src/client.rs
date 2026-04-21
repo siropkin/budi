@@ -3,20 +3,15 @@
 //! All analytics queries go through the daemon so it is the single owner of
 //! the SQLite database.
 
-use std::io::Write;
 use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use budi_core::analytics::{
     ActivityCost, ActivityCostDetail, BranchCost, BreakdownPage, FileCost, FileCostDetail,
-    ModelUsage, PaginatedSessions, ProviderStats, RepoUsage, SessionHealth, SessionListEntry,
-    SessionTag, TagCost, TicketCost, TicketCostDetail, UsageSummary,
+    ModelUsage, PaginatedSessions, ProviderStats, ProviderSyncStats, RepoUsage, SessionHealth,
+    SessionListEntry, SessionTag, SyncProgress, TagCost, TicketCost, TicketCostDetail,
+    UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -119,31 +114,6 @@ fn daemon_log_hint() -> String {
         .unwrap_or_default()
 }
 
-fn run_with_sync_heartbeat<T, E>(
-    op: &impl Fn() -> std::result::Result<T, E>,
-) -> std::result::Result<T, E> {
-    let running = Arc::new(AtomicBool::new(true));
-    let running_flag = running.clone();
-
-    let heartbeat = thread::spawn(move || {
-        let mut elapsed_secs = 0u64;
-        while running_flag.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_secs(15));
-            if !running_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            elapsed_secs += 15;
-            print!(" {elapsed_secs}s...");
-            let _ = std::io::stdout().flush();
-        }
-    });
-
-    let result = op();
-    running.store(false, Ordering::Relaxed);
-    let _ = heartbeat.join();
-    result
-}
-
 /// Check the response status and return a descriptive error for non-success codes.
 ///
 /// `503 Service Unavailable` with a `needs_migration: true` body (#366) is
@@ -184,7 +154,51 @@ fn parse_needs_migration_error(body: &str) -> Option<String> {
     }
 }
 
+/// Typed mirror of the daemon's `SyncResponse` (see
+/// `budi_daemon::routes::hooks::SyncResponse`). Returned by `POST /sync/all`
+/// and `POST /sync/reset`. Used by `budi db import` to render the final
+/// per-agent breakdown (#440).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SyncResponse {
+    pub files_synced: usize,
+    pub messages_ingested: usize,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub per_provider: Vec<ProviderSyncStats>,
+}
+
+/// Typed mirror of the daemon's `SyncStatusResponse`. `progress` is populated
+/// only while a sync is in flight and cleared once `syncing: false`, so a
+/// `Some(..)` value on a `syncing: false` snapshot should be ignored.
+///
+/// The freshness and ingest-queue fields are carried for wire-format
+/// parity with consumers that already key off `/sync/status` (Cursor
+/// extension, statusline). `budi db import` only reads `syncing` and
+/// `progress`; `#[allow(dead_code)]` keeps the struct whole without
+/// tripping the dead-code lint for the unused ones.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct SyncStatusResponse {
+    pub syncing: bool,
+    #[serde(default)]
+    pub last_sync_completed_at: Option<String>,
+    #[serde(default)]
+    pub newest_data_at: Option<String>,
+    #[serde(default)]
+    pub ingest_backlog: u64,
+    #[serde(default)]
+    pub ingest_ready: u64,
+    #[serde(default)]
+    pub ingest_failed: u64,
+    #[serde(default)]
+    pub last_synced: Option<String>,
+    #[serde(default)]
+    pub progress: Option<SyncProgress>,
+}
+
 /// Thin HTTP client that talks to budi-daemon.
+#[derive(Clone)]
 pub struct DaemonClient {
     base_url: String,
     client: Client,
@@ -246,45 +260,28 @@ impl DaemonClient {
 
     // ─── Sync & Migration ────────────────────────────────────────────
 
-    fn wait_for_sync(&self) -> Result<()> {
-        print!(" sync in progress, waiting");
-        let _ = std::io::stdout().flush();
-        let start = std::time::Instant::now();
-        let max_wait = Duration::from_secs(300);
-        loop {
-            std::thread::sleep(Duration::from_secs(2));
-            if start.elapsed() > max_wait {
-                println!();
-                anyhow::bail!(
-                    "timed out waiting for running sync to finish — run `budi doctor` to check status"
-                );
-            }
-            let ok = self
-                .client
-                .get(format!("{}/sync/status", self.base_url))
-                .send()
-                .ok()
-                .and_then(|r| r.json::<Value>().ok())
-                .and_then(|v| v.get("syncing")?.as_bool())
-                .unwrap_or(false);
-            if !ok {
-                print!(" ");
-                let _ = std::io::stdout().flush();
-                return Ok(());
-            }
-            print!(".");
-            let _ = std::io::stdout().flush();
-        }
+    fn send_sync_post(&self, path: &str) -> std::result::Result<Response, reqwest::Error> {
+        self.client
+            .post(format!(
+                "{}/{}",
+                self.base_url,
+                path.trim_start_matches('/')
+            ))
+            .timeout(Duration::from_secs(600))
+            .send()
     }
 
     fn sync_request(
         &self,
         send: impl Fn() -> std::result::Result<Response, reqwest::Error>,
-    ) -> Result<Value> {
-        let resp = run_with_sync_heartbeat(&send).map_err(describe_send_error)?;
+    ) -> Result<SyncResponse> {
+        let resp = send().map_err(describe_send_error)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
-            self.wait_for_sync()?;
-            let resp = run_with_sync_heartbeat(&send).map_err(describe_send_error)?;
+            // Another sync is already running; wait for it to finish (the
+            // import command polls /sync/status itself, so this branch only
+            // matters when a caller skipped the CLI progress loop).
+            self.wait_for_sync_completion()?;
+            let resp = send().map_err(describe_send_error)?;
             let resp = check_response(resp)?;
             return Ok(resp.json()?);
         }
@@ -292,22 +289,50 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn history(&self) -> Result<Value> {
-        self.sync_request(|| {
-            self.client
-                .post(format!("{}/sync/all", self.base_url))
-                .timeout(Duration::from_secs(600))
-                .send()
-        })
+    /// Block until a 409-indicated in-flight sync reports `syncing: false`.
+    /// Separate from the `budi db import` progress loop: this is the fallback
+    /// when a caller just wanted to trigger a sync and discovered one was
+    /// already running.
+    fn wait_for_sync_completion(&self) -> Result<()> {
+        let start = std::time::Instant::now();
+        let max_wait = Duration::from_secs(300);
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if start.elapsed() > max_wait {
+                anyhow::bail!(
+                    "timed out waiting for running sync to finish — run `budi doctor` to check status"
+                );
+            }
+            let still_running = self.sync_status().map(|s| s.syncing).unwrap_or(false);
+            if !still_running {
+                return Ok(());
+            }
+        }
     }
 
-    pub fn sync_reset(&self) -> Result<Value> {
-        self.sync_request(|| {
-            self.client
-                .post(format!("{}/sync/reset", self.base_url))
-                .timeout(Duration::from_secs(600))
-                .send()
-        })
+    /// `POST /sync/all` — run a quick 30-day sync and return the typed
+    /// per-agent report. Used by `budi db import` (no `--force`).
+    pub fn history(&self) -> Result<SyncResponse> {
+        self.sync_request(|| self.send_sync_post("sync/all"))
+    }
+
+    /// `POST /sync/reset` — clear sync state and re-ingest all history from
+    /// scratch. Used by `budi db import --force`.
+    pub fn sync_reset(&self) -> Result<SyncResponse> {
+        self.sync_request(|| self.send_sync_post("sync/reset"))
+    }
+
+    /// `GET /sync/status` — typed snapshot. The `progress` field is populated
+    /// only while a sync is in flight (see `/sync/status` handler).
+    /// `budi db import` polls this every ~2 s to render live per-agent progress.
+    pub fn sync_status(&self) -> Result<SyncStatusResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/sync/status", self.base_url))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
     }
 
     pub fn migrate(&self) -> Result<Value> {

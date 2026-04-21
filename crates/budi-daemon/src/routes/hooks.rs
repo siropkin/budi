@@ -25,6 +25,12 @@ pub struct SyncResponse {
     pub files_synced: usize,
     pub messages_ingested: usize,
     pub warnings: Vec<String>,
+    /// Per-provider breakdown of the sync. Omitted from the wire format when
+    /// empty so legacy consumers that don't know about the field ignore it
+    /// safely; the `budi db import` CLI uses it to render the
+    /// post-import per-agent summary table (#440).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub per_provider: Vec<budi_core::analytics::ProviderSyncStats>,
 }
 
 #[derive(serde::Serialize)]
@@ -37,6 +43,12 @@ pub struct SyncStatusResponse {
     pub ingest_failed: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_synced: Option<String>,
+    /// Live per-agent progress while `syncing == true`. Set to `None` between
+    /// syncs so `/sync/status` returns a minimal payload on the hot path
+    /// (statusline + doctor polls hit this route too). Backs `budi db import`
+    /// per-agent progress output (#440).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<budi_core::analytics::SyncProgress>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
@@ -103,17 +115,36 @@ pub struct InstallIntegrationsResponse {
 
 struct BusyFlagGuard {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    progress: Option<std::sync::Arc<std::sync::Mutex<Option<budi_core::analytics::SyncProgress>>>>,
 }
 
 impl BusyFlagGuard {
     fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        Self { flag }
+        Self {
+            flag,
+            progress: None,
+        }
+    }
+
+    fn with_progress(
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        progress: std::sync::Arc<std::sync::Mutex<Option<budi_core::analytics::SyncProgress>>>,
+    ) -> Self {
+        Self {
+            flag,
+            progress: Some(progress),
+        }
     }
 }
 
 impl Drop for BusyFlagGuard {
     fn drop(&mut self) {
         self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(slot) = self.progress.as_ref()
+            && let Ok(mut guard) = slot.lock()
+        {
+            *guard = None;
+        }
     }
 }
 
@@ -504,6 +535,15 @@ pub async fn health_integrations()
 
 pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusResponse> {
     let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
+    // Only return a progress snapshot when we actually hold the busy flag;
+    // a leftover `Some(..)` from a previous run (cleared by `BusyFlagGuard`
+    // on Drop, but timing matters for the `syncing = false` → `None`
+    // transition) should not leak into the next poll.
+    let progress = if syncing {
+        state.sync_progress.lock().ok().and_then(|g| g.clone())
+    } else {
+        None
+    };
     let status = tokio::task::spawn_blocking(|| {
         let db_path = budi_core::analytics::db_path().ok()?;
         let conn = budi_core::analytics::open_db(&db_path).ok()?;
@@ -528,6 +568,7 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
         ingest_ready: 0,
         ingest_failed: 0,
         last_synced: last_sync_completed_at,
+        progress,
     })
 }
 
@@ -561,6 +602,23 @@ pub struct SyncParams {
     pub migrate: bool,
 }
 
+/// Build a callback that publishes `SyncProgress` snapshots into the
+/// shared `AppState.sync_progress` slot so `/sync/status` can surface live
+/// per-agent progress during an in-flight `POST /sync/*` call (#440).
+///
+/// `Mutex::lock` failures are swallowed: a poisoned mutex just means a
+/// previous progress publish panicked, and losing a progress tick is
+/// strictly preferable to killing the sync itself.
+fn progress_publisher(
+    slot: std::sync::Arc<std::sync::Mutex<Option<budi_core::analytics::SyncProgress>>>,
+) -> impl FnMut(&budi_core::analytics::SyncProgress) + Send + 'static {
+    move |progress: &budi_core::analytics::SyncProgress| {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(progress.clone());
+        }
+    }
+}
+
 pub async fn analytics_sync(
     State(state): State<AppState>,
     body: Option<Json<SyncParams>>,
@@ -582,6 +640,7 @@ pub async fn analytics_sync(
         ));
     }
     let flag = state.syncing.clone();
+    let progress_slot = state.sync_progress.clone();
 
     // Result variant carries an explicit "stale schema, migrate=false"
     // signal so we can map it to the structured 503 that #366 mandates
@@ -592,7 +651,7 @@ pub async fn analytics_sync(
     }
 
     let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<SyncOutcome> {
-        let _busy = BusyFlagGuard::new(flag);
+        let _busy = BusyFlagGuard::with_progress(flag, progress_slot.clone());
         let db_path = budi_core::analytics::db_path()?;
         let mut conn = if params.migrate {
             budi_core::analytics::open_db_with_migration(&db_path)?
@@ -605,12 +664,15 @@ pub async fn analytics_sync(
             }
             c
         };
-        let (files_synced, messages_ingested, warnings) =
-            budi_core::analytics::sync_all(&mut conn)?;
+        let report = budi_core::analytics::sync_all_with_progress(
+            &mut conn,
+            progress_publisher(progress_slot),
+        )?;
         Ok(SyncOutcome::Ok(SyncResponse {
-            files_synced,
-            messages_ingested,
-            warnings,
+            files_synced: report.files_synced,
+            messages_ingested: report.messages_ingested,
+            warnings: report.warnings,
+            per_provider: report.per_provider,
         }))
     })
     .await
@@ -642,18 +704,22 @@ pub async fn analytics_sync_reset(
         ));
     }
     let flag = state.syncing.clone();
+    let progress_slot = state.sync_progress.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _busy = BusyFlagGuard::new(flag);
+        let _busy = BusyFlagGuard::with_progress(flag, progress_slot.clone());
         (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
             budi_core::analytics::reset_sync_state(&conn)?;
-            let (files_synced, messages_ingested, warnings) =
-                budi_core::analytics::sync_history(&mut conn)?;
+            let report = budi_core::analytics::sync_history_with_progress(
+                &mut conn,
+                progress_publisher(progress_slot),
+            )?;
             Ok(SyncResponse {
-                files_synced,
-                messages_ingested,
-                warnings,
+                files_synced: report.files_synced,
+                messages_ingested: report.messages_ingested,
+                warnings: report.warnings,
+                per_provider: report.per_provider,
             })
         })()
     })
@@ -683,17 +749,21 @@ pub async fn analytics_history(
         ));
     }
     let flag = state.syncing.clone();
+    let progress_slot = state.sync_progress.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _busy = BusyFlagGuard::new(flag);
+        let _busy = BusyFlagGuard::with_progress(flag, progress_slot.clone());
         (|| -> anyhow::Result<_> {
             let db_path = budi_core::analytics::db_path()?;
             let mut conn = budi_core::analytics::open_db_with_migration(&db_path)?;
-            let (files_synced, messages_ingested, warnings) =
-                budi_core::analytics::sync_history(&mut conn)?;
+            let report = budi_core::analytics::sync_history_with_progress(
+                &mut conn,
+                progress_publisher(progress_slot),
+            )?;
             Ok(SyncResponse {
-                files_synced,
-                messages_ingested,
-                warnings,
+                files_synced: report.files_synced,
+                messages_ingested: report.messages_ingested,
+                warnings: report.warnings,
+                per_provider: report.per_provider,
             })
         })()
     })
