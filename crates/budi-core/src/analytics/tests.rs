@@ -4252,7 +4252,10 @@ fn health_cursor_tips_use_plain_actions() {
 }
 
 #[test]
-fn health_suppressed_few_messages() {
+fn health_all_na_is_insufficient_data() {
+    // Fresh session with only 3 messages — none of the four vitals can be
+    // scored yet. Per #441 this must render as `insufficient_data`, not a
+    // trust-eroding `green` / "Session healthy".
     let mut conn = test_db();
     conn.execute(
         "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
@@ -4267,9 +4270,135 @@ fn health_suppressed_few_messages() {
     let h = session_health(&conn, Some("s1")).unwrap();
     assert!(h.vitals.context_drag.is_none());
     assert!(h.vitals.cache_efficiency.is_none());
+    assert!(h.vitals.thrashing.is_none());
+    assert!(h.vitals.cost_acceleration.is_none());
+    assert_eq!(h.state, "insufficient_data");
+    assert_eq!(h.tip, "Not enough session data yet to assess");
+}
+
+#[test]
+fn health_three_na_stays_insufficient_even_with_one_green_vital() {
+    // Contrived case: four messages scores exactly one vital
+    // (cache_efficiency) green, leaving three N/A. Per #441 the session
+    // should stay `insufficient_data` — one green reading isn't enough
+    // evidence to flip a verdict and never should paint green over N/A rows.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs: Vec<ParsedMessage> = (0..4)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 900, 1.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    let scored = [
+        h.vitals.context_drag.is_some(),
+        h.vitals.cache_efficiency.is_some(),
+        h.vitals.thrashing.is_some(),
+        h.vitals.cost_acceleration.is_some(),
+    ];
+    let na_count = scored.iter().filter(|s| !**s).count();
+    assert!(
+        na_count >= 3,
+        "expected at least 3 N/A with 4 messages, got na_count={na_count} scored={scored:?}"
+    );
+    assert_eq!(h.state, "insufficient_data");
+}
+
+#[test]
+fn health_green_stays_plain_with_single_na() {
+    // Stable 8-message session scores 3 vitals green (context_drag,
+    // cache_efficiency, cost_acceleration); thrashing stays None because the
+    // v22+ schema drops hook_events. 1 N/A is the normal steady state for
+    // every session today — per #441 we resolve in favour of rule 3 ("at
+    // least 3 of 4 numeric = plain green"), so this renders plain healthy
+    // rather than flagging partial on every working session.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs: Vec<ParsedMessage> = (0..8)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 900, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    let scored_count = [
+        h.vitals.context_drag.is_some(),
+        h.vitals.cache_efficiency.is_some(),
+        h.vitals.thrashing.is_some(),
+        h.vitals.cost_acceleration.is_some(),
+    ]
+    .iter()
+    .filter(|s| **s)
+    .count();
+    assert_eq!(
+        scored_count, 3,
+        "this fixture should score exactly 3 vitals; 1 N/A (thrashing)"
+    );
+    assert_eq!(h.state, "green");
+    assert_eq!(h.tip, "Session healthy");
+}
+
+#[test]
+fn health_green_partial_two_na() {
+    // 5 messages, stable, same model. context_drag (needs 5) and
+    // cache_efficiency (needs 4) score green; thrashing stays None and
+    // cost_acceleration stays None (reply-fallback needs 6 messages). That
+    // is 2 N/A — still green (all scored signals are healthy) but the tip
+    // must mention both gaps so the verdict is honest.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 100, 900, 5.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert!(h.vitals.context_drag.is_some());
+    assert!(h.vitals.cache_efficiency.is_some());
+    assert!(h.vitals.thrashing.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
     assert_eq!(h.state, "green");
-    assert_eq!(h.tip, "New session");
+    assert_eq!(
+        h.tip,
+        "Session healthy (partial — 2 metrics need more session data)"
+    );
+}
+
+#[test]
+fn health_red_with_many_na_stays_red() {
+    // Build a session where cache_efficiency goes red and the other vitals
+    // stay N/A — a real issue signal must trump the N/A count. One red
+    // vital with three N/A is still `red` so the user doesn't miss the
+    // failure indicator.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    // Large input, tiny cache reads → below CACHE_REUSE_RED threshold once
+    // enough messages accumulate. Only 5 messages so context_drag (needs 5)
+    // barely qualifies, but other metrics remain None.
+    let msgs: Vec<ParsedMessage> = (0..5)
+        .map(|i| health_msg(&format!("m{i}"), "s1", i, 1000, 100, 1.0))
+        .collect();
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.vitals.cache_efficiency.as_ref().unwrap().state, "red");
+    // Even with thrashing + cost_acceleration N/A, the red signal wins.
+    assert_eq!(h.state, "red");
 }
 
 #[test]
@@ -4371,7 +4500,10 @@ fn health_batch_returns_all_sessions() {
     assert_eq!(batch.len(), 3);
     assert!(batch.contains_key("s1"));
     assert!(batch.contains_key("s2"));
-    assert_eq!(batch["nonexistent"], "green");
+    // A session with no messages can't be called healthy (#441); batch mirrors
+    // the detail path and reports `insufficient_data` so the list view falls
+    // through to a neutral open circle instead of a trust-killer green dot.
+    assert_eq!(batch["nonexistent"], "insufficient_data");
 }
 
 #[test]
@@ -4395,10 +4527,15 @@ fn health_batch_matches_detail_thresholds() {
     assert_eq!(batch["s1"], detail.state);
 }
 
-// --- Coverage: green with sparse data when hook-based thrashing is unavailable (v22) ---
+// --- Coverage: insufficient_data when no vitals can be scored (v22) ---
 
 #[test]
-fn health_green_when_only_thrashing_computable() {
+fn health_insufficient_data_when_all_vitals_unscored() {
+    // 2 messages is below every vital's minimum sample requirement, and
+    // hook_events were dropped in v22 so thrashing is also absent. Pre-#441
+    // this returned plain `green` / "New session" — a trust-killer because
+    // the CLI then rendered "GREEN / Session healthy" over four N/A rows.
+    // Post-#441 the verdict is `insufficient_data` and the tip says so.
     let mut conn = test_db();
     conn.execute(
         "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
@@ -4414,11 +4551,8 @@ fn health_green_when_only_thrashing_computable() {
     assert!(h.vitals.context_drag.is_none());
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
-    assert_eq!(
-        h.state, "green",
-        "no hook_events → thrashing absent; remaining vitals suppressed → green default"
-    );
-    assert_eq!(h.tip, "New session");
+    assert_eq!(h.state, "insufficient_data");
+    assert_eq!(h.tip, "Not enough session data yet to assess");
 }
 
 // --- Coverage: cache_efficiency yellow ---

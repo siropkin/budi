@@ -255,11 +255,15 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
         let state_icon = match health.state.as_str() {
             "red" => "🔴",
             "yellow" => "🟡",
-            "gray" => "⚪",
+            "gray" | "insufficient_data" => "⚪",
             _ => "🟢",
         };
-        println!("  {state_icon} {bold}Health: {}{reset}", health.state);
-        if health.state == "green" {
+        let state_label = match health.state.as_str() {
+            "insufficient_data" => "insufficient data".to_string(),
+            other => other.to_string(),
+        };
+        println!("  {state_icon} {bold}Health: {state_label}{reset}");
+        if health.state == "green" || health.state == "insufficient_data" {
             println!("    {green}{}{reset}", health.tip);
         }
         for d in &health.details {

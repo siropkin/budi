@@ -7,9 +7,17 @@
 //! - **cost_acceleration** — cost growth (per user-turn when hook data exists,
 //!   otherwise per assistant reply)
 //!
-//! Overall state rules:
-//! - `green` — new session (no vitals scored yet) or all scored vitals are green
-//! - `yellow`/`red` — worst scored vital wins
+//! Overall state rules (see #441 — never paint a trust-killer green over an
+//! all-N/A session):
+//! - `red` / `yellow` — any scored vital went red/yellow. An actual issue
+//!   signal trumps N/A count: one red metric and three N/A still renders red.
+//! - `insufficient_data` — no vitals scored, or too many are N/A to make a
+//!   trustworthy healthy call (`>= 3 of 4` N/A, i.e. `<= 1 scored`). Renders
+//!   as `⚪ INSUFFICIENT DATA` in the CLI; statusline / sessions list fall
+//!   through to a neutral open circle rather than a green dot.
+//! - `green` — all scored vitals are green AND at most 2 of 4 are N/A. If
+//!   exactly 2 are N/A, the tip notes the partial coverage so the user isn't
+//!   surprised when they see some `N/A` rows.
 //!
 //! Tips are provider-aware: Claude Code, Cursor, and unknown providers each
 //! get different action recommendations where the underlying workflows differ.
@@ -61,7 +69,16 @@ impl ProviderKind {
 // Types
 // ---------------------------------------------------------------------------
 
-const MIN_VITALS_FOR_GREEN: usize = 2;
+/// Minimum number of N/A vitals (out of 4) at which the overall verdict
+/// flips from `green` → `insufficient_data`. At 3+ N/A we don't have enough
+/// signal to call a session "healthy" without eroding trust (#441).
+const INSUFFICIENT_DATA_NA_THRESHOLD: usize = 3;
+
+/// Overall state string emitted when too few vitals could be scored to paint
+/// a trustworthy verdict. Downstream consumers (CLI `vitals`, `sessions`
+/// list, statusline, Cursor extension) must render a neutral icon and never
+/// a green light — a green light over all-N/A is the trust-killer from #441.
+pub const STATE_INSUFFICIENT_DATA: &str = "insufficient_data";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionHealth {
@@ -233,8 +250,9 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     ];
 
     let overall_state = overall_state(&all_vitals);
+    let na_count = all_vitals.iter().filter(|(_, v)| v.is_none()).count();
     let details = generate_details(&all_vitals, provider);
-    let tip = generate_tip(&overall_state, &details, provider, msg_count);
+    let tip = generate_tip(&overall_state, &details, provider, msg_count, na_count);
 
     let cost_lag_hint = if provider == ProviderKind::Cursor {
         if let Some(last_msg) = messages.last() {
@@ -576,33 +594,36 @@ fn user_turn_costs(
 // Overall state
 // ---------------------------------------------------------------------------
 
-/// Determines the session-level health state.
-/// - New sessions and sessions with too few vitals → `green` (positive default).
-/// - Otherwise returns the worst scored state.
+/// Determines the session-level health state (#441).
+///
+/// - An actual yellow/red signal always dominates — one red vital with three
+///   N/A still renders red, because INSUFFICIENT DATA would hide a real issue.
+/// - Otherwise, if too many vitals are N/A (`>= 3 of 4`, i.e. `<= 1 scored`),
+///   the verdict is `insufficient_data`. Painting green here erodes trust the
+///   moment the user notices the contradiction with the N/A rows.
+/// - Otherwise the verdict is `green`. The number of N/A is surfaced in the
+///   tip (see `generate_tip`) when it's non-zero, so a partial-coverage green
+///   is honest about its partiality.
 fn overall_state(vitals: &[(&str, &Option<VitalScore>)]) -> String {
     let scored: Vec<&str> = vitals
         .iter()
         .filter_map(|(_, v)| v.as_ref())
         .map(|v| v.state.as_str())
         .collect();
+    let na_count = vitals.len().saturating_sub(scored.len());
 
-    if scored.is_empty() {
-        return "green".to_string();
+    if scored.contains(&"red") {
+        return "red".to_string();
+    }
+    if scored.contains(&"yellow") {
+        return "yellow".to_string();
     }
 
-    let worst = scored
-        .iter()
-        .max_by_key(|s| match **s {
-            "red" => 2,
-            "yellow" => 1,
-            _ => 0,
-        })
-        .unwrap_or(&"green");
-
-    if *worst == "green" && scored.len() < MIN_VITALS_FOR_GREEN {
-        return "green".to_string();
+    if na_count >= INSUFFICIENT_DATA_NA_THRESHOLD {
+        return STATE_INSUFFICIENT_DATA.to_string();
     }
-    worst.to_string()
+
+    "green".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -770,10 +791,24 @@ fn generate_tip(
     details: &[HealthDetail],
     provider: ProviderKind,
     message_count: u64,
+    na_count: usize,
 ) -> String {
+    if overall_state == STATE_INSUFFICIENT_DATA {
+        return "Not enough session data yet to assess".to_string();
+    }
     if overall_state == "green" {
         if message_count < 5 {
             return "New session".to_string();
+        }
+        // #441 ambiguity resolution: treat "at least 3 of 4 metrics actually
+        // returned a numeric value" as the dominant rule for plain green.
+        // Exactly 2 N/A (half the surface missing) is the partial band,
+        // because 1 N/A is the normal post-v22 state for any session
+        // without hook_events and would be noise on every healthy session.
+        if na_count >= 2 {
+            return format!(
+                "Session healthy (partial — {na_count} metrics need more session data)"
+            );
         }
         return "Session healthy".to_string();
     }
