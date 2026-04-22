@@ -147,16 +147,6 @@ pub fn service_mechanism() -> &'static str {
     "unsupported"
 }
 
-/// Clean up legacy service files from older budi versions.
-/// Returns `true` if any legacy files were removed.
-pub fn cleanup_legacy_services() -> bool {
-    #[cfg(target_os = "macos")]
-    return cleanup_legacy_launchd();
-
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
 // ===========================================================================
 // macOS — launchd LaunchAgent
 // ===========================================================================

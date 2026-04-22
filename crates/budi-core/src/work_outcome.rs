@@ -37,7 +37,7 @@
 //! `no_commit`), which would be the more damaging error. False positives
 //! are bounded by also requiring the commit to touch the same branch.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use chrono::{DateTime, Utc};
@@ -208,19 +208,6 @@ pub fn derive_work_outcome(inputs: &WorkOutcomeInputs<'_>) -> WorkOutcome {
     }
 }
 
-/// Resolve a repo root from a stored `repo_id` by checking candidate
-/// paths. Callers typically want to pass the cwd the session ran in,
-/// but for historical sessions we may only know the `repo_id`. This
-/// helper is intentionally minimal: it accepts an explicit candidate
-/// path and returns it when it looks like a git working tree.
-pub fn repo_root_candidate(path: &Path) -> Option<PathBuf> {
-    if path.join(".git").exists() {
-        Some(path.to_path_buf())
-    } else {
-        None
-    }
-}
-
 fn has_git_on_path() -> bool {
     Command::new("git")
         .arg("--version")
@@ -340,6 +327,7 @@ fn count_commits_on_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn unknown_when_branch_empty() {
