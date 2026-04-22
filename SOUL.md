@@ -537,7 +537,7 @@ Key points:
 - `crates/budi-core/src/migration.rs` - Schema v1, all migration paths
 - `crates/budi-core/src/cloud_sync.rs` - Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction
 - `crates/budi-core/src/autostart.rs` - Platform-native daemon autostart: launchd (macOS), systemd (Linux), Task Scheduler (Windows). Install/uninstall/status.
-- `crates/budi-core/src/config.rs` - BudiConfig, ProxyConfig (legacy test/compat knobs), AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
+- `crates/budi-core/src/config.rs` - BudiConfig, AgentsConfig, StatuslineConfig, TagsConfig, CloudConfig
 - `crates/budi-cli/build.rs` - Build script: creates empty vsix placeholder if not pre-built
 - `crates/budi-daemon/src/main.rs` - HTTP server (port 7878) + cloud sync worker + startup hooks for tailer / migration / legacy-residue notices.
 - `crates/budi-daemon/src/workers/cloud_sync.rs` - Background cloud sync loop: configurable interval, backoff, auth/schema error handling

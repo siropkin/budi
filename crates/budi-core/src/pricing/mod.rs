@@ -700,7 +700,6 @@ fn snapshot_unknowns() -> Vec<UnknownModelEntry> {
 /// that exercise [`install_manifest`] or [`warn_once_unknown`] need a way
 /// to reset it between cases.
 #[cfg(test)]
-#[allow(dead_code)] // Consumed by the test module added with #376 test gates.
 pub(crate) fn reset_state_for_test() {
     let mut guard = state().write().expect("pricing state RwLock poisoned");
     guard.manifest = load_embedded_manifest().unwrap_or_else(|_| Manifest {
@@ -717,7 +716,6 @@ pub(crate) fn reset_state_for_test() {
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // Consumed by the test module added with #376 test gates.
 pub(crate) fn install_for_test(entries: HashMap<String, ManifestEntry>, source: PricingSource) {
     let manifest = Manifest {
         version: match &source {

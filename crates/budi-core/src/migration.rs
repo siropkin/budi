@@ -976,14 +976,12 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-#[allow(dead_code)]
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     Ok(cols.filter_map(|c| c.ok()).any(|c| c == column))
 }
 
-#[allow(dead_code)]
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_decl: &str) -> Result<bool> {
     if !table_exists(conn, table)? {
         return Ok(false);

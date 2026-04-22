@@ -88,7 +88,7 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
 }
 
 /// Render a custom format template by replacing {slot} placeholders.
-pub fn render_template(template: &str, values: &HashMap<String, String>) -> String {
+fn render_template(template: &str, values: &HashMap<String, String>) -> String {
     let mut result = template.to_string();
     for (key, val) in values {
         result = result.replace(&format!("{{{key}}}"), val);
