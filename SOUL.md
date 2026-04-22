@@ -41,6 +41,7 @@ bash scripts/e2e/test_323_init_no_proxy_mutations.sh # regression guard for #323
 bash scripts/e2e/test_221_ticket_first_class.sh       # regression guard for #221 / #304 (ticket dimension)
 bash scripts/e2e/test_222_activity_classification.sh  # regression guard for #222 / #305 (activity dimension)
 bash scripts/e2e/test_224_statusline_provider_scope.sh # regression guard for #224 (statusline provider scoping)
+bash scripts/e2e/test_454_init_installs_statusline.sh # regression guard for #454 (init wires Claude Code statusline + doctor nudge)
 ```
 
 Each script is a single self-contained bash file that:
@@ -468,6 +469,22 @@ Key points:
   the default is the rolling `1d` / `7d` / `30d` cost view. The
   `coach` and `full` presets remain as opt-in advanced variants
   documented in `README.md`.
+- **`budi init` installs the statusline by default (#454).** A fresh
+  `budi init` wires the Budi statusline into `~/.claude/settings.json`
+  (and installs the Cursor extension when the Cursor CLI is on PATH)
+  without prompting. Pass `--no-integrations` to opt out, or run
+  `budi integrations install --with claude-code-statusline` / `--with
+  cursor-extension` later to install them piecewise. The installer is
+  idempotent — repeat `budi init` runs merge with an existing
+  `statusLine` command rather than clobbering it, and skip the
+  Cursor-extension install when one is already present.
+- **`budi doctor` flags a missing statusline.** When `~/.claude`
+  exists but `~/.claude/settings.json` carries no Budi-backed
+  `statusLine`, doctor surfaces a WARN with the exact `budi
+  integrations install` command to repair it. Install paths that
+  legitimately want no Claude integration (CI, containers,
+  hand-rolled settings) pass `budi init --no-integrations` to suppress
+  the nudge from day one.
 
 `budi doctor` runs three attribution checks:
 

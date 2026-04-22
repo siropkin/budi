@@ -34,6 +34,11 @@ enum Commands {
         /// Skip cleanup confirmation prompts
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// Skip the default recommended-integrations install (Claude Code
+        /// statusline + Cursor extension). Useful for CI, containers, or
+        /// when the user manages Claude / Cursor settings by hand.
+        #[arg(long, default_value_t = false)]
+        no_integrations: bool,
         #[arg(long, hide = true)]
         no_daemon: bool,
     },
@@ -554,8 +559,9 @@ fn main() -> Result<()> {
         Commands::Init {
             cleanup,
             yes,
+            no_integrations,
             no_daemon,
-        } => commands::init::cmd_init(cleanup, yes, no_daemon),
+        } => commands::init::cmd_init(cleanup, yes, no_integrations, no_daemon),
         Commands::Doctor { deep, repo_root } => commands::doctor::cmd_doctor(repo_root, deep),
         Commands::Stats {
             period,

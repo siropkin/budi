@@ -187,7 +187,7 @@ Keep only one install source first on PATH (Homebrew **or** standalone path), no
 
 ## Status line
 
-Budi adds a live cost display to Claude Code (optional in `budi init`). The default is intentionally quiet, stable, and scoped to the current agent surface — the Claude Code statusline shows Claude Code usage only (ADR-0088 §4):
+Budi adds a live cost display to Claude Code. `budi init` wires it in by default (pass `--no-integrations` to opt out, or run `budi integrations install --with claude-code-statusline` later). The default is intentionally quiet, stable, and scoped to the current agent surface — the Claude Code statusline shows Claude Code usage only (ADR-0088 §4):
 
 `budi · $1.24 1d · $8.50 7d · $32.10 30d`
 
@@ -223,7 +223,7 @@ Available slots: `1d`, `7d`, `30d`, `session`, `branch`, `project`, `provider`, 
 
 ## Cursor extension
 
-Budi includes a Cursor/VS Code extension that shows Cursor-only spend in a single status bar item. It can be installed during `budi init` and later via `budi integrations install --with cursor-extension`.
+Budi includes a Cursor/VS Code extension that shows Cursor-only spend in a single status bar item. `budi init` installs it by default (pass `--no-integrations` to opt out) and it can also be installed later via `budi integrations install --with cursor-extension`.
 
 As of v1.1.0 the extension is intentionally statusline-only (ADR-0088 §7, [#232](https://github.com/siropkin/budi/issues/232)) — no sidebar, no session list, no vitals/tips panel. The status bar renders the shared provider-scoped status contract filtered to `provider=cursor` and mirrors the Claude Code statusline byte-for-byte: `🟢 budi · $X 1d · $Y 7d · $Z 30d`. A leading dot glyph reports health (🟢 active, 🟡 reachable but quiet, 🔴 daemon unreachable, ⚪ first run / not installed yet). Click the status bar item to open the cloud dashboard — session list when a Cursor session is active, dashboard root otherwise — matching the Claude Code click-through.
 
@@ -251,11 +251,13 @@ Works for all installation methods — automatically detects Homebrew and runs `
 
 ## Integrations
 
-Manage integrations anytime (especially if you skipped some during first init):
+`budi init` installs the default recommended set (Claude Code statusline + Cursor extension) unless you pass `--no-integrations`. Manage them directly at any time:
 
 ```bash
-budi integrations list
-budi integrations install --with cursor-extension
+budi integrations list                                   # what is installed vs available
+budi integrations install                                # install all recommended (same as init's default)
+budi integrations install --with claude-code-statusline  # Claude Code cost statusline only
+budi integrations install --with cursor-extension        # Cursor extension only
 ```
 
 **Restart Claude Code and Cursor** after updating to pick up any changes.
@@ -648,8 +650,9 @@ Run `budi autostart status` — if it shows "not installed", run `budi autostart
 3. Open a fresh terminal after cleanup if the current shell still has old proxy env vars loaded
 
 **Status line not showing:**
-1. Restart Claude Code after `budi init`
-2. Check: `budi statusline` should output cost data
+1. Run `budi integrations list` — if Claude Code status line shows `not installed`, run `budi integrations install --with claude-code-statusline` (or plain `budi integrations install` for all recommended).
+2. Restart Claude Code so it picks up the new `~/.claude/settings.json`.
+3. Check: `budi statusline` should output cost data on the command line — if it does but Claude Code still renders nothing, the settings file was not picked up; fully quit and relaunch Claude Code.
 
 **Cursor extension status bar shows offline (red dot) or stays quiet (yellow):**
 1. Run `budi doctor` to verify daemon health and Cursor transcript visibility.
