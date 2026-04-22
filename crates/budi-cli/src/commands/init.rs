@@ -10,7 +10,7 @@ use budi_core::provider::Provider;
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_init(cleanup: bool, yes: bool, no_daemon: bool) -> Result<()> {
+pub fn cmd_init(cleanup: bool, yes: bool, no_integrations: bool, no_daemon: bool) -> Result<()> {
     if cleanup {
         run_cleanup_flow(yes)?;
     } else if let Ok(scan) = legacy_proxy::scan()
@@ -45,6 +45,10 @@ pub fn cmd_init(cleanup: bool, yes: bool, no_daemon: bool) -> Result<()> {
         print_autostart_status(&config);
     }
 
+    if !no_integrations {
+        install_default_integrations(&config);
+    }
+
     let bold_cyan = super::ansi("\x1b[1;36m");
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
@@ -62,6 +66,59 @@ pub fn cmd_init(cleanup: bool, yes: bool, no_daemon: bool) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Install the default recommended integrations (Claude Code statusline,
+/// Cursor extension) without prompting. This is the 8.3 fresh-user-flow
+/// contract for #454: `budi init` leaves Claude Code with a working Budi
+/// statusline. Callers that want a silent init (CI, containers, hand-rolled
+/// Claude / Cursor settings) pass `--no-integrations`.
+///
+/// The underlying installer is idempotent — Claude statusline merges the
+/// existing command when one is present, and the Cursor extension install
+/// is a no-op if the extension is already present — so calling this on
+/// every `budi init` is safe for repeat runs.
+///
+/// We drop the Claude Code statusline from the default set when `~/.claude`
+/// does not exist: Claude Code is not installed on this machine, so
+/// silently creating `~/.claude/settings.json` here would be a hidden
+/// directory-creation side effect outside the documented scope.
+fn install_default_integrations(config: &config::BudiConfig) {
+    let mut selected = super::integrations::default_recommended_components();
+
+    if !claude_code_installed() {
+        selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeStatusline);
+    }
+
+    if selected.is_empty() {
+        return;
+    }
+
+    let report = super::integrations::install_selected(config, &selected, None);
+
+    let mut prefs = super::integrations::load_preferences();
+    prefs
+        .enabled
+        .retain(|component| !component.is_removed_surface());
+    for component in &selected {
+        prefs.enabled.insert(*component);
+    }
+    let _ = super::integrations::save_preferences(&prefs);
+
+    if !report.warnings.is_empty() {
+        let yellow = super::ansi("\x1b[33m");
+        let reset = super::ansi("\x1b[0m");
+        for warning in &report.warnings {
+            eprintln!("{yellow}  Warning:{reset} {warning}");
+        }
+    }
+}
+
+fn claude_code_installed() -> bool {
+    let Ok(home) = config::home_dir() else {
+        return false;
+    };
+    home.join(".claude").is_dir()
 }
 
 fn run_cleanup_flow(yes: bool) -> Result<()> {

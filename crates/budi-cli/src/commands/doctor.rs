@@ -49,6 +49,10 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     proxy_residue.print();
     report.record(&proxy_residue);
 
+    let statusline_check = check_claude_statusline_integration();
+    statusline_check.print();
+    report.record(&statusline_check);
+
     if let Some(conn) = schema.conn.as_ref() {
         let legacy_proxy_history = check_legacy_proxy_history(conn);
         legacy_proxy_history.print();
@@ -447,6 +451,46 @@ fn check_legacy_proxy_residue() -> CheckResult {
         Some(
             "Run `budi init --cleanup` to review and remove old 8.0/8.1 proxy residue with explicit consent."
                 .to_string(),
+        ),
+    )
+}
+
+/// Warn when Claude Code is installed on this machine but the Budi
+/// statusline is not wired into `~/.claude/settings.json`. Tracks the
+/// fresh-user contract pinned by #454: `budi init` should leave Claude
+/// Code with a working Budi statusline, and a diverged state must be
+/// surfaced with the exact command to repair it.
+fn check_claude_statusline_integration() -> CheckResult {
+    let home = match config::home_dir() {
+        Ok(h) => h,
+        Err(_) => {
+            return CheckResult::pass(
+                "Claude statusline",
+                "home directory could not be resolved; statusline state is not checked",
+            );
+        }
+    };
+
+    let claude_dir = home.join(".claude");
+    if !claude_dir.exists() {
+        return CheckResult::pass(
+            "Claude statusline",
+            "Claude Code not detected (~/.claude is absent); statusline install is not required",
+        );
+    }
+
+    if super::integrations::claude_statusline_installed() {
+        return CheckResult::pass(
+            "Claude statusline",
+            "budi statusline is wired into ~/.claude/settings.json",
+        );
+    }
+
+    CheckResult::warn(
+        "Claude statusline",
+        "Claude Code is installed but the Budi statusline is not wired into ~/.claude/settings.json — Claude Code will render no cost display",
+        Some(
+            "Run `budi integrations install --with claude-code-statusline` (or plain `budi integrations install` to apply all recommended integrations), then restart Claude Code.".to_string(),
         ),
     )
 }
