@@ -60,9 +60,9 @@ budi targets **macOS**, **Linux** (glibc), and **Windows 10+**. Prebuilt release
 | **Codex CLI** | Tier 1 | Supported | Live transcript tailing from local session files |
 | **Cursor** | Tier 2 | Supported | Live transcript tailing plus Usage API cost reconciliation |
 | **Copilot CLI** | Tier 2 | Supported | Live transcript tailing from local session files |
-| **Gemini CLI** | Tier 3 | Deferred | Not part of the 8.2 scope |
+| **Gemini CLI** | Tier 3 | Deferred | Broader-agent coverage lives in [#294](https://github.com/siropkin/budi/issues/294) (8.4) |
 
-Supported means Budi can observe the agent's normal local transcript/session artifacts. `budi init` does not wrap the agent, patch shell profiles, or rewrite editor settings in 8.2.
+Supported means Budi can observe the agent's normal local transcript/session artifacts. `budi init` does not wrap the agent, patch shell profiles, or rewrite editor settings in 8.2+.
 
 All agents also support one-time historical import via `budi db import` (Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, Cursor Usage API).
 
@@ -312,13 +312,14 @@ budi stats --file <path>           # cost for a specific file, with per-branch +
 budi stats --provider codex        # filter stats to a single provider
 budi stats --tag ticket_id         # cost per ticket value (raw tag view)
 budi stats --tag ticket_prefix     # cost per team prefix
+budi stats --files --limit 0       # show every row (breakdown views default to --limit 30 with an (other) bucket)
 budi sessions                      # list recent sessions with cost and health
 budi sessions --ticket <id>        # sessions tagged with a ticket id
 budi sessions --activity <name>    # sessions tagged with an activity (bugfix, refactor, …)
 budi sessions <id>                 # session detail: cost, models, health, tags, work outcome
 budi vitals                        # session health vitals for most recent session
 budi vitals --session <id>         # health vitals for a specific session
-                                    # (the old `budi health` spelling still works in 8.2
+                                    # (the old `budi health` spelling still works in 8.3.x
                                     #  and prints a one-per-day deprecation hint)
 ```
 
@@ -327,6 +328,9 @@ budi vitals --session <id>         # health vitals for a specific session
 ```bash
 budi doctor                        # check health: daemon, tailer, schema, transcript visibility
 budi doctor --deep                 # run full SQLite integrity_check (slower)
+budi pricing status                # pricing manifest source, version, fetched-at, next refresh, known-model count
+budi pricing status --refresh      # trigger an immediate LiteLLM manifest refresh
+budi pricing status --json         # same data in scripting-friendly JSON
 budi cloud init                    # generate ~/.config/budi/cloud.toml from a commented template
 budi cloud init --api-key KEY      # write the key + enable sync in one step
 budi cloud status                  # cloud sync readiness + last-synced-at + queued records
