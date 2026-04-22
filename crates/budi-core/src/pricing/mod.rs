@@ -217,18 +217,6 @@ pub fn current_manifest_snapshot() -> Manifest {
         .clone()
 }
 
-/// The `PricingSource` currently in use by [`lookup`]. Exposes enough
-/// state for the daemon to decide whether it's running off the embedded
-/// baseline (so the first refresh gets an `embedded`-labelled retention
-/// floor) or a cached `manifest:vN`.
-pub fn current_source() -> PricingSource {
-    state()
-        .read()
-        .expect("pricing state RwLock poisoned")
-        .source
-        .clone()
-}
-
 /// Snapshot the current manifest state. Cheap — clones lightweight fields
 /// under the read lock and returns. Does no I/O.
 ///

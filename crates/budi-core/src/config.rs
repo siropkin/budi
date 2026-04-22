@@ -168,18 +168,6 @@ pub fn load_agents_config() -> Option<AgentsConfig> {
     }
 }
 
-/// Save agents config to disk.
-pub fn save_agents_config(config: &AgentsConfig) -> Result<()> {
-    let path = agents_config_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-    let raw = toml::to_string_pretty(config)?;
-    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
-    Ok(())
-}
-
 /// Known statusline slot names.
 ///
 /// `1d` / `7d` / `30d` are the canonical window slot names for the default
@@ -638,22 +626,6 @@ pub fn daemon_log_path(repo_root: &Path) -> Result<PathBuf> {
 
 pub fn repo_root_marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join(BUDI_REPO_ROOT_MARKER_FILE_NAME)
-}
-
-pub fn ensure_repo_layout(repo_root: &Path) -> Result<()> {
-    let paths = repo_paths(repo_root)?;
-    fs::create_dir_all(&paths.data_dir)
-        .with_context(|| format!("Failed to create {}", paths.data_dir.display()))?;
-    fs::create_dir_all(&paths.log_dir)
-        .with_context(|| format!("Failed to create {}", paths.log_dir.display()))?;
-    fs::create_dir_all(repo_root.join(".claude"))
-        .with_context(|| "Failed to create .claude".to_string())?;
-    let canonical_repo_root =
-        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    let marker_path = repo_root_marker_path(&paths.data_dir);
-    fs::write(&marker_path, canonical_repo_root.display().to_string())
-        .with_context(|| format!("Failed writing {}", marker_path.display()))?;
-    Ok(())
 }
 
 pub fn load_or_default(repo_root: &Path) -> Result<BudiConfig> {

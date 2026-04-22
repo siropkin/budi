@@ -104,19 +104,6 @@ pub const CLOUD_SYNC_WATERMARK_KEY: &str = "__budi_cloud_sync__";
 /// Sentinel key for tracking the last session sync timestamp.
 pub const CLOUD_SYNC_SESSION_WATERMARK_KEY: &str = "__budi_cloud_sync_sessions__";
 
-/// Get the current cloud sync watermark (latest fully-synced bucket_day).
-pub fn get_cloud_watermark(conn: &Connection) -> Result<Option<String>> {
-    match conn.query_row(
-        "SELECT last_synced FROM sync_state WHERE file_path = ?1",
-        params![CLOUD_SYNC_WATERMARK_KEY],
-        |r| r.get::<_, String>(0),
-    ) {
-        Ok(val) => Ok(Some(val)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// Update the cloud sync watermark after server confirmation.
 pub fn set_cloud_watermark(conn: &Connection, watermark: &str) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
