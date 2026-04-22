@@ -1391,8 +1391,19 @@ fn multi_provider_ingest_and_query() {
     assert_eq!(pstats.len(), 2);
     let cc_stats = pstats.iter().find(|p| p.provider == "claude_code").unwrap();
     let cu_stats = pstats.iter().find(|p| p.provider == "cursor").unwrap();
-    assert_eq!(cc_stats.message_count, 1);
-    assert_eq!(cu_stats.message_count, 1);
+    // #482: Agents-block fields — assistant_messages is the pre-8.3.1
+    // unit (assistant-only), user_messages is new, total_messages = sum.
+    // The Agents block sums back to `UsageSummary.total_messages` via
+    // `total_messages`, not `assistant_messages`.
+    assert_eq!(cc_stats.assistant_messages, 1);
+    assert_eq!(cc_stats.user_messages, 1);
+    assert_eq!(cc_stats.total_messages, 2);
+    assert_eq!(cu_stats.assistant_messages, 1);
+    assert_eq!(cu_stats.user_messages, 1);
+    assert_eq!(cu_stats.total_messages, 2);
+    // Per-provider totals reconcile to the grand `UsageSummary.total_messages`.
+    let summed: u64 = pstats.iter().map(|p| p.total_messages).sum();
+    assert_eq!(summed, all.total_messages);
 
     assert_eq!(cc_stats.display_name, "Claude Code");
     assert!(cc_stats.estimated_cost > 0.0);

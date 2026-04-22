@@ -3502,11 +3502,29 @@ pub fn statusline_stats(
 // ---------------------------------------------------------------------------
 
 /// Per-provider aggregate stats for the /analytics/providers endpoint.
+///
+/// ## Message counts (8.3.1 / #482)
+///
+/// Token and cost fields are assistant-only (a user turn has no LLM spend).
+/// The three message-count fields disambiguate what a row counts:
+///
+/// - `assistant_messages` — assistant replies. Same unit every other breakdown
+///   uses (`SessionStats.message_count`, `RepoUsage.message_count`, etc.).
+/// - `user_messages` — user prompts.
+/// - `total_messages` — user + assistant. Matches `UsageSummary.total_messages`
+///   so the Agents block sums back to the grand Total row in `budi stats`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderStats {
     pub provider: String,
     pub display_name: String,
-    pub message_count: u64,
+    /// Assistant-side message count. Pre-8.3.1 this was exposed as
+    /// `message_count`; the alias keeps older deserializers working.
+    #[serde(alias = "message_count")]
+    pub assistant_messages: u64,
+    /// User-side message count (8.3.1+, #482).
+    pub user_messages: u64,
+    /// User + assistant. Reconciles to `UsageSummary.total_messages`.
+    pub total_messages: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -3530,7 +3548,10 @@ fn provider_stats_from_rollups(
     window: &RollupWindow,
     filters: &DimensionFilters,
 ) -> Result<Vec<ProviderStats>> {
-    let mut conditions = vec!["role = 'assistant'".to_string()];
+    // #482: count user + assistant rows and split via CASE so the Agents
+    // block sums back to `UsageSummary.total_messages`. Tokens and cost
+    // stay assistant-only because a user turn has no LLM spend.
+    let mut conditions: Vec<String> = Vec::new();
     let mut params: Vec<String> = Vec::new();
     append_rollup_time_filters(&mut conditions, &mut params, window);
     apply_dimension_filters(
@@ -3542,20 +3563,27 @@ fn provider_stats_from_rollups(
         "repo_id",
         "git_branch",
     );
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
     let sql = format!(
         "SELECT provider as p,
-                COALESCE(SUM(message_count), 0) as msgs,
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cost_cents), 0.0)
+                COALESCE(SUM(message_count), 0) as total_msgs,
+                COALESCE(SUM(CASE WHEN role = 'user' THEN message_count ELSE 0 END), 0) as user_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN message_count ELSE 0 END), 0) as asst_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN input_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
          FROM {}
-         WHERE {}
+         {}
          GROUP BY p
-         ORDER BY msgs DESC",
+         ORDER BY asst_msgs DESC",
         rollup_table(window.level),
-        conditions.join(" AND ")
+        where_clause
     );
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
         .iter()
@@ -3572,7 +3600,9 @@ fn provider_stats_from_rollups(
                 row.get::<_, u64>(3)?,
                 row.get::<_, u64>(4)?,
                 row.get::<_, u64>(5)?,
-                row.get::<_, f64>(6)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, f64>(8)?,
             ))
         })?
         .filter_map(|r| r.ok())
@@ -3580,7 +3610,18 @@ fn provider_stats_from_rollups(
 
     let providers = crate::provider::all_providers();
     let mut result = Vec::new();
-    for (prov, messages, input, output, cache_create, cache_read, sum_cost_cents) in rows {
+    for (
+        prov,
+        total_msgs,
+        user_msgs,
+        asst_msgs,
+        input,
+        output,
+        cache_create,
+        cache_read,
+        sum_cost_cents,
+    ) in rows
+    {
         let display_name = providers
             .iter()
             .find(|p| p.name() == prov)
@@ -3590,7 +3631,9 @@ fn provider_stats_from_rollups(
         result.push(ProviderStats {
             provider: prov,
             display_name,
-            message_count: messages,
+            assistant_messages: asst_msgs,
+            user_messages: user_msgs,
+            total_messages: total_msgs,
             input_tokens: input,
             output_tokens: output,
             cache_creation_tokens: cache_create,
@@ -3614,7 +3657,10 @@ pub fn provider_stats_with_filters(
         return provider_stats_from_rollups(conn, &window, filters);
     }
 
-    let mut conditions = vec!["role = 'assistant'".to_string()];
+    // #482: count user + assistant rows and split via CASE so the Agents
+    // block sums back to `UsageSummary.total_messages`. Tokens and cost
+    // stay assistant-only because a user turn has no LLM spend.
+    let mut conditions: Vec<String> = Vec::new();
     let mut param_values = Vec::new();
     if let Some(s) = since
         && is_valid_timestamp(s)
@@ -3640,21 +3686,27 @@ pub fn provider_stats_with_filters(
         &project_expr,
         &branch_expr,
     );
-    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
         .iter()
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
     let sql = format!(
         "SELECT provider as p,
-                COUNT(*) as msgs,
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cost_cents), 0.0)
+                COUNT(*) as total_msgs,
+                COALESCE(SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END), 0) as user_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END), 0) as asst_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN input_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
          FROM messages {}
-         GROUP BY p ORDER BY msgs DESC",
+         GROUP BY p ORDER BY asst_msgs DESC",
         where_clause
     );
 
@@ -3668,7 +3720,9 @@ pub fn provider_stats_with_filters(
                 row.get::<_, u64>(3)?,
                 row.get::<_, u64>(4)?,
                 row.get::<_, u64>(5)?,
-                row.get::<_, f64>(6)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, f64>(8)?,
             ))
         })?
         .filter_map(|r| match r {
@@ -3683,7 +3737,18 @@ pub fn provider_stats_with_filters(
     let providers = crate::provider::all_providers();
     let mut result = Vec::new();
 
-    for (prov, messages, input, output, cache_create, cache_read, sum_cost_cents) in rows {
+    for (
+        prov,
+        total_msgs,
+        user_msgs,
+        asst_msgs,
+        input,
+        output,
+        cache_create,
+        cache_read,
+        sum_cost_cents,
+    ) in rows
+    {
         let display_name = providers
             .iter()
             .find(|p| p.name() == prov)
@@ -3696,7 +3761,9 @@ pub fn provider_stats_with_filters(
         result.push(ProviderStats {
             provider: prov,
             display_name,
-            message_count: messages,
+            assistant_messages: asst_msgs,
+            user_messages: user_msgs,
+            total_messages: total_msgs,
             input_tokens: input,
             output_tokens: output,
             cache_creation_tokens: cache_create,

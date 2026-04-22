@@ -443,6 +443,16 @@ pub fn cmd_stats(
         let (since, until) = period_date_range(period);
         let summary = client.summary(since.as_deref(), until.as_deref(), provider.as_deref())?;
         let cost = client.cost(since.as_deref(), until.as_deref(), provider.as_deref())?;
+        // #482 acceptance: expose per-provider counts so scripts can
+        // reconcile `sum(providers.total_messages) == total_messages`
+        // both ways (user + assistant split, and the combined total).
+        let providers = client
+            .providers(since.as_deref(), until.as_deref())
+            .unwrap_or_default();
+        let filtered_providers: Vec<&analytics::ProviderStats> = providers
+            .iter()
+            .filter(|p| provider.as_deref().is_none_or(|sel| p.provider == sel))
+            .collect();
         let mut obj = serde_json::to_value(&summary)?;
         if let Some(map) = obj.as_object_mut() {
             map.insert("total_cost".to_string(), serde_json::json!(cost.total_cost));
@@ -462,6 +472,10 @@ pub fn cmd_stats(
             map.insert(
                 "cache_savings".to_string(),
                 serde_json::json!(cost.cache_savings),
+            );
+            map.insert(
+                "providers".to_string(),
+                serde_json::to_value(&filtered_providers)?,
             );
             // Expose the resolved window so scripting users can verify
             // which period `--period today|week|month|Nd|Nw|Nm|all`
@@ -599,6 +613,12 @@ fn format_summary(
         )
         .unwrap();
     } else {
+        // #482: render the per-provider row's message count as
+        // `total_messages` (user + assistant) so the column label `msgs`
+        // carries the same unit as the Total row below
+        // (`3050 messages (1680 user, 1370 assistant)`). Pre-8.3.1 this
+        // was assistant-only, which read as a slice of Total but actually
+        // undercounted by `total_user_messages`.
         for ps in &displayed_providers {
             let total_tokens = ps.input_tokens
                 + ps.output_tokens
@@ -613,7 +633,7 @@ fn format_summary(
                 out,
                 "    {cyan}{:<14}{reset} {:>5} msgs  {}  {yellow}{}{reset}",
                 ps.display_name,
-                ps.message_count,
+                ps.total_messages,
                 format_tokens(total_tokens),
                 format_cost(cost),
             )
@@ -2844,10 +2864,18 @@ mod tests {
         msgs: u64,
         cents: f64,
     ) -> analytics::ProviderStats {
+        // #482: `msgs` is interpreted as the assistant-side count (same
+        // unit every pre-8.3.1 caller passed). The fixture picks a
+        // user_messages value slightly larger than assistant so
+        // `total_messages = assistant + user` stays unambiguous across
+        // snapshot tests.
+        let user = msgs.saturating_add(3);
         analytics::ProviderStats {
             provider: provider.into(),
             display_name: display.into(),
-            message_count: msgs,
+            assistant_messages: msgs,
+            user_messages: user,
+            total_messages: msgs + user,
             input_tokens: 100_000,
             output_tokens: 50_000,
             cache_creation_tokens: 10_000,
@@ -3188,6 +3216,100 @@ mod tests {
             &palette,
         );
         assert!(!r.contains("Cursor cost data may lag"));
+    }
+
+    #[test]
+    fn summary_agents_block_count_matches_total_row_unit() {
+        // #482: the Agents block's `msgs` column is the same unit as
+        // `Total {n} messages` (user + assistant), not the pre-8.3.1
+        // assistant-only count. Without this, a fresh reader seeing
+        // `Claude Code 1358 msgs` on top of `Total 3050 messages` has
+        // no way to tell that `1358` undercounts by `total_user_messages`.
+        //
+        // Contract: the per-provider count printed in the Agents block
+        // equals `ProviderStats.total_messages`, AND `sum(displayed
+        // providers.total_messages) == summary.total_messages` when no
+        // filter is active.
+        let summary = budi_core::analytics::UsageSummary {
+            total_messages: 3050,
+            total_user_messages: 1680,
+            total_assistant_messages: 1370,
+            total_input_tokens: 1_300_000,
+            total_output_tokens: 874_100,
+            total_cache_creation_tokens: 50_000,
+            total_cache_read_tokens: 200_000,
+            total_cost_cents: 12_640.0,
+        };
+        let est = fixture_cost(0.0);
+        // Hand-built providers so we can pin the exact split seen on
+        // the 2026-04-22 audit machine.
+        let claude = analytics::ProviderStats {
+            provider: "claude_code".into(),
+            display_name: "Claude Code".into(),
+            assistant_messages: 1358,
+            user_messages: 1670,
+            total_messages: 3028,
+            input_tokens: 1_300_000,
+            output_tokens: 874_100,
+            cache_creation_tokens: 50_000,
+            cache_read_tokens: 200_000,
+            estimated_cost: 126.40,
+            total_cost_cents: 12_640.0,
+        };
+        let cursor = analytics::ProviderStats {
+            provider: "cursor".into(),
+            display_name: "Cursor".into(),
+            assistant_messages: 12,
+            user_messages: 10,
+            total_messages: 22,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            estimated_cost: 0.0,
+            total_cost_cents: 0.0,
+        };
+        let providers = vec![claude.clone(), cursor.clone()];
+        let palette = SummaryPalette::plain();
+
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+
+        // The per-provider row renders `total_messages`, not
+        // `assistant_messages`. Locking the exact substring prevents a
+        // future renderer from quietly swapping back to assistant-only.
+        assert!(
+            rendered.contains(&format!("{} msgs", claude.total_messages)),
+            "Claude Code row must render total_messages ({}), not assistant_messages ({}):\n{rendered}",
+            claude.total_messages,
+            claude.assistant_messages,
+        );
+        assert!(
+            rendered.contains(&format!("{} msgs", cursor.total_messages)),
+            "Cursor row must render total_messages ({}):\n{rendered}",
+            cursor.total_messages,
+        );
+        assert!(
+            !rendered.contains(&format!("{} msgs", claude.assistant_messages)),
+            "must not render assistant-only count ({}) in Agents column:\n{rendered}",
+            claude.assistant_messages,
+        );
+
+        // Per-provider totals reconcile to the summary total to within
+        // the sync-lag budget. Here the fixture is internally consistent
+        // so the delta is exactly 0.
+        let agg: u64 = providers.iter().map(|p| p.total_messages).sum();
+        assert_eq!(
+            agg, summary.total_messages,
+            "sum of Agents-block counts ({}) must match Total row ({})",
+            agg, summary.total_messages,
+        );
     }
 
     // ─── #450 breakdown polish tests ──────────────────────────────────
