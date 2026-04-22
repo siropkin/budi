@@ -142,13 +142,13 @@ If you install with Homebrew, run `budi init` right after `brew install`.
 
 **One install on PATH.** Do not mix Homebrew with `~/.local/bin` (macOS/Linux) or with `%LOCALAPPDATA%\budi\bin` (Windows): you can end up with different `budi` and `budi-daemon` versions and confusing restarts. Keep a single install directory ahead of others on `PATH` (or remove duplicates). `budi init` warns if it detects multiple binaries.
 
-`budi init` is intentionally small in 8.2: it creates the data directory, validates schema/binary state, starts the daemon on port 7878, installs the platform-native autostart service, prints any detected agents based on local transcript roots, and exits.
+`budi init` is intentionally small: it creates the data directory, validates schema/binary state, starts the daemon on port 7878, installs the platform-native autostart service, installs the recommended integrations (Claude Code statusline + Cursor extension, unless `--no-integrations` is passed), prints any detected agents based on local transcript roots, and exits.
 
 It does **not** patch shell profiles, Cursor settings, or Codex config files. Run your agent normally (`claude`, `codex`, `cursor`, `gh copilot`) and Budi will tail the transcripts those tools already write locally.
 
 If you are upgrading from 8.0/8.1 and `budi doctor` reports leftover proxy-era config, run `budi init --cleanup` to review and remove managed Budi blocks with explicit consent.
 
-To install a specific version, set the `VERSION` environment variable: `VERSION=v7.1.0 curl -fsSL ... | bash` (or `$env:VERSION="v7.1.0"` on PowerShell).
+To install a specific version, set the `VERSION` environment variable: `VERSION=v8.2.1 curl -fsSL ... | bash` (or `$env:VERSION="v8.2.1"` on PowerShell).
 
 Run `budi doctor` to verify everything is set up correctly.
 
@@ -187,11 +187,11 @@ Keep only one install source first on PATH (Homebrew **or** standalone path), no
 
 ## Status line
 
-Budi adds a live cost display to Claude Code. `budi init` wires it in by default (pass `--no-integrations` to opt out, or run `budi integrations install --with claude-code-statusline` later). The default is intentionally quiet, stable, and scoped to the current agent surface — the Claude Code statusline shows Claude Code usage only (ADR-0088 §4):
+Budi adds a live cost display to Claude Code. `budi init` wires it in by default (pass `--no-integrations` to opt out, or run `budi integrations install --with claude-code-statusline` later). The default is quiet and scoped to the current agent surface — the Claude Code statusline shows Claude Code usage only:
 
 `budi · $1.24 1d · $8.50 7d · $32.10 30d`
 
-Rolling `1d` / `7d` / `30d` windows are the primary signal. They tell you what you spent in the last 24 hours, the last 7 days, and the last 30 days — not calendar-today or calendar-month. `budi stats` keeps calendar semantics if you want those.
+Rolling `1d` / `7d` / `30d` windows are the primary signal: last 24 hours, last 7 days, last 30 days ending now — not calendar-today / calendar-month. `budi stats` keeps calendar semantics if you want those.
 
 ### Shared status contract
 
@@ -225,7 +225,7 @@ Available slots: `1d`, `7d`, `30d`, `session`, `branch`, `project`, `provider`, 
 
 Budi includes a Cursor/VS Code extension that shows Cursor-only spend in a single status bar item. `budi init` installs it by default (pass `--no-integrations` to opt out) and it can also be installed later via `budi integrations install --with cursor-extension`.
 
-As of v1.1.0 the extension is intentionally statusline-only (ADR-0088 §7, [#232](https://github.com/siropkin/budi/issues/232)) — no sidebar, no session list, no vitals/tips panel. The status bar renders the shared provider-scoped status contract filtered to `provider=cursor` and mirrors the Claude Code statusline byte-for-byte: `🟢 budi · $X 1d · $Y 7d · $Z 30d`. A leading dot glyph reports health (🟢 active, 🟡 reachable but quiet, 🔴 daemon unreachable, ⚪ first run / not installed yet). Click the status bar item to open the cloud dashboard — session list when a Cursor session is active, dashboard root otherwise — matching the Claude Code click-through.
+The extension is statusline-only — no sidebar, no session list, no vitals/tips panel. The status bar renders the shared provider-scoped status contract filtered to `provider=cursor` and mirrors the Claude Code statusline byte-for-byte: `🟢 budi · $X 1d · $Y 7d · $Z 30d`. A leading dot glyph reports health (🟢 active, 🟡 reachable but quiet, 🔴 daemon unreachable, ⚪ first run / not installed yet). Click the status bar item to open the cloud dashboard — session list when a Cursor session is active, dashboard root otherwise — matching the Claude Code click-through.
 
 The extension also works as a **first-run onboarding entry point**: if you discover budi through the VS Code Marketplace before installing the CLI, the extension shows a welcome view with a pre-filled install command and hands you off to `budi init` in an integrated terminal. The hand-off is tracked by local-only integer counters in `~/.local/share/budi/cursor-onboarding.json` (no remote telemetry, ADR-0083 privacy limits preserved) and `budi doctor` prints a one-line summary of those counters so install-funnel health is visible locally.
 
@@ -243,8 +243,8 @@ Then reload Cursor: **Cmd+Shift+P** → **Developer: Reload Window**.
 ## Update
 
 ```bash
-budi update                      # downloads latest release, migrates DB, restarts daemon
-budi update --version 7.1.0     # update to a specific version
+budi update                       # downloads latest release, migrates DB, restarts daemon
+budi update --version 8.2.1       # update to a specific version
 ```
 
 Works for all installation methods — automatically detects Homebrew and runs `brew upgrade` when appropriate. Update refreshes integrations you previously enabled (stored in `~/.config/budi/integrations.toml`). Agent enablement is stored separately in `~/.config/budi/agents.toml`.
@@ -413,13 +413,13 @@ Tips are provider-aware: Claude Code suggestions mention `/compact` or `/clear`,
 | **Context Growth** | Context size is growing enough to add noise | 3x+ growth with meaningful absolute growth | 6x+ growth with large absolute context size |
 | **Cache Reuse** | Recent cache reuse is low for the active model stretch | Below 60% recent reuse | Below 35% recent reuse |
 | **Cost Acceleration** | Later turns/replies cost much more than earlier ones | 2x+ growth and meaningful cost per unit | 4x+ growth and high cost per unit |
-| **Retry Loops** | Agent is stuck in a failing tool loop (disabled since 8.0 — hook-event source removed; will be re-enabled on top of R1.5 tool-outcome signals) | One suspicious retry loop | Repeated or severe retry loops |
+| **Retry Loops** | Agent is stuck in a failing tool loop (currently disabled pending a rebuild on top of the tool-outcome signal) | One suspicious retry loop | Repeated or severe retry loops |
 
-Health state appears in the statusline's opt-in `coach` / `full` presets (see above; the default statusline is quiet and cost-only) and on the session detail page in the cloud dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh." The Cursor extension is statusline-only as of v1.1.0 and does not render per-session health.
+Health state appears in the statusline's opt-in `coach` / `full` presets (see above; the default statusline is quiet and cost-only) and on the session detail page in the cloud dashboard. Yellow means "pay attention soon"; red means "intervene now or start fresh." The Cursor extension is statusline-only and does not render per-session health.
 
 ## Privacy
 
-Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). In 8.2, Budi reads the local transcripts/session files the agent already wrote to disk and stores derived analytics metadata locally: timestamps, token counts, model names, costs, and attribution tags. Prompts, code, and responses never leave the machine; cloud sync sends only aggregated rollups and session summaries.
+Budi is local-first. All data stays on your machine by default (`~/.local/share/budi/` on Unix, `%LOCALAPPDATA%\budi` on Windows). Budi reads the local transcripts/session files the agent already wrote to disk and stores derived analytics metadata locally: timestamps, token counts, model names, costs, and attribution tags. Prompts, code, and responses never leave the machine; cloud sync sends only aggregated rollups and session summaries.
 
 **Cloud sync** (optional, disabled by default) pushes pre-aggregated daily rollups and session summaries to a team dashboard at `app.getbudi.dev`. Only numeric metrics cross the wire: token counts, costs, model names, hashed repo IDs, branch names, and ticket IDs. Prompts, code, responses, file paths, email addresses, raw payloads, and tag values are structurally excluded from the sync payload — there is no "full upload" mode.
 
@@ -435,7 +435,7 @@ See [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md) for 
 
 ## How it works
 
-A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon watches each supported provider's local transcript/session roots, tails incremental appends through the shared pipeline, and writes canonical `messages` + tag rows. Cursor cost/token reconciliation still comes from the Usage API on a pull cadence; the CLI is a thin HTTP client and all queries go through the daemon.
+A lightweight Rust daemon (port 7878) manages a single SQLite database. The daemon watches each supported provider's local transcript/session roots, tails incremental appends through the shared pipeline, and writes canonical `messages` + tag rows. Cursor cost/token reconciliation comes from the Usage API on a pull cadence. The CLI is a thin HTTP client and all queries go through the daemon.
 
 ## Details
 
@@ -476,7 +476,7 @@ A lightweight Rust daemon (port 7878) manages a single SQLite database. The daem
        Historical import (`budi db import`)       ┘
 ```
 
-The daemon is the single source of truth — the CLI never opens the database directly. The transcript tailer is the sole live data path in 8.2. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API can be imported via `budi db import` for one-time backfill.
+The daemon is the single source of truth — the CLI never opens the database directly. The transcript tailer is the sole live data path. Historical data from Claude Code JSONL transcripts, Codex Desktop/CLI sessions, Copilot CLI sessions, and Cursor Usage API can be imported via `budi db import` for one-time backfill.
 
 **Data model** — nine tables, seven data entities + two supporting:
 
@@ -527,34 +527,20 @@ Retention cleanup runs automatically after sync and queued realtime ingestion pr
 </details>
 
 <details>
-<summary>Hooks (removed in 8.0)</summary>
-
-Hook-based ingestion (`budi hook`) and the `hook_events` table have been removed. In 8.2, the transcript tailer is the sole live data source.
-
-</details>
-
-<details>
 <summary>Cost confidence levels</summary>
 
 Every message carries a `cost_confidence` tag that indicates how the cost was derived:
 
 | Level | Source | Accuracy |
 |-------|--------|----------|
-| `proxy_estimated` | Retained 8.1 proxy-era rows (historical only) | Estimated from response body / SSE stream |
 | `exact` | Cursor Usage API / Claude Code JSONL tokens | Exact tokens, calculated cost |
-| `estimated` | JSONL tokens x model pricing | ~92-96% accurate (missing thinking tokens) |
-| `estimated_unknown_model` | JSONL tokens × **unknown** model (8.3+) | `cost_cents = 0` — model id not in pricing manifest; backfilled automatically when upstream catches up ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md)) |
+| `estimated` | JSONL tokens × model pricing | ~92-96% accurate (missing thinking tokens) |
+| `estimated_unknown_model` | JSONL tokens × **unknown** model | `cost_cents = 0` — model id not in pricing manifest; backfilled automatically when upstream catches up ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md)) |
+| `proxy_estimated` | Legacy 8.0/8.1 proxy-era rows (read-only history) | Estimated from response body / SSE stream |
 
 Messages with `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
 
-In 8.3+ pricing is sourced from the community-maintained [LiteLLM pricing manifest](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) via a three-layer lookup (on-disk cache → embedded baseline → hard-fail to `unknown`), refreshed daily by the daemon (opt-out: `BUDI_PRICING_REFRESH=0`), with every row tagged `pricing_source` so history is auditable and immutable. See [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) for the full contract and `budi pricing status` for the operator surface.
-
-</details>
-
-<details>
-<summary>OpenTelemetry (removed in 8.0)</summary>
-
-OTEL ingestion endpoints (`POST /v1/logs`, `POST /v1/metrics`) and the `otel_events` table have been removed. As of 8.2.0 live cost capture is handled by the JSONL tailer (per-provider `Provider::watch_roots()`, [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)); 8.1.x used the proxy on port 9878 in this slot, which is removed in 8.2 R2.1 (#322).
+Pricing is sourced from the community-maintained [LiteLLM pricing manifest](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) via a three-layer lookup (on-disk cache → embedded baseline → hard-fail to `unknown`), refreshed daily by the daemon (opt-out: `BUDI_PRICING_REFRESH=0`), with every row tagged `pricing_source` so history is auditable and immutable. See [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) for the full contract and `budi pricing status` for the operator surface.
 
 </details>
 
