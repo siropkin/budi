@@ -1,6 +1,6 @@
 # Changelog
 
-## 8.3.0 — Unreleased
+## 8.3.0 — 2026-04-22
 
 8.3.0 is the pricing source-of-truth pivot, plus the deferred 8.2
 `docs/` + `scripts/` hygiene sweep, plus the two audit passes filed
