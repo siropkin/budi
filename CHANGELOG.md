@@ -1,5 +1,24 @@
 # Changelog
 
+## 8.3.5 — 2026-04-23
+
+8.3.5 is a cloud-quality-of-life patch release on top of `v8.3.4`. Two
+user-requested tickets land: daemon startup now logs whether the
+cloud uploader is running and why not, and `budi cloud init --api-key`
+auto-seeds both identity fields via a new `GET /v1/whoami` round-trip
+so a fresh user never has to hand-copy `org_id` out of the dashboard.
+No pivot, no new pricing / ingest behavior, no ADR amendments, no
+proxy reintroduction.
+
+### Added
+
+- **`budi cloud init --api-key KEY` auto-seeds `device_id` and `org_id`** (#541). Pre-fix the command wrote the api_key and flipped `enabled = true` but left `device_id` / `org_id` as commented placeholders, forcing the user through a six-step manual ritual (open dashboard → Settings → hand-copy `org_xxx` → paste into `cloud.toml` → uncomment → re-run) before `budi cloud sync` would do anything. Post-fix the CLI calls the new `GET /v1/whoami` endpoint on `app.getbudi.dev` (shipped as `siropkin/budi-cloud#56`) to resolve the `org_id` for the just-pasted key, generates a fresh UUID v4 for `device_id`, and writes both fields as real TOML assignments. `budi cloud init` prints a "Seeded cloud identity" block with each field's provenance (`generated` / `from /v1/whoami` / `from flag`) so the user can eyeball the result. Error taxonomy — `Unauthorized` reverts the template to `enabled = false` + stub key and tells the user, `EndpointAbsent` (404/405) and transient network / 5xx errors fall through to the pre-#541 commented-placeholder shape with a `!` warning so a self-hosted cloud without `/v1/whoami` or a cloud outage doesn't block `budi cloud init` from writing a config file. Two new escape-hatch flags `--device-id <ID>` and `--org-id <ID>` bypass the UUID v4 generation / whoami call respectively — useful for multi-machine setups and offline / self-hosted installs.
+- **Daemon boot emits exactly one `cloud uploader …` INFO line regardless of enabled state** (#540). Pre-fix the daemon silently skipped the uploader spawn when `cloud.enabled = false`, when `api_key` was still the placeholder, or when `device_id`/`org_id` were missing — a reader tailing `daemon.log` saw only ingest / pricing lines and had to cross-check `cloud.toml` to confirm. Post-fix the cloud-startup block always emits `cloud uploader configured endpoint=… device_id=… org_id=… interval_s=…` when ready, or `cloud uploader disabled reason="<tag>"` otherwise. The `reason` taxonomy mirrors the precedence `budi cloud status` uses (`cloud.enabled=false` → `missing api_key` → `api_key is placeholder` → `missing device_id` → `missing org_id`), sourced from a new `CloudConfig::disabled_reason()` on `budi-core`. `device_id` / `org_id` are abbreviated to the first 8 chars plus `…` via a new `log_id_prefix` helper (char-boundary-safe for non-ASCII ids); `api_key` is never logged.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause. Part A shipped with `v8.3.1`; Part B needs maintainer credential-level probing that can't be driven from CI.
+
 ## 8.3.4 — 2026-04-23
 
 8.3.4 is an internal-correctness + maintainer-quality-of-life patch
